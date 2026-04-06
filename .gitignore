@@ -1,0 +1,11 @@
+.claude/
+.gemini/
+GEMINI.md
+CLAUDE.md
+.venv/
+dist/
+__pycache__/
+*.pyc
+*.pyo
+.crew_workspace/
+analysis_report.md

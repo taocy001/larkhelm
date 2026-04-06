@@ -1,0 +1,912 @@
+"""
+larkhelm · Crew Agent executor
+"""
+from __future__ import annotations
+
+import json
+import subprocess
+import threading
+import time
+from collections import deque
+from pathlib import Path
+
+from larkhelm.log import _debug_log, log_entry
+from larkhelm.crew_types import (
+    HardFailError, AgentSpec, AgentState, AgentStatus, CrewState,
+    CREW_RESULT_PREVIEW,
+)
+from larkhelm.crew_card import _crew_update_card, _start_heartbeat
+
+
+def _workspace_dir(chat_id: str, crew_id: str) -> Path:
+    import larkhelm.config as _cfg
+    d = _cfg.SESSION_DIR / chat_id / f"crew_{crew_id}"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _detect_fail_marker(spec: AgentSpec, result: str) -> bool:
+    """Check whether the last non-empty line of the output contains the fail_marker."""
+    if not spec.fail_marker or not result:
+        return False
+    last_line = next((l.strip() for l in reversed(result.split("\n")) if l.strip()), "")
+    return spec.fail_marker in last_line
+
+
+def _sync_output_file(state: CrewState, agent_id: str) -> str:
+    """Sync an agent's output_file to a Feishu document (based on DOC_WRITE_BACKEND config).
+    Returns the Feishu document URL on success, or empty string for local/failure.
+    Only triggered when backend != "local" and the file exists.
+    """
+    import larkhelm.config as _cfg
+    backend = _cfg.DOC_WRITE_BACKEND
+    if backend == "local":
+        return ""
+
+    spec = state.agents[agent_id].spec
+    if not spec.output_file:
+        return ""
+
+    from larkhelm.chat_state import _get_cwd
+    cwd      = _get_cwd(state.chat_id)
+    out_path = Path(cwd) / ".crew_workspace" / spec.output_file
+    if not out_path.exists():
+        return ""
+
+    try:
+        content = out_path.read_text(encoding="utf-8")
+    except Exception as e:
+        _debug_log(f"[Crew] failed to read output_file: {e}")
+        return ""
+
+    title = out_path.stem  # e.g. "prd", "design"
+
+    from larkhelm.lark_client import (
+        FeishuDocClient,
+        DocPermissionError, DocAPIError, DocError,
+        send_permission_guide,
+        send_card,
+    )
+    doc_client = FeishuDocClient()
+
+    if not _cfg.DEFAULT_WIKI_SPACE_ID and not _cfg.DEFAULT_DRIVE_FOLDER:
+        # No storage location configured; send a one-time notification
+        send_card(state.chat_id, "📂 文档未上传至飞书",
+                  f"`{spec.output_file}` 已保存到本地工作区。\n\n"
+                  "如需自动上传到飞书云盘，请先设置目标文件夹：\n"
+                  "`/doc setfolder <飞书文件夹链接>`",
+                  color="orange")
+        return ""
+
+    try:
+        # Prefer wiki, then Drive folder, then root directory
+        if _cfg.DEFAULT_WIKI_SPACE_ID:
+            ref = doc_client.create_wiki_node(
+                _cfg.DEFAULT_WIKI_SPACE_ID, title, _cfg.DEFAULT_WIKI_PARENT_TOKEN
+            )
+            doc_url = ref.raw_url or f"https://feishu.cn/wiki/{ref.token}"
+        else:
+            try:
+                ref = doc_client.create_doc(title, _cfg.DEFAULT_DRIVE_FOLDER)
+            except DocPermissionError:
+                # No permission for folder; fall back to root with a project-prefixed title
+                project_prefix = (state.plan.title or "")[:20].strip()
+                root_title = f"{project_prefix}_{title}" if project_prefix else title
+                _debug_log(f"[Crew] {agent_id} folder permission denied, falling back to root, title: {root_title!r}")
+                ref = doc_client.create_doc(root_title, "")
+            doc_url = f"https://feishu.cn/docx/{ref.token}"
+
+        doc_client.append(ref, content)
+        _debug_log(f"[Crew] {agent_id} output_file synced to Feishu: {doc_url}")
+        return doc_url
+
+    except DocPermissionError as e:
+        _debug_log(f"[Crew] {agent_id} Feishu root directory write also failed, giving up upload")
+        send_permission_guide(state.chat_id, "create_folder", code=e.code)
+        return ""
+    except (DocAPIError, DocError) as e:
+        if backend == "auto":
+            _debug_log(f"[Crew] {agent_id} Feishu write failed, falling back to local: {e}")
+            return ""
+        _debug_log(f"[Crew] {agent_id} Feishu write failed: {e}")
+        return ""
+
+
+def _run_agent(state: CrewState, agent_id: str) -> str:
+    """Execute a single agent and return the text result. Uses an isolated session namespace."""
+    import larkhelm.config as _cfg
+    from larkhelm.chat_state import _get_cwd
+    from larkhelm.concurrency import _get_cancel_event
+    from larkhelm.card_builder import _fmt_elapsed
+    from larkhelm.perm import grant_yolo, revoke_yolo
+    from larkhelm.ai_runner import _spawn_claude_proc, query_gemini
+    from larkhelm.crew._scheduler import _resolve_prompt
+    from larkhelm.crew._state import _git_head
+
+    spec      = state.agents[agent_id].spec
+    cancel_ev = state.cancel_ev
+    cwd       = _get_cwd(state.chat_id)
+    workspace = _workspace_dir(state.chat_id, state.crew_id)
+
+    # Session isolation: crew_ns is the namespace, isolated from the main session.
+    # Crew agents do not use persistent sessions (sid=None):
+    #   1. Carrying over the previous failure history on retry significantly increases token usage.
+    #   2. Resumed runs inject context via the is_resuming prompt and do not rely on sessions.
+    crew_ns = f"{state.chat_id}__crew_{state.crew_id}_{agent_id}"
+    sid     = None  # No session reuse; each run starts a fresh conversation
+
+    # Build the full prompt (system + placeholder resolution).
+    # On retry, switch to the retry-specific role prompt (e.g. fixer mode).
+    ag_state = state.agents[agent_id]
+    active_system = spec.retry_system if (ag_state.retry_count > 0 and spec.retry_system) else spec.system
+    active_prompt = spec.retry_prompt if (ag_state.retry_count > 0 and spec.retry_prompt) else spec.prompt
+    resolved = _resolve_prompt(active_prompt, state)
+    if active_system:
+        full_prompt = f"{active_system}\n\n---\n\n{resolved}"
+    else:
+        full_prompt = resolved
+
+    # Inject downstream feedback (written by _execute on retry, truncated to 3000 chars to prevent token explosion)
+    if ag_state.feedback:
+        round_info = f" (retry {ag_state.retry_count})" if ag_state.retry_count else ""
+        feedback_trimmed = ag_state.feedback[:3000]
+        if len(ag_state.feedback) > 3000:
+            feedback_trimmed += f"\n\n…（已截断，共 {len(ag_state.feedback)} 字符）"
+        full_prompt = (
+            f"⚠️ **Feedback from previous iteration{round_info} — please fix the following issues:**\n\n"
+            f"{feedback_trimmed}\n\n"
+            f"---\n\n"
+            + full_prompt
+        )
+
+    # Resume context injection: inform the agent this task is being resumed from a checkpoint
+    if state.is_resuming:
+        _ws_path = Path(cwd) / ".crew_workspace"
+        # Only list planning/document files (.md/.json); filter out intermediate artifacts like result.txt (noise)
+        _plan_files = sorted(
+            f.name for f in _ws_path.iterdir()
+            if f.is_file() and f.suffix in (".md", ".json")
+        ) if _ws_path.exists() else []
+        _git_info = ""
+        if state.git_head_before:
+            _cur_head = _git_head(cwd)
+            if _cur_head and _cur_head != state.git_head_before:
+                _git_info = (f"\n- Code has been modified (start commit: {state.git_head_before},"
+                             f" current: {_cur_head}). Run `git diff {state.git_head_before}`"
+                             f" first to review completed changes and avoid duplicate work")
+            elif _cur_head:
+                _git_info = f"\n- No code changes detected (HEAD: {_cur_head})"
+        _resume_prefix = (
+            "⚠️ **Resuming task (previous execution was interrupted, continuing from checkpoint)**\n\n"
+            "Resume notes:\n"
+            "- `.crew_workspace/` contains the planning files from the last run; **use these as the baseline**, do not re-plan"
+            + (_git_info or "")
+            + ("\n- Existing planning files: " + ", ".join(_plan_files) if _plan_files else "")
+            + "\n- Continue directly from the incomplete parts; skip already completed content\n\n---\n\n"
+        )
+        full_prompt = _resume_prefix + full_prompt
+
+    # Timeout control: start countdown only after acquiring the process slot (semaphore),
+    # so waiting time is not counted toward the timeout.
+    agent_cancel  = threading.Event()
+    _slot_ready   = threading.Event()   # fired when the semaphore slot is acquired
+
+    def _timeout_watcher():
+        # Phase 1: wait for process slot while monitoring crew-level cancellation
+        while not _slot_ready.is_set():
+            if cancel_ev.is_set():
+                agent_cancel.set()
+                return
+            time.sleep(0.3)
+        # Phase 2: process has started; begin counting spec.timeout from now
+        deadline = time.time() + spec.timeout
+        while time.time() < deadline:
+            if cancel_ev.is_set():
+                agent_cancel.set()
+                return
+            time.sleep(0.3)
+        agent_cancel.set()
+
+    threading.Thread(target=_timeout_watcher, daemon=True).start()
+
+    # Progress card update (lightweight card-layer callback)
+    def _on_text(text: str, status: str = "typing"):
+        with state.lock:
+            state.agents[agent_id].result = text  # cache streaming intermediate state
+        _crew_update_card(state)
+
+    def _on_start():
+        """Callback when the process slot is acquired: update status and start the timeout countdown."""
+        _slot_ready.set()
+        with state.lock:
+            state.agents[agent_id].status     = AgentStatus.RUNNING
+            state.agents[agent_id].start_time = time.time()
+        _crew_update_card(state)
+
+    # Crew agents automatically grant all permissions (user authorized via /crew command)
+    grant_yolo(crew_ns)
+    try:
+        if spec.model == "gemini":
+            _on_start()   # Gemini has no semaphore callback; trigger directly
+            output = query_gemini(
+                chat_id=crew_ns,
+                message=full_prompt,
+                cwd=cwd,
+                cancel_ev=agent_cancel,
+                on_text=_on_text,
+                on_tool=None,
+                on_tool_result=None,
+                use_session=False,          # No session reuse; prevents carrying history into retries
+                record_under=state.chat_id, # Token stats recorded under the real chat_id
+            )
+        else:
+            output = _spawn_claude_proc(
+                chat_id=crew_ns,
+                message=full_prompt,
+                sid=sid,
+                cwd=cwd,
+                cancel_ev=agent_cancel,
+                on_text=_on_text,
+                on_tool=None,        # Crew agents do not surface tool call details
+                on_tool_result=None,
+                allow_retry=False,
+                on_start=_on_start,  # Fired when semaphore is acquired; timeout starts from here
+                session_namespace=crew_ns,
+            )
+    except InterruptedError:
+        if cancel_ev.is_set():
+            raise  # Crew-level cancellation → propagate → wrapper marks CANCELLED
+        # Per-agent timeout only → FAILED (not CANCELLED)
+        raise RuntimeError(f"Agent timed out (terminated after {_fmt_elapsed(spec.timeout)})")
+    finally:
+        revoke_yolo(crew_ns)
+
+    result = output.strip() or "（无输出）"
+
+    # Write result to file so downstream agents can read the full text via the Read tool
+    result_file = workspace / f"{agent_id}_result.txt"
+    try:
+        result_file.write_text(result, encoding="utf-8")
+    except Exception:
+        pass
+
+    return result
+
+
+def _run_agent_wrapper(state: CrewState, agent_id: str):
+    """Agent execution shell: catches exceptions, updates state, detects exit markers.
+    Process-level failures (subprocess crashes, etc.) are retried at most once.
+    """
+    from larkhelm.chat_state import _get_cwd
+    from larkhelm.crew._state import _git_auto_commit
+
+    last_exc: Exception | None = None
+
+    for proc_attempt in range(2):   # attempt 0 = first try, attempt 1 = retry
+        try:
+            result = _run_agent(state, agent_id)
+            needs_retry = _detect_fail_marker(state.agents[agent_id].spec, result)
+            if needs_retry:
+                _debug_log(f"[Crew] {agent_id} fail marker detected, pending retry")
+            # Sync output_file before updating state to avoid holding the lock during IO
+            feishu_url = _sync_output_file(state, agent_id)
+            # Auto-commit after code-modification agents succeed (when dev_auto_commit=true)
+            commit_hash = ""
+            if not needs_retry and agent_id in ("implementer", "fixer"):
+                cwd = _get_cwd(state.chat_id)
+                commit_hash = _git_auto_commit(cwd, agent_id)
+                if commit_hash:
+                    with state.lock:
+                        state.phase_commits[agent_id] = commit_hash
+                    _debug_log(f"[Git] {agent_id} auto-committed: {commit_hash}")
+            # Capture per-agent token stats
+            crew_ns = f"{state.chat_id}__crew_{state.crew_id}_{agent_id}"
+            try:
+                from larkhelm.token_stats import get_crew_agent_tokens
+                agent_tokens = get_crew_agent_tokens(crew_ns)
+            except Exception:
+                agent_tokens = {}
+            with state.lock:
+                state.agents[agent_id].status         = AgentStatus.DONE
+                state.agents[agent_id].result         = result
+                state.agents[agent_id].end_time       = time.time()
+                state.agents[agent_id].needs_retry    = needs_retry
+                state.agents[agent_id].feishu_doc_url = feishu_url
+                state.agents[agent_id].tokens         = agent_tokens
+            _debug_log(f"[Crew] {agent_id} done ({len(result)} chars)")
+            _crew_update_card(state)
+            return
+
+        except InterruptedError:
+            with state.lock:
+                state.agents[agent_id].status   = AgentStatus.CANCELLED
+                state.agents[agent_id].end_time = time.time()
+            _crew_update_card(state)
+            return
+
+        except Exception as e:
+            last_exc = e
+            if proc_attempt == 0:
+                _debug_log(f"[Crew] {agent_id} process failed (attempt 1/2), retrying in 1s: {e}")
+                time.sleep(1)
+                with state.lock:   # Reset to PENDING for retry
+                    state.agents[agent_id].status     = AgentStatus.PENDING
+                    state.agents[agent_id].start_time = None
+                    state.agents[agent_id].result     = ""
+                continue  # proceed to second attempt
+
+    # Both attempts failed
+    with state.lock:
+        state.agents[agent_id].status   = AgentStatus.FAILED
+        state.agents[agent_id].error    = str(last_exc)[:300] if last_exc else "unknown error"
+        state.agents[agent_id].end_time = time.time()
+    _debug_log(f"[Crew] {agent_id} permanently failed (both attempts failed): {last_exc}")
+    _crew_update_card(state)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Breakpoint confirmation
+# ═══════════════════════════════════════════════════════════════
+
+def _wait_for_breakpoint(state: CrewState, agent_id: str) -> bool:
+    """Pause after PM completes, send a confirmation card and wait for the user to click. Returns True=continue, False=cancel."""
+    import larkhelm.config as _cfg
+    from larkhelm.chat_state import _get_cwd
+    from larkhelm.lark_client import _send_card_raw
+    from larkhelm.crew._state import (
+        _breakpoint_meta, _breakpoint_events, _breakpoint_results,
+    )
+
+    crew_id = state.crew_id
+
+    # Register wait event.
+    # Note: if signal_breakpoint is called before this function registers the event (theoretical race),
+    # _breakpoint_results already has a value and should not be overwritten; fire bp_ev directly instead.
+    bp_ev = threading.Event()
+    with _breakpoint_meta:
+        _breakpoint_events[crew_id] = bp_ev
+        if crew_id in _breakpoint_results:
+            # Signal arrived early; wake immediately without overwriting the existing result
+            bp_ev.set()
+        else:
+            _breakpoint_results[crew_id] = False  # Default: cancel on timeout
+
+    # Update main card to breakpoint phase
+    with state.lock:
+        state.phase              = "breakpoint"
+        state.breakpoint_agent_id = agent_id
+    _crew_update_card(state)
+
+    # Read PRD preview (prefer file, fall back to agent output tail)
+    cwd      = _get_cwd(state.chat_id)
+    prd_path = Path(cwd) / ".crew_workspace" / "prd.md"
+    prd_preview = ""
+    try:
+        text        = prd_path.read_text(encoding="utf-8")
+        prd_preview = text[:700] + ("\n\n…（完整内容见 `.crew_workspace/prd.md`）" if len(text) > 700 else "")
+    except Exception:
+        ag = state.agents.get(agent_id)
+        if ag:
+            prd_preview = ag.result[:700]
+
+    # Send confirmation card
+    agent_role = state.agents[agent_id].spec.role if state.agents.get(agent_id) else "Agent"
+    # JSON 1.0 format (Feishu schema 2.0 does not support action buttons)
+    confirm_card = json.dumps({
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "yellow",
+            "title": {"tag": "plain_text",
+                      "content": f"⏸ {agent_role}已完成，请确认是否继续执行"},
+        },
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md",
+             "content": f"**任务：** {state.plan.title}\n\n{prd_preview}"}},
+            {"tag": "hr"},
+            {"tag": "action", "actions": [
+                {"tag": "button",
+                 "text": {"tag": "plain_text", "content": "✅ 继续执行"},
+                 "type": "primary",
+                 "value": {"cmd": f"crew_bp:confirm:{crew_id}"}},
+                {"tag": "button",
+                 "text": {"tag": "plain_text", "content": "❌ 取消"},
+                 "type": "danger",
+                 "value": {"cmd": f"crew_bp:cancel:{crew_id}"}},
+            ]},
+        ],
+    }, ensure_ascii=False)
+    _send_card_raw(state.chat_id, confirm_card)
+
+    # Wait for user decision; poll to support /cancel interruption; max 10 minutes
+    bp_deadline = time.time() + min(_cfg.RESPONSE_TIMEOUT * 2, 600)
+    while time.time() < bp_deadline:
+        if state.cancel_ev.is_set():
+            _debug_log(f"[Crew] breakpoint wait interrupted by /cancel")
+            break
+        if bp_ev.wait(timeout=2.0):   # wait returns True when the user has clicked
+            break
+
+    with _breakpoint_meta:
+        confirmed = _breakpoint_results.pop(crew_id, False)
+        _breakpoint_events.pop(crew_id, None)
+
+    return confirmed
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Scheduler
+# ═══════════════════════════════════════════════════════════════
+
+def _execute(state: CrewState, total_timeout: int):
+    """Execute all agents in topological waves, supporting retry fallback when QA/Reviewer fails."""
+    import larkhelm.config as _cfg
+    from larkhelm.chat_state import _get_cwd
+    from larkhelm.crew._scheduler import (
+        _topo_waves, _topo_waves_subset, _get_failed_dep,
+    )
+    from larkhelm.crew._checkpoint import _save_checkpoint
+
+    cancel_ev    = state.cancel_ev
+    deadline     = time.time() + total_timeout
+    wave_queue   = deque(_topo_waves(state.plan.agents))
+    retry_counts: dict[str, int] = {spec.id: 0 for spec in state.plan.agents}
+
+    while wave_queue:
+        if cancel_ev.is_set():
+            raise InterruptedError("Crew cancelled")
+        if time.time() > deadline:
+            with state.lock:
+                for spec in state.plan.agents:
+                    if state.agents[spec.id].status == AgentStatus.PENDING:
+                        state.agents[spec.id].status = AgentStatus.FAILED
+                        state.agents[spec.id].error  = "Crew 总超时"
+            break
+
+        wave = wave_queue.popleft()
+
+        # ── Phase 4: failure propagation — skip agents whose upstream is FAILED ──
+        runnable: list[AgentSpec] = []
+        with state.lock:
+            for spec in wave:
+                failed_dep = _get_failed_dep(state, spec)
+                if failed_dep:
+                    _debug_log(f"[Crew] {spec.id} skipped because upstream {failed_dep} failed")
+                    ag = state.agents[spec.id]
+                    ag.status   = AgentStatus.FAILED
+                    ag.error    = f"upstream {failed_dep} failed"
+                    ag.end_time = time.time()
+                elif spec.trigger_only and state.agents[spec.id].retry_count == 0:
+                    # Skip on first wave: mark as DONE (trigger pending), do not actually execute
+                    ag = state.agents[spec.id]
+                    ag.status   = AgentStatus.DONE
+                    ag.result   = ""   # empty result, sentinel
+                    ag.end_time = time.time()
+                    _debug_log(f"[Crew] {spec.id} trigger_only, skipping first wave")
+                else:
+                    runnable.append(spec)
+
+        if not runnable:
+            _crew_update_card(state)
+            continue
+
+        threads = [
+            threading.Thread(
+                target=_run_agent_wrapper,
+                args=(state, spec.id),
+                daemon=True,
+                name=f"crew-{spec.id}-{state.crew_id[:6]}",
+            )
+            for spec in runnable
+        ]
+        for t in threads:
+            t.start()
+
+        # Wait for this wave to complete; check cancel every 0.5s
+        done_ev = threading.Event()
+        def _waiter(ts=threads):
+            for t in ts:
+                t.join()
+            done_ev.set()
+        threading.Thread(target=_waiter, daemon=True).start()
+        while not done_ev.is_set():
+            if cancel_ev.is_set():
+                raise InterruptedError("Crew cancelled")
+            done_ev.wait(timeout=0.5)
+
+        # ── Check if any agent in this wave needs retry (read needs_retry under lock) ──
+        retry_specs: list[AgentSpec] = []
+        with state.lock:
+            for spec in wave:
+                if state.agents[spec.id].needs_retry:
+                    retry_specs.append(spec)
+
+        for spec in retry_specs:
+            ag = state.agents[spec.id]
+            if retry_counts[spec.id] >= spec.max_retries:
+                _debug_log(f"[Crew] {spec.id} reached max retries ({spec.max_retries}), giving up")
+                with state.lock:
+                    ag.needs_retry = False
+                if spec.is_gatekeeper:
+                    # Gatekeeper final rejection: clear remaining queue and go straight to synthesis
+                    _debug_log(f"[Crew] gatekeeper {spec.id} final rejection, skipping remaining tasks")
+                    wave_queue.clear()
+                if spec.hard_fail_on_exhaust:
+                    raise HardFailError(f"{spec.role}（{spec.id}）最终失败，已重试 {spec.max_retries} 次")
+                continue
+
+            # Not enough remaining time for a retry round (estimate: retry rounds × RESPONSE_TIMEOUT)
+            retry_num = retry_counts[spec.id] + 1
+            est_needed = (len(spec.retry_target) + 1) * _cfg.RESPONSE_TIMEOUT
+            if time.time() + est_needed > deadline:
+                _debug_log(f"[Crew] {spec.id} insufficient time remaining (~{est_needed}s needed), skipping retry #{retry_num}")
+                with state.lock:
+                    ag.needs_retry = False
+                if spec.hard_fail_on_exhaust:
+                    raise HardFailError(f"{spec.role} ({spec.id}) retries abandoned due to timeout")
+                continue
+
+            retry_counts[spec.id] += 1
+            _debug_log(f"[Crew] {spec.id} triggering retry #{retry_counts[spec.id]}, resetting: {spec.retry_target}")
+
+            # Build feedback: if the triggering agent has an output_file, pass only the file path reference.
+            # (The retry_target agent's system prompt already instructs it to read that file;
+            #  passing content directly would double-transmit and waste ~1000-3000 tokens/retry.)
+            # If no output_file (/crew dynamic scenario), pass the beginning of the output (errors are typically at the top).
+            _cwd_fb = _get_cwd(state.chat_id)
+            if ag.spec.output_file:
+                _fb_path = Path(_cwd_fb) / ".crew_workspace" / ag.spec.output_file
+                feedback = (
+                    f"Failure report: {_fb_path}\n"
+                    f"Use the Read tool to read this file for details, then fix each issue."
+                )
+            else:
+                # Take the beginning (bug list is typically first) rather than the end (usually just TESTS_FAILED etc.)
+                feedback = ag.result[:2000] if ag.result else ag.error[:1000]
+
+            # Reset this agent + agents in retry_target
+            targets = list(spec.retry_target) + [spec.id]
+            with state.lock:
+                for tid in targets:
+                    if tid not in state.agents:
+                        continue
+                    ta = state.agents[tid]
+                    ta.status     = AgentStatus.PENDING
+                    ta.result     = ""
+                    ta.error      = ""
+                    ta.start_time = None
+                    ta.end_time   = None
+                    ta.needs_retry = False
+                    ta.retry_count += 1
+                    ta.round_label = f"Round {ta.retry_count + 1}"
+                    # Only inject feedback into upstream retry_target agents (e.g. engineer), not into self
+                    if tid != spec.id:
+                        ta.feedback = feedback
+
+            # Re-enqueue the retry agent subset
+            retry_waves = _topo_waves_subset(state.plan.agents, set(targets))
+            wave_queue.extendleft(reversed(retry_waves))
+            _crew_update_card(state)
+            break  # At most one retry trigger per wave
+
+        # ── Save checkpoint: this wave is complete ────────────────────
+        if not retry_specs:
+            completed_ids = [spec.id for spec in state.plan.agents
+                             if state.agents[spec.id].status in
+                             (AgentStatus.DONE, AgentStatus.FAILED)]
+            _save_checkpoint(state, completed_ids)
+
+        # ── Phase 3.1: breakpoint — pause after an agent with breakpoint=True completes ──
+        if not retry_specs:  # Only check breakpoints when there are no retries (skip during retry)
+            for spec in wave:   # Iterate original wave; state guard ensures only DONE agents trigger
+                ag = state.agents.get(spec.id)
+                if (spec.breakpoint and ag and ag.status == AgentStatus.DONE):
+                    confirmed = _wait_for_breakpoint(state, spec.id)
+                    if not confirmed:
+                        raise InterruptedError("User cancelled")
+                    # Restore main card to running state
+                    with state.lock:
+                        state.phase = "running"
+                    _crew_update_card(state)
+                    break
+
+
+def _execute_from(state: CrewState, total_timeout: int, skip_ids: set):
+    """Continue execution after a set of already-completed agents, skipping agents in skip_ids."""
+    from larkhelm.crew._scheduler import _topo_waves, _get_failed_dep
+    from larkhelm.crew._checkpoint import _save_checkpoint
+
+    cancel_ev  = state.cancel_ev
+    deadline   = time.time() + total_timeout
+    all_waves  = _topo_waves(state.plan.agents)
+    wave_queue = deque()
+
+    for wave in all_waves:
+        # If all agents in this wave are already completed, skip the wave
+        if all(spec.id in skip_ids for spec in wave):
+            continue
+        wave_queue.append(wave)
+
+    # Skipped agent states are already restored from checkpoint; keep them as-is.
+    # Reset incomplete agents to PENDING (they may have been interrupted mid-run last time).
+    with state.lock:
+        for spec in state.plan.agents:
+            if spec.id not in skip_ids:
+                ag = state.agents[spec.id]
+                if ag.status not in (AgentStatus.DONE, AgentStatus.FAILED):
+                    ag.status     = AgentStatus.PENDING
+                    ag.result     = ""
+                    ag.error      = ""
+                    ag.start_time = None
+                    ag.end_time   = None
+
+    state.phase = "running"
+    _crew_update_card(state)
+
+    while wave_queue:
+        if cancel_ev.is_set():
+            raise InterruptedError("Crew cancelled")
+        if time.time() > deadline:
+            break
+
+        wave = wave_queue.popleft()
+        runnable: list[AgentSpec] = []
+        with state.lock:
+            for spec in wave:
+                if spec.id in skip_ids:
+                    continue
+                failed_dep = _get_failed_dep(state, spec)
+                if failed_dep:
+                    ag = state.agents[spec.id]
+                    ag.status = AgentStatus.FAILED
+                    ag.error  = f"upstream {failed_dep} failed"
+                    ag.end_time = time.time()
+                elif spec.trigger_only and state.agents[spec.id].retry_count == 0:
+                    ag = state.agents[spec.id]
+                    ag.status  = AgentStatus.DONE
+                    ag.result  = ""
+                    ag.end_time = time.time()
+                else:
+                    runnable.append(spec)
+
+        if not runnable:
+            _crew_update_card(state)
+            continue
+
+        threads = [
+            threading.Thread(target=_run_agent_wrapper, args=(state, spec.id),
+                             daemon=True, name=f"crew-{spec.id}-{state.crew_id[:6]}")
+            for spec in runnable
+        ]
+        for t in threads:
+            t.start()
+        done_ev = threading.Event()
+        def _waiter(ts=threads):
+            for t in ts: t.join()
+            done_ev.set()
+        threading.Thread(target=_waiter, daemon=True).start()
+        while not done_ev.is_set():
+            if cancel_ev.is_set():
+                raise InterruptedError("Crew cancelled")
+            done_ev.wait(timeout=0.5)
+
+        # Save checkpoint: this wave is complete
+        completed = [spec.id for spec in state.plan.agents
+                     if state.agents[spec.id].status in
+                     (AgentStatus.DONE, AgentStatus.FAILED)]
+        _save_checkpoint(state, completed)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Synthesis (Manager summary)
+# ═══════════════════════════════════════════════════════════════
+
+def _synthesize(state: CrewState) -> str:
+    """Manager synthesizes all agent results and produces the final deliverable."""
+    from larkhelm.chat_state import _get_cwd
+    from larkhelm.perm import grant_yolo, revoke_yolo
+    from larkhelm.ai_runner import _spawn_claude_proc
+
+    cancel_ev = state.cancel_ev
+    cwd       = _get_cwd(state.chat_id)
+
+    # No synthesis_prompt and only one agent → return its result directly
+    plan = state.plan
+    if not plan.synthesis_prompt and len(plan.agents) == 1:
+        only = list(state.agents.values())[0]
+        return only.result if only.status == AgentStatus.DONE else only.error
+
+    # Build synthesis prompt.
+    # Agents with output_file: pass only the path (Claude will use Read to retrieve it, avoiding double transmission).
+    # Agents without output_file: pass a summary (the only way to get their result).
+    parts = []
+    _cwd_synth = _get_cwd(state.chat_id)
+    for spec in plan.agents:
+        a = state.agents[spec.id]
+        if a.status == AgentStatus.DONE:
+            if spec.output_file:
+                out_path = Path(_cwd_synth) / ".crew_workspace" / spec.output_file
+                parts.append(f"## {spec.role} ({spec.id})\nOutput file: {out_path}")
+            else:
+                workspace   = _workspace_dir(state.chat_id, state.crew_id)
+                result_file = workspace / f"{spec.id}_result.txt"
+                preview     = a.result[:CREW_RESULT_PREVIEW]
+                suffix      = "…" if len(a.result) > CREW_RESULT_PREVIEW else ""
+                parts.append(
+                    f"## {spec.role} ({spec.id})\n{preview}{suffix}\n"
+                    f"Full output: {result_file}"
+                )
+        elif a.status == AgentStatus.FAILED:
+            if a.result:
+                # Partial output from timeout or similar; include in synthesis, annotate truncation
+                preview = a.result[:CREW_RESULT_PREVIEW]
+                suffix  = "…(truncated due to timeout)" if len(a.result) > CREW_RESULT_PREVIEW else "(truncated due to timeout)"
+                parts.append(f"## {spec.role} ({spec.id})\n⚠️ Incomplete execution, partial output:\n{preview}{suffix}")
+            else:
+                parts.append(f"## {spec.role} ({spec.id})\nExecution failed: {a.error}")
+
+    if not parts:
+        return "All agents produced no results."
+
+    synthesis_prompt = (plan.synthesis_prompt or "Please synthesize the outputs of all agents above and produce the final delivery report.")
+    full_prompt      = synthesis_prompt + "\n\n" + "\n\n".join(parts)
+
+    synth_ns = f"{state.chat_id}__crew_{state.crew_id}_synth"
+    synth_cancel = threading.Event()
+
+    def _watch_cancel():
+        while not synth_cancel.is_set():
+            if cancel_ev.is_set():
+                synth_cancel.set()
+                return
+            time.sleep(0.3)
+    threading.Thread(target=_watch_cancel, daemon=True).start()
+
+    grant_yolo(synth_ns)
+    try:
+        result = _spawn_claude_proc(
+            chat_id=synth_ns,
+            message=full_prompt,
+            sid=None,
+            cwd=cwd,
+            cancel_ev=synth_cancel,
+            on_text=None,
+            allow_retry=False,
+            session_namespace=synth_ns,
+        )
+    finally:
+        synth_cancel.set()
+        revoke_yolo(synth_ns)
+
+    return result.strip() or "Synthesis phase produced no output."
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Main flow
+# ═══════════════════════════════════════════════════════════════
+
+def _run_crew(state: CrewState, total_timeout: int):
+    """Complete crew execution flow (runs in a dedicated thread)."""
+    from larkhelm.chat_state import _get_cwd
+    from larkhelm.card_builder import _fmt_elapsed, _split_md, _make_card
+    from larkhelm.lark_client import _reply_card_raw, send_card
+    from larkhelm.crew._state import _register_crew_card
+    from larkhelm.crew._checkpoint import _clear_checkpoint
+
+    hb_stop = threading.Event()
+    _start_heartbeat(state, hb_stop)
+
+    try:
+        # ── Execute agents ───────────────────────────────
+        with state.lock:
+            state.phase = "running"
+        _crew_update_card(state)
+
+        try:
+            _execute(state, total_timeout)
+        except InterruptedError:
+            with state.lock:
+                state.phase = "cancelled"
+            _crew_update_card(state)
+            return
+        except HardFailError as e:
+            with state.lock:
+                state.phase = "failed"
+                state.final_output = f"❌ Pipeline hard failure: {e}"
+            _crew_update_card(state)
+            log_entry(state.chat_id, "error", str(e), model="crew")
+            return
+
+        if state.cancel_ev.is_set():
+            with state.lock:
+                state.phase = "cancelled"
+            _crew_update_card(state)
+            return
+
+        # ── Synthesis ────────────────────────────────────
+        with state.lock:
+            state.phase = "synthesizing"
+        _crew_update_card(state)
+
+        try:
+            final = _synthesize(state)
+        except Exception as e:
+            _debug_log(f"[Crew] synthesis failed: {e}")
+            # Fall back to concatenating all completed results when synthesis fails
+            final = "\n\n---\n\n".join(
+                f"**{state.agents[spec.id].spec.role}**\n{state.agents[spec.id].result}"
+                for spec in state.plan.agents
+                if state.agents[spec.id].status == AgentStatus.DONE
+            ) or "Synthesis failed, no results available."
+
+        # ── Git change statistics (appended to delivery report) ──────
+        try:
+            _cwd = _get_cwd(state.chat_id)
+            # Prefer uncommitted changes; if already committed, show the most recent commit's changes
+            _diff = subprocess.run(
+                ["git", "diff", "--stat", "HEAD"],
+                cwd=_cwd, capture_output=True, text=True, timeout=10,
+            )
+            _diff_out = _diff.stdout.strip()
+            if not _diff_out:
+                # Engineer may have already committed; check the most recent commit
+                _log = subprocess.run(
+                    ["git", "log", "-1", "--stat", "--no-merges", "--format="],
+                    cwd=_cwd, capture_output=True, text=True, timeout=10,
+                )
+                _diff_out = _log.stdout.strip()
+            if _diff_out:
+                final = final + "\n\n---\n\n**📊 Code change statistics**\n```\n" + _diff_out + "\n```"
+        except Exception:
+            pass  # Silently ignore: non-git repo, git not installed, timeout, etc.
+
+        # Append workspace path and git commit info
+        _cwd_val = _get_cwd(state.chat_id)
+        from larkhelm.crew._state import _git_head
+        _ws_note = f"\n\n---\n\n📁 Workspace files: `{_cwd_val}/.crew_workspace/`"
+        if state.phase_commits:
+            _commits_str = "  ".join(
+                f"`{aid}:{h}`" for aid, h in state.phase_commits.items()
+            )
+            _ws_note += f"\n🔖 Auto-committed: {_commits_str}"
+        elif state.git_head_before:
+            _cur = _git_head(_cwd_val)
+            if _cur and _cur != state.git_head_before:
+                _ws_note += f"\n📝 Code changed (start: `{state.git_head_before}` → current: `{_cur}`)"
+        final = final + _ws_note
+
+        with state.lock:
+            state.phase        = "done"
+            state.final_output = final
+        _crew_update_card(state)
+
+        # Completion notification: reply to the original user message so the user receives an alert
+        _label   = "Dev" if state.kind == "dev" else "Crew"
+        elapsed  = _fmt_elapsed(time.time() - state.start_time)
+        n_agents = len(state.plan.agents)
+        notify_body = (
+            f"**{state.plan.title}** completed\n\n"
+            f"{n_agents} agents · elapsed {elapsed}"
+        )
+        notify_card = _make_card(f"✅ {_label} complete", notify_body, color="green")
+        if state.trigger_msg_id:
+            notify_mid = _reply_card_raw(state.trigger_msg_id, notify_card, in_thread=False)
+        else:
+            notify_mid = send_card(state.chat_id, f"✅ {_label} complete", notify_body, color="green")
+
+        # Extra-long output: send additional cards (filter empty chunks to avoid blank cards)
+        chunks = _split_md(final)
+        if len(chunks) > 1:
+            for chunk in chunks[1:]:
+                if chunk.strip():
+                    send_card(state.chat_id, "📄 Continued (Crew output)", chunk, color="green")
+
+        log_entry(state.chat_id, "assistant", final, model="crew")
+        _clear_checkpoint(state.chat_id)
+        # Register both progress card and notification card in crew_card_index so replying to either hits context
+        if state.card_mid:
+            _register_crew_card(state.card_mid, state.chat_id, state.plan.title, final)
+        if notify_mid:
+            _register_crew_card(notify_mid, state.chat_id, state.plan.title, final)
+
+    finally:
+        hb_stop.set()

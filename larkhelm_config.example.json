@@ -1,0 +1,27 @@
+{
+  "APP_ID":            "YOUR_APP_ID",
+  "APP_SECRET":        "YOUR_APP_SECRET",
+  "claude_command":    "claude",
+  "gemini_command":    "gemini",
+  "kimi_command":      "kimi",
+  "default_model":     "claude",
+  "default_cwd":       "/home/YOUR_USER/code",
+  "skip_permissions":  true,
+  "response_timeout":  300,
+  "hard_timeout":      3600,
+  "max_card_len":      3000,
+  "allowed_chat_ids":  [],
+  "gemini_idle_ttl":   1800,
+  "timezone":          "Asia/Shanghai",
+
+  "doc_auto_inject":        true,
+  "doc_inject_max_chars":   2000,
+  "doc_inject_max_docs":    2,
+  "doc_read_max_chars":     6000,
+  "default_drive_folder":   "",
+  "doc_write_confirm":      true,
+  "doc_write_backend":      "auto",
+
+  "default_wiki_space_id":     "",
+  "default_wiki_parent_token": ""
+}

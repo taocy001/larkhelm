@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.larkhelm</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>PIPX_BIN_PLACEHOLDER/larkhelm</string>
+    <string>start</string>
+    <string>--config</string>
+    <string>CONFIG_PLACEHOLDER</string>
+    <string>--data-dir</string>
+    <string>DATA_DIR_PLACEHOLDER</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+    <key>PATH</key>
+    <string>PATH_PLACEHOLDER</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>StandardOutPath</key>
+  <string>LOG_DIR_PLACEHOLDER/larkhelm.log</string>
+  <key>StandardErrorPath</key>
+  <string>LOG_DIR_PLACEHOLDER/larkhelm.log</string>
+</dict>
+</plist>

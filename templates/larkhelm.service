@@ -1,0 +1,15 @@
+[Unit]
+Description=LarkHelm (Claude/Gemini)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=PIPX_BIN_PLACEHOLDER/larkhelm start --config CONFIG_PLACEHOLDER --data-dir DATA_DIR_PLACEHOLDER
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:LOG_DIR_PLACEHOLDER/larkhelm.log
+StandardError=append:LOG_DIR_PLACEHOLDER/larkhelm.log
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

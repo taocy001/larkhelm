@@ -1,0 +1,267 @@
+"""
+larkhelm · Crew Feishu card builder
+
+Contains:
+  - _build_card()         Build Crew/Dev summary card
+  - _crew_update_card()   Push card update (patch)
+  - _start_heartbeat()    Start heartbeat thread for periodic progress push
+"""
+from __future__ import annotations
+
+import json
+import threading
+import time
+from pathlib import Path
+
+from larkhelm.card_builder import _fmt_elapsed, _split_md, _make_card
+from larkhelm.chat_state import _get_cwd
+from larkhelm.crew_types import (
+    AgentStatus, CrewState, CREW_RESULT_PREVIEW, CREW_CARD_INTERVAL,
+)
+from larkhelm.lark_client import _patch_card_raw
+from larkhelm.log import _debug_log
+
+
+_STATUS_ICON = {
+    AgentStatus.PENDING:   "⏸",
+    AgentStatus.RUNNING:   "🔄",
+    AgentStatus.DONE:      "✅",
+    AgentStatus.FAILED:    "❌",
+    AgentStatus.CANCELLED: "🛑",
+}
+
+
+def _build_card(state: CrewState) -> str:
+    plan    = state.plan
+    agents  = state.agents
+    phase   = state.phase
+    elapsed = _fmt_elapsed(time.time() - state.start_time)
+
+    n_total    = len(plan.agents)
+    n_done     = sum(1 for a in agents.values() if a.status == AgentStatus.DONE)
+    n_failed   = sum(1 for a in agents.values() if a.status == AgentStatus.FAILED)
+    n_running  = sum(1 for a in agents.values() if a.status == AgentStatus.RUNNING)
+
+    # Title & color
+    _label = "Dev" if state.kind == "dev" else "Crew"
+    if phase == "planning":
+        title, color = f"🧠 {_label} · 规划中", "grey"
+    elif phase == "planned":
+        title, color = f"📋 {_label} · 即将执行  {n_total} 个 Agent", "blue"
+    elif phase == "running":
+        title = f"⚙️ {_label} · 执行中  {n_done}/{n_total} 完成"
+        if n_running:
+            title += f"  {n_running} 运行中"
+        running_tok = sum(
+            (a.tokens.get("input_tokens", 0) + a.tokens.get("output_tokens", 0))
+            for a in agents.values() if a.tokens
+        )
+        running_tok_str = f"  {running_tok // 1000}k tok" if running_tok > 0 else ""
+        title += f"  ({elapsed}){running_tok_str}"
+        color = "blue"
+    elif phase == "done":
+        fail_note = f"  {n_failed} 个失败" if n_failed else ""
+        total_tok = sum(
+            (a.tokens.get("input_tokens", 0) + a.tokens.get("output_tokens", 0))
+            for a in agents.values() if a.tokens
+        )
+        total_cost = sum(a.tokens.get("cost_usd", 0.0) for a in agents.values() if a.tokens)
+        tok_str = f" · {total_tok // 1000}k tok" if total_tok > 0 else ""
+        cost_str = f" ${total_cost:.2f}" if total_cost > 0.01 else ""
+        title = f"✅ {_label} 完成  {n_total} Agent{fail_note} · {elapsed}{tok_str}{cost_str}"
+        color = "green"
+    elif phase == "synthesizing":
+        title = f"🔗 {_label} · 综合中  {n_done}/{n_total} 完成  ({elapsed})"
+        color = "blue"
+    elif phase == "breakpoint":
+        bp_ag = state.agents.get(state.breakpoint_agent_id)
+        bp_role = bp_ag.spec.role if bp_ag else "Agent"
+        title = f"⏸ 等待确认 · {bp_role}已完成  {n_done}/{n_total}  ({elapsed})"
+        color = "yellow"
+    elif phase == "cancelled":
+        title, color = f"🛑 {_label} 已取消  ({elapsed})", "orange"
+    else:
+        title, color = f"❌ {_label} 失败  ({elapsed})", "red"
+
+    elements: list[dict] = []
+
+    # Task title
+    elements.append({
+        "tag": "markdown",
+        "content": f"**{plan.title}**",
+    })
+
+    # Agent status list (shown after planning completes)
+    if phase != "planning":
+        agent_lines = []
+        for spec in plan.agents:
+            a     = agents.get(spec.id)
+            icon  = _STATUS_ICON.get(a.status if a else AgentStatus.PENDING, "?")
+            dep   = f" ← {', '.join(spec.depends_on)}" if spec.depends_on else ""
+            t_str = ""
+            if a and a.start_time and a.end_time:
+                t_str = f" ({_fmt_elapsed(a.end_time - a.start_time)})"
+            elif a and a.start_time and a.status == AgentStatus.RUNNING:
+                t_str = f" ({_fmt_elapsed(time.time() - a.start_time)}…)"
+            agent_lines.append(
+                f"{icon} **{spec.id}** {spec.role} [{spec.model}]{dep}{t_str}"
+            )
+
+        elements.append({
+            "tag": "collapsible_panel",
+            "header": {"title": {"tag": "markdown", "content": "**📋 任务计划**"}},
+            "expanded": phase in ("planned", "running"),
+            "elements": [{"tag": "markdown", "content": "\n".join(agent_lines)}],
+        })
+
+    # Architect's planned file list (shown after Architect produces output)
+    if phase not in ("planning", "planned"):
+        _fc_path = Path(_get_cwd(state.chat_id)) / ".crew_workspace" / "file_changes.json"
+        if _fc_path.exists():
+            try:
+                _fc = json.loads(_fc_path.read_text(encoding="utf-8"))
+                _action_icon = {"create": "➕", "modify": "✏️", "delete": "🗑️"}
+                _file_lines = [
+                    f"{_action_icon.get(f.get('action', ''), '•')} `{f.get('path', '?')}` — {f.get('desc', '')}"
+                    for f in _fc.get("files", [])[:30]
+                ]
+                if _file_lines:
+                    elements.append({
+                        "tag": "collapsible_panel",
+                        "header": {"title": {"tag": "markdown", "content": "**📁 计划改动文件**"}},
+                        "expanded": False,
+                        "elements": [{"tag": "markdown", "content": "\n".join(_file_lines)}],
+                    })
+            except Exception:
+                pass
+
+    # Agent details (shown during running/synthesizing/breakpoint/done; flat markdown to avoid nested collapsibles)
+    if phase in ("running", "synthesizing", "breakpoint", "done", "cancelled", "failed"):
+        detail_lines: list[str] = []
+        for spec in plan.agents:
+            a = agents.get(spec.id)
+            if not a or a.status == AgentStatus.PENDING:
+                continue
+            # Skip trigger_only placeholder DONE (result is empty)
+            if spec.trigger_only and a.status == AgentStatus.DONE and not a.result:
+                continue
+            icon = _STATUS_ICON.get(a.status, "?")
+            t_str = ""
+            if a.start_time and a.end_time:
+                t_str = f" · {_fmt_elapsed(a.end_time - a.start_time)}"
+            elif a.start_time and a.status == AgentStatus.RUNNING:
+                t_str = f" · {_fmt_elapsed(time.time() - a.start_time)}…"
+
+            # Token info for completed agents
+            tok_info = ""
+            if a.tokens:
+                tok = a.tokens.get("input_tokens", 0) + a.tokens.get("output_tokens", 0)
+                if tok > 0:
+                    tok_info = f" · {tok // 1000}k tok"
+
+            round_tag = f" · _{a.round_label}_" if a.round_label else ""
+            detail_lines.append(f"**{icon} {spec.role}**{t_str}{tok_info}{round_tag}")
+
+            if a.status == AgentStatus.FAILED:
+                detail_lines.append(f"❌ 失败：{a.error[:200]}")
+            elif a.status == AgentStatus.CANCELLED:
+                detail_lines.append("🛑 已取消")
+            elif a.status == AgentStatus.RUNNING:
+                preview = a.result[:200] if a.result else "运行中..."
+                detail_lines.append(preview + " ▌")
+            else:
+                preview = a.result[:CREW_RESULT_PREVIEW]
+                suffix  = "\n\n…（更多内容见结果文件）" if len(a.result) > CREW_RESULT_PREVIEW else ""
+                detail_lines.append(preview + suffix)
+                if a.feishu_doc_url:
+                    detail_lines.append(f"📄 [飞书文档]({a.feishu_doc_url})")
+
+            detail_lines.append("---")
+
+        if detail_lines:
+            # Remove the trailing redundant ---
+            if detail_lines[-1] == "---":
+                detail_lines.pop()
+            elements.append({
+                "tag": "collapsible_panel",
+                "header": {"title": {"tag": "markdown", "content": "**🤖 Agent 详情**"}},
+                "expanded": phase in ("running", "synthesizing", "breakpoint"),
+                "elements": [{"tag": "markdown", "content": "\n\n".join(detail_lines)}],
+            })
+
+    # Final deliverable
+    if phase == "done" and state.final_output:
+        elements.append({"tag": "hr"})
+        chunk = _split_md(state.final_output)[0]
+        elements.append({
+            "tag": "markdown",
+            "content": chunk,
+        })
+
+    # ── Active phase: JSON 1.0 with cancel/pause buttons ─────────
+    if phase in ("running", "planned", "synthesizing", "breakpoint"):
+        body_parts: list[str] = [f"**{plan.title}**"]
+
+        # Agent status list
+        status_lines: list[str] = []
+        for spec in plan.agents:
+            a     = agents.get(spec.id)
+            icon  = _STATUS_ICON.get(a.status if a else AgentStatus.PENDING, "?")
+            dep   = f" ← {', '.join(spec.depends_on)}" if spec.depends_on else ""
+            t_str = ""
+            if a and a.start_time and a.end_time:
+                t_str = f" ({_fmt_elapsed(a.end_time - a.start_time)})"
+            elif a and a.start_time and a.status == AgentStatus.RUNNING:
+                t_str = f" ({_fmt_elapsed(time.time() - a.start_time)}…)"
+            status_lines.append(f"{icon} **{spec.id}** {spec.role} [{spec.model}]{dep}{t_str}")
+        if status_lines:
+            body_parts.append("\n".join(status_lines))
+
+        # Progress preview for running agents
+        running_previews: list[str] = []
+        for spec in plan.agents:
+            a = agents.get(spec.id)
+            if not a or a.status != AgentStatus.RUNNING:
+                continue
+            t_str = f" · {_fmt_elapsed(time.time() - a.start_time)}…" if a.start_time else ""
+            preview = (a.result[:300] if a.result else "运行中...") + " ▌"
+            running_previews.append(f"**🔄 {spec.role}**{t_str}\n{preview}")
+        if running_previews:
+            body_parts.append("---\n" + "\n\n".join(running_previews))
+
+        body_md = "\n\n".join(body_parts)
+        return _make_card(title, body_md, color=color,
+                          buttons=[("🛑 取消", f"cancel:{state.chat_id}"),
+                                   ("⏸ 暂停", f"crew_pause:{state.crew_id}")])
+
+    # ── Terminal phase: JSON 2.0 rich text format ────────────────
+    return json.dumps({
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": color,
+            "title": {"tag": "plain_text", "content": title},
+        },
+        "body": {"elements": elements},
+    }, ensure_ascii=False)
+
+
+def _crew_update_card(state: CrewState):
+    if not state.card_mid:
+        return
+    try:
+        _patch_card_raw(state.card_mid, _build_card(state))
+    except Exception as e:
+        _debug_log(f"[Crew] card update error: {e}")
+
+
+def _start_heartbeat(state: CrewState, stop_ev: threading.Event):
+    """Push a progress card every CREW_CARD_INTERVAL seconds."""
+    def _loop():
+        while not stop_ev.is_set():
+            try:
+                _crew_update_card(state)
+            except Exception as e:
+                _debug_log(f"[CrewHeartbeat] error: {e}")
+            stop_ev.wait(timeout=CREW_CARD_INTERVAL)
+    threading.Thread(target=_loop, daemon=True, name=f"crew-hb-{state.crew_id[:6]}").start()
