@@ -5,10 +5,10 @@ build-backend = "hatchling.build"
 [project]
 name = "larkhelm"
 dynamic = ["version"]
-description = "Feishu (Lark) AI assistant platform powered by Claude CLI & Gemini CLI"
+description = "Feishu (Lark) AI assistant platform powered by Claude CLI, Gemini CLI & Kimi Code CLI"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-keywords = ["feishu", "lark", "claude", "gemini", "ai", "chatbot", "bridge"]
+keywords = ["feishu", "lark", "claude", "gemini", "kimi", "ai", "chatbot", "bridge"]
 dependencies = [
     "lark-oapi>=1.0,<2",
     "croniter>=1.3",

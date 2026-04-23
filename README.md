@@ -11,7 +11,7 @@
 
 ### 简介
 
-LarkHelm 是一个运行在飞书（Lark）中的 AI 助手平台，以 Claude CLI 和 Gemini CLI 为 AI 后端。你可以直接在飞书会话中与 AI 对话、执行 Shell 命令、读写飞书文档；内置多 Agent 编排引擎支持复杂任务分解与并行执行，以及完整的软件工程自动化流水线。所有交互均以实时更新的飞书交互卡片呈现，支持进度追踪、中途取消与人工审批节点。
+LarkHelm 是一个运行在飞书（Lark）中的 AI 助手平台，以 Claude CLI、Gemini CLI 和 Kimi Code CLI 为 AI 后端。你可以直接在飞书会话中与 AI 对话、执行 Shell 命令、读写飞书文档；内置多 Agent 编排引擎支持复杂任务分解与并行执行，以及完整的软件工程自动化流水线。所有交互均以实时更新的飞书交互卡片呈现，支持进度追踪、中途取消与人工审批节点。
 
 **核心特性：**
 
@@ -240,7 +240,7 @@ python3 -m build --wheel
 
 ### Overview
 
-LarkHelm is an AI assistant platform that runs inside Feishu (Lark), powered by Claude CLI and Gemini CLI as AI backends. Chat with AI, run shell commands, and read/write Feishu documents directly in your Feishu workspace. A built-in multi-agent orchestration engine powers parallel task planning (`/crew`) and a full software engineering pipeline (`/dev`: requirements → architecture → implementation → QA → review). All interactions are rendered as live-updating Feishu interactive cards with progress tracking, in-progress cancellation, and human-in-the-loop approval nodes.
+LarkHelm is an AI assistant platform that runs inside Feishu (Lark), powered by Claude CLI, Gemini CLI, and Kimi Code CLI as AI backends. Chat with AI, run shell commands, and read/write Feishu documents directly in your Feishu workspace. A built-in multi-agent orchestration engine powers parallel task planning (`/crew`) and a full software engineering pipeline (`/dev`: requirements → architecture → implementation → QA → review). All interactions are rendered as live-updating Feishu interactive cards with progress tracking, in-progress cancellation, and human-in-the-loop approval nodes.
 
 **Key features:**
 
