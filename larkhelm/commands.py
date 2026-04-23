@@ -885,11 +885,33 @@ def _do_upgrade(chat_id: str, msg_id: str | None = None):
     from larkhelm.crew import cancel_all_crews, wait_crews_done
     cancel_all_crews(reason="服务升级中，Crew 任务重启后将自动恢复")
     wait_crews_done(timeout=30.0)
-    wait_for_idle(timeout=60.0)
+    idle = wait_for_idle(timeout=60.0)
+
+    # If we timed out, notify affected chats so their streaming cards don't hang silently
+    if not idle:
+        from larkhelm.concurrency import get_busy_chat_ids
+        for busy_cid in get_busy_chat_ids():
+            try:
+                send_card(busy_cid, "⚠️ 查询已中断",
+                          "服务正在升级重启，当前查询被中断，请稍后重新发送。",
+                          color="orange")
+            except Exception:
+                pass
+
+    # Write a marker file so the new process can confirm back to the upgrade requester
+    import json as _json
+    _notify_path = _cfg.DATA_DIR / "_restart_notify.json"
+    try:
+        _notify_path.write_text(
+            _json.dumps({"chat_id": chat_id, "ts": time.time()}),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        _debug_log(f"[Upgrade] failed to write restart notify: {e}")
 
     # Step 3: replace process in-place with os.execv (PID unchanged, transparent to systemd)
     _debug_log("[Upgrade] os.execv replacing process")
-    send_card_reply(chat_id, msg_id, "✅ 升级完成", "服务正在重启，连接将在数秒内恢复。", color="green")
+    send_card_reply(chat_id, msg_id, "🔄 升级中", "服务正在重启，连接将在数秒内恢复…", color="blue")
     time.sleep(1)   # Give send_card enough time to deliver
     _os.execv(_sys.executable, _sys.argv)
 

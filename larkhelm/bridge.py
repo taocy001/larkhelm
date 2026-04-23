@@ -128,6 +128,21 @@ def main(config_path: str | None = None, data_dir: str | None = None) -> None:
     from larkhelm.crew import resume_interrupted_crews
     resume_interrupted_crews()
 
+    # If restarted via /upgrade, notify the requester that the bot is back online
+    import json as _json
+    _notify_path = _cfg.DATA_DIR / "_restart_notify.json"
+    try:
+        if _notify_path.exists():
+            _nd = _json.loads(_notify_path.read_text(encoding="utf-8"))
+            _notify_path.unlink(missing_ok=True)   # delete first to avoid re-send on crash-loop
+            _nc = _nd.get("chat_id", "")
+            if _nc and (time.time() - float(_nd.get("ts", 0))) < 300:
+                from larkhelm.lark_client import send_card as _send_card
+                _send_card(_nc, "✅ 升级完成，已重新连接", "服务已成功重启并重新连接到飞书。", color="green")
+                _debug_log(f"[Startup] upgrade restart notification sent to {_nc[:12]}")
+    except Exception as _e:
+        _debug_log(f"[Startup] restart notify error: {_e}")
+
     _debug_log("🚀 飞书 × Claude & Gemini 桥接 v2.0 启动")
     _debug_log(f"   Claude:    {_cfg.CLAUDE_CMD}")
     _debug_log(f"   Gemini:    {_cfg.GEMINI_CMD}")

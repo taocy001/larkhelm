@@ -12,6 +12,7 @@ __all__ = [
     "_shutting_down", "set_shutting_down", "is_shutting_down", "wait_for_idle",
     "_pending_msg", "_set_pending", "_pop_pending", "_update_pending_card_mid",
     "_cron_lock",
+    "get_busy_chat_ids",
 ]
 
 BTW_TIMEOUT = 120  # /btw quick-answer timeout (seconds)
@@ -123,6 +124,19 @@ def wait_for_idle(timeout: float = 120.0) -> bool:
             return True
         time.sleep(1.0)
     return False
+
+
+def get_busy_chat_ids() -> list[str]:
+    """Return chat_ids whose per-chat lock is currently held (non-blocking probe)."""
+    with _chat_locks_meta:
+        snapshot = list(_chat_locks.items())
+    busy: list[str] = []
+    for chat_id, lock in snapshot:
+        if lock.acquire(blocking=False):
+            lock.release()
+        else:
+            busy.append(chat_id)
+    return busy
 
 
 def _set_pending(chat_id: str, message: str, model: str, user_msg_id: str | None) -> str | None:
