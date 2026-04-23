@@ -795,7 +795,7 @@ class FeishuDocClient:
         return {"type": "text_run", "text_run": {"content": text, "text_element_style": {}}}
 
     def _make_paragraph_block(self, text: str) -> dict:
-        return {"block_type": 2, "paragraph": {
+        return {"block_type": 2, "text": {
             "elements": [self._text_elem(text)], "style": {}}}
 
     def _make_heading_block(self, text: str, level: int) -> dict:
