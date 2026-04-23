@@ -323,11 +323,19 @@ def _cmd_doc_create(chat_id: str, rest: str):
         wiki_parent_token = _cfg.DEFAULT_WIKI_PARENT_TOKEN
         folder_token      = _cfg.DEFAULT_DRIVE_FOLDER
 
+    from larkhelm.chat_state import _get_chat_state
+    sender_open_id = _get_chat_state(chat_id).get("sender_open_id", "")
+
     try:
         if wiki_space_id:
             doc_ref      = doc_client.create_wiki_node(wiki_space_id, title, wiki_parent_token)
             node_token   = doc_ref.raw_url.split("/")[-1]
             wiki_url     = f"https://feishu.cn/wiki/{node_token}"
+            if sender_open_id:
+                try:
+                    doc_client.add_doc_member(doc_ref.token, sender_open_id)
+                except Exception:
+                    pass
             send_card(chat_id, "✅ 已创建知识库页面",
                       f"**标题：** {title}\n"
                       f"**文档 ID：** `{doc_ref.token}`\n"
@@ -336,6 +344,11 @@ def _cmd_doc_create(chat_id: str, rest: str):
         else:
             doc_ref  = doc_client.create_doc(title, folder_token)
             doc_url  = f"https://feishu.cn/docx/{doc_ref.token}"
+            if sender_open_id:
+                try:
+                    doc_client.add_doc_member(doc_ref.token, sender_open_id)
+                except Exception:
+                    pass
             send_card(chat_id, "✅ 已创建文档",
                       f"**标题：** {title}\n"
                       f"**文档 ID：** `{doc_ref.token}`\n"
@@ -422,10 +435,18 @@ def _cmd_doc_wiki_create(chat_id: str, rest: str):
     space_id     = parts[0]
     title        = parts[1]
     parent_token = parts[2].strip() if len(parts) > 2 else ""
+    from larkhelm.chat_state import _get_chat_state
+    sender_open_id = _get_chat_state(chat_id).get("sender_open_id", "")
     try:
-        doc_ref    = FeishuDocClient().create_wiki_node(space_id, title, parent_token)
+        doc_client = FeishuDocClient()
+        doc_ref    = doc_client.create_wiki_node(space_id, title, parent_token)
         node_token = doc_ref.raw_url.split("/")[-1]
         wiki_url   = f"https://feishu.cn/wiki/{node_token}"
+        if sender_open_id:
+            try:
+                doc_client.add_doc_member(doc_ref.token, sender_open_id)
+            except Exception:
+                pass
         send_card(chat_id, "✅ 已创建知识库页面",
                   f"**标题：** {title}\n"
                   f"**文档 ID：** `{doc_ref.token}`\n"

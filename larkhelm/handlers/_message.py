@@ -14,7 +14,7 @@ from lark_oapi.api.im.v1 import P2ImMessageReceiveV1, P2ImMessageReactionCreated
 import larkhelm.config as _cfg
 from larkhelm.log import _debug_log, log_entry
 from larkhelm.dedup import _is_duplicate
-from larkhelm.chat_state import _get_chat_model, _is_btw_reply, _register_btw_msg
+from larkhelm.chat_state import _get_chat_model, _is_btw_reply, _register_btw_msg, _set_chat_field
 from larkhelm.concurrency import (
     _get_chat_lock, _trigger_cancel, _reset_cancel, _pop_pending,
 )
@@ -75,6 +75,16 @@ def handle_message(data: P2ImMessageReceiveV1):
         chat_id = message.chat_id
         if not chat_id:
             return
+
+        # Track the sender's open_id so doc creation can add them as collaborator
+        try:
+            sender_open_id = data.event.sender.sender_id.open_id if (
+                data.event.sender and data.event.sender.sender_id
+            ) else ""
+            if sender_open_id:
+                _set_chat_field(chat_id, "sender_open_id", sender_open_id)
+        except Exception:
+            pass
 
         if is_shutting_down():
             send_card(chat_id, '⏳ 服务升级中', '正在重启，请稍后重试。', color='orange')
