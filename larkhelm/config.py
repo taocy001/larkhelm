@@ -163,9 +163,9 @@ def _init_runtime(config_path: str | None = None, data_dir: str | None = None) -
     GEMINI_CMD       = config.get("gemini_command", "gemini")
     KIMI_CMD         = config.get("kimi_command", "kimi")
     DEFAULT_MODEL    = config.get("default_model", "claude")
-    SKIP_PERMISSIONS = config.get("skip_permissions", True)
+    SKIP_PERMISSIONS = config.get("skip_permissions", False)
     RESPONSE_TIMEOUT = config.get("response_timeout", 300)   # soft timeout: release lock but don't kill process
-    HARD_TIMEOUT     = config.get("hard_timeout", 3600)       # hard timeout: force kill (default 1 hour)
+    HARD_TIMEOUT     = config.get("hard_timeout", 21600)      # hard timeout: force kill (default 6 hours)
     MAX_CARD_LEN     = config.get("max_card_len", 3000)
     ALLOWED_CHATS    = set(config.get("allowed_chat_ids", []))
     GEMINI_IDLE_TTL  = config.get("gemini_idle_ttl", 1800)

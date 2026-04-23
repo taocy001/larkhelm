@@ -20,7 +20,7 @@ LarkHelm 是一个运行在飞书（Lark）中的 AI 助手平台，以 Claude C
 - **飞书文档集成**：crew/dev 产出自动写入飞书云盘/Wiki；`/doc`、`/wiki` 命令读写文档；消息中的文档链接自动注入上下文
 - **上下文感知**：回复任意历史消息时自动注入被回复消息内容；回复 crew 结果卡片可直接追问
 - **多模态输入**：支持图片消息，Claude 原生识图
-- **多模型支持**：每个会话独立切换 Claude / Gemini
+- **多模型支持**：每个会话独立切换 Claude / Gemini / Kimi
 - **会话持久化**：重启不丢失上下文，支持多聊天独立会话，支持终端接力
 - **权限审批**：工具调用前弹出飞书卡片审批，支持「允许所有」快捷授权；权限不足时主动推送引导卡片
 - **定时任务**：内置 cron 调度，支持定时提醒与自动任务
@@ -34,6 +34,7 @@ LarkHelm 是一个运行在飞书（Lark）中的 AI 助手平台，以 Claude C
 | Python | 3.10 及以上 |
 | [Claude CLI](https://claude.ai/download) | 已登录，`claude` 可在 PATH 中执行 |
 | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | 可选，`gemini` 可在 PATH 中执行 |
+| [Kimi Code CLI](https://github.com/MoonshotAI/kimi-code) | 可选，`kimi` 可在 PATH 中执行 |
 | 飞书自建应用 | 需要 App ID 和 App Secret，开启消息接收权限 |
 
 ### 快速开始
@@ -82,6 +83,7 @@ cd larkhelm
   "APP_SECRET":            "YOUR_APP_SECRET",
   "claude_command":        "claude",
   "gemini_command":        "gemini",
+  "kimi_command":          "kimi",
   "default_model":         "claude",
   "default_cwd":           "/home/YOUR_USER/code",
   "skip_permissions":      false,
@@ -102,6 +104,7 @@ cd larkhelm
 | `APP_ID` / `APP_SECRET` | 飞书应用凭证 | 必填 |
 | `claude_command` | Claude CLI 路径或命令名 | `claude` |
 | `gemini_command` | Gemini CLI 路径或命令名 | `gemini` |
+| `kimi_command` | Kimi Code CLI 路径或命令名 | `kimi` |
 | `default_model` | 默认模型：`claude` 或 `gemini` | `claude` |
 | `default_cwd` | Shell 命令的初始工作目录 | `~/code` |
 | `skip_permissions` | 自动放行 Claude 工具权限审批 | `false` |
@@ -113,6 +116,8 @@ cd larkhelm
 | `default_drive_folder` | crew/dev 文档默认写入的云盘文件夹 token | — |
 | `default_wiki_space_id` | crew/dev 文档默认写入的 Wiki 空间 ID | — |
 | `doc_write_backend` | 文档写入后端：`auto`/`feishu`/`local` | `auto` |
+| `doc_auto_inject` | 消息中的文档链接自动注入上下文 | `true` |
+| `doc_write_confirm` | `/doc write` 覆写前要求确认 | `true` |
 | `mcp_config_file` | MCP 配置文件路径（可选） | — |
 | `timezone` | 定时任务时区 | `Asia/Shanghai` |
 
@@ -127,6 +132,7 @@ cd larkhelm
 | 直接发消息 | 向默认模型提问 |
 | `/c <内容>` 或 `/claude <内容>` | 强制使用 Claude |
 | `/g <内容>` 或 `/gemini <内容>` | 强制使用 Gemini |
+| `/k <内容>` 或 `/kimi <内容>` | 强制使用 Kimi |
 | `/btw <问题>` | 快问（不占主任务锁，回复到消息线程） |
 | `/cancel` | 中断当前任务 |
 
@@ -134,10 +140,10 @@ cd larkhelm
 
 | 命令 | 功能 |
 |---|---|
-| `/reset` | 清空当前会话（Claude + Gemini） |
-| `/reset claude` / `/reset gemini` | 单独重置指定模型会话 |
+| `/reset` | 清空当前会话（Claude + Gemini + Kimi） |
+| `/reset claude` / `/reset gemini` / `/reset kimi` | 单独重置指定模型会话 |
 | `/reset perm` | 取消「允许所有」授权 |
-| `/model claude\|gemini` | 切换当前会话默认模型 |
+| `/model claude\|gemini\|kimi` | 切换当前会话默认模型 |
 | `/rename <名称>` | 给当前会话命名 |
 | `/pickup` | 获取在终端接力会话的命令 |
 
@@ -175,7 +181,8 @@ cd larkhelm
 | `/doc create <标题> [文件夹/Wiki]` | 创建新文档 |
 | `/doc setfolder <url>` | 设置默认云盘文件夹 |
 | `/doc ls [url]` | 列出文件夹内容 |
-| `/wiki create <space_id> <标题>` | 在 Wiki 创建新节点 |
+| `/doc wiki list [space_id]` | 列出知识库节点 |
+| `/doc wiki create <space_id> <标题>` | 在知识库创建新页面 |
 
 **其他**
 
@@ -242,7 +249,7 @@ LarkHelm is an AI assistant platform that runs inside Feishu (Lark), powered by 
 - **Feishu document integration**: crew/dev outputs auto-written to Drive/Wiki; `/doc` and `/wiki` commands for read/write; document URLs in messages auto-injected as context
 - **Context awareness**: replying to any message auto-injects the quoted content; replying to a crew result card continues the conversation in context
 - **Multimodal input**: send images directly, Claude reads them natively
-- **Multi-model**: switch Claude / Gemini independently per conversation
+- **Multi-model**: switch Claude / Gemini / Kimi independently per conversation
 - **Session persistence**: context survives restarts, independent per chat, with terminal handoff support
 - **Permission approval**: tool calls trigger a Feishu card for approval, with "Allow All" shortcut; missing permissions trigger an actionable guide card
 - **Cron scheduler**: built-in scheduling for reminders and automated tasks
@@ -256,6 +263,7 @@ LarkHelm is an AI assistant platform that runs inside Feishu (Lark), powered by 
 | Python | 3.10 or later |
 | [Claude CLI](https://claude.ai/download) | Logged in, `claude` on PATH |
 | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | Optional, `gemini` on PATH |
+| [Kimi Code CLI](https://github.com/MoonshotAI/kimi-code) | Optional, `kimi` on PATH |
 | Feishu custom app | App ID + App Secret, message permissions enabled |
 
 ### Quick Start
@@ -299,6 +307,7 @@ Config file location:
   "APP_SECRET":            "YOUR_APP_SECRET",
   "claude_command":        "claude",
   "gemini_command":        "gemini",
+  "kimi_command":          "kimi",
   "default_model":         "claude",
   "default_cwd":           "/home/YOUR_USER/code",
   "skip_permissions":      false,
@@ -319,6 +328,7 @@ Config file location:
 | `APP_ID` / `APP_SECRET` | Feishu app credentials | required |
 | `claude_command` | Claude CLI path or command name | `claude` |
 | `gemini_command` | Gemini CLI path or command name | `gemini` |
+| `kimi_command` | Kimi Code CLI path or command name | `kimi` |
 | `default_model` | Default model: `claude` or `gemini` | `claude` |
 | `default_cwd` | Initial working directory for shell commands | `~/code` |
 | `skip_permissions` | Auto-approve Claude tool permission prompts | `false` |
@@ -330,6 +340,8 @@ Config file location:
 | `default_drive_folder` | Drive folder token for crew/dev document output | — |
 | `default_wiki_space_id` | Wiki space ID for crew/dev document output | — |
 | `doc_write_backend` | Document backend: `auto` / `feishu` / `local` | `auto` |
+| `doc_auto_inject` | Auto-inject linked document content as context | `true` |
+| `doc_write_confirm` | Require confirmation before `/doc write` overwrites | `true` |
 | `mcp_config_file` | Path to MCP config file (optional) | — |
 | `timezone` | Timezone for cron tasks | `Asia/Shanghai` |
 
@@ -344,6 +356,7 @@ All commands start with `/`.
 | Send a message | Query the default model |
 | `/c <text>` or `/claude <text>` | Force Claude |
 | `/g <text>` or `/gemini <text>` | Force Gemini |
+| `/k <text>` or `/kimi <text>` | Force Kimi |
 | `/btw <question>` | Quick aside (bypasses task queue, replies in thread) |
 | `/cancel` | Interrupt current task |
 
@@ -351,10 +364,10 @@ All commands start with `/`.
 
 | Command | Action |
 |---|---|
-| `/reset` | Clear session (Claude + Gemini) |
-| `/reset claude` / `/reset gemini` | Reset a specific model's session |
+| `/reset` | Clear session (Claude + Gemini + Kimi) |
+| `/reset claude` / `/reset gemini` / `/reset kimi` | Reset a specific model's session |
 | `/reset perm` | Revoke "Allow All" authorization |
-| `/model claude\|gemini` | Switch default model for this chat |
+| `/model claude\|gemini\|kimi` | Switch default model for this chat |
 | `/rename <name>` | Name the current session |
 | `/pickup` | Get terminal resume commands |
 
@@ -392,7 +405,8 @@ All commands start with `/`.
 | `/doc create <title> [folder/wiki]` | Create a new document |
 | `/doc setfolder <url>` | Set default Drive folder |
 | `/doc ls [url]` | List folder contents |
-| `/wiki create <space_id> <title>` | Create a new Wiki node |
+| `/doc wiki list [space_id]` | List Wiki space nodes |
+| `/doc wiki create <space_id> <title>` | Create a new Wiki node |
 
 **Other**
 
