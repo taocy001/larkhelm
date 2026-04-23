@@ -42,13 +42,22 @@ LarkHelm 是一个运行在飞书（Lark）中的 AI 助手平台，可以使用
 #### 1. 创建飞书应用
 
 1. 前往[飞书开放平台](https://open.feishu.cn/)，创建自建应用
-2. 开启以下权限：
-   - `im:message`（接收/发送消息）
-   - `im:message.group_at_msg`（群聊 @ 消息）
-   - `im:resource`（读取图片等资源）
-   - `docx:document`（可选，读写飞书文档）
-   - `drive:drive`（可选，访问云盘）
-   - `wiki:wiki:write`（可选，写入知识库）
+2. 开启以下权限（共 11 项）：
+
+   | 权限标识 | 用途 |
+   |---------|------|
+   | `im:message` | 接收、发送、更新消息及卡片 |
+   | `im:message:send_as_bot` | 以机器人身份发送消息 |
+   | `im:message:update` | 更新已发送的卡片内容（流式输出） |
+   | `im:message.p2p_msg:readonly` | 接收单聊消息事件 |
+   | `im:message.group_at_msg:readonly` | 接收群聊 @ 消息事件 |
+   | `im:message.reactions:read` | 读取 emoji 反应（触发重试） |
+   | `im:message.reactions:write_only` | 发送处理中/完成 emoji |
+   | `docx:document` | 读写飞书新版文档（`/doc` 命令） |
+   | `drive:drive` | 云盘文件夹操作、文档所有权转移 |
+   | `drive:file` | 文档权限管理 |
+   | `drive:file:upload` | 上传文件到云盘 |
+
 3. 记录 **App ID** 和 **App Secret**
 4. 将机器人添加到目标群聊或开启单聊权限
 
@@ -271,10 +280,24 @@ LarkHelm is an AI assistant platform that runs inside Feishu (Lark), supporting 
 #### 1. Create a Feishu App
 
 1. Go to [Feishu Open Platform](https://open.feishu.cn/), create a custom app
-2. Enable permissions: `im:message`, `im:message.group_at_msg`, `im:resource`
-3. Optionally enable: `docx:document`, `drive:drive`, `wiki:wiki:write` for document features
-4. Note your **App ID** and **App Secret**
-5. Add the bot to your target group or enable direct message
+2. Enable the following permissions (11 scopes):
+
+   | Scope | Purpose |
+   |-------|---------|
+   | `im:message` | Receive, send, and update messages and cards |
+   | `im:message:send_as_bot` | Send messages as the bot |
+   | `im:message:update` | Update card content in-place (streaming output) |
+   | `im:message.p2p_msg:readonly` | Receive direct message events |
+   | `im:message.group_at_msg:readonly` | Receive group @-mention events |
+   | `im:message.reactions:read` | Read emoji reactions (retry trigger) |
+   | `im:message.reactions:write_only` | Send processing/done emoji indicators |
+   | `docx:document` | Read and write Feishu documents (`/doc` commands) |
+   | `drive:drive` | Drive folder operations, document ownership transfer |
+   | `drive:file` | Document permission management |
+   | `drive:file:upload` | Upload files to Drive |
+
+3. Note your **App ID** and **App Secret**
+4. Add the bot to your target group or enable direct message
 
 #### 2. One-Command Install (recommended)
 
