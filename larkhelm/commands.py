@@ -876,10 +876,28 @@ def _do_upgrade(chat_id: str, msg_id: str | None = None):
         send_card_reply(chat_id, msg_id, "✅ 已是最新版本", output, color="green")
         return
 
-    # Step 2: notify user and wait for in-flight tasks to finish
+    # Step 2: reinstall package into the running venv so execv picks up new code
     send_card_reply(chat_id, msg_id, "🔄 升级中",
                     f"**拉取完成：**\n```\n{output[:400]}\n```\n\n"
-                    "正在等待进行中的任务完成后重启…", color="blue")
+                    "正在安装新版本…", color="blue")
+    try:
+        ri = subprocess.run(
+            [_sys.executable, "-m", "pip", "install", "--no-deps", "-q",
+             str(_cfg.SOURCE_DIR)],
+            capture_output=True, text=True, timeout=120,
+        )
+        if ri.returncode != 0:
+            send_card_reply(chat_id, msg_id, "❌ 升级失败",
+                            f"pip install 失败：\n```\n{(ri.stderr or ri.stdout)[:400]}\n```",
+                            color="red")
+            return
+    except Exception as e:
+        send_card_reply(chat_id, msg_id, "❌ 升级失败", f"pip install 异常：{e}", color="red")
+        return
+
+    # Step 3: wait for in-flight tasks to finish
+    send_card_reply(chat_id, msg_id, "🔄 升级中",
+                    f"**安装完成。**\n\n正在等待进行中的任务完成后重启…", color="blue")
 
     set_shutting_down()
     from larkhelm.crew import cancel_all_crews, wait_crews_done
