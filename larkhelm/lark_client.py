@@ -827,26 +827,26 @@ class FeishuDocClient:
             "style": {"language": _LANG_MAP.get(lang.lower(), 1), "wrap": False},
         }}
 
-    def add_doc_member(self, doc_token: str, open_id: str, doc_type: str = "docx") -> None:
-        """Grant full_access to a user (by open_id) on a Drive document."""
+    def transfer_doc_owner(self, doc_token: str, open_id: str, doc_type: str = "docx") -> None:
+        """Transfer document ownership to the given user (by open_id). Requires docs:doc scope."""
         import urllib.request as _urllib_req
         token = self._get_tenant_token()
         url   = (f"https://open.feishu.cn/open-apis/drive/v1/permissions"
-                 f"/{doc_token}/members?type={doc_type}&need_notification=false")
+                 f"/{doc_token}/members/transfer_owner"
+                 f"?type={doc_type}&remove_old_owner=false&stay_put=true")
         body  = _json_mod.dumps({
             "member_type": "openid",
             "member_id":   open_id,
-            "perm":        "full_access",
         }, ensure_ascii=False).encode()
         req = _urllib_req.Request(url, data=body, headers={
             "Authorization": f"Bearer {token}",
             "Content-Type":  "application/json; charset=utf-8",
-        })
+        }, method="POST")
         with _urllib_req.urlopen(req, timeout=10) as resp:
             data = _json_mod.loads(resp.read())
         code = data.get("code", 0)
         if code != 0:
-            raise DocAPIError(code, data.get("msg", "add_doc_member failed"))
+            raise DocAPIError(code, data.get("msg", "transfer_doc_owner failed"))
 
     # ── Create document / wiki node ──────────────────────────────
 

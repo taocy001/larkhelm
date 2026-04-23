@@ -333,7 +333,7 @@ def _cmd_doc_create(chat_id: str, rest: str):
             wiki_url     = f"https://feishu.cn/wiki/{node_token}"
             if sender_open_id:
                 try:
-                    doc_client.add_doc_member(doc_ref.token, sender_open_id)
+                    doc_client.transfer_doc_owner(doc_ref.token, sender_open_id)
                 except Exception:
                     pass
             send_card(chat_id, "✅ 已创建知识库页面",
@@ -346,7 +346,7 @@ def _cmd_doc_create(chat_id: str, rest: str):
             doc_url  = f"https://feishu.cn/docx/{doc_ref.token}"
             if sender_open_id:
                 try:
-                    doc_client.add_doc_member(doc_ref.token, sender_open_id)
+                    doc_client.transfer_doc_owner(doc_ref.token, sender_open_id)
                 except Exception:
                     pass
             send_card(chat_id, "✅ 已创建文档",
@@ -444,7 +444,7 @@ def _cmd_doc_wiki_create(chat_id: str, rest: str):
         wiki_url   = f"https://feishu.cn/wiki/{node_token}"
         if sender_open_id:
             try:
-                doc_client.add_doc_member(doc_ref.token, sender_open_id)
+                doc_client.transfer_doc_owner(doc_ref.token, sender_open_id)
             except Exception:
                 pass
         send_card(chat_id, "✅ 已创建知识库页面",
