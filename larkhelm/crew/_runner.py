@@ -33,6 +33,14 @@ def _detect_fail_marker(spec: AgentSpec, result: str) -> bool:
     return spec.fail_marker in last_line
 
 
+def _crew_owner_open_id(state: CrewState) -> str:
+    """Return the open_id to transfer ownership to: chat sender > config default."""
+    import larkhelm.config as _cfg
+    from larkhelm.chat_state import _get_chat_state
+    owner = _get_chat_state(state.chat_id).get("sender_open_id", "")
+    return owner or _cfg.DEFAULT_OWNER_OPEN_ID
+
+
 def _ensure_crew_folder(state: CrewState) -> None:
     """Create a per-project Feishu folder at crew start. Sets state.feishu_folder_token/url.
     Falls back silently if Feishu is unavailable or backend is 'local'.
@@ -42,25 +50,34 @@ def _ensure_crew_folder(state: CrewState) -> None:
         return
 
     project_name = (state.plan.title or "crew")[:40]
+    owner_open_id = _crew_owner_open_id(state)
 
     from larkhelm.lark_client import FeishuDocClient, DocError
     doc_client = FeishuDocClient()
 
     try:
         if _cfg.DEFAULT_WIKI_SPACE_ID:
-            # Create a wiki section as the project container; child docs go under it
             ref = doc_client.create_wiki_node(
                 _cfg.DEFAULT_WIKI_SPACE_ID, project_name, _cfg.DEFAULT_WIKI_PARENT_TOKEN
             )
             node_token = ref.raw_url.split("/")[-1]
             state.feishu_folder_token = node_token
             state.feishu_folder_url   = f"https://feishu.cn/wiki/{node_token}"
+            if owner_open_id:
+                try:
+                    doc_client.transfer_doc_owner(ref.token, owner_open_id)
+                except Exception:
+                    pass
         else:
-            # Drive: create a subfolder inside the configured parent (or root)
             parent = _cfg.DEFAULT_DRIVE_FOLDER or ""
             folder_token = doc_client.create_folder(project_name, parent)
             state.feishu_folder_token = folder_token
             state.feishu_folder_url   = f"https://feishu.cn/drive/folder/{folder_token}"
+            if owner_open_id:
+                try:
+                    doc_client.transfer_doc_owner(folder_token, owner_open_id, doc_type="folder")
+                except Exception:
+                    pass
         _debug_log(f"[Crew] 项目文件夹已创建: {state.feishu_folder_url}")
     except DocError as e:
         _debug_log(f"[Crew] 创建项目文件夹失败，将写入本地: {e}")
@@ -91,26 +108,30 @@ def _sync_output_file(state: CrewState, agent_id: str) -> str:
         _debug_log(f"[Crew] {agent_id} 读取 output_file 失败: {e}")
         return ""
 
-    title        = out_path.stem
-    folder_token = state.feishu_folder_token
+    title         = out_path.stem
+    folder_token  = state.feishu_folder_token
+    owner_open_id = _crew_owner_open_id(state)
 
     from larkhelm.lark_client import FeishuDocClient, DocError
     doc_client = FeishuDocClient()
 
     try:
         if _cfg.DEFAULT_WIKI_SPACE_ID:
-            # Create child wiki page under the project folder node (or wiki root if no folder)
             parent_token = folder_token or _cfg.DEFAULT_WIKI_PARENT_TOKEN
-            ref     = doc_client.create_wiki_node(_cfg.DEFAULT_WIKI_SPACE_ID, title, parent_token)
+            ref        = doc_client.create_wiki_node(_cfg.DEFAULT_WIKI_SPACE_ID, title, parent_token)
             node_token = ref.raw_url.split("/")[-1]
-            doc_url = f"https://feishu.cn/wiki/{node_token}"
+            doc_url    = f"https://feishu.cn/wiki/{node_token}"
         else:
-            # Drive: put doc in the project folder, then configured folder, then root
             target = folder_token or _cfg.DEFAULT_DRIVE_FOLDER or ""
             ref     = doc_client.create_doc(title, target)
             doc_url = f"https://feishu.cn/docx/{ref.token}"
 
         doc_client.append(ref, content)
+        if owner_open_id:
+            try:
+                doc_client.transfer_doc_owner(ref.token, owner_open_id)
+            except Exception:
+                pass
         _debug_log(f"[Crew] {agent_id} 已同步到飞书: {doc_url}")
         return doc_url
 
