@@ -18,14 +18,9 @@ def _cmd_doc(args):
     content = sys.stdin.read() if args.file == "-" else open(args.file, encoding="utf-8").read()
 
     if args.doc_command == "create":
-        doc_ref = doc_client.create_doc(args.title)
-        doc_client.append(doc_ref, content)
         owner_open_id = getattr(args, "owner", None) or _cfg.DEFAULT_OWNER_OPEN_ID
-        if owner_open_id:
-            try:
-                doc_client.transfer_doc_owner(doc_ref.token, owner_open_id)
-            except Exception:
-                pass
+        doc_ref = doc_client.create_doc(args.title, owner_open_id=owner_open_id)
+        doc_client.append(doc_ref, content)
         print(f"https://feishu.cn/docx/{doc_ref.token}")
 
     elif args.doc_command == "append":

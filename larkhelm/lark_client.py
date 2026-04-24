@@ -850,8 +850,10 @@ class FeishuDocClient:
 
     # ── Create document / wiki node ──────────────────────────────
 
-    def create_doc(self, title: str, folder_token: str = "") -> "DocRef":
+    def create_doc(self, title: str, folder_token: str = "",
+                   owner_open_id: str = "") -> "DocRef":
         """Create a blank docx document in the specified Drive folder (or root if empty).
+        If owner_open_id is given, transfers ownership immediately after creation.
         Uses the SDK native interface (raw request has a double-encode issue for docx create).
         """
         from lark_oapi.api.docx.v1 import (
@@ -873,6 +875,11 @@ class FeishuDocClient:
         doc_id = resp.data.document.document_id if resp.data and resp.data.document else ""
         if not doc_id:
             raise DocAPIError(0, "创建文档响应缺少 document_id")
+        if owner_open_id:
+            try:
+                self.transfer_doc_owner(doc_id, owner_open_id)
+            except Exception:
+                pass
         return DocRef(doc_type="docx", token=doc_id, raw_url="", title=title)
 
     def create_wiki_node(
@@ -881,8 +888,11 @@ class FeishuDocClient:
         title: str,
         parent_node_token: str = "",
         obj_type: str = "docx",
+        owner_open_id: str = "",
     ) -> "DocRef":
-        """Create a new node in a wiki space, also creating the underlying document."""
+        """Create a new node in a wiki space, also creating the underlying document.
+        If owner_open_id is given, transfers ownership immediately after creation.
+        """
         body: dict = {
             "obj_type":  obj_type,
             "node_type": "origin",
@@ -898,12 +908,24 @@ class FeishuDocClient:
         obj_token   = node.get("obj_token",  "")
         if not obj_token:
             raise DocAPIError(0, f"创建 wiki 节点响应缺少 obj_token (node={node_token})")
+        if owner_open_id:
+            try:
+                self.transfer_doc_owner(obj_token, owner_open_id)
+            except Exception:
+                pass
         return DocRef(
             doc_type="docx",
             token=obj_token,
             raw_url=f"wiki/{node_token}",
             title=title,
         )
+
+    def create_folder(self, name: str, parent_folder_token: str = "",
+                      owner_open_id: str = "") -> str:
+        """Create a Drive folder inside parent (uses root if parent is empty).
+        If owner_open_id is given, transfers ownership immediately after creation.
+        Returns new folder token.
+        """
 
     def get_root_folder_token(self) -> str:
         """Return the Drive root folder token for the current app/user."""
@@ -923,8 +945,6 @@ class FeishuDocClient:
             raise DocAPIError(0, "get_root_folder_token 响应缺少 token")
         return folder_token
 
-    def create_folder(self, name: str, parent_folder_token: str = "") -> str:
-        """Create a Drive folder inside parent (uses root if parent is empty). Returns new folder token."""
         if not parent_folder_token:
             parent_folder_token = self.get_root_folder_token()
         data = self._http_request(
@@ -935,6 +955,11 @@ class FeishuDocClient:
         folder_token = data.get("data", {}).get("token", "")
         if not folder_token:
             raise DocAPIError(0, "create_folder 响应缺少 token")
+        if owner_open_id:
+            try:
+                self.transfer_doc_owner(folder_token, owner_open_id, doc_type="folder")
+            except Exception:
+                pass
         return folder_token
 
     def list_wiki_nodes(

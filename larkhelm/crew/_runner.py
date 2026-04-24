@@ -58,26 +58,17 @@ def _ensure_crew_folder(state: CrewState) -> None:
     try:
         if _cfg.DEFAULT_WIKI_SPACE_ID:
             ref = doc_client.create_wiki_node(
-                _cfg.DEFAULT_WIKI_SPACE_ID, project_name, _cfg.DEFAULT_WIKI_PARENT_TOKEN
+                _cfg.DEFAULT_WIKI_SPACE_ID, project_name, _cfg.DEFAULT_WIKI_PARENT_TOKEN,
+                owner_open_id=owner_open_id,
             )
             node_token = ref.raw_url.split("/")[-1]
             state.feishu_folder_token = node_token
             state.feishu_folder_url   = f"https://feishu.cn/wiki/{node_token}"
-            if owner_open_id:
-                try:
-                    doc_client.transfer_doc_owner(ref.token, owner_open_id)
-                except Exception:
-                    pass
         else:
             parent = _cfg.DEFAULT_DRIVE_FOLDER or ""
-            folder_token = doc_client.create_folder(project_name, parent)
+            folder_token = doc_client.create_folder(project_name, parent, owner_open_id=owner_open_id)
             state.feishu_folder_token = folder_token
             state.feishu_folder_url   = f"https://feishu.cn/drive/folder/{folder_token}"
-            if owner_open_id:
-                try:
-                    doc_client.transfer_doc_owner(folder_token, owner_open_id, doc_type="folder")
-                except Exception:
-                    pass
         _debug_log(f"[Crew] 项目文件夹已创建: {state.feishu_folder_url}")
     except DocError as e:
         _debug_log(f"[Crew] 创建项目文件夹失败，将写入本地: {e}")
@@ -118,20 +109,16 @@ def _sync_output_file(state: CrewState, agent_id: str) -> str:
     try:
         if _cfg.DEFAULT_WIKI_SPACE_ID:
             parent_token = folder_token or _cfg.DEFAULT_WIKI_PARENT_TOKEN
-            ref        = doc_client.create_wiki_node(_cfg.DEFAULT_WIKI_SPACE_ID, title, parent_token)
+            ref        = doc_client.create_wiki_node(_cfg.DEFAULT_WIKI_SPACE_ID, title, parent_token,
+                                                     owner_open_id=owner_open_id)
             node_token = ref.raw_url.split("/")[-1]
             doc_url    = f"https://feishu.cn/wiki/{node_token}"
         else:
             target = folder_token or _cfg.DEFAULT_DRIVE_FOLDER or ""
-            ref     = doc_client.create_doc(title, target)
+            ref     = doc_client.create_doc(title, target, owner_open_id=owner_open_id)
             doc_url = f"https://feishu.cn/docx/{ref.token}"
 
         doc_client.append(ref, content)
-        if owner_open_id:
-            try:
-                doc_client.transfer_doc_owner(ref.token, owner_open_id)
-            except Exception:
-                pass
         _debug_log(f"[Crew] {agent_id} 已同步到飞书: {doc_url}")
         return doc_url
 

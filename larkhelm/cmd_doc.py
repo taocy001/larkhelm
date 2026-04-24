@@ -328,27 +328,18 @@ def _cmd_doc_create(chat_id: str, rest: str):
 
     try:
         if wiki_space_id:
-            doc_ref      = doc_client.create_wiki_node(wiki_space_id, title, wiki_parent_token)
-            node_token   = doc_ref.raw_url.split("/")[-1]
-            wiki_url     = f"https://feishu.cn/wiki/{node_token}"
-            if sender_open_id:
-                try:
-                    doc_client.transfer_doc_owner(doc_ref.token, sender_open_id)
-                except Exception:
-                    pass
+            doc_ref    = doc_client.create_wiki_node(wiki_space_id, title, wiki_parent_token,
+                                                     owner_open_id=sender_open_id)
+            node_token = doc_ref.raw_url.split("/")[-1]
+            wiki_url   = f"https://feishu.cn/wiki/{node_token}"
             send_card(chat_id, "✅ 已创建知识库页面",
                       f"**标题：** {title}\n"
                       f"**文档 ID：** `{doc_ref.token}`\n"
                       f"**链接：** {wiki_url}",
                       color="green")
         else:
-            doc_ref  = doc_client.create_doc(title, folder_token)
-            doc_url  = f"https://feishu.cn/docx/{doc_ref.token}"
-            if sender_open_id:
-                try:
-                    doc_client.transfer_doc_owner(doc_ref.token, sender_open_id)
-                except Exception:
-                    pass
+            doc_ref = doc_client.create_doc(title, folder_token, owner_open_id=sender_open_id)
+            doc_url = f"https://feishu.cn/docx/{doc_ref.token}"
             send_card(chat_id, "✅ 已创建文档",
                       f"**标题：** {title}\n"
                       f"**文档 ID：** `{doc_ref.token}`\n"
