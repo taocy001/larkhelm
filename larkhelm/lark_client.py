@@ -905,16 +905,37 @@ class FeishuDocClient:
             title=title,
         )
 
+    def get_root_folder_token(self) -> str:
+        """Return the Drive root folder token for the current app/user."""
+        import urllib.request as _urllib_req
+        token = self._get_tenant_token()
+        req = _urllib_req.Request(
+            "https://open.feishu.cn/open-apis/drive/explorer/v2/root_folder/meta",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        try:
+            with _urllib_req.urlopen(req, timeout=10) as resp:
+                data = _json_mod.loads(resp.read())
+        except Exception as e:
+            raise DocAPIError(0, f"get_root_folder_token 失败: {e}")
+        folder_token = data.get("data", {}).get("token", "")
+        if not folder_token:
+            raise DocAPIError(0, "get_root_folder_token 响应缺少 token")
+        return folder_token
+
     def create_folder(self, name: str, parent_folder_token: str = "") -> str:
-        """Create a Drive folder. Returns the new folder token."""
-        body: dict = {"name": name}
-        if parent_folder_token:
-            body["folderToken"] = parent_folder_token
-        data = self._call_api("POST", "/open-apis/drive/explorer/v2/folder", body)
-        token = data.get("data", {}).get("token", "")
-        if not token:
+        """Create a Drive folder inside parent (uses root if parent is empty). Returns new folder token."""
+        if not parent_folder_token:
+            parent_folder_token = self.get_root_folder_token()
+        data = self._http_request(
+            "POST",
+            "https://open.feishu.cn/open-apis/drive/v1/files/create_folder",
+            {"name": name, "folder_token": parent_folder_token},
+        )
+        folder_token = data.get("data", {}).get("token", "")
+        if not folder_token:
             raise DocAPIError(0, "create_folder 响应缺少 token")
-        return token
+        return folder_token
 
     def list_wiki_nodes(
         self,
