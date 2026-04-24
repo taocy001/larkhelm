@@ -4,6 +4,41 @@ import argparse
 import sys
 
 
+def _cmd_doc(args):
+    """Handler for `larkhelm doc` subcommands."""
+    import larkhelm.config as _cfg
+    import lark_oapi as lark
+    import larkhelm.lark_client as _lc
+    from larkhelm.lark_client import FeishuDocClient, parse_doc_url
+
+    _cfg._init_runtime()
+    _lc.client = lark.Client.builder().app_id(_cfg.APP_ID).app_secret(_cfg.APP_SECRET).build()
+    doc_client = FeishuDocClient()
+
+    content = sys.stdin.read() if args.file == "-" else open(args.file, encoding="utf-8").read()
+
+    if args.doc_command == "create":
+        doc_ref = doc_client.create_doc(args.title)
+        doc_client.append(doc_ref, content)
+        print(f"https://feishu.cn/docx/{doc_ref.token}")
+
+    elif args.doc_command == "append":
+        ref = parse_doc_url(args.url)
+        if ref is None:
+            print(f"无法识别的飞书链接：{args.url}", file=sys.stderr)
+            sys.exit(1)
+        doc_client.append(ref, content)
+        print("已追加内容。")
+
+    elif args.doc_command == "write":
+        ref = parse_doc_url(args.url)
+        if ref is None:
+            print(f"无法识别的飞书链接：{args.url}", file=sys.stderr)
+            sys.exit(1)
+        doc_client.replace_all(ref, content)
+        print("已覆盖写入内容。")
+
+
 def cli():
     from larkhelm import __version__
 
@@ -17,11 +52,35 @@ def cli():
         version=f"larkhelm {__version__}",
     )
     sub = parser.add_subparsers(dest="command")
+
     start_parser = sub.add_parser("start", help="start the service (runs in the foreground)")
     start_parser.add_argument("--config", metavar="PATH",
                               help="path to config file (default: auto-detect)")
     start_parser.add_argument("--data-dir", metavar="DIR",
                               help="path to data directory (default: auto-detect)")
+
+    # `larkhelm doc` — Feishu document operations for use by Claude Code / scripts
+    doc_parser = sub.add_parser("doc", help="read/write Feishu documents from the CLI")
+    doc_sub = doc_parser.add_subparsers(dest="doc_command")
+
+    # larkhelm doc create <title> [--file <path|-]
+    p_create = doc_sub.add_parser("create", help="create a new doc and write content to it")
+    p_create.add_argument("title", help="document title")
+    p_create.add_argument("--file", "-f", default="-",
+                          metavar="FILE", help="content file (default: stdin)")
+
+    # larkhelm doc append <url> [--file <path|-]
+    p_append = doc_sub.add_parser("append", help="append content to an existing doc")
+    p_append.add_argument("url", help="Feishu doc/wiki URL")
+    p_append.add_argument("--file", "-f", default="-",
+                          metavar="FILE", help="content file (default: stdin)")
+
+    # larkhelm doc write <url> [--file <path|-]
+    p_write = doc_sub.add_parser("write", help="overwrite an existing doc with new content")
+    p_write.add_argument("url", help="Feishu doc/wiki URL")
+    p_write.add_argument("--file", "-f", default="-",
+                         metavar="FILE", help="content file (default: stdin)")
+
     # Keep the version sub-command for backward compatibility (prefer the --version flag)
     sub.add_parser("version", help="print version (prefer --version)")
 
@@ -32,6 +91,11 @@ def cli():
     elif args.command == "start":
         from larkhelm.bridge import main
         main(config_path=args.config, data_dir=args.data_dir)
+    elif args.command == "doc":
+        if not args.doc_command:
+            doc_parser.print_help()
+            sys.exit(0)
+        _cmd_doc(args)
     else:
         # No subcommand given: show help and require the user to make an explicit choice
         parser.print_help()
