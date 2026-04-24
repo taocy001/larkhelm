@@ -905,6 +905,17 @@ class FeishuDocClient:
             title=title,
         )
 
+    def create_folder(self, name: str, parent_folder_token: str = "") -> str:
+        """Create a Drive folder. Returns the new folder token."""
+        body: dict = {"name": name}
+        if parent_folder_token:
+            body["folderToken"] = parent_folder_token
+        data = self._call_api("POST", "/open-apis/drive/explorer/v2/folder", body)
+        token = data.get("data", {}).get("token", "")
+        if not token:
+            raise DocAPIError(0, "create_folder 响应缺少 token")
+        return token
+
     def list_wiki_nodes(
         self,
         space_id: str,

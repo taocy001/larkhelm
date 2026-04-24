@@ -33,14 +33,46 @@ def _detect_fail_marker(spec: AgentSpec, result: str) -> bool:
     return spec.fail_marker in last_line
 
 
-def _sync_output_file(state: CrewState, agent_id: str) -> str:
-    """Sync an agent's output_file to a Feishu document (based on DOC_WRITE_BACKEND config).
-    Returns the Feishu document URL on success, or empty string for local/failure.
-    Only triggered when backend != "local" and the file exists.
+def _ensure_crew_folder(state: CrewState) -> None:
+    """Create a per-project Feishu folder at crew start. Sets state.feishu_folder_token/url.
+    Falls back silently if Feishu is unavailable or backend is 'local'.
     """
     import larkhelm.config as _cfg
-    backend = _cfg.DOC_WRITE_BACKEND
-    if backend == "local":
+    if _cfg.DOC_WRITE_BACKEND == "local":
+        return
+
+    project_name = (state.plan.title or "crew")[:40]
+
+    from larkhelm.lark_client import FeishuDocClient, DocError
+    doc_client = FeishuDocClient()
+
+    try:
+        if _cfg.DEFAULT_WIKI_SPACE_ID:
+            # Create a wiki section as the project container; child docs go under it
+            ref = doc_client.create_wiki_node(
+                _cfg.DEFAULT_WIKI_SPACE_ID, project_name, _cfg.DEFAULT_WIKI_PARENT_TOKEN
+            )
+            node_token = ref.raw_url.split("/")[-1]
+            state.feishu_folder_token = node_token
+            state.feishu_folder_url   = f"https://feishu.cn/wiki/{node_token}"
+        else:
+            # Drive: create a subfolder inside the configured parent (or root)
+            parent = _cfg.DEFAULT_DRIVE_FOLDER or ""
+            folder_token = doc_client.create_folder(project_name, parent)
+            state.feishu_folder_token = folder_token
+            state.feishu_folder_url   = f"https://feishu.cn/drive/folder/{folder_token}"
+        _debug_log(f"[Crew] 项目文件夹已创建: {state.feishu_folder_url}")
+    except DocError as e:
+        _debug_log(f"[Crew] 创建项目文件夹失败，将写入本地: {e}")
+
+
+def _sync_output_file(state: CrewState, agent_id: str) -> str:
+    """Sync an agent's output_file to Feishu, inside the per-project folder.
+    Returns the Feishu document URL on success, empty string on failure/local-only.
+    Always falls back to local if Feishu is unavailable.
+    """
+    import larkhelm.config as _cfg
+    if _cfg.DOC_WRITE_BACKEND == "local":
         return ""
 
     spec = state.agents[agent_id].spec
@@ -56,59 +88,34 @@ def _sync_output_file(state: CrewState, agent_id: str) -> str:
     try:
         content = out_path.read_text(encoding="utf-8")
     except Exception as e:
-        _debug_log(f"[Crew] failed to read output_file: {e}")
+        _debug_log(f"[Crew] {agent_id} 读取 output_file 失败: {e}")
         return ""
 
-    title = out_path.stem  # e.g. "prd", "design"
+    title        = out_path.stem
+    folder_token = state.feishu_folder_token
 
-    from larkhelm.lark_client import (
-        FeishuDocClient,
-        DocPermissionError, DocAPIError, DocError,
-        send_permission_guide,
-        send_card,
-    )
+    from larkhelm.lark_client import FeishuDocClient, DocError
     doc_client = FeishuDocClient()
 
-    if not _cfg.DEFAULT_WIKI_SPACE_ID and not _cfg.DEFAULT_DRIVE_FOLDER:
-        # No storage location configured; send a one-time notification
-        send_card(state.chat_id, "📂 文档未上传至飞书",
-                  f"`{spec.output_file}` 已保存到本地工作区。\n\n"
-                  "如需自动上传到飞书云盘，请先设置目标文件夹：\n"
-                  "`/doc setfolder <飞书文件夹链接>`",
-                  color="orange")
-        return ""
-
     try:
-        # Prefer wiki, then Drive folder, then root directory
         if _cfg.DEFAULT_WIKI_SPACE_ID:
-            ref = doc_client.create_wiki_node(
-                _cfg.DEFAULT_WIKI_SPACE_ID, title, _cfg.DEFAULT_WIKI_PARENT_TOKEN
-            )
-            doc_url = ref.raw_url or f"https://feishu.cn/wiki/{ref.token}"
+            # Create child wiki page under the project folder node (or wiki root if no folder)
+            parent_token = folder_token or _cfg.DEFAULT_WIKI_PARENT_TOKEN
+            ref     = doc_client.create_wiki_node(_cfg.DEFAULT_WIKI_SPACE_ID, title, parent_token)
+            node_token = ref.raw_url.split("/")[-1]
+            doc_url = f"https://feishu.cn/wiki/{node_token}"
         else:
-            try:
-                ref = doc_client.create_doc(title, _cfg.DEFAULT_DRIVE_FOLDER)
-            except DocPermissionError:
-                # No permission for folder; fall back to root with a project-prefixed title
-                project_prefix = (state.plan.title or "")[:20].strip()
-                root_title = f"{project_prefix}_{title}" if project_prefix else title
-                _debug_log(f"[Crew] {agent_id} folder permission denied, falling back to root, title: {root_title!r}")
-                ref = doc_client.create_doc(root_title, "")
+            # Drive: put doc in the project folder, then configured folder, then root
+            target = folder_token or _cfg.DEFAULT_DRIVE_FOLDER or ""
+            ref     = doc_client.create_doc(title, target)
             doc_url = f"https://feishu.cn/docx/{ref.token}"
 
         doc_client.append(ref, content)
-        _debug_log(f"[Crew] {agent_id} output_file synced to Feishu: {doc_url}")
+        _debug_log(f"[Crew] {agent_id} 已同步到飞书: {doc_url}")
         return doc_url
 
-    except DocPermissionError as e:
-        _debug_log(f"[Crew] {agent_id} Feishu root directory write also failed, giving up upload")
-        send_permission_guide(state.chat_id, "create_folder", code=e.code)
-        return ""
-    except (DocAPIError, DocError) as e:
-        if backend == "auto":
-            _debug_log(f"[Crew] {agent_id} Feishu write failed, falling back to local: {e}")
-            return ""
-        _debug_log(f"[Crew] {agent_id} Feishu write failed: {e}")
+    except DocError as e:
+        _debug_log(f"[Crew] {agent_id} 飞书写入失败，保留本地文件: {e}")
         return ""
 
 
@@ -448,6 +455,10 @@ def _execute(state: CrewState, total_timeout: int):
 
     cancel_ev    = state.cancel_ev
     deadline     = time.time() + total_timeout
+
+    # Create per-project Feishu folder before running any agents
+    _ensure_crew_folder(state)
+
     wave_queue   = deque(_topo_waves(state.plan.agents))
     retry_counts: dict[str, int] = {spec.id: 0 for spec in state.plan.agents}
 

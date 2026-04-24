@@ -122,6 +122,8 @@ def _resolve_prompt(template: str, state: CrewState) -> str:
             if a.spec.output_file:
                 out_path = Path(cwd) / ".crew_workspace" / a.spec.output_file
                 out_file_ref = f"\n主要输出文件：{out_path}（可用 Read 工具读取完整内容）"
+                if a.feishu_doc_url:
+                    out_file_ref += f"\n飞书文档：{a.feishu_doc_url}"
             ref = f"{out_file_ref}\n完整输出见：{result_file}（可用 Read 工具读取全文）"
             return f"【{a.spec.role} 输出摘要】\n{summary}{suffix}{ref}"
         elif a.status == AgentStatus.FAILED:

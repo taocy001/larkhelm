@@ -114,4 +114,6 @@ class CrewState:
     git_head_before:    str             = ""      # git HEAD hash at task start
     phase_commits:      dict[str, str]  = dataclasses.field(default_factory=dict)  # agent_id → git_commit_hash
     trigger_msg_id:     str | None      = None    # user message id that triggered the task; used to reply with completion notification
+    feishu_folder_token: str            = ""      # per-project Feishu folder token (Drive folder or Wiki node)
+    feishu_folder_url:   str            = ""      # human-readable URL for the project folder
     # phase_commits: {agent_id → git_commit_hash} (populated in auto_commit mode)
