@@ -23,5 +23,6 @@
   "doc_write_backend":      "auto",
 
   "default_wiki_space_id":     "",
-  "default_wiki_parent_token": ""
+  "default_wiki_parent_token": "",
+  "default_owner_open_id":     ""
 }

@@ -20,6 +20,12 @@ def _cmd_doc(args):
     if args.doc_command == "create":
         doc_ref = doc_client.create_doc(args.title)
         doc_client.append(doc_ref, content)
+        owner_open_id = getattr(args, "owner", None) or _cfg.DEFAULT_OWNER_OPEN_ID
+        if owner_open_id:
+            try:
+                doc_client.transfer_doc_owner(doc_ref.token, owner_open_id)
+            except Exception:
+                pass
         print(f"https://feishu.cn/docx/{doc_ref.token}")
 
     elif args.doc_command == "append":
@@ -68,6 +74,8 @@ def cli():
     p_create.add_argument("title", help="document title")
     p_create.add_argument("--file", "-f", default="-",
                           metavar="FILE", help="content file (default: stdin)")
+    p_create.add_argument("--owner", metavar="OPEN_ID",
+                          help="transfer ownership to this open_id (default: config default_owner_open_id)")
 
     # larkhelm doc append <url> [--file <path|-]
     p_append = doc_sub.add_parser("append", help="append content to an existing doc")

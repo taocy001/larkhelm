@@ -50,6 +50,7 @@ class _RuntimeConfig:
     DOC_WRITE_BACKEND:      str
     DEFAULT_WIKI_SPACE_ID:     str
     DEFAULT_WIKI_PARENT_TOKEN: str
+    DEFAULT_OWNER_OPEN_ID:     str
     PERM_HOOK_SCRIPT: str
     PERM_SOCKET_PATH: str
     SOURCE_DIR:       Path
@@ -89,6 +90,7 @@ DOC_WRITE_BACKEND:      str   # "auto" | "feishu" | "local"
 # Wiki / knowledge-base configuration
 DEFAULT_WIKI_SPACE_ID:     str
 DEFAULT_WIKI_PARENT_TOKEN: str
+DEFAULT_OWNER_OPEN_ID:     str
 
 # Permission approval socket path (derived from PID; fixed once _init_runtime sets it)
 PERM_HOOK_SCRIPT: str
@@ -115,7 +117,7 @@ def _init_runtime(config_path: str | None = None, data_dir: str | None = None) -
     global PERM_HOOK_SCRIPT, PERM_SOCKET_PATH
     global DOC_AUTO_INJECT, DOC_INJECT_MAX_CHARS, DOC_INJECT_MAX_DOCS
     global DOC_READ_MAX_CHARS, DEFAULT_DRIVE_FOLDER, DOC_WRITE_CONFIRM, DOC_WRITE_BACKEND
-    global DEFAULT_WIKI_SPACE_ID, DEFAULT_WIKI_PARENT_TOKEN
+    global DEFAULT_WIKI_SPACE_ID, DEFAULT_WIKI_PARENT_TOKEN, DEFAULT_OWNER_OPEN_ID
 
     _sys_cfg  = Path("/etc/larkhelm/config.json")
     _sys_data = Path("/var/lib/larkhelm")
@@ -182,6 +184,7 @@ def _init_runtime(config_path: str | None = None, data_dir: str | None = None) -
 
     DEFAULT_WIKI_SPACE_ID     = config.get("default_wiki_space_id",     "")
     DEFAULT_WIKI_PARENT_TOKEN = config.get("default_wiki_parent_token", "")
+    DEFAULT_OWNER_OPEN_ID     = config.get("default_owner_open_id",     "")
 
     PERM_HOOK_SCRIPT  = str(Path(__file__).parent / "perm_hook.py")
     PERM_SOCKET_PATH  = f"/tmp/feishu_perm_{os.getpid()}.sock"
@@ -211,6 +214,7 @@ def _init_runtime(config_path: str | None = None, data_dir: str | None = None) -
         DOC_WRITE_BACKEND=DOC_WRITE_BACKEND,
         DEFAULT_WIKI_SPACE_ID=DEFAULT_WIKI_SPACE_ID,
         DEFAULT_WIKI_PARENT_TOKEN=DEFAULT_WIKI_PARENT_TOKEN,
+        DEFAULT_OWNER_OPEN_ID=DEFAULT_OWNER_OPEN_ID,
         PERM_HOOK_SCRIPT=PERM_HOOK_SCRIPT, PERM_SOCKET_PATH=PERM_SOCKET_PATH,
         SOURCE_DIR=SOURCE_DIR,
     )
