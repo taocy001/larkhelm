@@ -199,7 +199,12 @@ def _build_card(state: CrewState) -> str:
         })
 
     # ── Active phase: JSON 1.0 with cancel/pause buttons ─────────
-    if phase in ("running", "planned", "synthesizing", "breakpoint"):
+    if phase in ("planning", "running", "planned", "synthesizing", "breakpoint"):
+        if phase == "planning":
+            body_md = "Manager 正在分析需求，生成任务计划…"
+            return _make_card(title, body_md, color=color,
+                              buttons=[("🛑 取消", f"cancel:{state.chat_id}")])
+
         body_parts: list[str] = [f"**{plan.title}**"]
 
         # Agent status list

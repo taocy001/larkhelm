@@ -147,7 +147,10 @@ def _patch_card_raw(message_id: str, card_json: str) -> bool:
                 .build()
             ).build()
         )
-        return resp.success()
+        if not resp.success():
+            _debug_log(f"[PatchCard] 失败 code={resp.code}: {resp.msg}")
+            return False
+        return True
     except Exception as e:
         _debug_log(f"[PatchCard] 异常: {e}")
         return False
