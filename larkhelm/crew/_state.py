@@ -35,7 +35,7 @@ _recent_crew_by_chat: dict[str, dict] = {}  # chat_id → {"title", "summary", "
 _RECENT_CREW_TTL = 7200  # seconds
 
 
-def get_recent_crew_context(chat_id: str) -> "dict | None":
+def get_recent_crew_context(chat_id: str) -> "dict":
     """Called by handlers.py: returns context if this chat has a crew task completed within the last 2h."""
     with _crew_card_index_lock:
         entry = _recent_crew_by_chat.get(chat_id)
@@ -106,7 +106,7 @@ def _register_crew_card(card_mid: str, chat_id: str, title: str, summary: str):
         _recent_crew_by_chat[chat_id] = entry
 
 
-def get_crew_card_context(card_mid: str) -> "dict | None":
+def get_crew_card_context(card_mid: str) -> "dict":
     """Called by handlers.py: returns crew context for the given card_mid, or None if not found."""
     with _crew_card_index_lock:
         return _crew_card_index.get(card_mid)

@@ -53,7 +53,7 @@ class CrewPhase(Enum):
 class AgentSpec:
     id:           str
     role:         str
-    model:        str           # "claude" | "gemini"
+    model:        str           # "claude" | "gemini" | "kimi" | "hermes_race" | "hermes_split" | "hermes_review"
     system:       str           # system prompt (used by /dev pipeline)
     prompt:       str           # task prompt, supports {agent_X_result} placeholders
     depends_on:   list[str]

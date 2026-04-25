@@ -4,6 +4,7 @@ larkhelm · Dev software engineering pipeline definition
 from __future__ import annotations
 
 import dataclasses
+import json
 
 from larkhelm.crew_types import AgentSpec, CrewPlan
 
@@ -39,7 +40,7 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
                 '"how_to_verify": "具体验证方法，如运行命令、检查文件内容等"}]}\n'
                 "priority 只能是 P0、P1 或 P2。每条验收标准必须可独立验证，建议 3-8 条。"
             ),
-            prompt=f"项目目录：{cwd}\n\n需求：{requirement}\n\n请先了解现有代码结构，然后输出 PRD 和验收标准 JSON。",
+            prompt=f"项目目录：{cwd}\n\n需求：{requirement}\n\n请先了解现有代码结构，然后输出 PRD 和验收标准 JSON。\n\n**重要**：请直接输出结果，不要等待用户确认，不要交互式提问。",
             depends_on=[], timeout=_cfg.RESPONSE_TIMEOUT * 4,
             breakpoint=not no_confirm,   # Wait for human confirmation after PM completes (--no-confirm to skip)
             output_file="prd.md",
@@ -68,7 +69,8 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
                 "task_list 中的文件顺序至关重要：若 A 依赖 B，则 B 必须排在 A 前面。"
                 "path 均使用相对于项目根目录的路径。不要写实现代码。"
             ),
-            prompt="请读取 PRD，了解现有代码，输出系统设计文档、文件变更清单和工程师任务单。",
+            prompt="请读取 PRD，了解现有代码，输出系统设计文档、文件变更清单和工程师任务单。\n\n"
+                   "**重要**：请直接输出结果，不要等待用户确认，不要交互式提问。",
             depends_on=["pm"], timeout=_cfg.RESPONSE_TIMEOUT * 4,
             output_file="design.md",
         ),
@@ -91,7 +93,7 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
                 "`文件路径 — 改动内容和原因`\n\n"
                 "**注意**：严格遵循现有代码风格；类图中已定义的类名、方法名、参数类型不得擅自修改。"
             ),
-            prompt="请读取 tasks.json 和 design.md，按 task_list 顺序逐文件实现，完成后写入 changes.md。",
+            prompt="请读取 tasks.json 和 design.md，按 task_list 顺序逐文件实现，完成后写入 changes.md。\n\n**重要**：请直接输出结果，不要等待用户确认，不要交互式提问。",
             depends_on=["architect"], timeout=_cfg.HARD_TIMEOUT,
             output_file="changes.md",
         ),
@@ -109,7 +111,7 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
                 "6. 更新 .crew_workspace/changes.md，追加本轮修复内容\n\n"
                 "**注意**：只修复 qa_report.md 中明确列出的问题，不要顺手重构其他代码。"
             ),
-            prompt="请读取 tasks.json 了解文件职责，然后修复 qa_report.md 中的问题，更新 changes.md。",
+            prompt="请读取 tasks.json 了解文件职责，然后修复 qa_report.md 中的问题，更新 changes.md。\n\n**重要**：请直接输出结果，不要等待用户确认，不要交互式提问。",
             depends_on=["implementer"], timeout=_cfg.HARD_TIMEOUT,
             trigger_only=True,
             output_file="changes.md",
@@ -133,7 +135,7 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
                 "TESTS_PASSED\n"
                 "TESTS_FAILED"
             ),
-            prompt="请补充测试用例并运行，将 bug 记录到 qa_report.md。",
+            prompt="请补充测试用例并运行，将 bug 记录到 qa_report.md。\n\n**重要**：请直接输出结果，不要等待用户确认，不要交互式提问。",
             depends_on=["fixer"], timeout=_cfg.RESPONSE_TIMEOUT * 4,
             exit_marker="TESTS_PASSED", fail_marker="TESTS_FAILED",
             retry_target=["fixer"], max_retries=1,
@@ -141,7 +143,7 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
             output_file="qa_report.md",
         ),
         AgentSpec(
-            id="reviewer", role="代码审查员", model="gemini",
+            id="reviewer", role="代码审查员", model="hermes_review",
             system=(
                 "你是一个严格的代码审查员。审查所有本次改动的代码。\n\n"
                 "**必须逐条检查以下 8 项，每项给出 ✅ 或 ❌ 及说明：**\n"
@@ -159,8 +161,12 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
                 "APPROVED\n"
                 "REJECTED"
             ),
-            prompt="请审查所有改动，输出审查报告。",
-            depends_on=["qa"], timeout=_cfg.RESPONSE_TIMEOUT * 4,
+            prompt=json.dumps({
+                "task": "审查所有本次改动的代码，按 8 项标准检查",
+                "agents": ["claude", "kimi", "gemini"],
+                "context": "请读取 .crew_workspace/changes.md 和 .crew_workspace/qa_report.md 了解改动内容",
+            }),
+            depends_on=["qa"], timeout=_cfg.RESPONSE_TIMEOUT * 8,
             exit_marker="APPROVED", fail_marker="REJECTED",
             retry_target=["fixer", "qa"], max_retries=1,
             is_gatekeeper=True,

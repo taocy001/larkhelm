@@ -78,7 +78,7 @@ def _start_cron_scheduler():
     threading.Thread(target=_loop, daemon=True, name="cron-scheduler").start()
 
 
-def main(config_path: str | None = None, data_dir: str | None = None) -> None:
+def main(config_path: str = None, data_dir: str = None) -> None:
     import larkhelm.config as _cfg
 
     _init_runtime(config_path, data_dir)

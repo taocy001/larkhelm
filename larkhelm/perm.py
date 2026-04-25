@@ -115,7 +115,7 @@ def _bash_needs_approval(command: str, cwd: str) -> bool:
     return False
 
 
-def _send_perm_card(chat_id: str, tool_name: str, tool_input: dict, tool_use_id: str) -> str | None:
+def _send_perm_card(chat_id: str, tool_name: str, tool_input: dict, tool_use_id: str) -> str:
     """Send a permission confirmation card (JSON 1.0; uses multiple div blocks to ensure content visibility)."""
     elements: list = []
 

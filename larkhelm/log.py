@@ -22,7 +22,7 @@ def _log_file(chat_id: str) -> Path:
 
 def log_entry(
     chat_id: str, role: str, content: str,
-    model: str = "claude", trace_id: str | None = None,
+    model: str = "claude", trace_id: str = None,
 ) -> None:
     now = datetime.now()
     model_tag = "Claude" if model == "claude" else "Gemini"
@@ -86,4 +86,9 @@ def _debug_log(msg: str) -> None:
                 f.write(line)
         except Exception:
             pass
-    print(msg, flush=True)
+    # stdout 输出到文件（当 stdout 被重定向时）
+    try:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+    except Exception:
+        pass

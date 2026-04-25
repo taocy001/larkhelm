@@ -83,17 +83,17 @@ def _build_stream_json_input(text: str, image_paths: list[str]) -> str:
 def _spawn_claude_proc(
     chat_id: str,
     message: str,
-    sid: str | None,
+    sid: str,
     cwd: str,
-    cancel_ev: threading.Event | None = None,
+    cancel_ev: threading.Event = None,
     on_text=None,
     on_tool=None,
     on_tool_result=None,
     allow_retry: bool = False,
     on_soft_timeout=None,
     on_start=None,
-    images: list[str] | None = None,
-    session_namespace: str | None = None,
+    images: list = None,
+    session_namespace: str = None,
 ) -> str:
     """
     Spawn a Claude CLI subprocess and stream its output.
@@ -107,7 +107,7 @@ def _spawn_claude_proc(
     args = [_cfg.CLAUDE_CMD, "--print", "--output-format", "stream-json", "--verbose"]
     if images:
         args += ["--input-format", "stream-json"]
-    settings_file: str | None = None
+    settings_file: str = None
     if _cfg.SKIP_PERMISSIONS:
         args.append("--dangerously-skip-permissions")
     else:
@@ -396,10 +396,10 @@ def _spawn_claude_proc(
 
 
 def query_claude(chat_id: str, message: str, cwd: str,
-                 cancel_ev: threading.Event | None = None,
+                 cancel_ev: threading.Event = None,
                  on_tool=None, on_text=None, on_tool_result=None,
                  on_soft_timeout=None,
-                 images: list[str] | None = None) -> str:
+                 images: list = None) -> str:
     """Public interface: query Claude using chat_id as the session namespace."""
     sid = _load_sid(chat_id, "claude")
     return _spawn_claude_proc(
@@ -414,17 +414,17 @@ def query_claude(chat_id: str, message: str, cwd: str,
 def _spawn_kimi_proc(
     chat_id: str,
     message: str,
-    sid: str | None,
+    sid: str,
     cwd: str,
-    cancel_ev: threading.Event | None = None,
+    cancel_ev: threading.Event = None,
     on_text=None,
     on_tool=None,
     on_tool_result=None,
     allow_retry: bool = False,
     on_soft_timeout=None,
     on_start=None,
-    images: list[str] | None = None,
-    session_namespace: str | None = None,
+    images: list = None,
+    session_namespace: str = None,
 ) -> str:
     """Spawn a Kimi CLI subprocess and stream its output.
 
@@ -698,12 +698,17 @@ def _build_kimi_stream_input(text: str, image_paths: list[str]) -> str:
 
 
 def query_kimi(chat_id: str, message: str, cwd: str,
-               cancel_ev: threading.Event | None = None,
+               cancel_ev: threading.Event = None,
                on_tool=None, on_text=None, on_tool_result=None,
                on_soft_timeout=None,
-               images: list[str] | None = None) -> str:
-    """Public interface: query Kimi using chat_id as the session namespace."""
-    sid = _load_sid(chat_id, "kimi")
+               images: list = None,
+               use_session: bool = True,
+               record_under: str = None) -> str:
+    """Public interface: query Kimi using chat_id as the session namespace.
+    use_session=False disables session load/save (for crew agents).
+    record_under: chat_id used for token usage recording (defaults to chat_id).
+    """
+    sid = _load_sid(chat_id, "kimi") if use_session else None
     return _spawn_kimi_proc(
         chat_id=chat_id, message=message, sid=sid, cwd=cwd,
         cancel_ev=cancel_ev, on_text=on_text, on_tool=on_tool,
@@ -714,11 +719,11 @@ def query_kimi(chat_id: str, message: str, cwd: str,
 
 
 def query_gemini(chat_id: str, message: str, cwd: str,
-                 cancel_ev: threading.Event | None = None,
+                 cancel_ev: threading.Event = None,
                  on_tool=None, on_text=None, on_tool_result=None,
                  on_soft_timeout=None,
                  use_session: bool = True,
-                 record_under: str | None = None) -> str:
+                 record_under: str = None) -> str:
     """Query Gemini CLI (per-query process mode).
     use_session=False disables session load/save (for crew agents).
     record_under: chat_id used for token usage recording (defaults to chat_id).

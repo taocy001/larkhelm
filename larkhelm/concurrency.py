@@ -30,7 +30,7 @@ _cancel_events_ts: dict[str, float] = {}  # chat_id → last access timestamp
 _CANCEL_EVENT_TTL = 3600  # clean up after 1 hour of inactivity to prevent memory growth in long-running processes
 _cancel_meta = threading.Lock()
 
-_pending_msg: dict[str, tuple[str, str, str | None, str | None]] = {}  # chat_id → (message, model, user_msg_id, queue_card_mid)
+_pending_msg: dict = {}  # chat_id → (message, model, user_msg_id, queue_card_mid)
 _pending_meta = threading.Lock()
 
 _cron_lock = threading.Lock()
@@ -139,7 +139,7 @@ def get_busy_chat_ids() -> list[str]:
     return busy
 
 
-def _set_pending(chat_id: str, message: str, model: str, user_msg_id: str | None) -> str | None:
+def _set_pending(chat_id: str, message: str, model: str, user_msg_id: str) -> str:
     """Set a queued message. Replaces any existing queued message and returns the old queue card message_id (for patch)."""
     with _pending_meta:
         existing = _pending_msg.get(chat_id)
@@ -148,7 +148,7 @@ def _set_pending(chat_id: str, message: str, model: str, user_msg_id: str | None
         return old_mid
 
 
-def _update_pending_card_mid(chat_id: str, mid: str | None) -> None:
+def _update_pending_card_mid(chat_id: str, mid: str) -> None:
     """Write the queue card message_id into the pending slot for later patching."""
     with _pending_meta:
         if chat_id in _pending_msg:
@@ -156,6 +156,6 @@ def _update_pending_card_mid(chat_id: str, mid: str | None) -> None:
             _pending_msg[chat_id] = (msg, model, umid, mid)
 
 
-def _pop_pending(chat_id: str) -> tuple[str, str, str | None, str | None] | None:
+def _pop_pending(chat_id: str) -> tuple:
     with _pending_meta:
         return _pending_msg.pop(chat_id, None)

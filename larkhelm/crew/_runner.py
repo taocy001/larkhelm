@@ -134,9 +134,10 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
     from larkhelm.concurrency import _get_cancel_event
     from larkhelm.card_builder import _fmt_elapsed
     from larkhelm.perm import grant_yolo, revoke_yolo
-    from larkhelm.ai_runner import _spawn_claude_proc, query_gemini
+    from larkhelm.ai_runner import _spawn_claude_proc, query_gemini, query_kimi
     from larkhelm.crew._scheduler import _resolve_prompt
     from larkhelm.crew._state import _git_head
+    from larkhelm.crew._hermes_orchestrator import _run_hermes_orchestrator
 
     spec      = state.agents[agent_id].spec
     cancel_ev = state.cancel_ev
@@ -155,11 +156,16 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
     ag_state = state.agents[agent_id]
     active_system = spec.retry_system if (ag_state.retry_count > 0 and spec.retry_system) else spec.system
     active_prompt = spec.retry_prompt if (ag_state.retry_count > 0 and spec.retry_prompt) else spec.prompt
-    resolved = _resolve_prompt(active_prompt, state)
-    if active_system:
-        full_prompt = f"{active_system}\n\n---\n\n{resolved}"
+    
+    # For Hermes orchestrator agents, the prompt is JSON params
+    if spec.model.startswith("hermes_"):
+        full_prompt = active_prompt
     else:
-        full_prompt = resolved
+        resolved = _resolve_prompt(active_prompt, state)
+        if active_system:
+            full_prompt = f"{active_system}\n\n---\n\n{resolved}"
+        else:
+            full_prompt = resolved
 
     # Inject downstream feedback (written by _execute on retry, truncated to 3000 chars to prevent token explosion)
     if ag_state.feedback:
@@ -214,11 +220,17 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
                 return
             time.sleep(0.3)
         # Phase 2: process has started; begin counting spec.timeout from now
-        deadline = time.time() + spec.timeout
-        while time.time() < deadline:
+        # Use a longer grace period: soft timeout releases the semaphore but keeps process running
+        soft_deadline = time.time() + spec.timeout
+        hard_deadline = time.time() + max(spec.timeout * 2, _cfg.HARD_TIMEOUT)
+        soft_fired = False
+        while time.time() < hard_deadline:
             if cancel_ev.is_set():
                 agent_cancel.set()
                 return
+            if not soft_fired and time.time() >= soft_deadline:
+                soft_fired = True
+                _debug_log(f"[Crew] {agent_id} soft timeout ({spec.timeout}s), releasing lock but keeping process running")
             time.sleep(0.3)
         agent_cancel.set()
 
@@ -254,6 +266,27 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
                 use_session=False,          # No session reuse; prevents carrying history into retries
                 record_under=state.chat_id, # Token stats recorded under the real chat_id
             )
+        elif spec.model == "kimi":
+            _on_start()   # Kimi has no semaphore callback; trigger directly
+            output = query_kimi(
+                chat_id=crew_ns,
+                message=full_prompt,
+                cwd=cwd,
+                cancel_ev=agent_cancel,
+                on_text=_on_text,
+                use_session=False,
+                record_under=state.chat_id,
+            )
+        elif spec.model.startswith("hermes_"):
+            # Hermes multi-agent orchestrator modes: race, split, review
+            _on_start()
+            output = _run_hermes_orchestrator(
+                state=state,
+                agent_id=agent_id,
+                spec=spec,
+                cancel_ev=agent_cancel,
+                on_text=_on_text,
+            )
         else:
             output = _spawn_claude_proc(
                 chat_id=crew_ns,
@@ -285,17 +318,50 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
     except Exception:
         pass
 
+    # For Hermes orchestrator agents, also write a formatted summary to a markdown file
+    if spec.model.startswith("hermes_"):
+        _write_hermes_summary(state, agent_id, result, workspace)
+
     return result
 
 
-def _run_agent_wrapper(state: CrewState, agent_id: str):
+def _write_hermes_summary(state: CrewState, agent_id: str, result: str, workspace: Path) -> None:
+    """Write a formatted markdown summary of Hermes orchestrator results for Feishu doc sync."""
+    spec = state.agents[agent_id].spec
+    mode = spec.model.replace("hermes_", "")
+    
+    summary_path = workspace / f"{agent_id}_summary.md"
+    lines = [
+        f"# {spec.role} 结果 ({mode} 模式)",
+        "",
+        f"**任务:** {state.plan.title}",
+        f"**Agent:** {agent_id}",
+        f"**模式:** {mode}",
+        f"**完成时间:** {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+        "---",
+        "",
+        result,
+        "",
+        "---",
+        "",
+        f"*由 LarkHelm Hermes Orchestrator 自动生成*",
+    ]
+    try:
+        summary_path.write_text("\n".join(lines), encoding="utf-8")
+        _debug_log(f"[HermesOrchestrator] summary written to {summary_path}")
+    except Exception as e:
+        _debug_log(f"[HermesOrchestrator] failed to write summary: {e}")
+
+
+def _run_agent_wrapper(state: CrewState, agent_id: str) -> None:
     """Agent execution shell: catches exceptions, updates state, detects exit markers.
     Process-level failures (subprocess crashes, etc.) are retried at most once.
     """
     from larkhelm.chat_state import _get_cwd
     from larkhelm.crew._state import _git_auto_commit
 
-    last_exc: Exception | None = None
+    last_exc: Exception = None
 
     for proc_attempt in range(2):   # attempt 0 = first try, attempt 1 = retry
         try:

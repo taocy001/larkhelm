@@ -84,7 +84,7 @@ REACTION_ACTIONS = {
 #  Raw API operations
 # ═══════════════════════════════════════════════════
 
-def _send_text_raw(chat_id: str, text: str) -> str | None:
+def _send_text_raw(chat_id: str, text: str) -> str:
     """Send a plain-text message; used only as a fallback when card delivery fails."""
     try:
         resp = client.im.v1.message.create(
@@ -103,7 +103,7 @@ def _send_text_raw(chat_id: str, text: str) -> str | None:
         return None
 
 
-def _send_card_raw(chat_id: str, card_json: str, _fallback_text: str | None = None) -> str | None:
+def _send_card_raw(chat_id: str, card_json: str, _fallback_text: str = None) -> str:
     """Send a message using a pre-built card JSON; returns the message_id.
     _fallback_text: plain text to send as fallback if card delivery fails (None = no fallback).
     """
@@ -133,7 +133,7 @@ def _send_card_raw(chat_id: str, card_json: str, _fallback_text: str | None = No
         return None
 
 
-def _patch_card_raw(message_id: str | None, card_json: str) -> bool:
+def _patch_card_raw(message_id: str, card_json: str) -> bool:
     """Update an existing message using a pre-built card JSON."""
     if not message_id:
         return False
@@ -153,7 +153,7 @@ def _patch_card_raw(message_id: str | None, card_json: str) -> bool:
         return False
 
 
-def _reply_card_raw(message_id: str, card_json: str, in_thread: bool = True) -> str | None:
+def _reply_card_raw(message_id: str, card_json: str, in_thread: bool = True) -> str:
     """Reply to a specified message with a card; returns the new message_id.
     in_thread=True: reply inside a thread; in_thread=False: quote-reply in the main chat stream.
     """
@@ -183,18 +183,18 @@ def _reply_card_raw(message_id: str, card_json: str, in_thread: bool = True) -> 
 
 def send_card(chat_id: str, title: str, body: str,
               color: str = "blue", note: str = "",
-              buttons: list[tuple[str, str]] | None = None,
-              normalize: bool = True) -> str | None:
+              buttons: list = None,
+              normalize: bool = True) -> str:
     chunk = _split_md(body.strip())[0]
     fallback = f"[{title}]\n{chunk.strip()[:500]}" if chunk.strip() else title
     return _send_card_raw(chat_id, _make_card(title, chunk.strip(), color, note, buttons, normalize=normalize),
                           _fallback_text=fallback)
 
 
-def send_card_reply(chat_id: str, msg_id: str | None, title: str, body: str,
+def send_card_reply(chat_id: str, msg_id: str, title: str, body: str,
                     color: str = "blue", note: str = "",
-                    buttons: list[tuple[str, str]] | None = None,
-                    normalize: bool = True) -> str | None:
+                    buttons: list = None,
+                    normalize: bool = True) -> str:
     """Send a card; if msg_id is set, send as a quote-reply to that message, otherwise send directly to the chat."""
     chunk = _split_md(body.strip())[0]
     card_json = _make_card(title, chunk.strip(), color, note, buttons, normalize=normalize)
@@ -206,16 +206,16 @@ def send_card_reply(chat_id: str, msg_id: str | None, title: str, body: str,
     return _send_card_raw(chat_id, card_json, _fallback_text=fallback)
 
 
-def update_card(message_id: str | None, title: str, body: str,
+def update_card(message_id: str, title: str, body: str,
                 color: str = "blue", note: str = "",
-                buttons: list[tuple[str, str]] | None = None) -> bool:
+                buttons: list = None) -> bool:
     if not message_id:
         return False
     chunk = _split_md(body.strip())[0]
     return _patch_card_raw(message_id, _make_card(title, chunk.strip(), color, note, buttons))
 
 
-def reply_card(chat_id: str, message_id: str | None,
+def reply_card(chat_id: str, message_id: str,
                title: str, body: str, color: str = "blue", note: str = ""):
     chunks = _split_md(body.strip())
     first, rest = chunks[0], chunks[1:]
@@ -279,7 +279,7 @@ def _pin_task_card(chat_id: str, message_id: str):
 #  Emoji reactions
 # ═══════════════════════════════════════════════════
 
-def react_to_message(message_id: str, emoji_type: str) -> str | None:
+def react_to_message(message_id: str, emoji_type: str) -> str:
     """Add an emoji reaction to a message; returns the reaction_id or None on failure."""
     try:
         resp = client.im.v1.message_reaction.create(
@@ -319,7 +319,7 @@ def delete_reaction(message_id: str, reaction_id: str):
 #  Image download
 # ═══════════════════════════════════════════════════
 
-def _download_image(image_key: str, chat_id: str, message_id: str) -> str | None:
+def _download_image(image_key: str, chat_id: str, message_id: str) -> str:
     """Download a message image from Feishu, save to SESSION_DIR/chat_id/imgs/, return local path or None."""
     try:
         imgs_dir = _cfg.SESSION_DIR / chat_id / "imgs"
@@ -507,7 +507,7 @@ class DocAPIError(DocError):
         self.msg  = msg
 
 
-def parse_doc_url(url: str) -> "DocRef | None":
+def parse_doc_url(url: str) -> "DocRef":
     """Extract a DocRef from a Feishu URL; returns None if unrecognised."""
     for pattern, doc_type in _DOC_URL_PATTERNS:
         m = pattern.search(url)
@@ -522,7 +522,7 @@ class FeishuDocClient:
     # ── URL parsing ─────────────────────────────────────────────
 
     @staticmethod
-    def parse_url(url: str) -> "DocRef | None":
+    def parse_url(url: str) -> "DocRef":
         return parse_doc_url(url)
 
     def resolve_wiki(self, node_token: str) -> "DocRef":
@@ -990,7 +990,7 @@ class FeishuDocClient:
                 break
         return all_nodes[:max_items]
 
-    def _call_api(self, method: str, uri: str, body: dict | None = None) -> dict:
+    def _call_api(self, method: str, uri: str, body: dict = None) -> dict:
         """Generic lark_oapi raw request wrapper; raises the appropriate exception when code != 0."""
         req = BaseRequest()
         req.http_method  = getattr(HttpMethod, method.upper())

@@ -72,14 +72,14 @@ def _topo_waves_subset(all_agents: list[AgentSpec], subset_ids: set[str]) -> lis
 
 
 # Phase 4: failure propagation helper
-def _get_failed_dep(state: CrewState, spec: AgentSpec) -> str | None:
+def _get_failed_dep(state: CrewState, spec: AgentSpec) -> str:
     """Return the first failed dependency id if any upstream (transitively) of spec is FAILED/CANCELLED
     and not needs_retry; otherwise return None.
     CANCELLED upstream: treated as incomplete (not success), blocking downstream execution with empty context."""
     id_map  = {s.id: s for s in state.plan.agents}
     checked: set[str] = set()
 
-    def _check(dep_id: str) -> str | None:
+    def _check(dep_id: str) -> str:
         if dep_id in checked:
             return None
         checked.add(dep_id)

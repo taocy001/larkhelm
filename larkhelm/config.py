@@ -105,7 +105,7 @@ STALL_THRESHOLD    = 30.0    # threshold for detecting a stalled tool (seconds)
 CURSOR_FRAMES      = ["▌", "▍", "▎", "▏"]
 
 
-def _init_runtime(config_path: str | None = None, data_dir: str | None = None) -> None:
+def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     """Initialise paths and configuration.
 
     Priority: CLI argument > environment variable > system paths (/etc / /var) > XDG user paths
@@ -220,7 +220,7 @@ def _init_runtime(config_path: str | None = None, data_dir: str | None = None) -
     )
 
 
-_runtime: _RuntimeConfig | None = None  # None means _init_runtime has not been called yet
+_runtime: _RuntimeConfig = None  # None means _init_runtime has not been called yet
 
 
 _config_write_lock = __import__("threading").Lock()

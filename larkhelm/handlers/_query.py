@@ -86,8 +86,8 @@ def _inject_doc_context(text: str, chat_id: str) -> str:
 #  AI query execution
 # ═══════════════════════════════════════════════════
 
-def _do_query(chat_id: str, message: str, model: str, user_msg_id: str | None = None,
-              images: list[str] | None = None):
+def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
+              images: list = None):
     import uuid
     trace_id = uuid.uuid4().hex[:12]
 

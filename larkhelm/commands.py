@@ -67,7 +67,7 @@ def _strip_at_mention(text: str) -> str:
 #  Command implementations
 # ═══════════════════════════════════════════════════
 
-def _cmd_reset(chat_id: str, which: str | None = None, msg_id: str | None = None):
+def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
     """Unified reset logic. which=None resets everything; otherwise 'claude'/'gemini'/'perm'."""
     if which is None:
         _clear_sid(chat_id, "claude")
@@ -91,7 +91,7 @@ def _cmd_reset(chat_id: str, which: str | None = None, msg_id: str | None = None
         send_card_reply(chat_id, msg_id, "🔐 权限已重置", "「允许所有」已取消，后续工具调用将重新弹出审批。", color="green")
 
 
-def _cmd_status(chat_id: str, msg_id: str | None = None):
+def _cmd_status(chat_id: str, msg_id: str = None):
     s_c = _load_sid(chat_id, "claude")
     s_g = _load_sid(chat_id, "gemini")
     cwd = _get_cwd(chat_id)
@@ -191,7 +191,7 @@ def _cmd_status(chat_id: str, msg_id: str | None = None):
     send_card_reply(chat_id, msg_id, "📊 运行状态", "\n".join(lines), color="turquoise", buttons=buttons)
 
 
-def _cmd_help(chat_id: str, msg_id: str | None = None):
+def _cmd_help(chat_id: str, msg_id: str = None):
     model = _get_chat_model(chat_id)
     _next_models = {"claude": "gemini", "gemini": "kimi", "kimi": "claude"}
     other = _next_models.get(model, "claude")
@@ -243,7 +243,7 @@ def _cmd_help(chat_id: str, msg_id: str | None = None):
     send_card_reply(chat_id, msg_id, "📖 帮助", body, color="blue", buttons=buttons)
 
 
-def _cmd_pickup(chat_id: str, msg_id: str | None = None):
+def _cmd_pickup(chat_id: str, msg_id: str = None):
     s_c  = _load_sid(chat_id, "claude")
     s_g  = _load_sid(chat_id, "gemini")
     s_k  = _load_sid(chat_id, "kimi")
@@ -265,7 +265,7 @@ def _cmd_pickup(chat_id: str, msg_id: str | None = None):
     send_card_reply(chat_id, msg_id, "🔗 终端接力", "\n".join(lines), color="purple")
 
 
-def _cmd_history(chat_id: str, show_all: bool = False, msg_id: str | None = None):
+def _cmd_history(chat_id: str, show_all: bool = False, msg_id: str = None):
     """Display conversation history.
     By default shows only the current session since the last reset;
     show_all=True shows all records with separator lines at reset points.
@@ -274,7 +274,7 @@ def _cmd_history(chat_id: str, show_all: bool = False, msg_id: str | None = None
 
     def _build_pairs(recs: list[dict]) -> list[tuple[dict, dict]]:
         pairs: list[tuple[dict, dict]] = []
-        pending_user: dict | None = None
+        pending_user: dict = None
         for r in recs:
             if r["role"] == "user":
                 pending_user = r
@@ -331,7 +331,7 @@ def _cmd_history(chat_id: str, show_all: bool = False, msg_id: str | None = None
     else:
         # ── /history all: all records, separator lines at resets, max 20 entries ──
         parts: list[str] = []
-        pending_user: dict | None = None
+        pending_user: dict = None
         pair_count = 0
         MAX_PAIRS = 20
 
@@ -389,7 +389,7 @@ def _fmt_token_block(label: str, data: dict) -> str:
     return "\n".join(lines)
 
 
-def _cmd_stats(chat_id: str, msg_id: str | None = None):
+def _cmd_stats(chat_id: str, msg_id: str = None):
     """Display today / this-month / all-time token stats plus conversation activity for the current chat."""
     now   = datetime.now()
     today = now.strftime("%Y-%m-%d")
@@ -441,7 +441,7 @@ def _cmd_stats(chat_id: str, msg_id: str | None = None):
     send_card_reply(chat_id, msg_id, "📊 Token 统计", "\n\n".join(parts), color="turquoise")
 
 
-def _cmd_cron(chat_id: str, args: str, msg_id: str | None = None):
+def _cmd_cron(chat_id: str, args: str, msg_id: str = None):
     """Handle /cron command: add / list / del."""
     from croniter import croniter, CroniterBadCronError
     import uuid as _uuid
@@ -523,7 +523,7 @@ def _cmd_cron(chat_id: str, args: str, msg_id: str | None = None):
                     color="orange")
 
 
-def _cmd_cd(chat_id: str, path: str, msg_id: str | None = None):
+def _cmd_cd(chat_id: str, path: str, msg_id: str = None):
     try:
         p = Path(path).expanduser()
         if not p.is_absolute():
@@ -538,11 +538,11 @@ def _cmd_cd(chat_id: str, path: str, msg_id: str | None = None):
         send_card_reply(chat_id, msg_id, "❌ 错误", str(e), color="red")
 
 
-def _cmd_pwd(chat_id: str, msg_id: str | None = None):
+def _cmd_pwd(chat_id: str, msg_id: str = None):
     send_card_reply(chat_id, msg_id, "📁 当前目录", f"`{_get_cwd(chat_id)}`", color="blue")
 
 
-def _cmd_ls(chat_id: str, path: str = "", msg_id: str | None = None):
+def _cmd_ls(chat_id: str, path: str = "", msg_id: str = None):
     cwd = _get_cwd(chat_id)
     target = (Path(cwd) / path if path else Path(cwd)).resolve()
     try:
@@ -562,7 +562,7 @@ def _cmd_ls(chat_id: str, path: str = "", msg_id: str | None = None):
         send_card_reply(chat_id, msg_id, "❌ 错误", str(e), color="red")
 
 
-def _cmd_run(chat_id: str, cmd: str, msg_id: str | None = None):
+def _cmd_run(chat_id: str, cmd: str, msg_id: str = None):
     cwd = _get_cwd(chat_id)
     mid = send_card_reply(chat_id, msg_id, "⏳ 执行中",
                           f"```bash\n{cmd}\n```\n目录: `{cwd}`", color="grey")
@@ -582,7 +582,7 @@ def _cmd_run(chat_id: str, cmd: str, msg_id: str | None = None):
     reply_card(chat_id, mid, f"{icon} Shell", body, color=color)
 
 
-def _cmd_model(chat_id: str, model_name: str, msg_id: str | None = None):
+def _cmd_model(chat_id: str, model_name: str, msg_id: str = None):
     model_name = model_name.lower().strip()
     if model_name not in ("claude", "gemini", "kimi"):
         send_card_reply(chat_id, msg_id, "⚠️ 无效模型",
@@ -612,7 +612,7 @@ _KIMI_SESSION_CMDS = {
 }
 
 
-def _cmd_cli_native(chat_id: str, model: str, cmd: str, msg_id: str | None = None):
+def _cmd_cli_native(chat_id: str, model: str, cmd: str, msg_id: str = None):
     """Handle /c /<cmd>, /g /<cmd>, or /k /<cmd>: passthrough channel for AI CLI native commands."""
     cmd_lower = cmd.lower().strip()
     m_name    = {"claude": "Claude", "gemini": "Gemini", "kimi": "Kimi"}.get(model, model.capitalize())
@@ -844,13 +844,13 @@ def _dispatch_button_cmd(chat_id: str, cmd: str):
 
 
 
-def _cmd_upgrade(chat_id: str, msg_id: str | None = None):
+def _cmd_upgrade(chat_id: str, msg_id: str = None):
     """/upgrade: pull latest code and restart the service in-place via os.execv (PID unchanged)."""
     threading.Thread(target=_do_upgrade, args=(chat_id, msg_id), daemon=True,
                      name="upgrade").start()
 
 
-def _do_upgrade(chat_id: str, msg_id: str | None = None):
+def _do_upgrade(chat_id: str, msg_id: str = None):
     import os as _os
     import sys as _sys
     from larkhelm.concurrency import set_shutting_down, wait_for_idle

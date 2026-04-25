@@ -69,11 +69,11 @@ def _split_md(text: str) -> list[str]:
 # ═══════════════════════════════════════════════════
 
 def _make_card(title: str, body: str, color: str = "blue", note: str = "",
-               buttons: list[tuple[str, str]] | None = None,
+               buttons: list[tuple[str, str]] = None,
                subtitle: str = "",
-               tools_md: str | None = None,
+               tools_md: str = None,
                tools_expanded: bool = False,
-               tools_list: list | None = None,
+               tools_list: list = None,
                normalize: bool = True) -> str:
     """
     With buttons  → JSON 1.0 (Feishu schema 2.0 body.elements does not support action tags)

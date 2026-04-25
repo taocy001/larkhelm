@@ -79,7 +79,7 @@ def _clear_checkpoint(chat_id: str):
         pass
 
 
-def _load_checkpoint(chat_id: str) -> "dict | None":
+def _load_checkpoint(chat_id: str) -> "dict":
     """Read the checkpoint file and return a dict, or None if unavailable."""
     from larkhelm.chat_state import _get_cwd
     cwd  = _get_cwd(chat_id)
@@ -96,7 +96,7 @@ def _load_checkpoint(chat_id: str) -> "dict | None":
         return None
 
 
-def _rebuild_state_from_checkpoint(data: dict) -> "CrewState | None":
+def _rebuild_state_from_checkpoint(data: dict) -> "CrewState":
     """Rebuild CrewState from a checkpoint dict, restoring completed agent results."""
     try:
         plan_data = data["plan"]
