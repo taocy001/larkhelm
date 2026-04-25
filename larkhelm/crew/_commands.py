@@ -102,15 +102,15 @@ _MANAGER_PROMPT_TPL = """\
 
 - **hermes_race**（竞争模式）：同一任务需要多个 agent 并行尝试，取最快/最好的结果
   - 适用：紧急修复、快速原型、方案比选
-  - 示例：{"task": "修复登录bug", "agents": ["claude", "kimi"]}
-  
+  - 示例：{{"task": "修复登录bug", "agents": ["claude", "kimi"]}}
+
 - **hermes_split**（分工模式）：任务可拆分为前后端/多模块并行开发
   - 适用：全栈功能开发、API+UI 同时实现
-  - 示例：{"backend_task": "FastAPI API", "frontend_task": "React 页面"}
-  
+  - 示例：{{"backend_task": "FastAPI API", "frontend_task": "React 页面"}}
+
 - **hermes_review**（评审模式）：需要实现→审查→测试的完整流水线
   - 适用：核心模块开发、安全关键代码、需要多轮验证
-  - 示例：{"task": "实现支付模块", "agents": ["claude", "kimi", "gemini"]}
+  - 示例：{{"task": "实现支付模块", "agents": ["claude", "kimi", "gemini"]}}
 
 使用编排模式时：
 - prompt 必须是 JSON 格式（包含 task/agents/context 等字段）
