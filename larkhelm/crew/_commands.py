@@ -217,38 +217,54 @@ def _crew_plan(chat_id: str, requirement: str, cwd: str,
         proc.kill()
         return None
 
-    threading.Thread(target=lambda: [_ for _ in proc.stderr], daemon=True).start()
+    _stderr_buf: list[str] = []
+    def _drain_stderr():
+        for ln in proc.stderr:
+            _stderr_buf.append(ln.rstrip())
+    threading.Thread(target=_drain_stderr, daemon=True).start()
+    _debug_log(f"[Crew/Manager] planning started pid={proc.pid} timeout={min(_cfg.RESPONSE_TIMEOUT, 120)}s")
+
+    # Hard deadline enforced by a timer thread — guards against claude producing no output at all,
+    # which would cause `for line in proc.stdout` to block indefinitely.
+    plan_timeout = min(_cfg.RESPONSE_TIMEOUT, 120)
+    def _hard_kill():
+        proc.kill()
+        stderr_preview = " | ".join(_stderr_buf[-3:]) if _stderr_buf else ""
+        _debug_log(f"[Crew/Manager] planning timed out (hard kill){'; stderr: ' + stderr_preview if stderr_preview else ''}")
+    _timer = threading.Timer(plan_timeout, _hard_kill)
+    _timer.daemon = True
+    _timer.start()
 
     # Collect all text output
     text_buf: list[str] = []
-    deadline = time.time() + min(_cfg.RESPONSE_TIMEOUT, 120)  # planning capped at 2 minutes
-    for line in proc.stdout:
-        if cancel_ev.is_set():
-            proc.kill()
-            return None
-        if time.time() > deadline:
-            proc.kill()
-            _debug_log("[Crew/Manager] planning timed out")
-            break
-        line = line.strip()
-        if not line or not line.startswith("{"):
-            continue
-        try:
-            ev = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        # Collect text content
-        if ev.get("type") == "assistant":
-            for block in ev.get("message", {}).get("content", []) or []:
-                if block.get("type") == "text":
-                    text_buf.append(block.get("text", ""))
-        if ev.get("type") == "result":
-            # result event also carries a result field
-            if ev.get("result"):
-                text_buf.append(ev["result"])
-            break
+    try:
+        for line in proc.stdout:
+            if cancel_ev.is_set():
+                proc.kill()
+                return None
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            # Collect text content
+            if ev.get("type") == "assistant":
+                for block in ev.get("message", {}).get("content", []) or []:
+                    if block.get("type") == "text":
+                        text_buf.append(block.get("text", ""))
+            if ev.get("type") == "result":
+                if ev.get("result"):
+                    text_buf.append(ev["result"])
+                break
+    finally:
+        _timer.cancel()
 
-    proc.wait()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
 
     full_text = "\n".join(text_buf)
 
@@ -258,7 +274,9 @@ def _crew_plan(chat_id: str, requirement: str, cwd: str,
         # Try to find the outermost JSON object directly
         m = re.search(r"(\{[\s\S]*\"agents\"[\s\S]*\})", full_text)
     if not m:
-        _debug_log(f"[Crew/Manager] no JSON plan found, output snippet: {full_text[:200]!r}")
+        stderr_preview = " | ".join(_stderr_buf[-5:]) if _stderr_buf else ""
+        _debug_log(f"[Crew/Manager] no JSON plan found, output: {full_text[:200]!r}"
+                   + (f", stderr: {stderr_preview}" if stderr_preview else ""))
         return None
 
     try:
