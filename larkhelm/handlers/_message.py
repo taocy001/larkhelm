@@ -237,13 +237,27 @@ def handle_message(data: P2ImMessageReceiveV1):
             _cmd_cron(chat_id, text[5:].strip(), _mid); return
         if tl.startswith("/crew"):
             from larkhelm.crew import cmd_crew
-            threading.Thread(target=cmd_crew, args=(chat_id, text[5:].strip(), message.message_id),
-                             daemon=True).start()
+            from larkhelm.log import _debug_log as _dl
+            def _crew_target(*a):
+                try:
+                    cmd_crew(*a)
+                except Exception as _e:
+                    import traceback as _tb
+                    _dl(f"[crew] unhandled exception: {_e}\n{_tb.format_exc()}")
+            threading.Thread(target=_crew_target, args=(chat_id, text[5:].strip(), message.message_id),
+                             daemon=True, name="crew-handler").start()
             return
         if tl.startswith("/dev"):
             from larkhelm.crew import cmd_dev
-            threading.Thread(target=cmd_dev, args=(chat_id, text[4:].strip(), message.message_id),
-                             daemon=True).start()
+            from larkhelm.log import _debug_log as _dl
+            def _dev_target(*a):
+                try:
+                    cmd_dev(*a)
+                except Exception as _e:
+                    import traceback as _tb
+                    _dl(f"[dev] unhandled exception: {_e}\n{_tb.format_exc()}")
+            threading.Thread(target=_dev_target, args=(chat_id, text[4:].strip(), message.message_id),
+                             daemon=True, name="dev-handler").start()
             return
         if tl == "/cancel":
             chat_lock = _get_chat_lock(chat_id)
