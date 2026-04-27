@@ -52,13 +52,14 @@ _TYPE_LABEL = {
 
 @dataclasses.dataclass
 class PlanStep:
-    idx:        int
-    type:       str           # "dev" | "review" | "fix" | "test"
-    desc:       str
-    status:     str           = "pending"
-    error:      str           = ""
-    start_time: float | None  = None
-    end_time:   float | None  = None
+    idx:         int
+    type:        str           # "dev" | "review" | "fix" | "test"
+    desc:        str
+    status:      str           = "pending"
+    error:       str           = ""
+    start_time:  float | None  = None
+    end_time:    float | None  = None
+    retry_count: int           = 0
 
 
 @dataclasses.dataclass
@@ -75,7 +76,9 @@ class MultiPlanState:
     current_idx:     int               = 0
     start_time:      float             = dataclasses.field(default_factory=time.time)
     _confirm_ev:     threading.Event   = dataclasses.field(default_factory=threading.Event)
-    _confirm_result: str               = "continue"  # "continue" | "skip" | "cancel"
+    _confirm_result: str               = "continue"  # "continue" | "skip" | "cancel" | "retry"
+    last_step_failed: bool             = False        # True when entering waiting after a failure
+    max_retries:     int               = 1            # auto-retries before notifying user
 
 
 # plan_id → MultiPlanState
@@ -115,7 +118,10 @@ def _build_plan_card(state: MultiPlanState) -> str:
     elif state.phase == "running":
         title, color = f"⚙️ Plan · {n_done}/{n_total} ({elapsed})", "blue"
     elif state.phase == "waiting":
-        title, color = f"⏸ Plan · 等待确认  {n_done}/{n_total} ({elapsed})", "yellow"
+        if state.last_step_failed:
+            title, color = f"⚠️ Plan · 步骤失败，请处理  {n_done}/{n_total} ({elapsed})", "orange"
+        else:
+            title, color = f"⏸ Plan · 等待确认  {n_done}/{n_total} ({elapsed})", "yellow"
     elif state.phase == "done":
         title, color = f"✅ Plan · 完成  {n_total} 阶段  ({elapsed})", "green"
     elif state.phase == "cancelled":
@@ -133,7 +139,8 @@ def _build_plan_card(state: MultiPlanState) -> str:
         elif s.start_time and s.status == "running":
             t_str = f" · {_fmt_elapsed(time.time() - s.start_time)}…"
         marker = " ◀" if s.status == "running" else ""
-        lines.append(f"{icon} **[{label}]** {s.desc}{t_str}{marker}")
+        retry_str = f" 🔄{s.retry_count}" if s.retry_count > 0 and s.status == "running" else ""
+        lines.append(f"{icon} **[{label}]** {s.desc}{t_str}{retry_str}{marker}")
         if s.status == "failed" and s.error:
             lines.append(f"   ⚠️ {s.error[:120]}")
 
@@ -155,17 +162,27 @@ def _build_plan_card(state: MultiPlanState) -> str:
                           buttons=[("🛑 取消", f"plan_cancel:{state.plan_id}")])
 
     if state.phase == "waiting":
+        # Show failed step error if applicable
+        if state.last_step_failed:
+            failed_steps = [s for s in state.steps if s.status == "failed"]
+            if failed_steps:
+                fs = failed_steps[-1]
+                err_detail = fs.error[:200] if fs.error else "执行失败（无详细信息）"
+                body += f"\n\n---\n⚠️ **[{_TYPE_LABEL.get(fs.type, fs.type.upper())}] {fs.desc[:60]}** 失败：\n{err_detail}"
+        # Show next step info
         idx = state.current_idx
-        if idx < n_total:
-            nxt   = state.steps[idx]
+        if idx < n_total and not state.last_step_failed:
+            nxt    = state.steps[idx]
             nlabel = _TYPE_LABEL.get(nxt.type, nxt.type.upper())
             body  += f"\n\n---\n**下一步：** [{nlabel}] {nxt.desc}"
-        return _make_card(title, body, color=color,
-                          buttons=[
-                              ("▶ 继续", f"plan_continue:{state.plan_id}"),
-                              ("⏭ 跳过下一步", f"plan_skip:{state.plan_id}"),
-                              ("🛑 取消", f"plan_cancel:{state.plan_id}"),
-                          ])
+        buttons = []
+        if state.last_step_failed:
+            buttons.append(("🔄 重试本步", f"plan_retry:{state.plan_id}"))
+        buttons.append(("▶ 继续", f"plan_continue:{state.plan_id}"))
+        if not state.last_step_failed:
+            buttons.append(("⏭ 跳过下一步", f"plan_skip:{state.plan_id}"))
+        buttons.append(("🛑 取消", f"plan_cancel:{state.plan_id}"))
+        return _make_card(title, body, color=color, buttons=buttons)
 
     return _make_card(title, body, color=color)
 
@@ -246,7 +263,7 @@ def _auto_plan(requirement: str, chat_id: str,
 # ── Confirmation signal (from card button callback) ───────────────
 
 def signal_plan(plan_id: str, action: str) -> bool:
-    """Called by card button: action = 'continue' | 'skip' | 'cancel'."""
+    """Called by card button: action = 'continue' | 'skip' | 'cancel' | 'retry'."""
     with _active_plans_lock:
         state = _active_plans.get(plan_id)
     if not state:
@@ -408,11 +425,26 @@ def _run_plan(state: MultiPlanState) -> None:
     threading.Thread(target=_heartbeat, daemon=True,
                      name=f"plan-hb-{state.plan_id[:6]}").start()
 
+    def _release_slot():
+        with _active_crew_lock:
+            if _active_crew.get(state.chat_id, "").startswith("plan:"):
+                _active_crew.pop(state.chat_id, None)
+
+    def _hold_slot():
+        with _active_crew_lock:
+            _active_crew[state.chat_id] = f"plan:{state.plan_id}"
+
     try:
-        for idx, step in enumerate(state.steps):
+        idx = 0
+        auto_retried = 0  # auto-retry counter for the current step
+        while idx < len(state.steps):
             if state.cancel_ev.is_set():
                 break
+
+            step = state.steps[idx]
             if step.status == "skipped":
+                idx += 1
+                auto_retried = 0
                 continue
 
             with state.lock:
@@ -420,15 +452,15 @@ def _run_plan(state: MultiPlanState) -> None:
                 state.phase       = "running"
                 step.status       = "running"
                 step.start_time   = time.time()
+                step.end_time     = None
             _update_plan_card(state)
 
             if step.type == "dev":
                 crew_id = uuid.uuid4().hex[:12]
                 _register_crew_thread(crew_id, threading.current_thread())
-                # Clear any plan-marker that was set during the previous wait,
-                # so _run_dev_crew_inner can claim _active_crew[chat_id].
-                with _active_crew_lock:
-                    _active_crew.pop(state.chat_id, None)
+                # Clear any plan-marker from the previous wait so _run_dev_crew_inner
+                # can claim _active_crew[chat_id].
+                _release_slot()
                 try:
                     ok = _run_dev_step(state, step, crew_id)
                 finally:
@@ -438,14 +470,11 @@ def _run_plan(state: MultiPlanState) -> None:
                     except Exception:
                         pass
             else:
-                # Reserve the chat slot for non-dev single-agent steps
-                with _active_crew_lock:
-                    _active_crew[state.chat_id] = f"plan:{state.plan_id}"
+                _hold_slot()
                 try:
                     ok = _run_single_agent_step(state, step)
                 finally:
-                    with _active_crew_lock:
-                        _active_crew.pop(state.chat_id, None)
+                    _release_slot()
 
             step.end_time = time.time()
 
@@ -457,16 +486,70 @@ def _run_plan(state: MultiPlanState) -> None:
             step.status = "done" if ok else "failed"
             _update_plan_card(state)
 
-            # Between steps: wait for human confirmation
             is_last = (idx == len(state.steps) - 1)
-            if is_last or state.cancel_ev.is_set():
+
+            if not ok:
+                label = _TYPE_LABEL.get(step.type, step.type.upper())
+
+                # Auto-retry without waking the user, up to max_retries times
+                if auto_retried < state.max_retries:
+                    auto_retried     += 1
+                    step.retry_count += 1
+                    step.status       = "pending"
+                    step.error        = ""
+                    step.start_time   = None
+                    step.end_time     = None
+                    _debug_log(f"[Plan] step {idx} auto-retry {auto_retried}/{state.max_retries}")
+                    _update_plan_card(state)
+                    continue  # retry same idx silently
+
+                # All auto-retries exhausted → proactive alert + wait for user decision
+                err_msg = step.error[:120] if step.error else "执行失败（无详细信息）"
+                retry_note = f"（已自动重试 {auto_retried} 次）" if auto_retried else ""
+                send_card(
+                    state.chat_id,
+                    f"⚠️ Plan · [{label}] 步骤失败{retry_note}",
+                    f"**{state.title}**\n\n"
+                    f"**失败步骤：** [{label}] {step.desc[:60]}\n"
+                    f"**错误：** {err_msg}\n\n"
+                    "请在任务卡片上选择「🔄 重试本步」、「▶ 继续」或「🛑 取消」。",
+                    color="orange",
+                )
+                with state.lock:
+                    state.last_step_failed = True
+                    state.current_idx = idx
+                _hold_slot()
+                action = _wait_confirm(state)
+                with state.lock:
+                    state.last_step_failed = False
+                _release_slot()
+
+                if action == "cancel":
+                    break
+                elif action == "retry":
+                    # User-triggered retry: reset auto-retry counter for a fresh start
+                    auto_retried     = 0
+                    step.retry_count += 1
+                    step.status       = "pending"
+                    step.error        = ""
+                    step.start_time   = None
+                    step.end_time     = None
+                    _update_plan_card(state)
+                    continue  # retry same idx
+                else:  # "continue" — accept failure, advance
+                    auto_retried = 0
+                    idx += 1
+                    continue
+
+            # Step succeeded; wait for human confirmation before next step
+            auto_retried = 0
+            if is_last:
+                idx += 1
                 continue
 
-            # Reserve slot during wait so no other /dev or /crew can run
-            with _active_crew_lock:
-                _active_crew[state.chat_id] = f"plan:{state.plan_id}"
-
+            _hold_slot()
             with state.lock:
+                state.last_step_failed = False
                 state.current_idx = idx + 1
             action = _wait_confirm(state)
 
@@ -477,8 +560,9 @@ def _run_plan(state: MultiPlanState) -> None:
                 nxt.status     = "skipped"
                 nxt.start_time = nxt.end_time = time.time()
                 _update_plan_card(state)
-            # Note: _active_crew is still set here; cleared at start of next step
-            # (before _run_dev_step) or at the top of the next iteration for non-dev.
+            # _active_crew still held; cleared at start of next step branch
+
+            idx += 1
 
         # ── Final state ───────────────────────────────────────────
         with state.lock:
@@ -489,11 +573,7 @@ def _run_plan(state: MultiPlanState) -> None:
             else:
                 state.phase = "done"
 
-        # Clear _active_crew if still held
-        with _active_crew_lock:
-            if _active_crew.get(state.chat_id, "").startswith("plan:"):
-                _active_crew.pop(state.chat_id, None)
-
+        _release_slot()
         _update_plan_card(state)
 
         if state.phase == "done":
@@ -507,10 +587,7 @@ def _run_plan(state: MultiPlanState) -> None:
         _hb_stop.set()
         with _active_plans_lock:
             _active_plans.pop(state.plan_id, None)
-        # Final cleanup
-        with _active_crew_lock:
-            if _active_crew.get(state.chat_id, "").startswith("plan:"):
-                _active_crew.pop(state.chat_id, None)
+        _release_slot()
 
 
 # ── Entry point ──────────────────────────────────────────────────
@@ -526,6 +603,14 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None) -> None:
     from larkhelm.crew._state import _active_crew, _active_crew_lock
 
     text = args_str.strip()
+
+    # Parse --retry=N flag (default: 1 auto-retry before notifying user)
+    _retry_re  = re.compile(r'--retry(?:=| +)(\d+)')
+    _retry_m   = _retry_re.search(text)
+    max_retries = int(_retry_m.group(1)) if _retry_m else 1
+    if _retry_m:
+        text = _retry_re.sub("", text).strip()
+
     if not text:
         send_card(chat_id, "⚠️ 用法",
                   "**手动编排**\n"
@@ -533,7 +618,8 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None) -> None:
                   "[fix] 修复问题\n[test] 回归测试\n```\n\n"
                   "**智能规划**（自然语言描述需求，自动生成计划）\n"
                   "`/plan 实现 Phase 5~10，每个阶段之间做代码检视和修复`\n\n"
-                  "也支持从飞书文档读取：`/plan https://feishu.cn/docx/xxx`",
+                  "也支持从飞书文档读取：`/plan https://feishu.cn/docx/xxx`\n\n"
+                  "**选项：** `--retry=N` 步骤失败时自动重试 N 次（默认 1）",
                   color="orange")
         return
 
@@ -589,6 +675,7 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None) -> None:
             steps=[],
             phase="planning",
             trigger_msg_id=user_msg_id,
+            max_retries=max_retries,
         )
         # Show "generating" card immediately
         planning_card = _build_plan_card(state)
@@ -663,6 +750,7 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None) -> None:
     state = MultiPlanState(
         plan_id=plan_id, chat_id=chat_id, title=title, steps=steps,
         trigger_msg_id=user_msg_id,
+        max_retries=max_retries,
     )
 
     init_card = _build_plan_card(state)

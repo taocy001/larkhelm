@@ -166,14 +166,14 @@ def handle_card_action(event: P2CardActionTrigger) -> P2CardActionTriggerRespons
             return resp
 
         # Plan step confirmation buttons
-        if cmd.startswith("plan_continue:") or cmd.startswith("plan_skip:") or cmd.startswith("plan_cancel:"):
+        if cmd.startswith("plan_continue:") or cmd.startswith("plan_skip:") or cmd.startswith("plan_cancel:") or cmd.startswith("plan_retry:"):
             parts  = cmd.split(":", 1)
-            action = parts[0].replace("plan_", "")   # "continue" | "skip" | "cancel"
+            action = parts[0].replace("plan_", "")   # "continue" | "skip" | "cancel" | "retry"
             plan_id = parts[1]
             from larkhelm.cmd_plan import signal_plan
             signal_plan(plan_id, action)
-            labels = {"continue": "▶ 继续执行", "skip": "⏭ 已跳过", "cancel": "🛑 已取消"}
-            colors = {"continue": "green", "skip": "grey", "cancel": "red"}
+            labels = {"continue": "▶ 继续执行", "skip": "⏭ 已跳过", "cancel": "🛑 已取消", "retry": "🔄 重试中"}
+            colors = {"continue": "green", "skip": "grey", "cancel": "red", "retry": "blue"}
             from lark_oapi.event.callback.model.p2_card_action_trigger import CallBackCard
             cb_card = CallBackCard()
             cb_card.type = "raw"
