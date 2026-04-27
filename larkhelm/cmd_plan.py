@@ -237,7 +237,7 @@ def _auto_plan(requirement: str, chat_id: str,
     # Background context: injected Feishu doc content takes priority; fall back to
     # local workspace files hint when no doc was provided.
     if doc_context:
-        ctx_hint = f"\n\n## 背景文档\n\n{doc_context[:8000]}"
+        ctx_hint = f"\n\n## 背景文档（仅作参考，严格按上述用户需求的范围执行，不要规划需求范围之外的步骤）\n\n{doc_context[:8000]}"
     else:
         ws = Path(cwd) / ".crew_workspace"
         ctx_hint = ""
@@ -247,7 +247,9 @@ def _auto_plan(requirement: str, chat_id: str,
                 "（若存在）和 .crew_workspace/design.md（若存在）了解背景后再制定计划。"
             )
 
-    prompt = f"{_PLANNER_SYSTEM}{ctx_hint}\n\n用户需求：{requirement}"
+    # Put user requirement BEFORE doc context so Claude knows the scope
+    # constraint before reading the full document.
+    prompt = f"{_PLANNER_SYSTEM}\n\n用户需求：{requirement}{ctx_hint}"
 
     grant_yolo(ns)
     try:
@@ -628,7 +630,7 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None) -> None:
     # Feishu doc URL handling
     # ① URL only (no other text) → load doc content as the plan body (manual or smart)
     # ② URL(s) mixed with natural language → read docs as background context for smart planner
-    _feishu_url_re = re.compile(r'https://[a-zA-Z0-9-]+\.feishu\.cn/[^\s\]>）]+')
+    _feishu_url_re = re.compile(r'https://[a-zA-Z0-9-]+\.feishu\.cn/[a-zA-Z0-9/_\-?.=#%&+]+')
     _doc_context   = ""
     _urls          = _feishu_url_re.findall(text)
     if _urls:
