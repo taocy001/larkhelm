@@ -179,6 +179,9 @@ def _send_perm_card(chat_id: str, tool_name: str, tool_input: dict, tool_use_id:
     return _send_card_raw(chat_id, card_json)
 
 
+_MAX_PERM_CONN_BUF = 65536  # 64 KB — prevent DoS via oversized payloads from rogue hook scripts
+
+
 def _handle_perm_conn(conn):
     """Handle a single permission-request connection from the hook script."""
     try:
@@ -188,6 +191,10 @@ def _handle_perm_conn(conn):
             if not chunk:
                 break
             buf += chunk
+            if len(buf) > _MAX_PERM_CONN_BUF:
+                _debug_log("[Perm] oversized hook payload, closing connection")
+                conn.close()
+                return
         if not buf.strip():
             conn.close()
             return

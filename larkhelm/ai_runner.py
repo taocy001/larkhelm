@@ -40,6 +40,13 @@ def active_proc_count() -> int:
         return _active_proc_count
 
 
+def _acquire_ai_sem(cancel_ev: threading.Event = None) -> None:
+    """Acquire the AI process semaphore. Raises InterruptedError if cancel_ev fires before a slot opens."""
+    while not _ai_proc_sem.acquire(timeout=1.0):
+        if cancel_ev and cancel_ev.is_set():
+            raise InterruptedError("cancelled while waiting for AI process slot")
+
+
 def _inc_active() -> None:
     global _active_proc_count
     with _active_proc_count_lock:
@@ -157,7 +164,7 @@ def _spawn_claude_proc(
         "FEISHU_PERM_YOLO": "1" if is_yolo(ns) else "0",
     }
 
-    _ai_proc_sem.acquire()
+    _acquire_ai_sem(cancel_ev)
     try:
         proc = subprocess.Popen(
             args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -247,7 +254,6 @@ def _spawn_claude_proc(
 
     threading.Thread(target=_watch, daemon=True).start()
 
-    _result_parts: list[str] = []
     result_text, new_sid = "", None
     _tool_start_times: dict[str, float] = {}
     if on_text:
@@ -275,8 +281,7 @@ def _spawn_claude_proc(
                     if btype == "text":
                         chunk = block.get("text", "")
                         if chunk:
-                            _result_parts.append(chunk)
-                            result_text = "".join(_result_parts)
+                            result_text += chunk
                         if on_text:
                             on_text(result_text, status="typing")
                     elif btype == "tool_use":
@@ -465,7 +470,7 @@ def _spawn_kimi_proc(
                f"images={len(images) if images else 0} ns={ns}")
     env = {**os.environ, "DBUS_SESSION_BUS_ADDRESS": "", "GCM_CREDENTIAL_STORAGE": "file"}
 
-    _ai_proc_sem.acquire()
+    _acquire_ai_sem(cancel_ev)
     try:
         proc = subprocess.Popen(
             args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -549,7 +554,6 @@ def _spawn_kimi_proc(
     # Kimi tool name mapping to LarkHelm internal names (aligned with Claude)
     _KIMI_TOOL_MAP = {"Shell": "Bash", "FetchURL": "WebFetch", "SearchWeb": "WebSearch"}
 
-    _result_parts: list[str] = []
     result_text, new_sid = "", None
     _tool_start_times: dict[str, float] = {}
     if on_text:
@@ -580,8 +584,7 @@ def _spawn_kimi_proc(
                 tool_calls = ev.get("tool_calls") or []
 
                 if content and isinstance(content, str):
-                    _result_parts.append(content)
-                    result_text = "".join(_result_parts)
+                    result_text += content
                     if on_text:
                         on_text(result_text, status="typing")
                 elif content and isinstance(content, list):
@@ -589,8 +592,7 @@ def _spawn_kimi_proc(
                     text_parts = [c.get("text", "") for c in content if c.get("type") == "text"]
                     chunk = "".join(text_parts)
                     if chunk:
-                        _result_parts.append(chunk)
-                        result_text = "".join(_result_parts)
+                        result_text += chunk
                         if on_text:
                             on_text(result_text, status="typing")
 
@@ -755,7 +757,7 @@ def query_gemini(chat_id: str, message: str, cwd: str,
     env = {**os.environ, "DBUS_SESSION_BUS_ADDRESS": "", "GCM_CREDENTIAL_STORAGE": "file"}
     _debug_log(f"[gemini] starting query cwd={cwd} resume={sid} use_session={use_session}")
 
-    _ai_proc_sem.acquire()
+    _acquire_ai_sem(cancel_ev)
     try:
         proc = subprocess.Popen(
             args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -821,7 +823,6 @@ def query_gemini(chat_id: str, message: str, cwd: str,
 
     threading.Thread(target=_watch, daemon=True).start()
 
-    _result_parts: list[str] = []
     result_text, new_sid = "", None
     _tool_start_times: dict[str, float] = {}
     if on_text:
@@ -855,18 +856,11 @@ def query_gemini(chat_id: str, message: str, cwd: str,
                                          if isinstance(p, dict) and "text" in p)
                 else:
                     text_chunk = str(content)
-                if not ev.get("delta", False) and result_text:
-                    # Non-delta full-text replacement: reset parts to avoid double-counting
-                    if text_chunk.startswith(result_text):
-                        _result_parts.clear()
-                        _result_parts.append(text_chunk)
-                        result_text = text_chunk
-                    else:
-                        _result_parts.append(text_chunk)
-                        result_text = "".join(_result_parts)
+                if not ev.get("delta", False) and result_text and text_chunk.startswith(result_text):
+                    # Non-delta full-text message that supersedes previous deltas: replace in full
+                    result_text = text_chunk
                 else:
-                    _result_parts.append(text_chunk)
-                    result_text = "".join(_result_parts)
+                    result_text += text_chunk
                 if on_text:
                     on_text(result_text, status="typing")
             elif etype == "tool_use":

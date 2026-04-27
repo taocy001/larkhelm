@@ -187,6 +187,7 @@ def _crew_plan(chat_id: str, requirement: str, cwd: str,
     )
 
     import os as _os
+    from larkhelm.ai_runner import _ai_proc_sem
 
     args = [
         _cfg.CLAUDE_CMD, "--print", "--output-format", "stream-json", "--verbose",
@@ -201,78 +202,88 @@ def _crew_plan(chat_id: str, requirement: str, cwd: str,
         "FEISHU_PERM_YOLO": "1",
     }
 
-    try:
-        proc = subprocess.Popen(
-            args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1, cwd=cwd, env=env,
-        )
-    except FileNotFoundError:
-        _debug_log("[Crew/Manager] Claude CLI not found")
-        return None
-
-    try:
-        proc.stdin.write(prompt + "\n")
-        proc.stdin.close()
-    except OSError:
-        proc.kill()
-        return None
-
-    _stderr_buf: list[str] = []
-    def _drain_stderr():
-        for ln in proc.stderr:
-            if len(_stderr_buf) < 50:
-                _stderr_buf.append(ln.rstrip())
-    threading.Thread(target=_drain_stderr, daemon=True).start()
-    _debug_log(f"[Crew/Manager] planning started pid={proc.pid} timeout={min(_cfg.RESPONSE_TIMEOUT, 120)}s")
-
-    # Hard deadline enforced by a timer thread — guards against claude producing no output at all,
-    # which would cause `for line in proc.stdout` to block indefinitely.
     plan_timeout = min(_cfg.RESPONSE_TIMEOUT, 120)
-    def _hard_kill():
-        proc.kill()
-        stderr_preview = " | ".join(_stderr_buf[-3:]) if _stderr_buf else ""
-        _debug_log(f"[Crew/Manager] planning timed out (hard kill){'; stderr: ' + stderr_preview if stderr_preview else ''}")
-    _timer = threading.Timer(plan_timeout, _hard_kill)
-    _timer.daemon = True
-    _timer.start()
 
-    # Collect all text output; cap total accumulated chars to avoid large-string mmap pressure
-    _TEXT_BUF_MAX_CHARS = 200_000
-    text_buf: list[str] = []
-    text_buf_len = 0
+    # Acquire process semaphore so Manager counts against the global AI subprocess limit
+    if not _ai_proc_sem.acquire(timeout=plan_timeout):
+        _debug_log("[Crew/Manager] timed out waiting for AI process slot")
+        return None
+
     try:
-        for line in proc.stdout:
-            if cancel_ev.is_set():
-                proc.kill()
-                return None
-            line = line.strip()
-            if not line or not line.startswith("{"):
-                continue
-            try:
-                ev = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            # Collect text content
-            if ev.get("type") == "assistant":
-                for block in ev.get("message", {}).get("content", []) or []:
-                    if block.get("type") == "text":
-                        chunk = block.get("text", "")
-                        if chunk and text_buf_len < _TEXT_BUF_MAX_CHARS:
-                            text_buf.append(chunk)
-                            text_buf_len += len(chunk)
-            if ev.get("type") == "result":
-                result_val = ev.get("result", "")
-                if result_val and text_buf_len < _TEXT_BUF_MAX_CHARS:
-                    text_buf.append(result_val)
-                break
+        try:
+            proc = subprocess.Popen(
+                args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, bufsize=1, cwd=cwd, env=env,
+            )
+        except FileNotFoundError:
+            _debug_log("[Crew/Manager] Claude CLI not found")
+            return None
+
+        try:
+            proc.stdin.write(prompt + "\n")
+            proc.stdin.close()
+        except OSError:
+            proc.kill()
+            return None
+
+        _stderr_buf: list[str] = []
+        def _drain_stderr():
+            for ln in proc.stderr:
+                if len(_stderr_buf) < 50:
+                    _stderr_buf.append(ln.rstrip())
+        threading.Thread(target=_drain_stderr, daemon=True).start()
+        _debug_log(f"[Crew/Manager] planning started pid={proc.pid} timeout={plan_timeout}s")
+
+        # Hard deadline enforced by a timer thread — guards against claude producing no output at all,
+        # which would cause `for line in proc.stdout` to block indefinitely.
+        def _hard_kill():
+            proc.kill()
+            stderr_preview = " | ".join(_stderr_buf[-3:]) if _stderr_buf else ""
+            _debug_log(f"[Crew/Manager] planning timed out (hard kill){'; stderr: ' + stderr_preview if stderr_preview else ''}")
+        _timer = threading.Timer(plan_timeout, _hard_kill)
+        _timer.daemon = True
+        _timer.start()
+
+        # Collect all text output; cap total accumulated chars to avoid large-string mmap pressure
+        _TEXT_BUF_MAX_CHARS = 200_000
+        text_buf: list[str] = []
+        text_buf_len = 0
+        try:
+            for line in proc.stdout:
+                if cancel_ev.is_set():
+                    proc.kill()
+                    return None
+                line = line.strip()
+                if not line or not line.startswith("{"):
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                # Collect text content
+                if ev.get("type") == "assistant":
+                    for block in ev.get("message", {}).get("content", []) or []:
+                        if block.get("type") == "text":
+                            chunk = block.get("text", "")
+                            if chunk and text_buf_len < _TEXT_BUF_MAX_CHARS:
+                                text_buf.append(chunk)
+                                text_buf_len += len(chunk)
+                if ev.get("type") == "result":
+                    result_val = ev.get("result", "")
+                    if result_val and text_buf_len < _TEXT_BUF_MAX_CHARS:
+                        text_buf.append(result_val)
+                    break
+        finally:
+            _timer.cancel()
+
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()  # always reap zombie regardless of kill outcome
+
     finally:
-        _timer.cancel()
-
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()  # always reap zombie regardless of kill outcome
+        _ai_proc_sem.release()
 
     full_text = "\n".join(text_buf)
 
