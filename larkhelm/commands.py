@@ -122,13 +122,13 @@ def _cmd_status(chat_id: str, msg_id: str = None):
         if not ver:
             return f"❌ {name} 不可用"
         if sid:
-            return f"✅ {name}  会话 `{sid[:12]}…`"
+            return f"✅ {name}  会话 **{sid[:12]}…**"
         return f"✅ {name}  暂无会话"
 
     if _cfg.SKIP_PERMISSIONS:
         perm_status = "⏭️ 跳过（skip_permissions=true）"
     elif is_yolo(chat_id):
-        perm_status = "🚀 允许所有（发送 `/reset perm` 恢复审批）"
+        perm_status = "🚀 允许所有（发送 **/reset perm** 恢复审批）"
     else:
         perm_status = "🔐 正常审批"
 
@@ -147,9 +147,9 @@ def _cmd_status(chat_id: str, msg_id: str = None):
             }.get(crew_state.phase, crew_state.phase)
             n_done  = sum(1 for a in crew_state.agents.values() if a.status.value == "done")
             n_total = len(crew_state.agents)
-            crew_info = f"**Crew 进行中** `{crew_id[:8]}…`　{_phase_label}　{n_done}/{n_total} 完成"
+            crew_info = f"**Crew 进行中** {crew_id[:8]}…　{_phase_label}　{n_done}/{n_total} 完成"
         elif crew_id:
-            crew_info = f"**Crew 进行中** `{crew_id[:8]}…`"
+            crew_info = f"**Crew 进行中** {crew_id[:8]}…"
     except Exception:
         pass
 
@@ -164,7 +164,7 @@ def _cmd_status(chat_id: str, msg_id: str = None):
         token_summary = "　　".join(parts)
 
     lines = [
-        f"**模型** {model}　　**目录** `{cwd}`"
+        f"**模型** {model}　　**目录** {cwd}"
         + (f"　　**会话名** {_get_chat_state(chat_id).get('name', '').replace('**','').replace('`','')}"
            if _get_chat_state(chat_id).get('name') else ""),
         "",
@@ -182,14 +182,14 @@ def _cmd_status(chat_id: str, msg_id: str = None):
     if not s_c and not s_g and not s_k:
         tips.append("💡 直接发消息开始第一次对话，会自动建立会话")
     else:
-        tips.append("💡 `/pickup` — 获取在终端接力会话的命令")
-        tips.append("💡 `/reset` — 清除会话，开始全新对话")
+        tips.append("💡 **/pickup** — 获取在终端接力会话的命令")
+        tips.append("💡 **/reset** — 清除会话，开始全新对话")
     if model == "claude":
-        tips.append("💡 `/model gemini` — 切换默认模型为 Gemini")
+        tips.append("💡 **/model gemini** — 切换默认模型为 Gemini")
     elif model == "gemini":
-        tips.append("💡 `/model claude` — 切换默认模型为 Claude")
+        tips.append("💡 **/model claude** — 切换默认模型为 Claude")
     else:
-        tips.append("💡 `/model claude` — 切换默认模型为 Claude")
+        tips.append("💡 **/model claude** — 切换默认模型为 Claude")
 
     lines += tips
     _next_models = {"claude": "gemini", "gemini": "kimi", "kimi": "claude"}

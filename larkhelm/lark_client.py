@@ -757,16 +757,55 @@ class FeishuDocClient:
                 for c in data.get("data", {}).get("items", [])
                 if c.get("block_id")]
 
+    # Inline markdown pattern: inline-code > bold > italic > strikethrough
+    _INLINE_MD_RE = re.compile(
+        r'`([^`]+)`'          # group 1: inline code
+        r'|\*\*([^*]+)\*\*'   # group 2: bold
+        r'|\*([^*]+)\*'       # group 3: italic
+        r'|~~([^~]+)~~'       # group 4: strikethrough
+    )
+
+    @staticmethod
+    def _text_elem(text: str, bold=False, italic=False, code=False, strike=False) -> dict:
+        style: dict = {}
+        if bold:        style["bold"]          = True
+        if italic:      style["italic"]        = True
+        if code:        style["inline_code"]   = True
+        if strike:      style["strikethrough"] = True
+        return {"type": "text_run", "text_run": {"content": text, "text_element_style": style}}
+
+    def _parse_inline(self, text: str) -> list:
+        """Split text into styled text_run elements honoring **bold**, *italic*, `code`, ~~strike~~."""
+        elems = []
+        pos   = 0
+        for m in self._INLINE_MD_RE.finditer(text):
+            if m.start() > pos:
+                elems.append(self._text_elem(text[pos:m.start()]))
+            g1, g2, g3, g4 = m.group(1), m.group(2), m.group(3), m.group(4)
+            if g1 is not None:
+                elems.append(self._text_elem(g1, code=True))
+            elif g2 is not None:
+                elems.append(self._text_elem(g2, bold=True))
+            elif g3 is not None:
+                elems.append(self._text_elem(g3, italic=True))
+            elif g4 is not None:
+                elems.append(self._text_elem(g4, strike=True))
+            pos = m.end()
+        if pos < len(text):
+            elems.append(self._text_elem(text[pos:]))
+        return elems or [self._text_elem(text)]
+
     def _md_to_blocks(self, content: str) -> list:
         """Convert Markdown text to a list of Feishu docx Block JSON objects.
-        Supports: paragraphs, H1-H3 headings, code blocks, unordered lists, ordered lists.
+        Supports: paragraphs, H1-H3 headings, code blocks, unordered/ordered lists,
+        tables (rendered as code block), inline bold/italic/code/strikethrough.
         """
         blocks = []
         lines  = content.split("\n")
         i = 0
         while i < len(lines):
             line = lines[i]
-            # Code block
+            # Fenced code block
             if line.startswith("```"):
                 lang       = line[3:].strip()
                 code_lines = []
@@ -776,6 +815,14 @@ class FeishuDocClient:
                     i += 1
                 blocks.append(self._make_code_block("\n".join(code_lines), lang))
                 i += 1
+                continue
+            # Markdown table — collect all consecutive | lines and render as code block
+            if re.match(r'^\|', line):
+                table_lines = []
+                while i < len(lines) and re.match(r'^\|', lines[i]):
+                    table_lines.append(lines[i])
+                    i += 1
+                blocks.append(self._make_code_block("\n".join(table_lines), ""))
                 continue
             # Heading
             if line.startswith("### "):
@@ -790,8 +837,8 @@ class FeishuDocClient:
             # Ordered list
             elif re.match(r'^\d+\. ', line):
                 blocks.append(self._make_ordered_block(re.sub(r'^\d+\. ', '', line)))
-            # Blank line — skip
-            elif not line.strip():
+            # Blank line or horizontal rule — skip
+            elif not line.strip() or re.match(r'^-{3,}$', line.strip()):
                 pass
             # Plain paragraph
             else:
@@ -799,28 +846,24 @@ class FeishuDocClient:
             i += 1
         return blocks
 
-    @staticmethod
-    def _text_elem(text: str) -> dict:
-        return {"type": "text_run", "text_run": {"content": text, "text_element_style": {}}}
-
     def _make_paragraph_block(self, text: str) -> dict:
         return {"block_type": 2, "text": {
-            "elements": [self._text_elem(text)], "style": {}}}
+            "elements": self._parse_inline(text), "style": {}}}
 
     def _make_heading_block(self, text: str, level: int) -> dict:
         # H1=block_type 3, H2=4, H3=5 (Feishu block_type mapping)
         bt  = 2 + level
         key = {3: "heading1", 4: "heading2", 5: "heading3"}[bt]
         return {"block_type": bt, key: {
-            "elements": [self._text_elem(text)], "style": {}}}
+            "elements": self._parse_inline(text), "style": {}}}
 
     def _make_bullet_block(self, text: str) -> dict:
         return {"block_type": 12, "bullet": {
-            "elements": [self._text_elem(text)], "style": {}}}
+            "elements": self._parse_inline(text), "style": {}}}
 
     def _make_ordered_block(self, text: str) -> dict:
         return {"block_type": 13, "ordered": {
-            "elements": [self._text_elem(text)], "style": {}}}
+            "elements": self._parse_inline(text), "style": {}}}
 
     def _make_code_block(self, code: str, lang: str = "") -> dict:
         _LANG_MAP = {
