@@ -24,6 +24,10 @@ from larkhelm.log import _debug_log
 from larkhelm.chat_state import _load_sid, _save_sid, _clear_sid
 from larkhelm.perm import is_yolo
 
+class QueryCancelledError(Exception):
+    """Raised when a query or crew agent is cancelled by the user or cancel_ev."""
+
+
 # Global concurrency limit: shared by all AI subprocesses (normal queries + crew agents + combined)
 # On a 3.8 GB machine each Claude process uses ~300-350 MB; cap at 3 to avoid swap thrashing
 MAX_AI_PROCS = 3
@@ -41,10 +45,10 @@ def active_proc_count() -> int:
 
 
 def _acquire_ai_sem(cancel_ev: threading.Event = None) -> None:
-    """Acquire the AI process semaphore. Raises InterruptedError if cancel_ev fires before a slot opens."""
+    """Acquire the AI process semaphore. Raises QueryCancelledError if cancel_ev fires before a slot opens."""
     while not _ai_proc_sem.acquire(timeout=1.0):
         if cancel_ev and cancel_ev.is_set():
-            raise InterruptedError("cancelled while waiting for AI process slot")
+            raise QueryCancelledError("cancelled while waiting for AI process slot")
 
 
 def _inc_active() -> None:
@@ -387,7 +391,7 @@ def _spawn_claude_proc(
             Path(settings_file).unlink(missing_ok=True)
 
     if cancelled_flag.is_set():
-        raise InterruptedError("query cancelled")
+        raise QueryCancelledError("query cancelled")
 
     rc = proc.returncode
     if rc == -9:
@@ -673,7 +677,7 @@ def _spawn_kimi_proc(
         _dec_active()
 
     if cancelled_flag.is_set():
-        raise InterruptedError("query cancelled")
+        raise QueryCancelledError("query cancelled")
 
     rc = proc.returncode
     if rc == -9:
@@ -927,7 +931,7 @@ def query_gemini(chat_id: str, message: str, cwd: str,
         _dec_active()
 
     if cancelled_flag.is_set():
-        raise InterruptedError("query cancelled")
+        raise QueryCancelledError("query cancelled")
     rc = proc.returncode
     if rc == -9:
         if not soft_timeout_flag.is_set():

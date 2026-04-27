@@ -25,7 +25,7 @@ from larkhelm.lark_client import (
     _index_reply,
 )
 from larkhelm.card_builder import _make_card, _split_md, _fmt_elapsed
-from larkhelm.ai_runner import query_claude, query_gemini, query_kimi
+from larkhelm.ai_runner import query_claude, query_gemini, query_kimi, QueryCancelledError
 
 # ── Card UX parameters (from config) ────────────────────────────────
 TOOL_HISTORY_CAP   = _cfg.TOOL_HISTORY_CAP
@@ -409,7 +409,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             if mid:
                 _index_reply(mid, chat_id, message, model)
 
-        except InterruptedError:
+        except QueryCancelledError:
             elapsed = _fmt_elapsed(time.time() - start)
             # The card was synchronously updated to "cancelling" in the cancel callback response;
             # here we just patch with the final elapsed time; patch failure is safe (no stale cancel button)

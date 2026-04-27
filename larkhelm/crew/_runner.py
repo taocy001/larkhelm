@@ -11,6 +11,7 @@ from collections import deque
 from pathlib import Path
 
 from larkhelm.log import _debug_log, log_entry
+from larkhelm.ai_runner import QueryCancelledError
 from larkhelm.crew_types import (
     HardFailError, AgentSpec, AgentState, AgentStatus, CrewState,
     CREW_RESULT_PREVIEW,
@@ -325,7 +326,7 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
                 on_start=_on_start,  # Fired when semaphore is acquired; timeout starts from here
                 session_namespace=crew_ns,
             )
-    except InterruptedError:
+    except QueryCancelledError:
         if cancel_ev.is_set():
             raise  # Crew-level cancellation → propagate → wrapper marks CANCELLED
         # Per-agent timeout only → FAILED (not CANCELLED)
@@ -422,7 +423,7 @@ def _run_agent_wrapper(state: CrewState, agent_id: str) -> None:
             _crew_update_card(state)
             return
 
-        except InterruptedError:
+        except QueryCancelledError:
             with state.lock:
                 state.agents[agent_id].status   = AgentStatus.CANCELLED
                 state.agents[agent_id].end_time = time.time()
@@ -562,7 +563,7 @@ def _execute(state: CrewState, total_timeout: int):
 
     while wave_queue:
         if cancel_ev.is_set():
-            raise InterruptedError("Crew cancelled")
+            raise QueryCancelledError("Crew cancelled")
         if time.time() > deadline:
             with state.lock:
                 for spec in state.plan.agents:
@@ -619,7 +620,7 @@ def _execute(state: CrewState, total_timeout: int):
         threading.Thread(target=_waiter, daemon=True).start()
         while not done_ev.is_set():
             if cancel_ev.is_set():
-                raise InterruptedError("Crew cancelled")
+                raise QueryCancelledError("Crew cancelled")
             done_ev.wait(timeout=0.5)
 
         # ── Check if any agent in this wave needs retry (read needs_retry under lock) ──
@@ -711,7 +712,7 @@ def _execute(state: CrewState, total_timeout: int):
                 if (spec.breakpoint and ag and ag.status == AgentStatus.DONE):
                     confirmed = _wait_for_breakpoint(state, spec.id)
                     if not confirmed:
-                        raise InterruptedError("User cancelled")
+                        raise QueryCancelledError("User cancelled")
                     # Restore main card to running state
                     with state.lock:
                         state.phase = "running"
@@ -753,7 +754,7 @@ def _execute_from(state: CrewState, total_timeout: int, skip_ids: set):
 
     while wave_queue:
         if cancel_ev.is_set():
-            raise InterruptedError("Crew cancelled")
+            raise QueryCancelledError("Crew cancelled")
         if time.time() > deadline:
             break
 
@@ -795,7 +796,7 @@ def _execute_from(state: CrewState, total_timeout: int, skip_ids: set):
         threading.Thread(target=_waiter, daemon=True).start()
         while not done_ev.is_set():
             if cancel_ev.is_set():
-                raise InterruptedError("Crew cancelled")
+                raise QueryCancelledError("Crew cancelled")
             done_ev.wait(timeout=0.5)
 
         # Save checkpoint: this wave is complete
@@ -913,7 +914,7 @@ def _run_crew(state: CrewState, total_timeout: int):
 
         try:
             _execute(state, total_timeout)
-        except InterruptedError:
+        except QueryCancelledError:
             with state.lock:
                 state.phase = "cancelled"
             _crew_update_card(state)

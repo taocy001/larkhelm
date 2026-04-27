@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from larkhelm.log import _debug_log
+from larkhelm.ai_runner import QueryCancelledError
 from larkhelm.crew_types import AgentSpec, AgentState, AgentStatus, CrewPlan, CrewState
 
 
@@ -240,7 +241,7 @@ def resume_interrupted_crews():
                     state.phase = "failed"
                 _crew_update_card(state)
                 send_card(state.chat_id, "❌ Crew 硬失败", str(e), color="red")
-            except InterruptedError:
+            except QueryCancelledError:
                 with state.lock:
                     state.phase = "cancelled"
                 _crew_update_card(state)
