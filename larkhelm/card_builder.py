@@ -35,7 +35,8 @@ def _normalize_newlines(text: str) -> str:
     result: list[str] = []
     in_code = False
     for line in lines:
-        if line.startswith("```"):
+        # Use stripped form so indented code fences (e.g. inside lists) are detected correctly
+        if line.lstrip().startswith("```"):
             in_code = not in_code
         if in_code:
             result.append(line)
@@ -51,9 +52,22 @@ def _split_md(text: str) -> list[str]:
         return [text]
     chunks, buf, buf_len, in_code = [], [], 0, False
     for line in text.split("\n"):
-        if line.startswith("```"):
+        if line.lstrip().startswith("```"):
             in_code = not in_code
         line_len = len(line) + 1
+        # Single line longer than the limit: flush buffer then hard-split the line
+        if line_len > _cfg.MAX_CARD_LEN:
+            if buf:
+                chunks.append("\n".join(buf))
+                buf, buf_len = [], 0
+            remainder = line
+            while len(remainder) > _cfg.MAX_CARD_LEN:
+                chunks.append(remainder[:_cfg.MAX_CARD_LEN])
+                remainder = remainder[_cfg.MAX_CARD_LEN:]
+            if remainder:
+                buf.append(remainder)
+                buf_len = len(remainder) + 1
+            continue
         if buf_len + line_len > _cfg.MAX_CARD_LEN and buf and not in_code:
             chunks.append("\n".join(buf))
             buf, buf_len = [], 0

@@ -165,14 +165,21 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     GEMINI_CMD       = config.get("gemini_command", "gemini")
     KIMI_CMD         = config.get("kimi_command", "kimi")
     DEFAULT_MODEL    = config.get("default_model", "claude")
-    SKIP_PERMISSIONS = config.get("skip_permissions", False)
-    RESPONSE_TIMEOUT = config.get("response_timeout", 300)   # soft timeout: release lock but don't kill process
-    HARD_TIMEOUT     = config.get("hard_timeout", 21600)      # hard timeout: force kill (default 6 hours)
-    MAX_CARD_LEN     = config.get("max_card_len", 3000)
+    SKIP_PERMISSIONS = bool(config.get("skip_permissions", False))
+    RESPONSE_TIMEOUT = int(config.get("response_timeout", 300))   # soft timeout: release lock but don't kill process
+    HARD_TIMEOUT     = int(config.get("hard_timeout", 21600))      # hard timeout: force kill (default 6 hours)
+    MAX_CARD_LEN     = int(config.get("max_card_len", 3000))
     ALLOWED_CHATS    = set(config.get("allowed_chat_ids", []))
-    GEMINI_IDLE_TTL  = config.get("gemini_idle_ttl", 1800)
+    GEMINI_IDLE_TTL  = int(config.get("gemini_idle_ttl", 1800))
     DEFAULT_CWD      = config.get("default_cwd", str(Path.home() / "code"))
     CRON_TIMEZONE    = config.get("timezone", "Asia/Shanghai")
+    if HARD_TIMEOUT <= RESPONSE_TIMEOUT:
+        print(
+            f"⚠️  hard_timeout ({HARD_TIMEOUT}s) ≤ response_timeout ({RESPONSE_TIMEOUT}s); "
+            f"adjusting hard_timeout to response_timeout + 60",
+            file=sys.stderr,
+        )
+        HARD_TIMEOUT = RESPONSE_TIMEOUT + 60
 
     DOC_AUTO_INJECT      = config.get("doc_auto_inject",      True)
     DOC_INJECT_MAX_CHARS = config.get("doc_inject_max_chars", 2000)

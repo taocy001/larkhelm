@@ -622,7 +622,7 @@ class TestFeishuDocClient(unittest.TestCase):
         blocks = self.dc._md_to_blocks("Hello world")
         self.assertEqual(len(blocks), 1)
         self.assertEqual(blocks[0]["block_type"], 2)
-        self.assertIn("paragraph", blocks[0])
+        self.assertIn("text", blocks[0])
 
     def test_md_to_blocks_headings(self):
         md = "# Title\n## Subtitle\n### Sub-sub"

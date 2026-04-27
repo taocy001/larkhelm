@@ -94,17 +94,21 @@ def handle_message(data: P2ImMessageReceiveV1):
             _debug_log(f"[ACL] rejected chat_id={chat_id}")
             return
 
-        # Group chat @mention filter: only respond when the bot itself is mentioned
+        # Group chat @mention filter: only respond when the bot itself is mentioned.
+        # If BOT_OPEN_ID is unknown (fetch failed at startup), fail-closed and ignore the message
+        # rather than responding to all group messages indiscriminately.
         if message.chat_type == "group" and message.mentions:
             import larkhelm.lark_client as _lc_mod
             bot_id = _lc_mod.BOT_OPEN_ID
-            if bot_id:
-                mentioned_ids = {
-                    m.id.open_id for m in message.mentions
-                    if m.id and m.id.open_id
-                }
-                if bot_id not in mentioned_ids:
-                    return
+            if not bot_id:
+                _debug_log("[Filter] BOT_OPEN_ID unknown, ignoring group message to avoid broadcast")
+                return
+            mentioned_ids = {
+                m.id.open_id for m in message.mentions
+                if m.id and m.id.open_id
+            }
+            if bot_id not in mentioned_ids:
+                return
 
         _msg_images: list[str] = []
 

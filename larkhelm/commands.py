@@ -23,7 +23,7 @@ from larkhelm.concurrency import (
     _cron_lock, _get_btw_lock, _reset_cancel,
 )
 from larkhelm.token_stats import get_token_stats, get_token_stats_persistent
-from larkhelm.perm import _perm_yolo, revoke_yolo
+from larkhelm.perm import revoke_yolo, is_yolo
 from larkhelm.cmd_doc import _cmd_doc, _cmd_doc_write_do
 from larkhelm.lark_client import (
     send_card, send_card_reply, reply_card, _send_card_raw, _patch_card_raw, _reply_card_raw,
@@ -39,17 +39,28 @@ from larkhelm.ai_runner import query_gemini, _spawn_claude_proc
 #  Shell command execution
 # ═══════════════════════════════════════════════════
 
+# Env-var key fragments that indicate credentials — filtered from subprocess environment
+# to prevent accidental leakage via /run output or error messages.
+_SENSITIVE_ENV_PREFIXES = frozenset({
+    "API_KEY", "SECRET", "PASSWORD", "TOKEN", "CREDENTIAL",
+    "ACCESS_KEY", "PRIVATE_KEY", "AUTH_KEY",
+})
+
+
 def _run_shell(chat_id: str, cmd: str) -> tuple[str, str, int]:
+    import os as _os
     cwd = _get_cwd(chat_id)
     try:
         import shlex
         args = shlex.split(cmd)
     except ValueError as e:
         return "", f"命令格式错误: {e}", 1
+    safe_env = {k: v for k, v in _os.environ.items()
+                if not any(s in k.upper() for s in _SENSITIVE_ENV_PREFIXES)}
     try:
         r = subprocess.run(
             args, shell=False, capture_output=True, text=True,
-            timeout=30, cwd=cwd, env={**__import__("os").environ}
+            timeout=30, cwd=cwd, env=safe_env
         )
         return r.stdout, r.stderr, r.returncode
     except subprocess.TimeoutExpired:
@@ -116,7 +127,7 @@ def _cmd_status(chat_id: str, msg_id: str = None):
 
     if _cfg.SKIP_PERMISSIONS:
         perm_status = "⏭️ 跳过（skip_permissions=true）"
-    elif chat_id in _perm_yolo:
+    elif is_yolo(chat_id):
         perm_status = "🚀 允许所有（发送 `/reset perm` 恢复审批）"
     else:
         perm_status = "🔐 正常审批"

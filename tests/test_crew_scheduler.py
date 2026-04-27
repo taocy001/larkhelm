@@ -305,7 +305,7 @@ class TestResolvePrompt(unittest.TestCase):
         state = self._crew({"agent_1": "out"})
         template = "{agent_99_result}"
         result = _resolve_prompt(template, state)
-        self.assertIn("不存在", result)
+        self.assertIn("does not exist", result)
 
     def test_failed_agent_placeholder(self):
         specs = [_spec("agent_1")]

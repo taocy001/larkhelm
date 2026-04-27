@@ -27,7 +27,8 @@ _btw_locks_meta = threading.Lock()
 
 _cancel_events: dict[str, threading.Event] = {}
 _cancel_events_ts: dict[str, float] = {}  # chat_id → last access timestamp
-_CANCEL_EVENT_TTL = 3600  # clean up after 1 hour of inactivity to prevent memory growth in long-running processes
+_CANCEL_EVENT_TTL = 3600  # evict after 1 hour of inactivity
+_CANCEL_EVENTS_MAX = 1000  # hard cap regardless of TTL
 _cancel_meta = threading.Lock()
 
 _pending_msg: dict = {}  # chat_id → (message, model, user_msg_id, queue_card_mid)
@@ -69,6 +70,11 @@ def _get_cancel_event(chat_id: str) -> threading.Event:
             _cancel_events.pop(cid, None)
             _cancel_events_ts.pop(cid, None)
         if chat_id not in _cancel_events:
+            # Enforce hard cap: evict oldest entry before inserting a new one
+            if len(_cancel_events) >= _CANCEL_EVENTS_MAX:
+                oldest = min(_cancel_events_ts, key=_cancel_events_ts.get)
+                _cancel_events.pop(oldest, None)
+                _cancel_events_ts.pop(oldest, None)
             _cancel_events[chat_id] = threading.Event()
         _cancel_events_ts[chat_id] = now
         return _cancel_events[chat_id]

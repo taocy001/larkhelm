@@ -72,18 +72,18 @@ class TestTruncateToolResult(unittest.TestCase):
         content = "garbage" * 100 + "real error message here"
         result = _truncate_tool_result(content, is_error=True)
         self.assertIn("real error message here", result)
-        self.assertIn("截断", result)
+        self.assertIn("...(truncated)", result)
 
     def test_error_exactly_200_no_prefix(self):
         content = "x" * 200
         result = _truncate_tool_result(content, is_error=True)
         self.assertEqual(result, "x" * 200)
-        self.assertNotIn("截断", result)
+        self.assertNotIn("...(truncated)", result)
 
     def test_error_201_adds_truncation_prefix(self):
         content = "x" * 201
         result = _truncate_tool_result(content, is_error=True)
-        self.assertIn("截断", result)
+        self.assertIn("...(truncated)", result)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -154,7 +154,7 @@ def _make_mock_proc(stdout_lines: list[str], returncode: int = 0):
     mock_proc.stdin = MagicMock()
     mock_proc.returncode = returncode
 
-    def _wait():
+    def _wait(timeout=None):
         mock_proc.returncode = returncode
     mock_proc.wait = _wait
     return mock_proc

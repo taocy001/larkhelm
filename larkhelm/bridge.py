@@ -15,6 +15,9 @@ Business logic has been split into:
   handlers.py     — Feishu event handlers
   crew.py         — multi-agent collaboration
 """
+import fcntl
+import gc
+import os
 import signal
 import sys
 import threading
@@ -31,6 +34,43 @@ from larkhelm.chat_state import _load_global_state, _get_chat_state, _state_lock
 from larkhelm.concurrency import _cron_lock, set_shutting_down, wait_for_idle
 from larkhelm.perm import _start_perm_server
 from larkhelm.handlers import handle_message, handle_card_action, handle_reaction_created
+
+# PID lock file — holds an exclusive flock for the lifetime of the process.
+# Prevents multiple daemon instances from running simultaneously, which was a
+# root cause of cumulative memory exhaustion (each instance loads 200+ modules
+# and accumulates in-memory state independently).
+_pid_lock_fd = None
+
+
+def _acquire_pid_lock(data_dir) -> bool:
+    """Try to acquire an exclusive file lock. Returns False if another instance already holds it."""
+    global _pid_lock_fd
+    lock_path = data_dir / "larkhelm.lock"
+    try:
+        fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.write(fd, f"{os.getpid()}\n".encode())
+        os.ftruncate(fd, len(f"{os.getpid()}\n"))
+        _pid_lock_fd = fd  # keep fd open — lock released when fd is closed (process exit)
+        return True
+    except (OSError, IOError):
+        return False
+
+
+_GC_INTERVAL = 600  # run gc.collect() every 10 minutes
+
+
+def _start_gc_thread():
+    """Background thread that periodically runs full GC to release memory back to OS."""
+    def _loop():
+        while True:
+            time.sleep(_GC_INTERVAL)
+            try:
+                collected = gc.collect(2)  # full collection (generations 0,1,2)
+                _debug_log(f"[GC] 周期性 gc.collect 完成，回收 {collected} 个对象")
+            except Exception as e:
+                _debug_log(f"[GC] gc.collect 异常: {e}")
+    threading.Thread(target=_loop, daemon=True, name="gc-collector").start()
 
 
 def _start_cron_scheduler():
@@ -82,6 +122,15 @@ def main(config_path: str = None, data_dir: str = None) -> None:
     import larkhelm.config as _cfg
 
     _init_runtime(config_path, data_dir)
+
+    if not _acquire_pid_lock(_cfg.DATA_DIR):
+        print(
+            f"[larkhelm] 另一个实例正在运行（{_cfg.DATA_DIR}/larkhelm.lock 被锁定）。"
+            "请先停止已有进程再重启。",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     _load_global_state()
 
     if not _cfg.SKIP_PERMISSIONS:
@@ -123,6 +172,7 @@ def main(config_path: str = None, data_dir: str = None) -> None:
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
     _start_cron_scheduler()
+    _start_gc_thread()
 
     # On startup, resume any crew tasks that were interrupted last time
     from larkhelm.crew import resume_interrupted_crews

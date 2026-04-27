@@ -112,7 +112,8 @@ def _set_chat_model(chat_id: str, model: str) -> None:
 # ═══════════════════════════════════════════════════
 #  btw side-note state
 # ═══════════════════════════════════════════════════
-_BTW_MSG_ID_CAP = 50  # maximum btw message IDs tracked per chat
+_BTW_MSG_ID_CAP = 50     # maximum btw message IDs tracked per chat
+_BTW_CHAT_ID_CAP = 500   # maximum distinct chat_ids tracked (outer dict LRU cap)
 _btw_msg_ids: dict[str, set[str]] = {}
 _btw_msg_ids_meta = threading.Lock()
 
@@ -122,7 +123,12 @@ def _register_btw_msg(chat_id: str, msg_id: str) -> None:
     if not msg_id:
         return
     with _btw_msg_ids_meta:
-        s = _btw_msg_ids.setdefault(chat_id, set())
+        if chat_id not in _btw_msg_ids:
+            # Evict oldest entry when outer dict exceeds cap
+            if len(_btw_msg_ids) >= _BTW_CHAT_ID_CAP:
+                _btw_msg_ids.pop(next(iter(_btw_msg_ids)), None)
+            _btw_msg_ids[chat_id] = set()
+        s = _btw_msg_ids[chat_id]
         s.add(msg_id)
         if len(s) > _BTW_MSG_ID_CAP:
             remove = list(s)[:len(s) // 2]

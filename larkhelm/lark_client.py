@@ -50,10 +50,16 @@ def _fetch_bot_open_id() -> None:
                 BOT_OPEN_ID = bot_open_id
                 _debug_log(f"[Bot] 获取 open_id={bot_open_id}")
             else:
+                import sys as _sys
+                print(f"[larkhelm] ⚠️  BOT_OPEN_ID fetch failed — group @mention filter disabled: {data}", file=_sys.stderr)
                 _debug_log(f"[Bot] 未能获取 open_id，响应: {data}")
         else:
+            import sys as _sys
+            print(f"[larkhelm] ⚠️  BOT_OPEN_ID fetch failed (code={resp.code}) — group @mention filter disabled", file=_sys.stderr)
             _debug_log(f"[Bot] 获取 open_id 失败 code={resp.code} msg={resp.msg}")
     except Exception as e:
+        import sys as _sys
+        print(f"[larkhelm] ⚠️  BOT_OPEN_ID fetch exception — group @mention filter disabled: {e}", file=_sys.stderr)
         _debug_log(f"[Bot] 获取 open_id 异常: {e}")
 
 

@@ -220,7 +220,8 @@ def _crew_plan(chat_id: str, requirement: str, cwd: str,
     _stderr_buf: list[str] = []
     def _drain_stderr():
         for ln in proc.stderr:
-            _stderr_buf.append(ln.rstrip())
+            if len(_stderr_buf) < 50:
+                _stderr_buf.append(ln.rstrip())
     threading.Thread(target=_drain_stderr, daemon=True).start()
     _debug_log(f"[Crew/Manager] planning started pid={proc.pid} timeout={min(_cfg.RESPONSE_TIMEOUT, 120)}s")
 
@@ -235,8 +236,10 @@ def _crew_plan(chat_id: str, requirement: str, cwd: str,
     _timer.daemon = True
     _timer.start()
 
-    # Collect all text output
+    # Collect all text output; cap total accumulated chars to avoid large-string mmap pressure
+    _TEXT_BUF_MAX_CHARS = 200_000
     text_buf: list[str] = []
+    text_buf_len = 0
     try:
         for line in proc.stdout:
             if cancel_ev.is_set():
@@ -253,10 +256,14 @@ def _crew_plan(chat_id: str, requirement: str, cwd: str,
             if ev.get("type") == "assistant":
                 for block in ev.get("message", {}).get("content", []) or []:
                     if block.get("type") == "text":
-                        text_buf.append(block.get("text", ""))
+                        chunk = block.get("text", "")
+                        if chunk and text_buf_len < _TEXT_BUF_MAX_CHARS:
+                            text_buf.append(chunk)
+                            text_buf_len += len(chunk)
             if ev.get("type") == "result":
-                if ev.get("result"):
-                    text_buf.append(ev["result"])
+                result_val = ev.get("result", "")
+                if result_val and text_buf_len < _TEXT_BUF_MAX_CHARS:
+                    text_buf.append(result_val)
                 break
     finally:
         _timer.cancel()
@@ -265,6 +272,7 @@ def _crew_plan(chat_id: str, requirement: str, cwd: str,
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
         proc.kill()
+        proc.wait()  # always reap zombie regardless of kill outcome
 
     full_text = "\n".join(text_buf)
 
@@ -421,6 +429,11 @@ def _run_generic_crew(chat_id: str, requirement: str,
                                 user_msg_id, crew_id)
     finally:
         _unregister_crew_thread(crew_id)
+        try:
+            from larkhelm.token_stats import evict_crew_agent_tokens
+            evict_crew_agent_tokens(f"{chat_id}__crew_{crew_id}")
+        except Exception:
+            pass
 
 
 def _run_generic_crew_inner(chat_id: str, requirement: str,
@@ -523,6 +536,11 @@ def _run_dev_crew(chat_id: str, requirement: str, user_msg_id: str,
         _run_dev_crew_inner(chat_id, requirement, user_msg_id, no_confirm, crew_id)
     finally:
         _unregister_crew_thread(crew_id)
+        try:
+            from larkhelm.token_stats import evict_crew_agent_tokens
+            evict_crew_agent_tokens(f"{chat_id}__crew_{crew_id}")
+        except Exception:
+            pass
 
 
 def _run_dev_crew_inner(chat_id: str, requirement: str, user_msg_id: str,

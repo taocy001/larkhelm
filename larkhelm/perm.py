@@ -29,17 +29,23 @@ _perm_card_mid: dict[str, str]             = {}   # tool_use_id → permission c
 _perm_tool_name: dict[str, str]            = {}   # tool_use_id → tool_name
 _perm_tool_input: dict[str, dict]          = {}   # tool_use_id → tool_input
 
-_perm_yolo: set[str] = set()   # session namespace → granted Allow All
+_perm_yolo: dict[str, float] = {}   # namespace → expiry timestamp
+_YOLO_TTL = 3 * 3600                # Allow-All grants expire after 3 hours
 
 
-def grant_yolo(ns: str):
-    """Grant Allow All permission to the given namespace."""
-    _perm_yolo.add(ns)
+def grant_yolo(ns: str) -> None:
+    """Grant Allow All permission to the given namespace (expires after _YOLO_TTL seconds)."""
+    _perm_yolo[ns] = time.time() + _YOLO_TTL
 
 
-def revoke_yolo(ns: str):
+def revoke_yolo(ns: str) -> None:
     """Revoke Allow All permission from the given namespace."""
-    _perm_yolo.discard(ns)
+    _perm_yolo.pop(ns, None)
+
+
+def is_yolo(ns: str) -> bool:
+    """Return True if Allow All is currently granted and not expired for this namespace."""
+    return _perm_yolo.get(ns, 0.0) > time.time()
 
 
 # ── Dangerous command patterns (pre-compiled) ────────────────────────────────────────
@@ -194,7 +200,7 @@ def _handle_perm_conn(conn):
         _debug_log(f"[Perm] received request tool={tool_name} id={tool_use_id[:16]}")
 
         # Fast-path: Allow All already granted
-        if chat_id in _perm_yolo:
+        if is_yolo(chat_id):
             conn.sendall((json.dumps({"decision": "allow"}) + "\n").encode())
             conn.close()
             return
@@ -276,15 +282,19 @@ def _start_perm_server():
     import socket as _sock
     import os as _os
     path = _cfg.PERM_SOCKET_PATH
-    # Atomically remove the old socket file to avoid a race between exists+unlink
+    # Remove stale socket file first
     try:
         _os.unlink(path)
     except FileNotFoundError:
         pass
-    server = _sock.socket(_sock.AF_UNIX, _sock.SOCK_STREAM)
-    server.bind(path)
-    # Restrict access to the current user only, preventing other local users from connecting
-    _os.chmod(path, 0o600)
+    # Set umask before bind so the socket file is created with 0o600 permissions atomically,
+    # eliminating the TOCTTOU window that exists between bind() and a subsequent chmod().
+    _old_umask = _os.umask(0o077)
+    try:
+        server = _sock.socket(_sock.AF_UNIX, _sock.SOCK_STREAM)
+        server.bind(path)
+    finally:
+        _os.umask(_old_umask)
     server.listen(32)
     _debug_log(f"[Perm] permission approval server started: {path}")
 

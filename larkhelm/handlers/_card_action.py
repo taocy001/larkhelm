@@ -13,7 +13,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 import larkhelm.config as _cfg
 from larkhelm.log import _debug_log
 from larkhelm.concurrency import _trigger_cancel, _pop_pending
-from larkhelm.perm import _perm_yolo, _perm_lock, _perm_pending, _perm_decision, _perm_tool_name, _perm_tool_input
+from larkhelm.perm import grant_yolo, _perm_lock, _perm_pending, _perm_decision, _perm_tool_name, _perm_tool_input
 
 
 def handle_card_action(event: P2CardActionTrigger) -> P2CardActionTriggerResponse:
@@ -34,12 +34,14 @@ def handle_card_action(event: P2CardActionTrigger) -> P2CardActionTriggerRespons
             parts = cmd.split(":", 2)
             if len(parts) == 3:
                 action_name, tool_use_id = parts[1], parts[2]
+                if action_name not in {"allow", "deny", "yolo"}:
+                    return resp
                 with _perm_lock:
                     tool_name  = _perm_tool_name.get(tool_use_id, "?")
                     tool_input = _perm_tool_input.get(tool_use_id, {})
                     if tool_use_id in _perm_pending:
                         if action_name == "yolo":
-                            _perm_yolo.add(chat_id)
+                            grant_yolo(chat_id)
                         _perm_decision[tool_use_id] = action_name
                         _perm_pending[tool_use_id].set()
                 labels = {"allow": "✅ 已允许", "deny": "❌ 已拒绝", "yolo": "🚀 已允许全部"}

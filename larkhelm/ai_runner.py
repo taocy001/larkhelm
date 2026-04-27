@@ -12,14 +12,17 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
 
+_MAX_STDERR_LINES = 100  # cap stderr drain buffers to prevent unbounded string accumulation
+
 import larkhelm.config as _cfg
 from larkhelm.log import _debug_log
 from larkhelm.chat_state import _load_sid, _save_sid, _clear_sid
-from larkhelm.perm import _perm_yolo
+from larkhelm.perm import is_yolo
 
 # Global concurrency limit: shared by all AI subprocesses (normal queries + crew agents + combined)
 # On a 3.8 GB machine each Claude process uses ~300-350 MB; cap at 3 to avoid swap thrashing
@@ -129,9 +132,9 @@ def _spawn_claude_proc(
                 }]
             }
         }
-        settings_file = f"/tmp/feishu_claude_settings_{os.getpid()}.json"
-        # Create with 0o600 permissions to prevent other local users from reading the hook config
-        fd = os.open(settings_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # Use a unique temp file per subprocess invocation to avoid races between concurrent queries
+        fd, settings_file = tempfile.mkstemp(prefix="feishu_claude_", suffix=".json")
+        os.chmod(settings_file, 0o600)
         with os.fdopen(fd, "w") as _f:
             json.dump(hook_settings_obj, _f)
         args += ["--settings", settings_file]
@@ -151,7 +154,7 @@ def _spawn_claude_proc(
         "GCM_CREDENTIAL_STORAGE": "file",
         "FEISHU_CHAT_ID": ns,
         "FEISHU_PERM_SOCKET": _cfg.PERM_SOCKET_PATH,
-        "FEISHU_PERM_YOLO": "1" if ns in _perm_yolo else "0",
+        "FEISHU_PERM_YOLO": "1" if is_yolo(ns) else "0",
     }
 
     _ai_proc_sem.acquire()
@@ -198,7 +201,8 @@ def _spawn_claude_proc(
             for line in proc.stderr:
                 stripped = line.rstrip()
                 if stripped:
-                    stderr_buf.append(stripped)
+                    if len(stderr_buf) < _MAX_STDERR_LINES:
+                        stderr_buf.append(stripped)
                     if "Warning: Python" in stripped and "lockfile expects" in stripped:
                         print(stripped, file=sys.stderr)
         except Exception:
@@ -243,6 +247,7 @@ def _spawn_claude_proc(
 
     threading.Thread(target=_watch, daemon=True).start()
 
+    _result_parts: list[str] = []
     result_text, new_sid = "", None
     _tool_start_times: dict[str, float] = {}
     if on_text:
@@ -268,7 +273,10 @@ def _spawn_claude_proc(
                 for block in ev.get("message", {}).get("content", []) or []:
                     btype = block.get("type", "")
                     if btype == "text":
-                        result_text += block.get("text", "")
+                        chunk = block.get("text", "")
+                        if chunk:
+                            _result_parts.append(chunk)
+                            result_text = "".join(_result_parts)
                         if on_text:
                             on_text(result_text, status="typing")
                     elif btype == "tool_use":
@@ -363,7 +371,11 @@ def _spawn_claude_proc(
                 break
     finally:
         completed.set()
-        proc.wait()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
         _ai_proc_sem.release()
         _dec_active()
         if settings_file:
@@ -490,7 +502,7 @@ def _spawn_kimi_proc(
         try:
             for line in proc.stderr:
                 stripped = line.rstrip()
-                if stripped:
+                if stripped and len(stderr_buf) < _MAX_STDERR_LINES:
                     stderr_buf.append(stripped)
         except Exception:
             pass
@@ -537,6 +549,7 @@ def _spawn_kimi_proc(
     # Kimi tool name mapping to LarkHelm internal names (aligned with Claude)
     _KIMI_TOOL_MAP = {"Shell": "Bash", "FetchURL": "WebFetch", "SearchWeb": "WebSearch"}
 
+    _result_parts: list[str] = []
     result_text, new_sid = "", None
     _tool_start_times: dict[str, float] = {}
     if on_text:
@@ -567,7 +580,8 @@ def _spawn_kimi_proc(
                 tool_calls = ev.get("tool_calls") or []
 
                 if content and isinstance(content, str):
-                    result_text += content
+                    _result_parts.append(content)
+                    result_text = "".join(_result_parts)
                     if on_text:
                         on_text(result_text, status="typing")
                 elif content and isinstance(content, list):
@@ -575,7 +589,8 @@ def _spawn_kimi_proc(
                     text_parts = [c.get("text", "") for c in content if c.get("type") == "text"]
                     chunk = "".join(text_parts)
                     if chunk:
-                        result_text += chunk
+                        _result_parts.append(chunk)
+                        result_text = "".join(_result_parts)
                         if on_text:
                             on_text(result_text, status="typing")
 
@@ -647,7 +662,11 @@ def _spawn_kimi_proc(
                 break
     finally:
         completed.set()
-        proc.wait()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
         _ai_proc_sem.release()
         _dec_active()
 
@@ -756,7 +775,8 @@ def query_gemini(chat_id: str, message: str, cwd: str,
             for line in proc.stderr:
                 stripped = line.rstrip()
                 if stripped:
-                    stderr_buf.append(stripped)
+                    if len(stderr_buf) < _MAX_STDERR_LINES:
+                        stderr_buf.append(stripped)
                     if "Keychain initialization encountered an error" in stripped:
                         _debug_log(f"[gemini] Stderr: {stripped}")
         except Exception:
@@ -801,6 +821,7 @@ def query_gemini(chat_id: str, message: str, cwd: str,
 
     threading.Thread(target=_watch, daemon=True).start()
 
+    _result_parts: list[str] = []
     result_text, new_sid = "", None
     _tool_start_times: dict[str, float] = {}
     if on_text:
@@ -835,12 +856,17 @@ def query_gemini(chat_id: str, message: str, cwd: str,
                 else:
                     text_chunk = str(content)
                 if not ev.get("delta", False) and result_text:
+                    # Non-delta full-text replacement: reset parts to avoid double-counting
                     if text_chunk.startswith(result_text):
+                        _result_parts.clear()
+                        _result_parts.append(text_chunk)
                         result_text = text_chunk
                     else:
-                        result_text += text_chunk
+                        _result_parts.append(text_chunk)
+                        result_text = "".join(_result_parts)
                 else:
-                    result_text += text_chunk
+                    _result_parts.append(text_chunk)
+                    result_text = "".join(_result_parts)
                 if on_text:
                     on_text(result_text, status="typing")
             elif etype == "tool_use":
@@ -898,7 +924,11 @@ def query_gemini(chat_id: str, message: str, cwd: str,
                 break
     finally:
         completed.set()
-        proc.wait(timeout=5)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()  # always reap to prevent zombie; must not raise here
         _ai_proc_sem.release()
         _dec_active()
 
