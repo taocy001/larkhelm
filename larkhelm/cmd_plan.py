@@ -148,7 +148,8 @@ def _build_plan_card(state: MultiPlanState) -> str:
 
     if state.phase == "planning":
         return _make_card(title, f"**需求：** {state.title}\n\n生成多阶段执行计划中，请稍候…",
-                          color=color)
+                          color=color,
+                          buttons=[("🛑 取消", f"plan_cancel:{state.plan_id}")])
 
     if state.phase == "confirming":
         return _make_card(title, body, color=color,
@@ -217,6 +218,7 @@ _PLANNER_SYSTEM = """\
 - [review] 后面通常跟 [fix]
 - 只在必要时插入 [test]，避免冗余
 - 不要输出序号、解释或额外说明，只输出步骤列表
+- **严格遵守用户指定的范围**：如果用户说"phase5到phase10"，只输出那几个 phase 的步骤，不要擅自补充范围之外的内容
 """
 
 def _auto_plan(requirement: str, chat_id: str,
