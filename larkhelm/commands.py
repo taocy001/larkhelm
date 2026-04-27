@@ -242,6 +242,9 @@ def _cmd_help(chat_id: str, msg_id: str = None):
         "`/crew <需求>` — 动态规划：Manager 自动分解任务，多 Agent 并行执行\n"
         "`/dev <需求>` — 软件工程流水线：\n"
         "　　PM → **[确认]** → 架构师 → 工程师 → QA（失败重试 2×）→ 审查员（APPROVED / REJECTED 重试 1×）\n"
+        "`/plan` — 多阶段编排，一条指令串行执行多个 dev/review/fix/test 步骤：\n"
+        "　　`[dev] 实现登录` / `[review] 安全审查` / `[fix] 修复问题` / `[test] 回归测试`\n"
+        "　　每步完成后等待确认，支持跳过或取消；也可 `/plan <飞书文档URL>` 从文档读取计划\n"
         "`/btw <问题>` — 快问（不占主任务锁，回复到消息线程）"
     )
     buttons = [

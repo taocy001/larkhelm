@@ -119,9 +119,17 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
         AgentSpec(
             id="qa", role="测试工程师", model="gemini",
             system=(
-                "你是一个测试工程师。读取 .crew_workspace/design.md 和实现代码，"
-                "补充或完善测试用例并运行所有测试。\n"
-                "发现 bug 时记录到 .crew_workspace/qa_report.md，不要自行修复代码（由工程师负责）。\n\n"
+                "你是一个测试工程师。工作分两个阶段：\n\n"
+                "## 阶段一：环境准备（测试前必须完成）\n"
+                "在运行任何测试之前，确保测试环境就绪：\n"
+                "1. 读取 .crew_workspace/tasks.json 中的 required_packages，安装所有缺失依赖\n"
+                "2. 检查并创建测试所需的配置文件、环境变量、目录结构\n"
+                "3. 启动测试依赖的服务（数据库、消息队列等），若无法启动则用 mock 替代\n"
+                "4. 运行一个最简单的 smoke test 验证环境可用；若失败，先修复环境再继续\n"
+                "**环境问题（缺包、缺配置、端口、权限）由你负责解决，不要报告给工程师。**\n\n"
+                "## 阶段二：测试执行\n"
+                "读取 .crew_workspace/design.md 和实现代码，补充或完善测试用例并运行所有测试。\n"
+                "发现**代码 bug**时记录到 .crew_workspace/qa_report.md，不要自行修复代码（由工程师负责）。\n\n"
                 "**验收标准检查：**\n"
                 "如果 .crew_workspace/prd_criteria.json 存在，读取其中的 criteria 列表，"
                 "逐条按 how_to_verify 执行验证，在 qa_report.md 末尾追加验收结果表格：\n"
@@ -135,7 +143,7 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
                 "TESTS_PASSED\n"
                 "TESTS_FAILED"
             ),
-            prompt="请补充测试用例并运行，将 bug 记录到 qa_report.md。\n\n**重要**：请直接输出结果，不要等待用户确认，不要交互式提问。",
+            prompt="请先完成环境准备（安装依赖、修复环境问题），再补充测试用例并运行，将代码 bug 记录到 qa_report.md。\n\n**重要**：请直接输出结果，不要等待用户确认，不要交互式提问。",
             depends_on=["fixer"], timeout=_cfg.RESPONSE_TIMEOUT * 4,
             exit_marker="TESTS_PASSED", fail_marker="TESTS_FAILED",
             retry_target=["fixer"], max_retries=1,

@@ -99,26 +99,39 @@ def _sync_output_file(state: CrewState, agent_id: str) -> str:
         _debug_log(f"[Crew] {agent_id} 读取 output_file 失败: {e}")
         return ""
 
-    title         = out_path.stem
+    project_prefix = (state.plan.title or "crew")[:20].strip()
+    title         = f"{project_prefix} · {out_path.stem}"
     folder_token  = state.feishu_folder_token
     owner_open_id = _crew_owner_open_id(state)
 
-    from larkhelm.lark_client import FeishuDocClient, DocError
+    from larkhelm.lark_client import FeishuDocClient, DocError, parse_doc_url
     doc_client = FeishuDocClient()
 
+    # Reuse existing Feishu doc if this output_file was already synced (e.g. fixer reusing changes.md)
+    existing_url = state.output_file_urls.get(spec.output_file, "")
+
     try:
-        if _cfg.DEFAULT_WIKI_SPACE_ID:
+        if existing_url:
+            # Append to the already-created doc instead of creating a duplicate
+            ref = parse_doc_url(existing_url)
+            doc_client.append(ref, content)
+            _debug_log(f"[Crew] {agent_id} 追加到已有飞书文档: {existing_url}")
+            return existing_url
+        elif _cfg.DEFAULT_WIKI_SPACE_ID:
             parent_token = folder_token or _cfg.DEFAULT_WIKI_PARENT_TOKEN
             ref        = doc_client.create_wiki_node(_cfg.DEFAULT_WIKI_SPACE_ID, title, parent_token,
                                                      owner_open_id=owner_open_id)
             node_token = ref.raw_url.split("/")[-1]
             doc_url    = f"https://feishu.cn/wiki/{node_token}"
+            doc_client.append(ref, content)
         else:
             target = folder_token or _cfg.DEFAULT_DRIVE_FOLDER or ""
             ref     = doc_client.create_doc(title, target, owner_open_id=owner_open_id)
             doc_url = f"https://feishu.cn/docx/{ref.token}"
+            doc_client.append(ref, content)
 
-        doc_client.append(ref, content)
+        with state.lock:
+            state.output_file_urls[spec.output_file] = doc_url
         _debug_log(f"[Crew] {agent_id} 已同步到飞书: {doc_url}")
         return doc_url
 
@@ -166,6 +179,18 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
             full_prompt = f"{active_system}\n\n---\n\n{resolved}"
         else:
             full_prompt = resolved
+
+    # Inject Feishu doc URLs from completed upstream agents so this agent can reference them
+    _upstream_doc_refs = []
+    for _dep_id in spec.depends_on:
+        _dep = state.agents.get(_dep_id)
+        if _dep and _dep.feishu_doc_url:
+            _upstream_doc_refs.append(f"- {_dep.spec.role}：{_dep.feishu_doc_url}")
+    if _upstream_doc_refs and not spec.model.startswith("hermes_"):
+        full_prompt += (
+            "\n\n---\n\n**上游 Agent 飞书文档（可直接引用，与本地文件内容相同）：**\n"
+            + "\n".join(_upstream_doc_refs)
+        )
 
     # Inject downstream feedback (written by _execute on retry, truncated to 3000 chars to prevent token explosion)
     if ag_state.feedback:
@@ -236,11 +261,10 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
 
     threading.Thread(target=_timeout_watcher, daemon=True).start()
 
-    # Progress card update (lightweight card-layer callback)
+    # Progress card update: only cache the latest text; heartbeat (_start_heartbeat) pushes the card
     def _on_text(text: str, status: str = "typing"):
         with state.lock:
-            state.agents[agent_id].result = text  # cache streaming intermediate state
-        _crew_update_card(state)
+            state.agents[agent_id].result = text
 
     def _on_start():
         """Callback when the process slot is acquired: update status and start the timeout countdown."""
@@ -810,7 +834,8 @@ def _synthesize(state: CrewState) -> str:
         if a.status == AgentStatus.DONE:
             if spec.output_file:
                 out_path = Path(_cwd_synth) / ".crew_workspace" / spec.output_file
-                parts.append(f"## {spec.role} ({spec.id})\nOutput file: {out_path}")
+                feishu_note = f"\n飞书文档：{a.feishu_doc_url}" if a.feishu_doc_url else ""
+                parts.append(f"## {spec.role} ({spec.id})\nOutput file: {out_path}{feishu_note}")
             else:
                 workspace   = _workspace_dir(state.chat_id, state.crew_id)
                 result_file = workspace / f"{spec.id}_result.txt"
@@ -944,10 +969,24 @@ def _run_crew(state: CrewState, total_timeout: int):
         except Exception:
             pass  # Silently ignore: non-git repo, git not installed, timeout, etc.
 
-        # Append workspace path and git commit info
+        # Append Feishu folder link, per-agent doc links, and git commit info
         _cwd_val = _get_cwd(state.chat_id)
         from larkhelm.crew._state import _git_head
-        _ws_note = f"\n\n---\n\n📁 Workspace files: `{_cwd_val}/.crew_workspace/`"
+        _ws_note = "\n\n---\n\n"
+        if state.feishu_folder_url:
+            _ws_note += f"📁 [飞书项目文件夹]({state.feishu_folder_url})"
+        else:
+            _ws_note += f"📁 Workspace: `{_cwd_val}/.crew_workspace/`"
+        # List per-agent Feishu doc links (deduplicated: same URL only once)
+        _seen_urls: set[str] = set()
+        _doc_links = []
+        for spec in state.plan.agents:
+            _ag = state.agents[spec.id]
+            if _ag.feishu_doc_url and _ag.feishu_doc_url not in _seen_urls:
+                _seen_urls.add(_ag.feishu_doc_url)
+                _doc_links.append(f"[{spec.role}]({_ag.feishu_doc_url})")
+        if _doc_links:
+            _ws_note += "\n📄 " + "  ·  ".join(_doc_links)
         if state.phase_commits:
             _commits_str = "  ".join(
                 f"`{aid}:{h}`" for aid, h in state.phase_commits.items()

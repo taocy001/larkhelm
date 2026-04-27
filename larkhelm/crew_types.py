@@ -116,4 +116,5 @@ class CrewState:
     trigger_msg_id:     str | None      = None    # user message id that triggered the task; used to reply with completion notification
     feishu_folder_token: str            = ""      # per-project Feishu folder token (Drive folder or Wiki node)
     feishu_folder_url:   str            = ""      # human-readable URL for the project folder
+    output_file_urls:    dict           = dataclasses.field(default_factory=dict)  # output_file → feishu_doc_url
     # phase_commits: {agent_id → git_commit_hash} (populated in auto_commit mode)

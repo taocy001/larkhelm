@@ -935,6 +935,22 @@ class FeishuDocClient:
         If owner_open_id is given, transfers ownership immediately after creation.
         Returns new folder token.
         """
+        if not parent_folder_token:
+            parent_folder_token = self.get_root_folder_token()
+        data = self._http_request(
+            "POST",
+            "https://open.feishu.cn/open-apis/drive/v1/files/create_folder",
+            {"name": name, "folder_token": parent_folder_token},
+        )
+        folder_token = data.get("data", {}).get("token", "")
+        if not folder_token:
+            raise DocAPIError(0, "create_folder 响应缺少 token")
+        if owner_open_id:
+            try:
+                self.transfer_doc_owner(folder_token, owner_open_id, doc_type="folder")
+            except Exception:
+                pass
+        return folder_token
 
     def get_root_folder_token(self) -> str:
         """Return the Drive root folder token for the current app/user."""
@@ -952,23 +968,6 @@ class FeishuDocClient:
         folder_token = data.get("data", {}).get("token", "")
         if not folder_token:
             raise DocAPIError(0, "get_root_folder_token 响应缺少 token")
-        return folder_token
-
-        if not parent_folder_token:
-            parent_folder_token = self.get_root_folder_token()
-        data = self._http_request(
-            "POST",
-            "https://open.feishu.cn/open-apis/drive/v1/files/create_folder",
-            {"name": name, "folder_token": parent_folder_token},
-        )
-        folder_token = data.get("data", {}).get("token", "")
-        if not folder_token:
-            raise DocAPIError(0, "create_folder 响应缺少 token")
-        if owner_open_id:
-            try:
-                self.transfer_doc_owner(folder_token, owner_open_id, doc_type="folder")
-            except Exception:
-                pass
         return folder_token
 
     def list_wiki_nodes(

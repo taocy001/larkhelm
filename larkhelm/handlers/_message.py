@@ -263,6 +263,18 @@ def handle_message(data: P2ImMessageReceiveV1):
             threading.Thread(target=_dev_target, args=(chat_id, text[4:].strip(), message.message_id),
                              daemon=True, name="dev-handler").start()
             return
+        if tl.startswith("/plan"):
+            from larkhelm.cmd_plan import cmd_plan
+            from larkhelm.log import _debug_log as _dl
+            def _plan_target(*a):
+                try:
+                    cmd_plan(*a)
+                except Exception as _e:
+                    import traceback as _tb
+                    _dl(f"[plan] unhandled exception: {_e}\n{_tb.format_exc()}")
+            threading.Thread(target=_plan_target, args=(chat_id, text[5:].strip(), message.message_id),
+                             daemon=True, name="plan-handler").start()
+            return
         if tl == "/cancel":
             chat_lock = _get_chat_lock(chat_id)
             is_running = not chat_lock.acquire(blocking=False)

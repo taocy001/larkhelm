@@ -165,6 +165,31 @@ def handle_card_action(event: P2CardActionTrigger) -> P2CardActionTriggerRespons
                 resp.toast = toast
             return resp
 
+        # Plan step confirmation buttons
+        if cmd.startswith("plan_continue:") or cmd.startswith("plan_skip:") or cmd.startswith("plan_cancel:"):
+            parts  = cmd.split(":", 1)
+            action = parts[0].replace("plan_", "")   # "continue" | "skip" | "cancel"
+            plan_id = parts[1]
+            from larkhelm.cmd_plan import signal_plan
+            signal_plan(plan_id, action)
+            labels = {"continue": "▶ 继续执行", "skip": "⏭ 已跳过", "cancel": "🛑 已取消"}
+            colors = {"continue": "green", "skip": "grey", "cancel": "red"}
+            from lark_oapi.event.callback.model.p2_card_action_trigger import CallBackCard
+            cb_card = CallBackCard()
+            cb_card.type = "raw"
+            cb_card.data = {
+                "config": {"wide_screen_mode": True},
+                "header": {"template": colors.get(action, "grey"),
+                           "title": {"tag": "plain_text", "content": labels.get(action, action)}},
+                "elements": [],
+            }
+            resp.card = cb_card
+            toast = CallBackToast()
+            toast.type = "success"
+            toast.content = labels.get(action, action)
+            resp.toast = toast
+            return resp
+
         # Crew pause button
         if cmd.startswith("crew_pause:"):
             crew_id = cmd.split(":", 1)[1]

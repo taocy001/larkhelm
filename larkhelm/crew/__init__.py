@@ -104,7 +104,6 @@ __all__ = [
     "_workspace_dir",
     # Runner
     "_run_agent",
-    "_run_agent_wrapper",
     "_wait_for_breakpoint",
     "_detect_fail_marker",
     "_sync_output_file",
