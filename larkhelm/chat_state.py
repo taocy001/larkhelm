@@ -153,12 +153,17 @@ _pending_doc_writes_lock = threading.Lock()
 
 def set_pending_doc_write(chat_id: str, url: str, content: str, ref: object) -> None:
     """Stage a document write operation that awaits user confirmation (5-minute TTL)."""
+    now = time.time()
     with _pending_doc_writes_lock:
+        # Evict any expired entries to prevent unbounded accumulation of doc content strings
+        expired = [k for k, v in _pending_doc_writes.items() if v["expire_ts"] < now]
+        for k in expired:
+            del _pending_doc_writes[k]
         _pending_doc_writes[chat_id] = {
             "url":       url,
             "content":   content,
             "ref":       ref,
-            "expire_ts": time.time() + 300,
+            "expire_ts": now + 300,
         }
 
 
