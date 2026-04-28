@@ -4,7 +4,6 @@ larkhelm · Dev software engineering pipeline definition
 from __future__ import annotations
 
 import dataclasses
-import json
 
 from larkhelm.crew_types import AgentSpec, CrewPlan
 
@@ -151,7 +150,7 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
             output_file="qa_report.md",
         ),
         AgentSpec(
-            id="reviewer", role="代码审查员", model="hermes_review",
+            id="reviewer", role="代码审查员", model="claude",
             system=(
                 "你是一个严格的代码审查员。审查所有本次改动的代码。\n\n"
                 "**必须逐条检查以下 8 项，每项给出 ✅ 或 ❌ 及说明：**\n"
@@ -169,11 +168,7 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
                 "APPROVED\n"
                 "REJECTED"
             ),
-            prompt=json.dumps({
-                "task": "审查所有本次改动的代码，按 8 项标准检查",
-                "agents": ["claude", "kimi", "gemini"],
-                "context": "请读取 .crew_workspace/changes.md 和 .crew_workspace/qa_report.md 了解改动内容",
-            }),
+            prompt="请读取 .crew_workspace/changes.md 和 .crew_workspace/qa_report.md 了解改动内容，按 8 项标准完整审查，输出到 .crew_workspace/review.md。\n\n**重要**：请直接输出结果，不要等待用户确认，不要交互式提问。",
             depends_on=["qa"], timeout=_cfg.RESPONSE_TIMEOUT * 8,
             exit_marker="APPROVED", fail_marker="REJECTED",
             retry_target=["fixer", "qa"], max_retries=1,

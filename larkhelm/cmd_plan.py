@@ -19,7 +19,6 @@ Or load from a Feishu doc:
 from __future__ import annotations
 
 import dataclasses
-import json
 import re
 import threading
 import time
@@ -79,6 +78,7 @@ class MultiPlanState:
     _confirm_result: str               = "continue"  # "continue" | "skip" | "cancel" | "retry"
     last_step_failed: bool             = False        # True when entering waiting after a failure
     max_retries:     int               = 1            # auto-retries before notifying user
+    no_confirm:      bool              = False        # skip between-step confirmations
 
 
 # plan_id → MultiPlanState
@@ -312,7 +312,7 @@ def _run_single_agent_step(state: MultiPlanState, step: PlanStep) -> bool:
 
     if step.type == "review":
         spec = AgentSpec(
-            id="reviewer", role="代码审查员", model="hermes_review",
+            id="reviewer", role="代码审查员", model="claude",
             system=(
                 "你是一个严格的代码审查员。\n\n"
                 "**必须逐条检查以下 8 项，每项给出 ✅ 或 ❌ 及说明：**\n"
@@ -327,11 +327,7 @@ def _run_single_agent_step(state: MultiPlanState, step: PlanStep) -> bool:
                 "将检查结果输出到 .crew_workspace/review.md，不要自行修改代码。\n\n"
                 "⚠️ 输出的最后一行必须且只能是 APPROVED 或 REJECTED"
             ),
-            prompt=json.dumps({
-                "task": step.desc or "审查所有本次改动的代码，按 8 项标准检查",
-                "agents": ["claude", "kimi", "gemini"],
-                "context": "请先读取 .crew_workspace/changes.md 了解改动范围",
-            }),
+            prompt=f"{step.desc or '审查所有本次改动的代码，按 8 项标准检查'}\n\n请先读取 .crew_workspace/changes.md 了解改动范围，完成后输出到 .crew_workspace/review.md。\n\n**重要**：请直接输出结果，不要等待用户确认。",
             depends_on=[], timeout=_cfg.RESPONSE_TIMEOUT * 8,
             output_file="review.md",
         )
@@ -545,9 +541,9 @@ def _run_plan(state: MultiPlanState) -> None:
                     idx += 1
                     continue
 
-            # Step succeeded; wait for human confirmation before next step
+            # Step succeeded; advance to next step (with optional confirmation)
             auto_retried = 0
-            if is_last:
+            if is_last or state.no_confirm:
                 idx += 1
                 continue
 
@@ -615,6 +611,11 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None) -> None:
     if _retry_m:
         text = _retry_re.sub("", text).strip()
 
+    # Parse --no-confirm flag: skip between-step human confirmations
+    no_confirm = "--no-confirm" in text
+    if no_confirm:
+        text = text.replace("--no-confirm", "").strip()
+
     if not text:
         send_card(chat_id, "⚠️ 用法",
                   "**手动编排**\n"
@@ -623,7 +624,9 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None) -> None:
                   "**智能规划**（自然语言描述需求，自动生成计划）\n"
                   "`/plan 实现 Phase 5~10，每个阶段之间做代码检视和修复`\n\n"
                   "也支持从飞书文档读取：`/plan https://feishu.cn/docx/xxx`\n\n"
-                  "**选项：** `--retry=N` 步骤失败时自动重试 N 次（默认 1）",
+                  "**选项：**\n"
+                  "- `--retry=N` 步骤失败时自动重试 N 次（默认 1）\n"
+                  "- `--no-confirm` 步骤成功后跳过确认，自动连续执行",
                   color="orange")
         return
 
@@ -680,6 +683,7 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None) -> None:
             phase="planning",
             trigger_msg_id=user_msg_id,
             max_retries=max_retries,
+            no_confirm=no_confirm,
         )
         # Show "generating" card immediately
         planning_card = _build_plan_card(state)
@@ -755,6 +759,7 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None) -> None:
         plan_id=plan_id, chat_id=chat_id, title=title, steps=steps,
         trigger_msg_id=user_msg_id,
         max_retries=max_retries,
+        no_confirm=no_confirm,
     )
 
     init_card = _build_plan_card(state)

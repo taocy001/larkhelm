@@ -30,20 +30,20 @@ HERMES_AGENTS = {
         "command": "claude",
         "args": ["-p"],
         "strength": "代码质量高，架构设计强，适合核心逻辑",
-        "timeout": 120,
+        "timeout": 600,
     },
     "kimi": {
         "command": "kimi",
         "args": ["-p"],
         "strength": "上下文长，适合审查和文档",
-        "timeout": 120,
+        "timeout": 600,
         "prompt_prefix": "请直接给出结果，不要探索项目目录，不要读取文件。限制在1000字以内。",
     },
     "gemini": {
         "command": "gemini",
         "args": ["-p"],
         "strength": "测试覆盖好，文档生成强",
-        "timeout": 180,
+        "timeout": 600,
     },
 }
 
@@ -309,84 +309,61 @@ def _mode_split_inline(backend_task, frontend_task, agents, cancel_ev, on_text):
 
 
 def _mode_review_inline(task, context, agents, cancel_ev, on_text):
-    """Review mode: implement → review → test pipeline."""
-    # Default assignment: claude implement, kimi review, gemini test
-    implementer = "claude"
-    reviewer = "kimi" if "kimi" in agents else "claude"
-    tester = "gemini" if "gemini" in agents else "kimi" if "kimi" in agents else "claude"
+    """Review mode: all agents review in parallel; any REJECTED → overall REJECTED."""
+    import concurrent.futures
 
-    # Step 1: Implement
-    if on_text:
-        on_text("[1/3] 实现阶段开始...")
-    agent = HERMES_AGENTS[implementer]
-    prefix = agent.get("prompt_prefix", "")
-    full_prompt = f"{prefix}\n\n{context}\n\n任务：{task}\n\n请直接输出完整实现代码，不要交互式确认。"
-    cmd = [agent["command"]] + agent["args"] + [full_prompt]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=agent.get("timeout", 120))
-        impl_output = result.stdout
-        if result.returncode != 0:
-            return f"❌ 实现阶段失败:\n{result.stderr[:1000]}"
-    except Exception as e:
-        return f"❌ 实现阶段异常: {e}"
+    def run_one(agent_name):
+        if cancel_ev.is_set():
+            return agent_name, {"status": "cancelled", "output": ""}
+        agent = HERMES_AGENTS.get(agent_name)
+        if not agent:
+            return agent_name, {"status": "error", "output": f"Unknown agent: {agent_name}"}
+        prefix = agent.get("prompt_prefix", "")
+        full_prompt = (
+            f"{prefix}\n\n{context}\n\n{task}\n\n"
+            "请直接输出审查结论。"
+            "输出的最后一行必须且只能是 APPROVED 或 REJECTED（不含其他字符）。"
+        )
+        cmd = [agent["command"]] + agent["args"] + [full_prompt]
+        timeout = agent.get("timeout", 600)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            return agent_name, {
+                "status": "success" if result.returncode == 0 else "error",
+                "output": result.stdout,
+            }
+        except subprocess.TimeoutExpired:
+            return agent_name, {"status": "timeout", "output": ""}
+        except Exception as e:
+            return agent_name, {"status": "error", "output": str(e)}
 
-    if cancel_ev.is_set():
-        return "（已取消）"
-    if on_text:
-        on_text("✅ 实现阶段完成")
-
-    # Step 2: Review
-    if on_text:
-        on_text("[2/3] 审查阶段开始...")
-    agent = HERMES_AGENTS[reviewer]
-    prefix = agent.get("prompt_prefix", "")
-    review_prompt = (
-        f"{prefix}\n\n请审查以下代码，找出问题并给出改进建议:\n\n"
-        f"```\n{impl_output}\n```\n\n"
-        f"请列出所有发现的问题（bug、性能问题、风格问题等）。"
-    )
-    cmd = [agent["command"]] + agent["args"] + [review_prompt]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=agent.get("timeout", 180))
-        review_output = result.stdout
-    except Exception as e:
-        review_output = f"审查异常: {e}"
+    results: dict = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(agents)) as executor:
+        futures = {executor.submit(run_one, a): a for a in agents}
+        for future in concurrent.futures.as_completed(futures):
+            agent_name, result = future.result()
+            results[agent_name] = result
+            if on_text:
+                on_text(f"✅ {agent_name} 完成: {result.get('status', '?')}")
 
     if cancel_ev.is_set():
         return "（已取消）"
-    if on_text:
-        on_text("✅ 审查阶段完成")
 
-    # Step 3: Test
-    if on_text:
-        on_text("[3/3] 测试阶段开始...")
-    agent = HERMES_AGENTS[tester]
-    prefix = agent.get("prompt_prefix", "")
-    test_prompt = (
-        f"{prefix}\n\n请为以下代码编写完整的 pytest 测试，并修复审查发现的问题:\n\n"
-        f"原始代码:\n```\n{impl_output}\n```\n\n"
-        f"审查意见:\n{review_output}\n\n"
-        f"请输出修复后的完整代码 + 完整的测试文件。"
+    outputs = []
+    for agent_name in agents:
+        r = results.get(agent_name, {})
+        status = r.get("status", "error")
+        output = r.get("output", "")
+        outputs.append(f"## {agent_name} ({status})\n{output}")
+
+    rejected = any(
+        "REJECTED" in r.get("output", "")
+        for r in results.values()
+        if r.get("status") == "success"
     )
-    cmd = [agent["command"]] + agent["args"] + [test_prompt]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=agent.get("timeout", 180))
-        test_output = result.stdout
-    except Exception as e:
-        test_output = f"测试异常: {e}"
+    verdict = "REJECTED" if rejected else "APPROVED"
 
-    if cancel_ev.is_set():
-        return "（已取消）"
-    if on_text:
-        on_text("✅ 测试阶段完成")
-
-    return (
-        f"# 评审模式结果\n\n"
-        f"## 1. 实现 ({implementer})\n```\n{impl_output[:1500]}\n```\n\n"
-        f"## 2. 审查 ({reviewer})\n```\n{review_output[:1500]}\n```\n\n"
-        f"## 3. 测试 + 修复 ({tester})\n```\n{test_output[:2000]}\n```\n\n"
-        f"---\n流水线完成: 实现 ✅ 审查 ✅ 测试 ✅"
-    )
+    return "\n\n---\n\n".join(outputs) + f"\n\n---\n\n综合结论: **{verdict}**\n\n{verdict}"
 
 
 def _format_hermes_result(result: dict, mode: str) -> str:
