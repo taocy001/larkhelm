@@ -50,26 +50,27 @@ def handle_card_action(event: P2CardActionTrigger) -> P2CardActionTriggerRespons
                 confirm_elements: list = []
                 if tool_name == "Bash":
                     cmd_text = tool_input.get("command", "").strip()
-                    confirm_elements.append({"tag": "div", "text": {"tag": "lark_md",
-                        "content": f"**命令：**\n{cmd_text[:400] or '(空)'}"}})
+                    confirm_elements.append({"tag": "markdown",
+                        "content": f"**命令：**\n```bash\n{cmd_text[:400] or '(空)'}\n```"})
                 elif tool_name in ("Write", "Edit", "NotebookEdit"):
                     path = tool_input.get("file_path", tool_input.get("notebook_path", "?"))
                     old = tool_input.get("old_string", "")
                     new = tool_input.get("new_string", "")
-                    detail = f"\n**修改：** {len(old.splitlines())} 行 → {len(new.splitlines())} 行" if old else ""
-                    confirm_elements.append({"tag": "div", "text": {"tag": "lark_md",
-                        "content": f"**工具：** `{tool_name}`\n**文件：** `{path}`{detail}"}})
+                    detail = f"\n\n**修改：** {len(old.splitlines())} 行 → {len(new.splitlines())} 行" if old else ""
+                    confirm_elements.append({"tag": "markdown",
+                        "content": f"**工具：** `{tool_name}`\n\n**文件：** `{path}`{detail}"})
                 else:
-                    confirm_elements.append({"tag": "div", "text": {"tag": "lark_md",
-                        "content": f"**工具：** `{tool_name}`"}})
+                    confirm_elements.append({"tag": "markdown",
+                        "content": f"**工具：** `{tool_name}`"})
                 from lark_oapi.event.callback.model.p2_card_action_trigger import CallBackCard
                 cb_card = CallBackCard()
                 cb_card.type = "raw"
                 cb_card.data = {
+                    "schema": "2.0",
                     "config": {"wide_screen_mode": True},
                     "header": {"template": result_color,
                                "title": {"tag": "plain_text", "content": result_title}},
-                    "elements": confirm_elements,
+                    "body": {"elements": confirm_elements},
                 }
                 resp.card = cb_card
                 toast = CallBackToast()
@@ -90,15 +91,16 @@ def handle_card_action(event: P2CardActionTrigger) -> P2CardActionTriggerRespons
                 cb_card = CallBackCard()
                 cb_card.type = "raw"
                 cb_card.data = {
+                    "schema": "2.0",
                     "config": {"wide_screen_mode": True},
                     "header": {
                         "template": "green" if confirmed else "red",
                         "title": {"tag": "plain_text",
                                   "content": "✅ 继续执行" if confirmed else "🛑 已取消"},
                     },
-                    "elements": [{"tag": "div", "text": {"tag": "lark_md",
+                    "body": {"elements": [{"tag": "markdown",
                         "content": "决策已记录，继续执行后续阶段…" if confirmed else "Crew 任务已取消。",
-                    }}],
+                    }]},
                 }
                 resp.card = cb_card
                 toast = CallBackToast()
@@ -121,11 +123,11 @@ def handle_card_action(event: P2CardActionTrigger) -> P2CardActionTriggerRespons
                 cb_card = CallBackCard()
                 cb_card.type = "raw"
                 cb_card.data = {
+                    "schema": "2.0",
                     "config": {"wide_screen_mode": True},
                     "header": {"template": "orange",
                                "title": {"tag": "plain_text", "content": "🛑 取消中"}},
-                    "elements": [{"tag": "div", "text": {"tag": "lark_md",
-                                                         "content": "取消信号已发送，请稍候…"}}],
+                    "body": {"elements": [{"tag": "markdown", "content": "取消信号已发送，请稍候…"}]},
                 }
                 resp.card = cb_card
                 toast = CallBackToast()
@@ -144,19 +146,20 @@ def handle_card_action(event: P2CardActionTrigger) -> P2CardActionTriggerRespons
                 cb_card.type = "raw"
                 if pending:
                     cb_card.data = {
+                        "schema": "2.0",
                         "config": {"wide_screen_mode": True},
                         "header": {"template": "grey",
                                    "title": {"tag": "plain_text", "content": "✗ 排队已取消"}},
-                        "elements": [{"tag": "div", "text": {"tag": "lark_md",
-                                                             "content": f"已取消排队：\n\n> {pending[0][:80]}"}}],
+                        "body": {"elements": [{"tag": "markdown",
+                                               "content": f"已取消排队：\n\n> {pending[0][:80]}"}]},
                     }
                 else:
                     cb_card.data = {
+                        "schema": "2.0",
                         "config": {"wide_screen_mode": True},
                         "header": {"template": "grey",
                                    "title": {"tag": "plain_text", "content": "✗ 排队已取消"}},
-                        "elements": [{"tag": "div", "text": {"tag": "lark_md",
-                                                             "content": "排队任务已取消。"}}],
+                        "body": {"elements": [{"tag": "markdown", "content": "排队任务已取消。"}]},
                     }
                 resp.card = cb_card
                 toast = CallBackToast()
@@ -178,10 +181,11 @@ def handle_card_action(event: P2CardActionTrigger) -> P2CardActionTriggerRespons
             cb_card = CallBackCard()
             cb_card.type = "raw"
             cb_card.data = {
+                "schema": "2.0",
                 "config": {"wide_screen_mode": True},
                 "header": {"template": colors.get(action, "grey"),
                            "title": {"tag": "plain_text", "content": labels.get(action, action)}},
-                "elements": [],
+                "body": {"elements": []},
             }
             resp.card = cb_card
             toast = CallBackToast()

@@ -122,11 +122,11 @@ def _bash_needs_approval(command: str, cwd: str) -> bool:
 
 
 def _send_perm_card(chat_id: str, tool_name: str, tool_input: dict, tool_use_id: str) -> str:
-    """Send a permission confirmation card (JSON 1.0; uses multiple div blocks to ensure content visibility)."""
-    elements: list = []
+    """Send a permission confirmation card (JSON 2.0 for proper markdown rendering)."""
+    body_elements: list = []
 
     def md(content: str):
-        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": content}})
+        body_elements.append({"tag": "markdown", "content": content})
 
     if tool_name == "Bash":
         cmd_text = tool_input.get("command", "").strip()
@@ -134,7 +134,7 @@ def _send_perm_card(chat_id: str, tool_name: str, tool_input: dict, tool_use_id:
         md(f"**工具：** `Bash`")
         if desc_field:
             md(f"_{desc_field}_")
-        md("**命令：**\n" + (cmd_text[:800] or "(空)"))
+        md(f"**命令：**\n```bash\n{cmd_text[:800] or '(空)'}\n```")
     elif tool_name in ("Write", "Edit", "NotebookEdit"):
         path = tool_input.get("file_path", tool_input.get("notebook_path", "?"))
         md(f"**工具：** `{tool_name}`")
@@ -161,20 +161,24 @@ def _send_perm_card(chat_id: str, tool_name: str, tool_input: dict, tool_use_id:
         for k, v in list(tool_input.items())[:6]:
             md(f"**{k}：** `{str(v)[:120]}`")
 
-    elements.append({"tag": "hr"})
-    elements.append({
+    body_elements.append({"tag": "hr"})
+    body_elements.append({
         "tag": "action",
         "actions": [
-            {"tag": "button", "text": {"tag": "plain_text", "content": label},
-             "type": _btn_type(label), "value": {"cmd": f"perm:{act}:{tool_use_id}"}}
+            {
+                "tag": "button", "text": {"tag": "plain_text", "content": label},
+                "type": _btn_type(label),
+                "behaviors": [{"type": "callback", "value": {"cmd": f"perm:{act}:{tool_use_id}"}}],
+            }
             for label, act in [("✅ 允许", "allow"), ("❌ 拒绝", "deny"), ("🚀 允许所有", "yolo")]
         ],
     })
 
     card_json = json.dumps({
+        "schema": "2.0",
         "config": {"wide_screen_mode": True},
         "header": {"template": "orange", "title": {"tag": "plain_text", "content": "🔐 权限请求"}},
-        "elements": elements,
+        "body": {"elements": body_elements},
     }, ensure_ascii=False)
     return _send_card_raw(chat_id, card_json)
 
@@ -258,13 +262,13 @@ def _handle_perm_conn(conn):
             result_title = labels.get(decision, "已处理")
             result_color = "green" if decision != "deny" else "red"
             result_card = json.dumps({
+                "schema": "2.0",
                 "config": {"wide_screen_mode": True},
                 "header": {"template": result_color,
                            "title": {"tag": "plain_text", "content": result_title}},
-                "elements": [
-                    {"tag": "div", "text": {"tag": "lark_md",
-                                            "content": f"**工具：** `{tool_name}`"}},
-                ],
+                "body": {"elements": [
+                    {"tag": "markdown", "content": f"**工具：** `{tool_name}`"},
+                ]},
             }, ensure_ascii=False)
             ok = _patch_card_raw(card_mid, result_card)
             _debug_log(f"[Perm] card update {'ok' if ok else 'failed'} decision={decision}")

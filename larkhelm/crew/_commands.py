@@ -477,15 +477,15 @@ def _run_generic_crew_inner(chat_id: str, requirement: str,
     clear_recent_crew_context(chat_id)
 
     try:
-        # Send initial card (JSON 1.0 so subsequent patches can keep the same schema)
         init_card = json.dumps({
+            "schema": "2.0",
             "config": {"wide_screen_mode": True},
             "header": {"template": "grey",
                        "title": {"tag": "plain_text", "content": "🧠 Crew · 规划中"}},
-            "elements": [
-                {"tag": "div", "text": {"tag": "lark_md",
-                 "content": f"**需求：** {requirement[:100]}\n\nManager 正在分析需求，生成任务计划…"}},
-            ],
+            "body": {"elements": [
+                {"tag": "markdown",
+                 "content": f"**需求：** {requirement[:100]}\n\nManager 正在分析需求，生成任务计划…"},
+            ]},
         }, ensure_ascii=False)
         if user_msg_id:
             card_mid = _reply_card_raw(user_msg_id, init_card, in_thread=False)
@@ -602,14 +602,15 @@ def _run_dev_crew_inner(chat_id: str, requirement: str, user_msg_id: str,
             flow_desc = "产品经理 → 架构师 → 工程师 → 测试工程师 → 代码审查员"
 
         init_card = json.dumps({
+            "schema": "2.0",
             "config": {"wide_screen_mode": True},
             "header": {"template": "blue",
                        "title": {"tag": "plain_text",
                                  "content": f"📐 软件开发 · {plan.title}"}},
-            "elements": [
-                {"tag": "div", "text": {"tag": "lark_md",
-                 "content": f"**需求：** {requirement[:200]}\n\n**流程：** {flow_desc}"}},
-            ],
+            "body": {"elements": [
+                {"tag": "markdown",
+                 "content": f"**需求：** {requirement[:200]}\n\n**流程：** {flow_desc}"},
+            ]},
         }, ensure_ascii=False)
         if user_msg_id:
             card_mid = _reply_card_raw(user_msg_id, init_card, in_thread=False)
@@ -657,18 +658,19 @@ def immediate_cancel_crew(chat_id: str) -> bool:
         elapsed = _fmt_elapsed(time.time() - state.start_time)
         _label  = "Dev" if state.kind == "dev" else "Crew"
         _patch_card_raw(state.card_mid, json.dumps({
+            "schema": "2.0",
             "config": {"wide_screen_mode": True},
             "header": {
                 "template": "orange",
                 "title": {"tag": "plain_text",
                           "content": f"🛑 {_label} 取消中… ({elapsed})"},
             },
-            "elements": [{"tag": "div", "text": {"tag": "lark_md",
+            "body": {"elements": [{"tag": "markdown",
                 "content": (
                     f"**{state.plan.title}**\n\n"
                     "正在等待运行中的 Agent 退出…"
                 ),
-            }}],
+            }]},
         }, ensure_ascii=False))
         return True
     except Exception as e:
@@ -705,17 +707,18 @@ def cancel_all_crews(reason: str = "服务重启"):
         try:
             elapsed = _fmt_elapsed(time.time() - state.start_time)
             _patch_card_raw(state.card_mid, json.dumps({
+                "schema": "2.0",
                 "config": {"wide_screen_mode": True},
                 "header": {"template": "orange",
                            "title": {"tag": "plain_text",
                                      "content": f"🛑 Crew 已中断（{elapsed}）"}},
-                "elements": [{"tag": "div", "text": {"tag": "lark_md",
+                "body": {"elements": [{"tag": "markdown",
                     "content": (
                         f"⚠️ **{reason}**，服务重启后将自动从断点恢复。\n\n"
                         f"**任务：** {state.plan.title}\n\n"
                         f"已完成 {len(completed_ids)} 个 Agent，断点已保存。"
                     ),
-                }}],
+                }]},
             }, ensure_ascii=False))
         except Exception as e:
             _debug_log(f"[Shutdown] cancel card update failed: {e}")
@@ -758,17 +761,18 @@ def pause_crew(crew_id: str) -> bool:
     elapsed = _fmt_elapsed(time.time() - state.start_time)
     try:
         _patch_card_raw(state.card_mid, json.dumps({
+            "schema": "2.0",
             "config": {"wide_screen_mode": True},
             "header": {"template": "yellow",
                        "title": {"tag": "plain_text",
                                  "content": f"⏸ {_label} 已暂停 ({elapsed})"}},
-            "elements": [{"tag": "div", "text": {"tag": "lark_md",
+            "body": {"elements": [{"tag": "markdown",
                 "content": (
                     f"**{state.plan.title}**\n\n"
                     f"断点已保存（已完成 {len(completed_ids)} 个 Agent）。\n\n"
                     f"服务重启后将自动从断点继续执行。"
                 ),
-            }}],
+            }]},
         }, ensure_ascii=False))
     except Exception as e:
         _debug_log(f"[Pause] card update failed: {e}")
