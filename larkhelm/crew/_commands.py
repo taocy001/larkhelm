@@ -512,10 +512,11 @@ def _run_generic_crew_inner(chat_id: str, requirement: str,
             else:
                 if card_mid:
                     _patch_card_raw(card_mid, json.dumps({
+                        "schema": "2.0",
                         "config": {"wide_screen_mode": True},
                         "header": {"template": "orange",
                                    "title": {"tag": "plain_text", "content": "🛑 Crew 已取消"}},
-                        "elements": [],
+                        "body": {"elements": []},
                     }, ensure_ascii=False))
                 return
 
