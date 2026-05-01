@@ -5,10 +5,12 @@ Contains:
   - _make_card()          Build card JSON (always JSON 2.0; buttons use behaviors/callback)
   - _split_md()           Split Markdown at MAX_CARD_LEN boundaries
   - _normalize_newlines() Insert blank lines outside code blocks for Feishu paragraph rendering
+  - _md_to_body_elements() Split markdown into body elements, converting tables to Feishu table elements
   - _btn_type()           Determine button style from its label
   - _fmt_elapsed()        Format elapsed seconds as a human-readable string
 """
 import json
+import re
 
 import larkhelm.config as _cfg
 
@@ -29,22 +31,110 @@ def _btn_type(label: str) -> str:
     return "default"
 
 
+def _is_table_line(line: str) -> bool:
+    s = line.strip()
+    return s.startswith("|") and s.endswith("|") and len(s) > 2
+
+
 def _normalize_newlines(text: str) -> str:
-    """Convert single newlines outside code blocks to double newlines (Feishu card Markdown requires double newlines for paragraph breaks)."""
+    """Convert single newlines outside code blocks to double newlines.
+    Table rows are kept together without extra blank lines so _md_to_body_elements
+    can detect and convert them as contiguous blocks."""
     lines = text.split("\n")
     result: list[str] = []
     in_code = False
     for line in lines:
-        # Use stripped form so indented code fences (e.g. inside lists) are detected correctly
         if line.lstrip().startswith("```"):
             in_code = not in_code
         if in_code:
             result.append(line)
         else:
-            if result and result[-1] != "" and line != "":
-                result.append("")
+            curr_table = _is_table_line(line)
+            prev_table = bool(result) and _is_table_line(result[-1])
+            # Don't insert blank lines adjacent to table rows
+            if not curr_table and not prev_table:
+                if result and result[-1] != "" and line != "":
+                    result.append("")
             result.append(line)
     return "\n".join(result)
+
+
+def _parse_md_table(table_lines: list[str]) -> dict | None:
+    """Convert a list of markdown table lines into a Feishu JSON 2.0 table element."""
+    def split_cells(line: str) -> list[str]:
+        return [c.strip() for c in line.strip().strip("|").split("|")]
+
+    def is_separator(line: str) -> bool:
+        return bool(re.match(r"^\|[-| :]+\|$", line.strip()))
+
+    non_sep = [l for l in table_lines if not is_separator(l)]
+    if not non_sep:
+        return None
+
+    headers = split_cells(non_sep[0])
+    data_rows_cells = [split_cells(l) for l in non_sep[1:]]
+
+    if not headers:
+        return None
+
+    col_keys = [f"c{i}" for i in range(len(headers))]
+    columns = [
+        {"data_source_column": col_keys[i], "width": "auto",
+         "horizontal_align": "left", "name": headers[i]}
+        for i in range(len(headers))
+    ]
+    rows = [
+        {col_keys[i]: (cells[i] if i < len(cells) else "") for i in range(len(col_keys))}
+        for cells in data_rows_cells
+    ]
+
+    if not rows:
+        return None
+
+    return {
+        "tag": "table",
+        "page_size": len(rows),
+        "row_height": "low",
+        "header_style": {"text_align": "left", "bold": True, "lines": 1},
+        "columns": columns,
+        "rows": rows,
+    }
+
+
+def _md_to_body_elements(text: str) -> list[dict]:
+    """Split normalized markdown into body elements.
+    Markdown tables are converted to Feishu native table elements;
+    everything else becomes markdown elements."""
+    elements: list[dict] = []
+    lines = text.split("\n")
+    buf: list[str] = []
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+        if _is_table_line(line):
+            content = "\n".join(buf).strip()
+            if content:
+                elements.append({"tag": "markdown", "content": content})
+            buf = []
+            table_lines: list[str] = []
+            while i < len(lines) and _is_table_line(lines[i]):
+                table_lines.append(lines[i])
+                i += 1
+            table_elem = _parse_md_table(table_lines)
+            if table_elem:
+                elements.append(table_elem)
+            else:
+                elements.append({"tag": "markdown", "content": "\n".join(table_lines)})
+        else:
+            buf.append(line)
+            i += 1
+
+    content = "\n".join(buf).strip()
+    if content:
+        elements.append({"tag": "markdown", "content": content})
+
+    return elements or [{"tag": "markdown", "content": text}]
 
 
 def _split_md(text: str) -> list[str]:
@@ -90,9 +180,10 @@ def _make_card(title: str, body: str, color: str = "blue", note: str = "",
                tools_list: list = None,
                normalize: bool = True) -> str:
     """
-    Always uses JSON 2.0 (supports code blocks, collapsible panels, quotes, etc.).
+    Always uses JSON 2.0 (supports code blocks, collapsible panels, quotes, tables, etc.).
     Buttons use behaviors/callback — action.value in the card callback event receives
     the same {"cmd": ...} dict, so the existing handler is fully compatible.
+    Markdown tables in body are automatically converted to Feishu native table elements.
     """
     body_elements: list = []
 
@@ -139,7 +230,7 @@ def _make_card(title: str, body: str, color: str = "blue", note: str = "",
     if note:
         content = (content + "\n\n" if content else "") + f"---\n\n_{note}_"
     if content:
-        body_elements.append({"tag": "markdown", "content": content})
+        body_elements.extend(_md_to_body_elements(content))
 
     if buttons:
         body_elements.append({"tag": "hr"})
