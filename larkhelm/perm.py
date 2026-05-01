@@ -122,23 +122,23 @@ def _bash_needs_approval(command: str, cwd: str) -> bool:
 
 
 def _send_perm_card(chat_id: str, tool_name: str, tool_input: dict, tool_use_id: str) -> str:
-    """Send a permission confirmation card (JSON 2.0 for proper markdown rendering)."""
-    body_elements: list = []
+    """Send a permission confirmation card (JSON 1.0; required for interactive action buttons)."""
+    elements: list = []
 
     def md(content: str):
-        body_elements.append({"tag": "markdown", "content": content})
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": content}})
 
     if tool_name == "Bash":
         cmd_text = tool_input.get("command", "").strip()
         desc_field = tool_input.get("description", "").strip()
-        md(f"**工具：** `Bash`")
+        md(f"**工具：** Bash")
         if desc_field:
             md(f"_{desc_field}_")
-        md(f"**命令：**\n```bash\n{cmd_text[:800] or '(空)'}\n```")
+        md("**命令：**\n" + (cmd_text[:800] or "(空)"))
     elif tool_name in ("Write", "Edit", "NotebookEdit"):
         path = tool_input.get("file_path", tool_input.get("notebook_path", "?"))
-        md(f"**工具：** `{tool_name}`")
-        md(f"**文件：** `{path}`")
+        md(f"**工具：** {tool_name}")
+        md(f"**文件：** {path}")
         old = tool_input.get("old_string", "")
         new = tool_input.get("new_string", tool_input.get("new_string", ""))
         if old:
@@ -148,37 +148,33 @@ def _send_perm_card(chat_id: str, tool_name: str, tool_input: dict, tool_use_id:
         offset = tool_input.get("offset", "")
         limit  = tool_input.get("limit", "")
         extra  = f"  行 {offset}–{int(offset)+int(limit)}" if offset and limit else ""
-        md(f"**工具：** `Read`")
-        md(f"**文件：** `{path}`{extra}")
+        md(f"**工具：** Read")
+        md(f"**文件：** {path}{extra}")
     elif tool_name == "Glob":
-        md(f"**工具：** `Glob`")
-        md(f"**模式：** `{tool_input.get('pattern','?')}`")
+        md(f"**工具：** Glob")
+        md(f"**模式：** {tool_input.get('pattern','?')}")
     elif tool_name == "Grep":
-        md(f"**工具：** `Grep`")
-        md(f"**模式：** `{tool_input.get('pattern','?')}`")
+        md(f"**工具：** Grep")
+        md(f"**模式：** {tool_input.get('pattern','?')}")
     else:
-        md(f"**工具：** `{tool_name}`")
+        md(f"**工具：** {tool_name}")
         for k, v in list(tool_input.items())[:6]:
-            md(f"**{k}：** `{str(v)[:120]}`")
+            md(f"**{k}：** {str(v)[:120]}")
 
-    body_elements.append({"tag": "hr"})
-    body_elements.append({
+    elements.append({"tag": "hr"})
+    elements.append({
         "tag": "action",
         "actions": [
-            {
-                "tag": "button", "text": {"tag": "plain_text", "content": label},
-                "type": _btn_type(label),
-                "behaviors": [{"type": "callback", "value": {"cmd": f"perm:{act}:{tool_use_id}"}}],
-            }
+            {"tag": "button", "text": {"tag": "plain_text", "content": label},
+             "type": _btn_type(label), "value": {"cmd": f"perm:{act}:{tool_use_id}"}}
             for label, act in [("✅ 允许", "allow"), ("❌ 拒绝", "deny"), ("🚀 允许所有", "yolo")]
         ],
     })
 
     card_json = json.dumps({
-        "schema": "2.0",
         "config": {"wide_screen_mode": True},
         "header": {"template": "orange", "title": {"tag": "plain_text", "content": "🔐 权限请求"}},
-        "body": {"elements": body_elements},
+        "elements": elements,
     }, ensure_ascii=False)
     return _send_card_raw(chat_id, card_json)
 

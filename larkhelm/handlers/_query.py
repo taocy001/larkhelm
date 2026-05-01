@@ -24,7 +24,7 @@ from larkhelm.lark_client import (
     EMOJI_PROCESSING, EMOJI_DONE, EMOJI_ERROR,
     _index_reply,
 )
-from larkhelm.card_builder import _make_card, _split_md, _fmt_elapsed
+from larkhelm.card_builder import _make_card, _make_simple_v1_card, _split_md, _fmt_elapsed
 from larkhelm.ai_runner import query_claude, query_gemini, query_kimi, QueryCancelledError
 
 # ── Card UX parameters (from config) ────────────────────────────────
@@ -201,11 +201,14 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 tool_parts.append(f"_+{n_hidden} 条更早记录已隐藏_")
 
             def _fmt_desc(d: str) -> str:
+                # Streaming card uses JSON 1.0 / lark_md which doesn't render backticks or
+                # fenced code blocks — show plain text; full content is in the final card
                 if not d:
                     return ""
                 if "\n" in d:
-                    return f"\n```\n{d}\n```"
-                return f"  \n`{d}`"
+                    first = next((l.strip() for l in d.splitlines() if l.strip()), d[:80])
+                    return f"  \n{first[:120]}…"
+                return f"  \n{d}"
 
             for t in comp[-TOOL_HISTORY_CAP:]:
                 icon = "✗" if t["is_error"] else "✓"
@@ -386,6 +389,11 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                                     tools_list=final_tools if final_tools else None,
                                     tools_expanded=False)
             if not _patch_card_raw(mid, final_card):
+                # Streaming card is JSON 1.0 (has cancel button); final card is JSON 2.0.
+                # Feishu rejects V1→V2 schema change on patch (ErrCode 200830).
+                # Clean up the streaming card first (remove the stale cancel button),
+                # then create a new message with the JSON 2.0 final card.
+                _patch_card_raw(mid, _make_simple_v1_card(f"✅ {m_name} 完成", f"耗时 {elapsed}"))
                 mid = _send_card_raw(chat_id, final_card)
             for i, chunk in enumerate(chunks[1:], 2):
                 chunk_note = note if i == len(chunks) else ""

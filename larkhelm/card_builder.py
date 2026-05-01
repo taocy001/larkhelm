@@ -2,12 +2,17 @@
 larkhelm · Feishu card builder utilities
 
 Contains:
-  - _make_card()          Build card JSON (always JSON 2.0; buttons use behaviors/callback)
-  - _split_md()           Split Markdown at MAX_CARD_LEN boundaries
-  - _normalize_newlines() Insert blank lines outside code blocks for Feishu paragraph rendering
+  - _make_card()           With buttons → JSON 1.0; without buttons → JSON 2.0
+  - _make_simple_v1_card() Minimal JSON 1.0 card for patching existing V1 streaming cards
+  - _split_md()            Split Markdown at MAX_CARD_LEN boundaries
+  - _normalize_newlines()  Insert blank lines outside code blocks for Feishu paragraph rendering
   - _md_to_body_elements() Split markdown into body elements, converting tables to Feishu table elements
-  - _btn_type()           Determine button style from its label
-  - _fmt_elapsed()        Format elapsed seconds as a human-readable string
+  - _btn_type()            Determine button style from its label
+  - _fmt_elapsed()         Format elapsed seconds as a human-readable string
+
+Schema strategy:
+  JSON 1.0 (elements[])     — required for interactive buttons (action tag)
+  JSON 2.0 (body.elements[])— used when no buttons; supports code blocks, tables, collapsible panels
 """
 import json
 import re
@@ -51,7 +56,6 @@ def _normalize_newlines(text: str) -> str:
         else:
             curr_table = _is_table_line(line)
             prev_table = bool(result) and _is_table_line(result[-1])
-            # Don't insert blank lines adjacent to table rows
             if not curr_table and not prev_table:
                 if result and result[-1] != "" and line != "":
                     result.append("")
@@ -145,7 +149,6 @@ def _split_md(text: str) -> list[str]:
         if line.lstrip().startswith("```"):
             in_code = not in_code
         line_len = len(line) + 1
-        # Single line longer than the limit: flush buffer then hard-split the line
         if line_len > _cfg.MAX_CARD_LEN:
             if buf:
                 chunks.append("\n".join(buf))
@@ -169,8 +172,21 @@ def _split_md(text: str) -> list[str]:
 
 
 # ═══════════════════════════════════════════════════
-#  Card builder
+#  Card builders
 # ═══════════════════════════════════════════════════
+
+def _make_simple_v1_card(title: str, body: str, color: str = "blue") -> str:
+    """Minimal JSON 1.0 card. Used to clean up streaming cards (which are JSON 1.0)
+    before sending a new JSON 2.0 final card, avoiding the V1→V2 schema-change error."""
+    elements = []
+    if body.strip():
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": body}})
+    return json.dumps({
+        "config": {"wide_screen_mode": True},
+        "header": {"template": color, "title": {"tag": "plain_text", "content": title}},
+        "elements": elements,
+    }, ensure_ascii=False)
+
 
 def _make_card(title: str, body: str, color: str = "blue", note: str = "",
                buttons: list[tuple[str, str]] = None,
@@ -180,15 +196,44 @@ def _make_card(title: str, body: str, color: str = "blue", note: str = "",
                tools_list: list = None,
                normalize: bool = True) -> str:
     """
-    Always uses JSON 2.0 (supports code blocks, collapsible panels, quotes, tables, etc.).
-    Buttons use behaviors/callback — action.value in the card callback event receives
-    the same {"cmd": ...} dict, so the existing handler is fully compatible.
-    Markdown tables in body are automatically converted to Feishu native table elements.
+    With buttons  → JSON 1.0 (only schema that supports the action tag for interactive buttons)
+    Without buttons → JSON 2.0 (supports code blocks, tables, collapsible panels, etc.)
+
+    When patching a JSON 1.0 streaming card with a JSON 2.0 final card, Feishu rejects the
+    schema change (ErrCode 200830). Use _make_simple_v1_card() to first clean up the
+    streaming card, then send the JSON 2.0 card as a new message.
     """
+    if buttons:
+        # ── JSON 1.0: required for interactive buttons (action tag) ──────────
+        elements: list = []
+        if tools_md:
+            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": tools_md}})
+            elements.append({"tag": "hr"})
+        if body.strip():
+            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": body}})
+        elements.append({"tag": "hr"})
+        elements.append({
+            "tag": "action",
+            "actions": [
+                {"tag": "button", "text": {"tag": "plain_text", "content": label},
+                 "type": _btn_type(label), "value": {"cmd": cmd}}
+                for label, cmd in buttons
+            ],
+        })
+        if note:
+            elements.append({"tag": "hr"})
+            elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": note}]})
+        header: dict = {"template": color, "title": {"tag": "plain_text", "content": title}}
+        return json.dumps({
+            "config": {"wide_screen_mode": True},
+            "header": header,
+            "elements": elements,
+        }, ensure_ascii=False)
+
+    # ── JSON 2.0: code blocks, tables, collapsible panels ────────────────────
     body_elements: list = []
 
     if tools_list:
-        # Structured tool list: nested collapsibles to expand full output
         inner_elements: list = []
         for t in tools_list:
             icon = "✗" if t["is_error"] else "✓"
@@ -231,21 +276,6 @@ def _make_card(title: str, body: str, color: str = "blue", note: str = "",
         content = (content + "\n\n" if content else "") + f"---\n\n_{note}_"
     if content:
         body_elements.extend(_md_to_body_elements(content))
-
-    if buttons:
-        body_elements.append({"tag": "hr"})
-        body_elements.append({
-            "tag": "action",
-            "actions": [
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": label},
-                    "type": _btn_type(label),
-                    "behaviors": [{"type": "callback", "value": {"cmd": cmd}}],
-                }
-                for label, cmd in buttons
-            ],
-        })
 
     v2_header: dict = {"template": color, "title": {"tag": "plain_text", "content": title}}
     if subtitle:
