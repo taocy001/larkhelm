@@ -498,27 +498,34 @@ def _wait_for_breakpoint(state: CrewState, agent_id: str) -> bool:
     # Send confirmation card
     agent_role = state.agents[agent_id].spec.role if state.agents.get(agent_id) else "Agent"
     confirm_card = json.dumps({
+        "schema": "2.0",
         "config": {"wide_screen_mode": True},
         "header": {
             "template": "yellow",
             "title": {"tag": "plain_text",
                       "content": f"⏸ {agent_role}已完成，请确认是否继续执行"},
         },
-        "elements": [
-            {"tag": "div", "text": {"tag": "lark_md",
-             "content": f"**任务：** {state.plan.title}\n\n{prd_preview}"}},
+        "body": {"elements": [
+            {"tag": "markdown", "content": f"**任务：** {state.plan.title}\n\n{prd_preview}"},
             {"tag": "hr"},
-            {"tag": "action", "actions": [
-                {"tag": "button",
-                 "text": {"tag": "plain_text", "content": "✅ 继续执行"},
-                 "type": "primary",
-                 "value": {"cmd": f"crew_bp:confirm:{crew_id}"}},
-                {"tag": "button",
-                 "text": {"tag": "plain_text", "content": "❌ 取消"},
-                 "type": "danger",
-                 "value": {"cmd": f"crew_bp:cancel:{crew_id}"}},
-            ]},
-        ],
+            {
+                "tag": "column_set", "flex_mode": "flow", "horizontal_spacing": "8px",
+                "columns": [
+                    {"tag": "column", "width": "auto", "elements": [
+                        {"tag": "button", "element_id": "btn_0",
+                         "text": {"tag": "plain_text", "content": "✅ 继续执行"},
+                         "type": "primary",
+                         "behaviors": [{"type": "callback", "value": {"cmd": f"crew_bp:confirm:{crew_id}"}}]},
+                    ]},
+                    {"tag": "column", "width": "auto", "elements": [
+                        {"tag": "button", "element_id": "btn_1",
+                         "text": {"tag": "plain_text", "content": "❌ 取消"},
+                         "type": "danger",
+                         "behaviors": [{"type": "callback", "value": {"cmd": f"crew_bp:cancel:{crew_id}"}}]},
+                    ]},
+                ],
+            },
+        ]},
     }, ensure_ascii=False)
     _send_card_raw(state.chat_id, confirm_card)
 

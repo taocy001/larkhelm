@@ -1,18 +1,13 @@
 """
 larkhelm · Feishu card builder utilities
 
-Contains:
-  - _make_card()           With buttons → JSON 1.0; without buttons → JSON 2.0
-  - _make_simple_v1_card() Minimal JSON 1.0 card for patching existing V1 streaming cards
-  - _split_md()            Split Markdown at MAX_CARD_LEN boundaries
-  - _normalize_newlines()  Insert blank lines outside code blocks for Feishu paragraph rendering
-  - _md_to_body_elements() Split markdown into body elements, converting tables to Feishu table elements
-  - _btn_type()            Determine button style from its label
-  - _fmt_elapsed()         Format elapsed seconds as a human-readable string
-
-Schema strategy:
-  JSON 1.0 (elements[])     — required for interactive buttons (action tag)
-  JSON 2.0 (body.elements[])— used when no buttons; supports code blocks, tables, collapsible panels
+Schema strategy: always JSON 2.0.
+  - Buttons: placed directly in body.elements (single) or via column_set (multiple).
+    Use behaviors/callback — server receives the same action.value dict as schema 1.0.
+  - Tables: markdown tables are parsed and emitted as native Feishu table elements.
+  - Code blocks / collapsible panels / headings: rendered via markdown tag.
+  - _make_simple_v1_card: JSON 1.0 helper for patching pre-existing V1 streaming cards
+    (avoids the V1→V2 schema-change error for sessions started before this schema migration).
 """
 import json
 import re
@@ -171,13 +166,23 @@ def _split_md(text: str) -> list[str]:
     return chunks or [text]
 
 
+def _make_btn_element(label: str, cmd: str, idx: int = 0) -> dict:
+    return {
+        "tag": "button",
+        "element_id": f"btn_{idx}",
+        "text": {"tag": "plain_text", "content": label},
+        "type": _btn_type(label),
+        "behaviors": [{"type": "callback", "value": {"cmd": cmd}}],
+    }
+
+
 # ═══════════════════════════════════════════════════
 #  Card builders
 # ═══════════════════════════════════════════════════
 
 def _make_simple_v1_card(title: str, body: str, color: str = "blue") -> str:
-    """Minimal JSON 1.0 card. Used to clean up streaming cards (which are JSON 1.0)
-    before sending a new JSON 2.0 final card, avoiding the V1→V2 schema-change error."""
+    """Minimal JSON 1.0 card. Used to clean up pre-existing V1 streaming cards
+    (removes their stale cancel button) before sending a new V2 final card."""
     elements = []
     if body.strip():
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": body}})
@@ -196,41 +201,10 @@ def _make_card(title: str, body: str, color: str = "blue", note: str = "",
                tools_list: list = None,
                normalize: bool = True) -> str:
     """
-    With buttons  → JSON 1.0 (only schema that supports the action tag for interactive buttons)
-    Without buttons → JSON 2.0 (supports code blocks, tables, collapsible panels, etc.)
-
-    When patching a JSON 1.0 streaming card with a JSON 2.0 final card, Feishu rejects the
-    schema change (ErrCode 200830). Use _make_simple_v1_card() to first clean up the
-    streaming card, then send the JSON 2.0 card as a new message.
+    Always JSON 2.0. Buttons placed directly in body.elements (single) or via
+    column_set (multiple). Server receives action.value == behaviors[0].value,
+    so the existing card action handler is fully compatible.
     """
-    if buttons:
-        # ── JSON 1.0: required for interactive buttons (action tag) ──────────
-        elements: list = []
-        if tools_md:
-            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": tools_md}})
-            elements.append({"tag": "hr"})
-        if body.strip():
-            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": body}})
-        elements.append({"tag": "hr"})
-        elements.append({
-            "tag": "action",
-            "actions": [
-                {"tag": "button", "text": {"tag": "plain_text", "content": label},
-                 "type": _btn_type(label), "value": {"cmd": cmd}}
-                for label, cmd in buttons
-            ],
-        })
-        if note:
-            elements.append({"tag": "hr"})
-            elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": note}]})
-        header: dict = {"template": color, "title": {"tag": "plain_text", "content": title}}
-        return json.dumps({
-            "config": {"wide_screen_mode": True},
-            "header": header,
-            "elements": elements,
-        }, ensure_ascii=False)
-
-    # ── JSON 2.0: code blocks, tables, collapsible panels ────────────────────
     body_elements: list = []
 
     if tools_list:
@@ -276,6 +250,25 @@ def _make_card(title: str, body: str, color: str = "blue", note: str = "",
         content = (content + "\n\n" if content else "") + f"---\n\n_{note}_"
     if content:
         body_elements.extend(_md_to_body_elements(content))
+
+    if buttons:
+        body_elements.append({"tag": "hr"})
+        if len(buttons) == 1:
+            body_elements.append(_make_btn_element(buttons[0][0], buttons[0][1], 0))
+        else:
+            body_elements.append({
+                "tag": "column_set",
+                "flex_mode": "flow",
+                "horizontal_spacing": "8px",
+                "columns": [
+                    {
+                        "tag": "column",
+                        "width": "auto",
+                        "elements": [_make_btn_element(label, cmd, i)],
+                    }
+                    for i, (label, cmd) in enumerate(buttons)
+                ],
+            })
 
     v2_header: dict = {"template": color, "title": {"tag": "plain_text", "content": title}}
     if subtitle:

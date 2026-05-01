@@ -201,14 +201,11 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 tool_parts.append(f"_+{n_hidden} 条更早记录已隐藏_")
 
             def _fmt_desc(d: str) -> str:
-                # Streaming card uses JSON 1.0 / lark_md which doesn't render backticks or
-                # fenced code blocks — show plain text; full content is in the final card
                 if not d:
                     return ""
                 if "\n" in d:
-                    first = next((l.strip() for l in d.splitlines() if l.strip()), d[:80])
-                    return f"  \n{first[:120]}…"
-                return f"  \n{d}"
+                    return f"\n```\n{d}\n```"
+                return f"  \n`{d}`"
 
             for t in comp[-TOOL_HISTORY_CAP:]:
                 icon = "✗" if t["is_error"] else "✓"
