@@ -13,7 +13,7 @@ import threading
 import time
 from pathlib import Path
 
-from larkhelm.card_builder import _fmt_elapsed, _split_md, _make_card
+from larkhelm.card_builder import _fmt_elapsed, _split_md, _make_card, _make_card_dict
 from larkhelm.chat_state import _get_cwd
 from larkhelm.crew_types import (
     AgentStatus, CrewState, CREW_RESULT_PREVIEW, CREW_CARD_INTERVAL,
@@ -198,7 +198,7 @@ def _build_card(state: CrewState) -> str:
             "content": chunk,
         })
 
-    # ── Active phase: JSON 1.0 with cancel/pause buttons ─────────
+    # ── Active phase: JSON 2.0 with cancel/pause buttons ─────────
     if phase in ("planning", "running", "planned", "synthesizing", "breakpoint"):
         if phase == "planning":
             body_md = "Manager 正在分析需求，生成任务计划…"
@@ -239,16 +239,9 @@ def _build_card(state: CrewState) -> str:
                           buttons=[("🛑 取消", f"cancel:{state.chat_id}"),
                                    ("⏸ 暂停", f"crew_pause:{state.crew_id}")])
 
-    # ── Terminal phase: JSON 2.0 rich text format ────────────────
-    return json.dumps({
-        "schema": "2.0",
-        "config": {"wide_screen_mode": True},
-        "header": {
-            "template": color,
-            "title": {"tag": "plain_text", "content": title},
-        },
-        "body": {"elements": elements},
-    }, ensure_ascii=False)
+    # ── Terminal phase: rich text with pre-built element tree ────
+    return json.dumps(_make_card_dict(title, raw_elements=elements, color=color),
+                      ensure_ascii=False)
 
 
 def _crew_update_card(state: CrewState):

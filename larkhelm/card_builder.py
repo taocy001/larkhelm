@@ -53,9 +53,11 @@ def _normalize_newlines(text: str) -> str:
     result: list[str] = []
     in_code = False
     for line in lines:
+        was_in_code = in_code
         if line.lstrip().startswith("```"):
             in_code = not in_code
-        if in_code:
+        if was_in_code:
+            # Inside a code block (including the closing fence): append verbatim.
             result.append(line)
         else:
             curr_table = _is_table_line(line)
@@ -96,8 +98,8 @@ def _parse_md_table(table_lines: list[str]) -> dict | None:
 
     return {
         "tag": "table",
-        "page_size": len(rows),
-        "row_height": "low",
+        "page_size": min(len(rows), 100),
+        "row_height": "medium",
         "header_style": {"text_align": "left", "bold": True, "lines": 1},
         "columns": columns,
         "rows": rows,
@@ -192,7 +194,7 @@ def _buttons_element(buttons: list[tuple[str, str]]) -> dict | None:
     return {
         "tag": "column_set",
         "flex_mode": "flow",
-        "horizontal_spacing": "8px",
+        "horizontal_spacing": "small",
         "columns": [
             {"tag": "column", "width": "auto",
              "elements": [_btn_element(label, cmd, i)]}
@@ -214,6 +216,7 @@ def _make_card_dict(
     tools_expanded: bool = False,
     tools_list: list = None,
     normalize: bool = True,
+    raw_elements: "list[dict] | None" = None,
 ) -> dict:
     """
     Build a Feishu card and return it as a dict (JSON 2.0).
@@ -223,54 +226,63 @@ def _make_card_dict(
       list[str]:  multiple independent markdown sections; each rendered as its own
                   block, useful when content has distinct visual paragraphs
                   (e.g. tool name line, then a code block for the command).
+    raw_elements — pre-built list[dict] body elements; when provided, body/note/buttons/
+                   tools_* are ignored and the list is used as-is. For complex cards
+                   (e.g. crew_card.py terminal phase) that build their own element tree.
     """
+    # Fast path: caller supplies pre-built elements (e.g. crew_card terminal phase)
+    if raw_elements is not None:
+        header: dict = {"template": color, "title": {"tag": "plain_text", "content": title}}
+        if subtitle:
+            header["subtitle"] = {"tag": "plain_text", "content": subtitle}
+        return {
+            "schema": "2.0",
+            "config": {"wide_screen_mode": True},
+            "header": header,
+            "body": {"elements": raw_elements},
+        }
+
     body_elements: list = []
 
     # ── Tool call panels ──────────────────────────────────────────────────
     if tools_list:
+        # Flat markdown elements inside one collapsible panel — JSON 2.0 does not
+        # support nesting collapsible_panel inside collapsible_panel.
         inner: list = []
         for t in tools_list:
             icon = "✗" if t["is_error"] else "✓"
             desc_str = f" `{t['desc']}`" if t.get("desc") else ""
             hdr = f"{icon} **{t['name']}** ({_fmt_elapsed(t['elapsed'])}){desc_str}"
+            inner.append({"tag": "markdown", "content": hdr})
             full = t.get("full_result", "")
             if full:
                 n = len(full)
-                inner.append({
-                    "tag": "collapsible_panel",
-                    "header": {"title": {"tag": "markdown", "content": hdr}},
-                    "expanded": False,
-                    "elements": [{"tag": "markdown",
-                                  "content": f"```\n{full[:4800]}\n```"
-                                             + (f"\n\n_（截断，共 {n} 字符）_"
-                                                if n > 4800 else "")}],
-                })
-            else:
-                inner.append({"tag": "markdown", "content": hdr})
+                suffix = f"\n\n_（截断，共 {n} 字符）_" if n > 4800 else ""
+                inner.append({"tag": "markdown",
+                               "content": f"```\n{full[:4800]}\n```{suffix}"})
         body_elements.append({
             "tag": "collapsible_panel",
-            "header": {"title": {"tag": "markdown", "content": "**🔧 工具调用**"}},
+            "header": {"title": {"tag": "plain_text", "content": "🔧 工具调用"}},
             "expanded": tools_expanded,
             "elements": inner,
         })
-        if body if isinstance(body, str) else any(s.strip() for s in body):
-            body_elements.append({"tag": "hr"})
     elif tools_md:
         body_elements.append({
             "tag": "collapsible_panel",
-            "header": {"title": {"tag": "markdown", "content": "**🔧 工具调用**"}},
+            "header": {"title": {"tag": "plain_text", "content": "🔧 工具调用"}},
             "expanded": tools_expanded,
             "elements": [{"tag": "markdown", "content": tools_md}],
         })
-        if body if isinstance(body, str) else any(s.strip() for s in body):
-            body_elements.append({"tag": "hr"})
 
     # ── Body content ──────────────────────────────────────────────────────
+    tools_present = bool(body_elements)  # true if tools panel was added above
     sections: list[str] = [body] if isinstance(body, str) else list(body)
     body_has_content = False
     for sec in sections:
         elems = _section_elements(sec, normalize)
         if elems:
+            if tools_present and not body_has_content:
+                body_elements.append({"tag": "hr"})  # separator between tools and body
             body_elements.extend(elems)
             body_has_content = True
 
@@ -285,7 +297,8 @@ def _make_card_dict(
 
     # ── Buttons ───────────────────────────────────────────────────────────
     if buttons:
-        body_elements.append({"tag": "hr"})
+        if body_elements:  # only add divider when there is content above
+            body_elements.append({"tag": "hr"})
         body_elements.append(_buttons_element(buttons))
 
     # ── Header ───────────────────────────────────────────────────────────
@@ -312,11 +325,13 @@ def _make_card(
     tools_expanded: bool = False,
     tools_list: list = None,
     normalize: bool = True,
+    raw_elements: "list[dict] | None" = None,
 ) -> str:
     """JSON string wrapper around _make_card_dict."""
     return json.dumps(
         _make_card_dict(title, body, color, note, buttons, subtitle,
-                        tools_md, tools_expanded, tools_list, normalize),
+                        tools_md, tools_expanded, tools_list, normalize,
+                        raw_elements),
         ensure_ascii=False,
     )
 

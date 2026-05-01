@@ -13,7 +13,8 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 import larkhelm.config as _cfg
 from larkhelm.log import _debug_log
 from larkhelm.concurrency import _trigger_cancel, _pop_pending
-from larkhelm.perm import grant_yolo, _perm_lock, _perm_pending, _perm_decision, _perm_tool_name, _perm_tool_input
+from larkhelm.perm import (grant_yolo, _perm_lock, _perm_pending, _perm_decision,
+                            _perm_tool_name, _perm_tool_input, _fmt_tool_body)
 from larkhelm.card_builder import _make_card_dict
 
 
@@ -48,21 +49,11 @@ def handle_card_action(event: P2CardActionTrigger) -> P2CardActionTriggerRespons
                 labels = {"allow": "✅ 已允许", "deny": "❌ 已拒绝", "yolo": "🚀 已允许全部"}
                 result_title = labels.get(action_name, "已处理")
                 result_color = "green" if action_name != "deny" else "red"
-                if tool_name == "Bash":
-                    cmd_text = tool_input.get("command", "").strip()
-                    body_str = f"**命令：**\n```bash\n{cmd_text[:400] or '(空)'}\n```"
-                elif tool_name in ("Write", "Edit", "NotebookEdit"):
-                    path   = tool_input.get("file_path", tool_input.get("notebook_path", "?"))
-                    old    = tool_input.get("old_string", "")
-                    new    = tool_input.get("new_string", "")
-                    detail = f"\n\n**修改：** {len(old.splitlines())} 行 → {len(new.splitlines())} 行" if old else ""
-                    body_str = f"**工具：** `{tool_name}`\n\n**文件：** `{path}`{detail}"
-                else:
-                    body_str = f"**工具：** `{tool_name}`"
+                body_sections = _fmt_tool_body(tool_name, tool_input, max_cmd=400)
                 from lark_oapi.event.callback.model.p2_card_action_trigger import CallBackCard
                 cb_card = CallBackCard()
                 cb_card.type = "raw"
-                cb_card.data = _make_card_dict(result_title, body_str, color=result_color)
+                cb_card.data = _make_card_dict(result_title, body_sections, color=result_color)
                 resp.card = cb_card
                 toast = CallBackToast()
                 toast.type = "success"

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from larkhelm.log import _debug_log
 from larkhelm.ai_runner import QueryCancelledError
-from larkhelm.crew_types import AgentSpec, AgentState, AgentStatus, CrewPlan, CrewState
+from larkhelm.crew_types import AgentSpec, AgentState, AgentStatus, CrewPlan, CrewState, HardFailError
 
 
 _CHECKPOINT_FILE = ".crew_workspace/crew_checkpoint.json"
@@ -208,15 +208,12 @@ def resume_interrupted_crews():
             resume_title = "▶️ Crew 续跑中（从暂停恢复）" if paused else "🔄 Crew 续跑中（从断点恢复）"
             # Update card to indicate resume in progress
             try:
-                _patch_card_raw(state.card_mid, json.dumps({
-                    "schema": "2.0",
-                    "config": {"wide_screen_mode": True},
-                    "header": {"template": "blue",
-                               "title": {"tag": "plain_text",
-                                         "content": resume_title}},
-                    "body": {"elements": [{"tag": "markdown",
-                        "content": f"服务重启后从断点继续执行。\n\n**任务：** {state.plan.title}"}]},
-                }, ensure_ascii=False))
+                from larkhelm.card_builder import _make_card
+                _patch_card_raw(state.card_mid, _make_card(
+                    resume_title,
+                    f"服务重启后从断点继续执行。\n\n**任务：** {state.plan.title}",
+                    color="blue",
+                ))
             except Exception:
                 pass
 

@@ -13,13 +13,14 @@ import json
 import re
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import larkhelm.config as _cfg
 from larkhelm.log import _debug_log
 from larkhelm.chat_state import _get_cwd
 from larkhelm.lark_client import _send_card_raw, _patch_card_raw
-from larkhelm.card_builder import _btn_type, _make_card
+from larkhelm.card_builder import _make_card
 
 # ── Permission state ─────────────────────────────────────────────────────
 _perm_lock        = threading.Lock()
@@ -49,9 +50,10 @@ def is_yolo(ns: str) -> bool:
 
 
 # ── Dangerous command patterns (pre-compiled) ────────────────────────────────────────
+_INTERPRETERS = r'(bash|sh|zsh|python3?|ruby|perl|node|bun|deno|php)'
 _DANGEROUS_PATTERNS = [
     re.compile(pat) for pat in [
-        r'(?<![a-zA-Z0-9_/])rm(\s|$)',
+        r'\brm\b',                                        # catches /usr/bin/rm too
         r'\brmdir\b',
         r'\bdd\b',
         r'\bmkfs\b',
@@ -71,7 +73,11 @@ _DANGEROUS_PATTERNS = [
         r'\bpip3?\s+uninstall\b',
         r'\byum\s+(remove|erase)\b',
         r'\bdnf\s+remove\b',
-        r'[|;`]\s*(bash|sh|zsh|python3?|ruby|perl|node)\s',
+        # Pipe/chain to interpreter — covers |, ;, `, &&, ||, $(...) and no-arg trailing
+        r'[|;`]\s*' + _INTERPRETERS + r'(\s|$)',
+        r'&&\s*' + _INTERPRETERS + r'(\s|$)',
+        r'\|\|\s*' + _INTERPRETERS + r'(\s|$)',
+        r'\$\(\s*' + _INTERPRETERS + r'(\s|\))',
         r'>\s*/(?!tmp/)',
     ]
 ]
@@ -121,17 +127,19 @@ def _bash_needs_approval(command: str, cwd: str) -> bool:
     return False
 
 
-def _send_perm_card(chat_id: str, tool_name: str, tool_input: dict, tool_use_id: str) -> str:
-    """Send a permission confirmation card."""
+def _fmt_tool_body(tool_name: str, tool_input: dict, max_cmd: int = 800) -> list[str]:
+    """Format tool input into body sections for permission cards.
+    Shared between the initial request card and the callback response card."""
     sections: list[str] = []
-
     if tool_name == "Bash":
         cmd_text   = tool_input.get("command", "").strip()
         desc_field = tool_input.get("description", "").strip()
+        # Escape triple-backtick sequences to prevent Markdown code-fence breakout.
+        safe_cmd = cmd_text[:max_cmd].replace("```", "` ` `")
         sections.append(f"**工具：** `Bash`")
         if desc_field:
             sections.append(f"_{desc_field}_")
-        sections.append(f"**命令：**\n```bash\n{cmd_text[:800] or '(空)'}\n```")
+        sections.append(f"**命令：**\n```bash\n{safe_cmd or '(空)'}\n```")
     elif tool_name in ("Write", "Edit", "NotebookEdit"):
         path   = tool_input.get("file_path", tool_input.get("notebook_path", "?"))
         old    = tool_input.get("old_string", "")
@@ -152,13 +160,19 @@ def _send_perm_card(chat_id: str, tool_name: str, tool_input: dict, tool_use_id:
         sections.append(f"**工具：** `{tool_name}`")
         for k, v in list(tool_input.items())[:6]:
             sections.append(f"**{k}：** `{str(v)[:120]}`")
+    return sections
 
+
+def _send_perm_card(chat_id: str, tool_name: str, tool_input: dict, tool_use_id: str) -> str:
+    """Send a permission confirmation card."""
     buttons = [
-        ("✅ 允许",   f"perm:allow:{tool_use_id}"),
-        ("❌ 拒绝",   f"perm:deny:{tool_use_id}"),
+        ("✅ 允许",    f"perm:allow:{tool_use_id}"),
+        ("❌ 拒绝",    f"perm:deny:{tool_use_id}"),
         ("🚀 允许所有", f"perm:yolo:{tool_use_id}"),
     ]
-    card_json = _make_card("🔐 权限请求", sections, color="orange", buttons=buttons)
+    card_json = _make_card("🔐 权限请求",
+                           _fmt_tool_body(tool_name, tool_input),
+                           color="orange", buttons=buttons)
     return _send_card_raw(chat_id, card_json)
 
 
@@ -182,12 +196,13 @@ def _handle_perm_conn(conn):
             conn.close()
             return
 
-        req         = json.loads(buf.strip())
-        chat_id     = req.get("chat_id", "")
-        tool_name   = req.get("tool_name", "?")
-        tool_input  = req.get("tool_input", {})
-        tool_use_id = req.get("tool_use_id", "") or str(time.time())
-        _debug_log(f"[Perm] received request tool={tool_name} id={tool_use_id[:16]}")
+        req            = json.loads(buf.strip())
+        chat_id        = req.get("chat_id", "")
+        tool_name      = req.get("tool_name", "?")
+        tool_input     = req.get("tool_input", {})
+        client_id      = req.get("tool_use_id", "")       # for debug only
+        tool_use_id    = uuid.uuid4().hex                  # server-generated; not client-controlled
+        _debug_log(f"[Perm] received request tool={tool_name} client_id={client_id[:16]}")
 
         # Fast-path: Allow All already granted
         if is_yolo(chat_id):
@@ -280,11 +295,24 @@ def _start_perm_server():
     server.listen(32)
     _debug_log(f"[Perm] permission approval server started: {path}")
 
+    _conn_sem = threading.Semaphore(16)   # cap concurrent handler threads
+
     def _serve():
         while True:
             try:
                 conn, _ = server.accept()
-                threading.Thread(target=_handle_perm_conn, args=(conn,),
+                if not _conn_sem.acquire(blocking=False):
+                    _debug_log("[Perm] connection limit reached, dropping connection")
+                    conn.close()
+                    continue
+
+                def _handle_and_release(c=conn):
+                    try:
+                        _handle_perm_conn(c)
+                    finally:
+                        _conn_sem.release()
+
+                threading.Thread(target=_handle_and_release,
                                  daemon=True, name="perm-conn").start()
             except Exception:
                 break
