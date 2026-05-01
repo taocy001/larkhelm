@@ -204,7 +204,10 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 if not d:
                     return ""
                 if "\n" in d:
-                    return f"\n```\n{d}\n```"
+                    # lark_md (JSON 1.0) doesn't render fenced code blocks;
+                    # show first non-empty line only — full content is in the final collapsible card
+                    first = next((l.strip() for l in d.splitlines() if l.strip()), d[:80])
+                    return f"  \n`{first[:120]}…`"
                 return f"  \n`{d}`"
 
             for t in comp[-TOOL_HISTORY_CAP:]:
