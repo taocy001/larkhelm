@@ -204,10 +204,8 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 if not d:
                     return ""
                 if "\n" in d:
-                    # lark_md doesn't render markdown formatting; show first non-empty line only
-                    first = next((l.strip() for l in d.splitlines() if l.strip()), d[:80])
-                    return f"  \n{first[:120]}…"
-                return f"  \n{d}"
+                    return f"\n```\n{d}\n```"
+                return f"  \n`{d}`"
 
             for t in comp[-TOOL_HISTORY_CAP:]:
                 icon = "✗" if t["is_error"] else "✓"

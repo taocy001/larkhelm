@@ -2,7 +2,7 @@
 larkhelm · Feishu card builder utilities
 
 Contains:
-  - _make_card()          Build card JSON (JSON 1.0 with buttons / JSON 2.0 without)
+  - _make_card()          Build card JSON (always JSON 2.0; buttons use behaviors/callback)
   - _split_md()           Split Markdown at MAX_CARD_LEN boundaries
   - _normalize_newlines() Insert blank lines outside code blocks for Feishu paragraph rendering
   - _btn_type()           Determine button style from its label
@@ -90,37 +90,10 @@ def _make_card(title: str, body: str, color: str = "blue", note: str = "",
                tools_list: list = None,
                normalize: bool = True) -> str:
     """
-    With buttons  → JSON 1.0 (Feishu schema 2.0 body.elements does not support action tags)
-    Without buttons → JSON 2.0 (supports code blocks, collapsible panels, quotes, etc.)
+    Always uses JSON 2.0 (supports code blocks, collapsible panels, quotes, etc.).
+    Buttons use behaviors/callback — action.value in the card callback event receives
+    the same {"cmd": ...} dict, so the existing handler is fully compatible.
     """
-    if buttons:
-        # ── JSON 1.0: supports interactive buttons ──────────────────────────
-        elements: list = []
-        if tools_md:
-            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": tools_md}})
-            elements.append({"tag": "hr"})
-        if body.strip():
-            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": body}})
-        elements.append({"tag": "hr"})
-        elements.append({
-            "tag": "action",
-            "actions": [
-                {"tag": "button", "text": {"tag": "plain_text", "content": label},
-                 "type": _btn_type(label), "value": {"cmd": cmd}}
-                for label, cmd in buttons
-            ],
-        })
-        if note:
-            elements.append({"tag": "hr"})
-            elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": note}]})
-        header: dict = {"template": color, "title": {"tag": "plain_text", "content": title}}
-        return json.dumps({
-            "config": {"wide_screen_mode": True},
-            "header": header,
-            "elements": elements,
-        }, ensure_ascii=False)
-
-    # ── JSON 2.0: supports markdown code blocks / headings / quotes / collapsible panels ──
     body_elements: list = []
 
     if tools_list:
@@ -167,6 +140,21 @@ def _make_card(title: str, body: str, color: str = "blue", note: str = "",
         content = (content + "\n\n" if content else "") + f"---\n\n_{note}_"
     if content:
         body_elements.append({"tag": "markdown", "content": content})
+
+    if buttons:
+        body_elements.append({"tag": "hr"})
+        body_elements.append({
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": label},
+                    "type": _btn_type(label),
+                    "behaviors": [{"type": "callback", "value": {"cmd": cmd}}],
+                }
+                for label, cmd in buttons
+            ],
+        })
 
     v2_header: dict = {"template": color, "title": {"tag": "plain_text", "content": title}}
     if subtitle:
