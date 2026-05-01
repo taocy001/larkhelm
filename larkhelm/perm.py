@@ -19,7 +19,7 @@ import larkhelm.config as _cfg
 from larkhelm.log import _debug_log
 from larkhelm.chat_state import _get_cwd
 from larkhelm.lark_client import _send_card_raw, _patch_card_raw
-from larkhelm.card_builder import _btn_type
+from larkhelm.card_builder import _btn_type, _make_card
 
 # ── Permission state ─────────────────────────────────────────────────────
 _perm_lock        = threading.Lock()
@@ -122,68 +122,43 @@ def _bash_needs_approval(command: str, cwd: str) -> bool:
 
 
 def _send_perm_card(chat_id: str, tool_name: str, tool_input: dict, tool_use_id: str) -> str:
-    """Send a permission confirmation card (JSON 2.0 with markdown rendering)."""
-    from larkhelm.card_builder import _make_btn_element
-    body_elements: list = []
-
-    def md(content: str):
-        body_elements.append({"tag": "markdown", "content": content})
+    """Send a permission confirmation card."""
+    sections: list[str] = []
 
     if tool_name == "Bash":
-        cmd_text = tool_input.get("command", "").strip()
+        cmd_text   = tool_input.get("command", "").strip()
         desc_field = tool_input.get("description", "").strip()
-        md(f"**工具：** `Bash`")
+        sections.append(f"**工具：** `Bash`")
         if desc_field:
-            md(f"_{desc_field}_")
-        md(f"**命令：**\n```bash\n{cmd_text[:800] or '(空)'}\n```")
+            sections.append(f"_{desc_field}_")
+        sections.append(f"**命令：**\n```bash\n{cmd_text[:800] or '(空)'}\n```")
     elif tool_name in ("Write", "Edit", "NotebookEdit"):
-        path = tool_input.get("file_path", tool_input.get("notebook_path", "?"))
-        md(f"**工具：** `{tool_name}`")
-        md(f"**文件：** `{path}`")
-        old = tool_input.get("old_string", "")
-        new = tool_input.get("new_string", tool_input.get("new_string", ""))
-        if old:
-            md(f"**修改内容：** {len(old.splitlines())} 行 → {len(new.splitlines())} 行")
+        path   = tool_input.get("file_path", tool_input.get("notebook_path", "?"))
+        old    = tool_input.get("old_string", "")
+        new    = tool_input.get("new_string", "")
+        detail = f"\n\n**修改内容：** {len(old.splitlines())} 行 → {len(new.splitlines())} 行" if old else ""
+        sections.append(f"**工具：** `{tool_name}`\n\n**文件：** `{path}`{detail}")
     elif tool_name == "Read":
-        path = tool_input.get("file_path", "?")
+        path   = tool_input.get("file_path", "?")
         offset = tool_input.get("offset", "")
         limit  = tool_input.get("limit", "")
         extra  = f"  行 {offset}–{int(offset)+int(limit)}" if offset and limit else ""
-        md(f"**工具：** `Read`")
-        md(f"**文件：** `{path}`{extra}")
+        sections.append(f"**工具：** `Read`\n\n**文件：** `{path}`{extra}")
     elif tool_name == "Glob":
-        md(f"**工具：** `Glob`")
-        md(f"**模式：** `{tool_input.get('pattern','?')}`")
+        sections.append(f"**工具：** `Glob`\n\n**模式：** `{tool_input.get('pattern','?')}`")
     elif tool_name == "Grep":
-        md(f"**工具：** `Grep`")
-        md(f"**模式：** `{tool_input.get('pattern','?')}`")
+        sections.append(f"**工具：** `Grep`\n\n**模式：** `{tool_input.get('pattern','?')}`")
     else:
-        md(f"**工具：** `{tool_name}`")
+        sections.append(f"**工具：** `{tool_name}`")
         for k, v in list(tool_input.items())[:6]:
-            md(f"**{k}：** `{str(v)[:120]}`")
+            sections.append(f"**{k}：** `{str(v)[:120]}`")
 
-    body_elements.append({"tag": "hr"})
-    btns = [("✅ 允许", "allow"), ("❌ 拒绝", "deny"), ("🚀 允许所有", "yolo")]
-    body_elements.append({
-        "tag": "column_set",
-        "flex_mode": "flow",
-        "horizontal_spacing": "8px",
-        "columns": [
-            {
-                "tag": "column",
-                "width": "auto",
-                "elements": [_make_btn_element(label, f"perm:{act}:{tool_use_id}", i)],
-            }
-            for i, (label, act) in enumerate(btns)
-        ],
-    })
-
-    card_json = json.dumps({
-        "schema": "2.0",
-        "config": {"wide_screen_mode": True},
-        "header": {"template": "orange", "title": {"tag": "plain_text", "content": "🔐 权限请求"}},
-        "body": {"elements": body_elements},
-    }, ensure_ascii=False)
+    buttons = [
+        ("✅ 允许",   f"perm:allow:{tool_use_id}"),
+        ("❌ 拒绝",   f"perm:deny:{tool_use_id}"),
+        ("🚀 允许所有", f"perm:yolo:{tool_use_id}"),
+    ]
+    card_json = _make_card("🔐 权限请求", sections, color="orange", buttons=buttons)
     return _send_card_raw(chat_id, card_json)
 
 
@@ -265,15 +240,7 @@ def _handle_perm_conn(conn):
             labels = {"allow": "✅ 已允许", "deny": "❌ 已拒绝", "yolo": "🚀 已允许全部", "timeout": "⏰ 已超时"}
             result_title = labels.get(decision, "已处理")
             result_color = "green" if decision != "deny" else "red"
-            result_card = json.dumps({
-                "schema": "2.0",
-                "config": {"wide_screen_mode": True},
-                "header": {"template": result_color,
-                           "title": {"tag": "plain_text", "content": result_title}},
-                "body": {"elements": [
-                    {"tag": "markdown", "content": f"**工具：** `{tool_name}`"},
-                ]},
-            }, ensure_ascii=False)
+            result_card  = _make_card(result_title, f"**工具：** `{tool_name}`", color=result_color)
             ok = _patch_card_raw(card_mid, result_card)
             _debug_log(f"[Perm] card update {'ok' if ok else 'failed'} decision={decision}")
 

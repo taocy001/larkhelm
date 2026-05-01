@@ -477,16 +477,12 @@ def _run_generic_crew_inner(chat_id: str, requirement: str,
     clear_recent_crew_context(chat_id)
 
     try:
-        init_card = json.dumps({
-            "schema": "2.0",
-            "config": {"wide_screen_mode": True},
-            "header": {"template": "grey",
-                       "title": {"tag": "plain_text", "content": "🧠 Crew · 规划中"}},
-            "body": {"elements": [
-                {"tag": "markdown",
-                 "content": f"**需求：** {requirement[:100]}\n\nManager 正在分析需求，生成任务计划…"},
-            ]},
-        }, ensure_ascii=False)
+        from larkhelm.card_builder import _make_card
+        init_card = _make_card(
+            "🧠 Crew · 规划中",
+            f"**需求：** {requirement[:100]}\n\nManager 正在分析需求，生成任务计划…",
+            color="grey",
+        )
         if user_msg_id:
             card_mid = _reply_card_raw(user_msg_id, init_card, in_thread=False)
         else:
@@ -511,13 +507,7 @@ def _run_generic_crew_inner(chat_id: str, requirement: str,
                 )
             else:
                 if card_mid:
-                    _patch_card_raw(card_mid, json.dumps({
-                        "schema": "2.0",
-                        "config": {"wide_screen_mode": True},
-                        "header": {"template": "orange",
-                                   "title": {"tag": "plain_text", "content": "🛑 Crew 已取消"}},
-                        "body": {"elements": []},
-                    }, ensure_ascii=False))
+                    _patch_card_raw(card_mid, _make_card("🛑 Crew 已取消", "", color="orange"))
                 return
 
         # Initialize CrewState
@@ -602,17 +592,12 @@ def _run_dev_crew_inner(chat_id: str, requirement: str, user_msg_id: str,
         else:
             flow_desc = "产品经理 → 架构师 → 工程师 → 测试工程师 → 代码审查员"
 
-        init_card = json.dumps({
-            "schema": "2.0",
-            "config": {"wide_screen_mode": True},
-            "header": {"template": "blue",
-                       "title": {"tag": "plain_text",
-                                 "content": f"📐 软件开发 · {plan.title}"}},
-            "body": {"elements": [
-                {"tag": "markdown",
-                 "content": f"**需求：** {requirement[:200]}\n\n**流程：** {flow_desc}"},
-            ]},
-        }, ensure_ascii=False)
+        from larkhelm.card_builder import _make_card
+        init_card = _make_card(
+            f"📐 软件开发 · {plan.title}",
+            f"**需求：** {requirement[:200]}\n\n**流程：** {flow_desc}",
+            color="blue",
+        )
         if user_msg_id:
             card_mid = _reply_card_raw(user_msg_id, init_card, in_thread=False)
         else:
@@ -656,23 +641,14 @@ def immediate_cancel_crew(chat_id: str) -> bool:
     if not state or not state.card_mid:
         return False
     try:
+        from larkhelm.card_builder import _make_card
         elapsed = _fmt_elapsed(time.time() - state.start_time)
         _label  = "Dev" if state.kind == "dev" else "Crew"
-        _patch_card_raw(state.card_mid, json.dumps({
-            "schema": "2.0",
-            "config": {"wide_screen_mode": True},
-            "header": {
-                "template": "orange",
-                "title": {"tag": "plain_text",
-                          "content": f"🛑 {_label} 取消中… ({elapsed})"},
-            },
-            "body": {"elements": [{"tag": "markdown",
-                "content": (
-                    f"**{state.plan.title}**\n\n"
-                    "正在等待运行中的 Agent 退出…"
-                ),
-            }]},
-        }, ensure_ascii=False))
+        _patch_card_raw(state.card_mid, _make_card(
+            f"🛑 {_label} 取消中… ({elapsed})",
+            f"**{state.plan.title}**\n\n正在等待运行中的 Agent 退出…",
+            color="orange",
+        ))
         return True
     except Exception as e:
         _debug_log(f"[Cancel] immediate card update failed: {e}")
@@ -706,21 +682,15 @@ def cancel_all_crews(reason: str = "服务重启"):
         # Send cancel signal after checkpoint is saved, to avoid persisting cancelled state
         state.cancel_ev.set()
         try:
+            from larkhelm.card_builder import _make_card
             elapsed = _fmt_elapsed(time.time() - state.start_time)
-            _patch_card_raw(state.card_mid, json.dumps({
-                "schema": "2.0",
-                "config": {"wide_screen_mode": True},
-                "header": {"template": "orange",
-                           "title": {"tag": "plain_text",
-                                     "content": f"🛑 Crew 已中断（{elapsed}）"}},
-                "body": {"elements": [{"tag": "markdown",
-                    "content": (
-                        f"⚠️ **{reason}**，服务重启后将自动从断点恢复。\n\n"
-                        f"**任务：** {state.plan.title}\n\n"
-                        f"已完成 {len(completed_ids)} 个 Agent，断点已保存。"
-                    ),
-                }]},
-            }, ensure_ascii=False))
+            _patch_card_raw(state.card_mid, _make_card(
+                f"🛑 Crew 已中断（{elapsed}）",
+                (f"⚠️ **{reason}**，服务重启后将自动从断点恢复。\n\n"
+                 f"**任务：** {state.plan.title}\n\n"
+                 f"已完成 {len(completed_ids)} 个 Agent，断点已保存。"),
+                color="orange",
+            ))
         except Exception as e:
             _debug_log(f"[Shutdown] cancel card update failed: {e}")
 
@@ -758,23 +728,17 @@ def pause_crew(crew_id: str) -> bool:
     _save_checkpoint(state, completed_ids)
 
     # Update card
+    from larkhelm.card_builder import _make_card
     _label  = "Dev" if state.kind == "dev" else "Crew"
     elapsed = _fmt_elapsed(time.time() - state.start_time)
     try:
-        _patch_card_raw(state.card_mid, json.dumps({
-            "schema": "2.0",
-            "config": {"wide_screen_mode": True},
-            "header": {"template": "yellow",
-                       "title": {"tag": "plain_text",
-                                 "content": f"⏸ {_label} 已暂停 ({elapsed})"}},
-            "body": {"elements": [{"tag": "markdown",
-                "content": (
-                    f"**{state.plan.title}**\n\n"
-                    f"断点已保存（已完成 {len(completed_ids)} 个 Agent）。\n\n"
-                    f"服务重启后将自动从断点继续执行。"
-                ),
-            }]},
-        }, ensure_ascii=False))
+        _patch_card_raw(state.card_mid, _make_card(
+            f"⏸ {_label} 已暂停 ({elapsed})",
+            (f"**{state.plan.title}**\n\n"
+             f"断点已保存（已完成 {len(completed_ids)} 个 Agent）。\n\n"
+             f"服务重启后将自动从断点继续执行。"),
+            color="yellow",
+        ))
     except Exception as e:
         _debug_log(f"[Pause] card update failed: {e}")
 

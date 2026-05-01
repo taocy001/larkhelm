@@ -1,13 +1,25 @@
 """
 larkhelm · Feishu card builder utilities
 
-Schema strategy: always JSON 2.0.
-  - Buttons: placed directly in body.elements (single) or via column_set (multiple).
-    Use behaviors/callback — server receives the same action.value dict as schema 1.0.
-  - Tables: markdown tables are parsed and emitted as native Feishu table elements.
-  - Code blocks / collapsible panels / headings: rendered via markdown tag.
-  - _make_simple_v1_card: JSON 1.0 helper for patching pre-existing V1 streaming cards
-    (avoids the V1→V2 schema-change error for sessions started before this schema migration).
+Public API
+----------
+_make_card_dict(...)  → dict   core builder; callers that need a dict (e.g. CallBackCard.data)
+_make_card(...)       → str    json.dumps(_make_card_dict(...)); callers that need a JSON string
+_make_simple_v1_card(...)→ str  JSON 1.0 helper to clean up pre-migration streaming cards
+_split_md(text)       → list[str]
+_fmt_elapsed(s)       → str
+_normalize_newlines(t)→ str
+
+body parameter accepts str or list[str].
+  str       — treated as a single markdown section
+  list[str] — each element becomes an independent markdown block (useful when content
+               has multiple sections that should not be merged, e.g. perm cards)
+
+Schema: always JSON 2.0.
+  Buttons — direct button element (single) or column_set (multiple).
+            Callbacks use behaviors/callback; server receives action.value == behaviors[0].value,
+            compatible with the existing _card_action.py handler.
+  Tables  — markdown pipe tables auto-converted to Feishu native table elements.
 """
 import json
 import re
@@ -15,9 +27,7 @@ import re
 import larkhelm.config as _cfg
 
 
-# ═══════════════════════════════════════════════════
-#  Utility functions
-# ═══════════════════════════════════════════════════
+# ── Utilities ───────────────────────────────────────────────────────────────
 
 def _fmt_elapsed(seconds: float) -> str:
     return f"{seconds:.0f}s" if seconds < 60 else f"{seconds/60:.1f}m"
@@ -37,9 +47,8 @@ def _is_table_line(line: str) -> bool:
 
 
 def _normalize_newlines(text: str) -> str:
-    """Convert single newlines outside code blocks to double newlines.
-    Table rows are kept together without extra blank lines so _md_to_body_elements
-    can detect and convert them as contiguous blocks."""
+    """Double newlines outside code blocks for Feishu paragraph breaks.
+    Table rows are kept contiguous so _md_to_body_elements can detect them."""
     lines = text.split("\n")
     result: list[str] = []
     in_code = False
@@ -59,33 +68,28 @@ def _normalize_newlines(text: str) -> str:
 
 
 def _parse_md_table(table_lines: list[str]) -> dict | None:
-    """Convert a list of markdown table lines into a Feishu JSON 2.0 table element."""
+    """Convert contiguous markdown table lines → Feishu JSON 2.0 table element."""
     def split_cells(line: str) -> list[str]:
         return [c.strip() for c in line.strip().strip("|").split("|")]
 
-    def is_separator(line: str) -> bool:
+    def is_sep(line: str) -> bool:
         return bool(re.match(r"^\|[-| :]+\|$", line.strip()))
 
-    non_sep = [l for l in table_lines if not is_separator(l)]
+    non_sep = [l for l in table_lines if not is_sep(l)]
     if not non_sep:
         return None
 
     headers = split_cells(non_sep[0])
-    data_rows_cells = [split_cells(l) for l in non_sep[1:]]
-
     if not headers:
         return None
 
     col_keys = [f"c{i}" for i in range(len(headers))]
-    columns = [
-        {"data_source_column": col_keys[i], "width": "auto",
-         "horizontal_align": "left", "name": headers[i]}
-        for i in range(len(headers))
-    ]
-    rows = [
-        {col_keys[i]: (cells[i] if i < len(cells) else "") for i in range(len(col_keys))}
-        for cells in data_rows_cells
-    ]
+    columns = [{"data_source_column": col_keys[i], "width": "auto",
+                "horizontal_align": "left", "name": headers[i]}
+               for i in range(len(headers))]
+    rows = [{col_keys[i]: (cells[i] if i < len(cells) else "")
+             for i in range(len(col_keys))}
+            for cells in (split_cells(l) for l in non_sep[1:])]
 
     if not rows:
         return None
@@ -101,9 +105,8 @@ def _parse_md_table(table_lines: list[str]) -> dict | None:
 
 
 def _md_to_body_elements(text: str) -> list[dict]:
-    """Split normalized markdown into body elements.
-    Markdown tables are converted to Feishu native table elements;
-    everything else becomes markdown elements."""
+    """Split a normalized markdown string into body elements,
+    converting pipe tables to Feishu native table elements."""
     elements: list[dict] = []
     lines = text.split("\n")
     buf: list[str] = []
@@ -112,28 +115,30 @@ def _md_to_body_elements(text: str) -> list[dict]:
     while i < len(lines):
         line = lines[i]
         if _is_table_line(line):
-            content = "\n".join(buf).strip()
-            if content:
+            if content := "\n".join(buf).strip():
                 elements.append({"tag": "markdown", "content": content})
             buf = []
             table_lines: list[str] = []
             while i < len(lines) and _is_table_line(lines[i]):
                 table_lines.append(lines[i])
                 i += 1
-            table_elem = _parse_md_table(table_lines)
-            if table_elem:
-                elements.append(table_elem)
-            else:
-                elements.append({"tag": "markdown", "content": "\n".join(table_lines)})
+            elem = _parse_md_table(table_lines)
+            elements.append(elem if elem else
+                            {"tag": "markdown", "content": "\n".join(table_lines)})
         else:
             buf.append(line)
             i += 1
 
-    content = "\n".join(buf).strip()
-    if content:
+    if content := "\n".join(buf).strip():
         elements.append({"tag": "markdown", "content": content})
 
     return elements or [{"tag": "markdown", "content": text}]
+
+
+def _section_elements(section: str, normalize: bool) -> list[dict]:
+    """Normalize one body section and expand tables."""
+    content = _normalize_newlines(section.strip()) if normalize else section.strip()
+    return _md_to_body_elements(content) if content else []
 
 
 def _split_md(text: str) -> list[str]:
@@ -166,7 +171,9 @@ def _split_md(text: str) -> list[str]:
     return chunks or [text]
 
 
-def _make_btn_element(label: str, cmd: str, idx: int = 0) -> dict:
+# ── Button helpers ───────────────────────────────────────────────────────────
+
+def _btn_element(label: str, cmd: str, idx: int = 0) -> dict:
     return {
         "tag": "button",
         "element_id": f"btn_{idx}",
@@ -176,64 +183,77 @@ def _make_btn_element(label: str, cmd: str, idx: int = 0) -> dict:
     }
 
 
-# ═══════════════════════════════════════════════════
-#  Card builders
-# ═══════════════════════════════════════════════════
+def _buttons_element(buttons: list[tuple[str, str]]) -> dict | None:
+    """Return a single button element or a column_set for multiple buttons."""
+    if not buttons:
+        return None
+    if len(buttons) == 1:
+        return _btn_element(buttons[0][0], buttons[0][1], 0)
+    return {
+        "tag": "column_set",
+        "flex_mode": "flow",
+        "horizontal_spacing": "8px",
+        "columns": [
+            {"tag": "column", "width": "auto",
+             "elements": [_btn_element(label, cmd, i)]}
+            for i, (label, cmd) in enumerate(buttons)
+        ],
+    }
 
-def _make_simple_v1_card(title: str, body: str, color: str = "blue") -> str:
-    """Minimal JSON 1.0 card. Used to clean up pre-existing V1 streaming cards
-    (removes their stale cancel button) before sending a new V2 final card."""
-    elements = []
-    if body.strip():
-        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": body}})
-    return json.dumps({
-        "config": {"wide_screen_mode": True},
-        "header": {"template": color, "title": {"tag": "plain_text", "content": title}},
-        "elements": elements,
-    }, ensure_ascii=False)
 
+# ── Core card builder ────────────────────────────────────────────────────────
 
-def _make_card(title: str, body: str, color: str = "blue", note: str = "",
-               buttons: list[tuple[str, str]] = None,
-               subtitle: str = "",
-               tools_md: str = None,
-               tools_expanded: bool = False,
-               tools_list: list = None,
-               normalize: bool = True) -> str:
+def _make_card_dict(
+    title: str,
+    body: "str | list[str]" = "",
+    color: str = "blue",
+    note: str = "",
+    buttons: "list[tuple[str, str]] | None" = None,
+    subtitle: str = "",
+    tools_md: str = None,
+    tools_expanded: bool = False,
+    tools_list: list = None,
+    normalize: bool = True,
+) -> dict:
     """
-    Always JSON 2.0. Buttons placed directly in body.elements (single) or via
-    column_set (multiple). Server receives action.value == behaviors[0].value,
-    so the existing card action handler is fully compatible.
+    Build a Feishu card and return it as a dict (JSON 2.0).
+
+    body — str or list[str].
+      str:        single markdown section (normalized + table-converted).
+      list[str]:  multiple independent markdown sections; each rendered as its own
+                  block, useful when content has distinct visual paragraphs
+                  (e.g. tool name line, then a code block for the command).
     """
     body_elements: list = []
 
+    # ── Tool call panels ──────────────────────────────────────────────────
     if tools_list:
-        inner_elements: list = []
+        inner: list = []
         for t in tools_list:
             icon = "✗" if t["is_error"] else "✓"
             desc_str = f" `{t['desc']}`" if t.get("desc") else ""
-            header_md = f"{icon} **{t['name']}** ({_fmt_elapsed(t['elapsed'])}){desc_str}"
+            hdr = f"{icon} **{t['name']}** ({_fmt_elapsed(t['elapsed'])}){desc_str}"
             full = t.get("full_result", "")
             if full:
-                char_count = len(full)
-                inner_elements.append({
+                n = len(full)
+                inner.append({
                     "tag": "collapsible_panel",
-                    "header": {"title": {"tag": "markdown", "content": header_md}},
+                    "header": {"title": {"tag": "markdown", "content": hdr}},
                     "expanded": False,
                     "elements": [{"tag": "markdown",
                                   "content": f"```\n{full[:4800]}\n```"
-                                             + (f"\n\n_（截断，共 {char_count} 字符）_"
-                                                if char_count > 4800 else "")}],
+                                             + (f"\n\n_（截断，共 {n} 字符）_"
+                                                if n > 4800 else "")}],
                 })
             else:
-                inner_elements.append({"tag": "markdown", "content": header_md})
+                inner.append({"tag": "markdown", "content": hdr})
         body_elements.append({
             "tag": "collapsible_panel",
             "header": {"title": {"tag": "markdown", "content": "**🔧 工具调用**"}},
             "expanded": tools_expanded,
-            "elements": inner_elements,
+            "elements": inner,
         })
-        if body.strip():
+        if body if isinstance(body, str) else any(s.strip() for s in body):
             body_elements.append({"tag": "hr"})
     elif tools_md:
         body_elements.append({
@@ -242,41 +262,74 @@ def _make_card(title: str, body: str, color: str = "blue", note: str = "",
             "expanded": tools_expanded,
             "elements": [{"tag": "markdown", "content": tools_md}],
         })
-        if body.strip():
+        if body if isinstance(body, str) else any(s.strip() for s in body):
             body_elements.append({"tag": "hr"})
 
-    content = _normalize_newlines(body.strip()) if normalize else body.strip()
-    if note:
-        content = (content + "\n\n" if content else "") + f"---\n\n_{note}_"
-    if content:
-        body_elements.extend(_md_to_body_elements(content))
+    # ── Body content ──────────────────────────────────────────────────────
+    sections: list[str] = [body] if isinstance(body, str) else list(body)
+    body_has_content = False
+    for sec in sections:
+        elems = _section_elements(sec, normalize)
+        if elems:
+            body_elements.extend(elems)
+            body_has_content = True
 
+    # ── Note (appended to last markdown element or as new element) ────────
+    if note:
+        note_md = f"---\n\n_{note}_"
+        # Try to append to last markdown element for compact rendering
+        if body_elements and body_elements[-1].get("tag") == "markdown":
+            body_elements[-1]["content"] += "\n\n" + note_md
+        else:
+            body_elements.append({"tag": "markdown", "content": note_md})
+
+    # ── Buttons ───────────────────────────────────────────────────────────
     if buttons:
         body_elements.append({"tag": "hr"})
-        if len(buttons) == 1:
-            body_elements.append(_make_btn_element(buttons[0][0], buttons[0][1], 0))
-        else:
-            body_elements.append({
-                "tag": "column_set",
-                "flex_mode": "flow",
-                "horizontal_spacing": "8px",
-                "columns": [
-                    {
-                        "tag": "column",
-                        "width": "auto",
-                        "elements": [_make_btn_element(label, cmd, i)],
-                    }
-                    for i, (label, cmd) in enumerate(buttons)
-                ],
-            })
+        body_elements.append(_buttons_element(buttons))
 
-    v2_header: dict = {"template": color, "title": {"tag": "plain_text", "content": title}}
+    # ── Header ───────────────────────────────────────────────────────────
+    header: dict = {"template": color, "title": {"tag": "plain_text", "content": title}}
     if subtitle:
-        v2_header["subtitle"] = {"tag": "plain_text", "content": subtitle}
+        header["subtitle"] = {"tag": "plain_text", "content": subtitle}
 
-    return json.dumps({
+    return {
         "schema": "2.0",
         "config": {"wide_screen_mode": True},
-        "header": v2_header,
+        "header": header,
         "body": {"elements": body_elements},
+    }
+
+
+def _make_card(
+    title: str,
+    body: "str | list[str]" = "",
+    color: str = "blue",
+    note: str = "",
+    buttons: "list[tuple[str, str]] | None" = None,
+    subtitle: str = "",
+    tools_md: str = None,
+    tools_expanded: bool = False,
+    tools_list: list = None,
+    normalize: bool = True,
+) -> str:
+    """JSON string wrapper around _make_card_dict."""
+    return json.dumps(
+        _make_card_dict(title, body, color, note, buttons, subtitle,
+                        tools_md, tools_expanded, tools_list, normalize),
+        ensure_ascii=False,
+    )
+
+
+def _make_simple_v1_card(title: str, body: str, color: str = "blue") -> str:
+    """Minimal JSON 1.0 card for patching pre-migration V1 streaming cards.
+    Only needed to remove a stale cancel button from a card created before the
+    schema 2.0 migration; new cards are always schema 2.0."""
+    elements = []
+    if body.strip():
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": body}})
+    return json.dumps({
+        "config": {"wide_screen_mode": True},
+        "header": {"template": color, "title": {"tag": "plain_text", "content": title}},
+        "elements": elements,
     }, ensure_ascii=False)

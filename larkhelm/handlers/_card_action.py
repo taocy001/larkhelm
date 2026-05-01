@@ -14,6 +14,7 @@ import larkhelm.config as _cfg
 from larkhelm.log import _debug_log
 from larkhelm.concurrency import _trigger_cancel, _pop_pending
 from larkhelm.perm import grant_yolo, _perm_lock, _perm_pending, _perm_decision, _perm_tool_name, _perm_tool_input
+from larkhelm.card_builder import _make_card_dict
 
 
 def handle_card_action(event: P2CardActionTrigger) -> P2CardActionTriggerResponse:
@@ -47,31 +48,21 @@ def handle_card_action(event: P2CardActionTrigger) -> P2CardActionTriggerRespons
                 labels = {"allow": "✅ 已允许", "deny": "❌ 已拒绝", "yolo": "🚀 已允许全部"}
                 result_title = labels.get(action_name, "已处理")
                 result_color = "green" if action_name != "deny" else "red"
-                confirm_elements: list = []
                 if tool_name == "Bash":
                     cmd_text = tool_input.get("command", "").strip()
-                    confirm_elements.append({"tag": "markdown",
-                        "content": f"**命令：**\n```bash\n{cmd_text[:400] or '(空)'}\n```"})
+                    body_str = f"**命令：**\n```bash\n{cmd_text[:400] or '(空)'}\n```"
                 elif tool_name in ("Write", "Edit", "NotebookEdit"):
-                    path = tool_input.get("file_path", tool_input.get("notebook_path", "?"))
-                    old = tool_input.get("old_string", "")
-                    new = tool_input.get("new_string", "")
+                    path   = tool_input.get("file_path", tool_input.get("notebook_path", "?"))
+                    old    = tool_input.get("old_string", "")
+                    new    = tool_input.get("new_string", "")
                     detail = f"\n\n**修改：** {len(old.splitlines())} 行 → {len(new.splitlines())} 行" if old else ""
-                    confirm_elements.append({"tag": "markdown",
-                        "content": f"**工具：** `{tool_name}`\n\n**文件：** `{path}`{detail}"})
+                    body_str = f"**工具：** `{tool_name}`\n\n**文件：** `{path}`{detail}"
                 else:
-                    confirm_elements.append({"tag": "markdown",
-                        "content": f"**工具：** `{tool_name}`"})
+                    body_str = f"**工具：** `{tool_name}`"
                 from lark_oapi.event.callback.model.p2_card_action_trigger import CallBackCard
                 cb_card = CallBackCard()
                 cb_card.type = "raw"
-                cb_card.data = {
-                    "schema": "2.0",
-                    "config": {"wide_screen_mode": True},
-                    "header": {"template": result_color,
-                               "title": {"tag": "plain_text", "content": result_title}},
-                    "body": {"elements": confirm_elements},
-                }
+                cb_card.data = _make_card_dict(result_title, body_str, color=result_color)
                 resp.card = cb_card
                 toast = CallBackToast()
                 toast.type = "success"
@@ -90,18 +81,11 @@ def handle_card_action(event: P2CardActionTrigger) -> P2CardActionTriggerRespons
                 from lark_oapi.event.callback.model.p2_card_action_trigger import CallBackCard
                 cb_card = CallBackCard()
                 cb_card.type = "raw"
-                cb_card.data = {
-                    "schema": "2.0",
-                    "config": {"wide_screen_mode": True},
-                    "header": {
-                        "template": "green" if confirmed else "red",
-                        "title": {"tag": "plain_text",
-                                  "content": "✅ 继续执行" if confirmed else "🛑 已取消"},
-                    },
-                    "body": {"elements": [{"tag": "markdown",
-                        "content": "决策已记录，继续执行后续阶段…" if confirmed else "Crew 任务已取消。",
-                    }]},
-                }
+                cb_card.data = _make_card_dict(
+                    "✅ 继续执行" if confirmed else "🛑 已取消",
+                    "决策已记录，继续执行后续阶段…" if confirmed else "Crew 任务已取消。",
+                    color="green" if confirmed else "red",
+                )
                 resp.card = cb_card
                 toast = CallBackToast()
                 toast.type = "success"
@@ -122,13 +106,7 @@ def handle_card_action(event: P2CardActionTrigger) -> P2CardActionTriggerRespons
                 from lark_oapi.event.callback.model.p2_card_action_trigger import CallBackCard
                 cb_card = CallBackCard()
                 cb_card.type = "raw"
-                cb_card.data = {
-                    "schema": "2.0",
-                    "config": {"wide_screen_mode": True},
-                    "header": {"template": "orange",
-                               "title": {"tag": "plain_text", "content": "🛑 取消中"}},
-                    "body": {"elements": [{"tag": "markdown", "content": "取消信号已发送，请稍候…"}]},
-                }
+                cb_card.data = _make_card_dict("🛑 取消中", "取消信号已发送，请稍候…", color="orange")
                 resp.card = cb_card
                 toast = CallBackToast()
                 toast.type = "success"
@@ -144,23 +122,8 @@ def handle_card_action(event: P2CardActionTrigger) -> P2CardActionTriggerRespons
                 from lark_oapi.event.callback.model.p2_card_action_trigger import CallBackCard
                 cb_card = CallBackCard()
                 cb_card.type = "raw"
-                if pending:
-                    cb_card.data = {
-                        "schema": "2.0",
-                        "config": {"wide_screen_mode": True},
-                        "header": {"template": "grey",
-                                   "title": {"tag": "plain_text", "content": "✗ 排队已取消"}},
-                        "body": {"elements": [{"tag": "markdown",
-                                               "content": f"已取消排队：\n\n> {pending[0][:80]}"}]},
-                    }
-                else:
-                    cb_card.data = {
-                        "schema": "2.0",
-                        "config": {"wide_screen_mode": True},
-                        "header": {"template": "grey",
-                                   "title": {"tag": "plain_text", "content": "✗ 排队已取消"}},
-                        "body": {"elements": [{"tag": "markdown", "content": "排队任务已取消。"}]},
-                    }
+                body_str = f"已取消排队：\n\n> {pending[0][:80]}" if pending else "排队任务已取消。"
+                cb_card.data = _make_card_dict("✗ 排队已取消", body_str, color="grey")
                 resp.card = cb_card
                 toast = CallBackToast()
                 toast.type = "success"
@@ -180,13 +143,7 @@ def handle_card_action(event: P2CardActionTrigger) -> P2CardActionTriggerRespons
             from lark_oapi.event.callback.model.p2_card_action_trigger import CallBackCard
             cb_card = CallBackCard()
             cb_card.type = "raw"
-            cb_card.data = {
-                "schema": "2.0",
-                "config": {"wide_screen_mode": True},
-                "header": {"template": colors.get(action, "grey"),
-                           "title": {"tag": "plain_text", "content": labels.get(action, action)}},
-                "body": {"elements": []},
-            }
+            cb_card.data = _make_card_dict(labels.get(action, action), "", color=colors.get(action, "grey"))
             resp.card = cb_card
             toast = CallBackToast()
             toast.type = "success"

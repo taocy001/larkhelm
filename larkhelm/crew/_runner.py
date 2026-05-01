@@ -458,6 +458,7 @@ def _wait_for_breakpoint(state: CrewState, agent_id: str) -> bool:
     """Pause after PM completes, send a confirmation card and wait for the user to click. Returns True=continue, False=cancel."""
     import larkhelm.config as _cfg
     from larkhelm.chat_state import _get_cwd
+    from larkhelm.card_builder import _make_card
     from larkhelm.lark_client import _send_card_raw
     from larkhelm.crew._state import (
         _breakpoint_meta, _breakpoint_events, _breakpoint_results,
@@ -496,37 +497,16 @@ def _wait_for_breakpoint(state: CrewState, agent_id: str) -> bool:
             prd_preview = ag.result[:700]
 
     # Send confirmation card
-    agent_role = state.agents[agent_id].spec.role if state.agents.get(agent_id) else "Agent"
-    confirm_card = json.dumps({
-        "schema": "2.0",
-        "config": {"wide_screen_mode": True},
-        "header": {
-            "template": "yellow",
-            "title": {"tag": "plain_text",
-                      "content": f"⏸ {agent_role}已完成，请确认是否继续执行"},
-        },
-        "body": {"elements": [
-            {"tag": "markdown", "content": f"**任务：** {state.plan.title}\n\n{prd_preview}"},
-            {"tag": "hr"},
-            {
-                "tag": "column_set", "flex_mode": "flow", "horizontal_spacing": "8px",
-                "columns": [
-                    {"tag": "column", "width": "auto", "elements": [
-                        {"tag": "button", "element_id": "btn_0",
-                         "text": {"tag": "plain_text", "content": "✅ 继续执行"},
-                         "type": "primary",
-                         "behaviors": [{"type": "callback", "value": {"cmd": f"crew_bp:confirm:{crew_id}"}}]},
-                    ]},
-                    {"tag": "column", "width": "auto", "elements": [
-                        {"tag": "button", "element_id": "btn_1",
-                         "text": {"tag": "plain_text", "content": "❌ 取消"},
-                         "type": "danger",
-                         "behaviors": [{"type": "callback", "value": {"cmd": f"crew_bp:cancel:{crew_id}"}}]},
-                    ]},
-                ],
-            },
-        ]},
-    }, ensure_ascii=False)
+    agent_role   = state.agents[agent_id].spec.role if state.agents.get(agent_id) else "Agent"
+    confirm_card = _make_card(
+        f"⏸ {agent_role}已完成，请确认是否继续执行",
+        f"**任务：** {state.plan.title}\n\n{prd_preview}",
+        color="yellow",
+        buttons=[
+            ("✅ 继续执行", f"crew_bp:confirm:{crew_id}"),
+            ("❌ 取消",    f"crew_bp:cancel:{crew_id}"),
+        ],
+    )
     _send_card_raw(state.chat_id, confirm_card)
 
     # Wait for user decision; poll to support /cancel interruption; max 10 minutes
