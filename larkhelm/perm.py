@@ -312,8 +312,12 @@ def _start_perm_server():
                     finally:
                         _conn_sem.release()
 
-                threading.Thread(target=_handle_and_release,
-                                 daemon=True, name="perm-conn").start()
+                try:
+                    threading.Thread(target=_handle_and_release,
+                                     daemon=True, name="perm-conn").start()
+                except Exception:
+                    _conn_sem.release()
+                    conn.close()
             except Exception:
                 break
 

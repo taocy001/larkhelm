@@ -109,7 +109,7 @@ def _build_card(state: CrewState) -> str:
 
         elements.append({
             "tag": "collapsible_panel",
-            "header": {"title": {"tag": "markdown", "content": "**📋 任务计划**"}},
+            "header": {"title": {"tag": "plain_text", "content": "**📋 任务计划**"}},
             "expanded": phase in ("planned", "running"),
             "elements": [{"tag": "markdown", "content": "\n".join(agent_lines)}],
         })
@@ -128,7 +128,7 @@ def _build_card(state: CrewState) -> str:
                 if _file_lines:
                     elements.append({
                         "tag": "collapsible_panel",
-                        "header": {"title": {"tag": "markdown", "content": "**📁 计划改动文件**"}},
+                        "header": {"title": {"tag": "plain_text", "content": "**📁 计划改动文件**"}},
                         "expanded": False,
                         "elements": [{"tag": "markdown", "content": "\n".join(_file_lines)}],
                     })
@@ -184,7 +184,7 @@ def _build_card(state: CrewState) -> str:
                 detail_lines.pop()
             elements.append({
                 "tag": "collapsible_panel",
-                "header": {"title": {"tag": "markdown", "content": "**🤖 Agent 详情**"}},
+                "header": {"title": {"tag": "plain_text", "content": "**🤖 Agent 详情**"}},
                 "expanded": phase in ("running", "synthesizing", "breakpoint"),
                 "elements": [{"tag": "markdown", "content": "\n\n".join(detail_lines)}],
             })
