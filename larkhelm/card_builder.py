@@ -5,7 +5,6 @@ Public API
 ----------
 _make_card_dict(...)  → dict   core builder; callers that need a dict (e.g. CallBackCard.data)
 _make_card(...)       → str    json.dumps(_make_card_dict(...)); callers that need a JSON string
-_make_simple_v1_card(...)→ str  JSON 1.0 helper to clean up pre-migration streaming cards
 _split_md(text)       → list[str]
 _fmt_elapsed(s)       → str
 _normalize_newlines(t)→ str
@@ -336,15 +335,3 @@ def _make_card(
     )
 
 
-def _make_simple_v1_card(title: str, body: str, color: str = "blue") -> str:
-    """Minimal JSON 1.0 card for patching pre-migration V1 streaming cards.
-    Only needed to remove a stale cancel button from a card created before the
-    schema 2.0 migration; new cards are always schema 2.0."""
-    elements = []
-    if body.strip():
-        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": body}})
-    return json.dumps({
-        "config": {"wide_screen_mode": True},
-        "header": {"template": color, "title": {"tag": "plain_text", "content": title}},
-        "elements": elements,
-    }, ensure_ascii=False)

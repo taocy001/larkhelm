@@ -24,7 +24,7 @@ from larkhelm.lark_client import (
     EMOJI_PROCESSING, EMOJI_DONE, EMOJI_ERROR,
     _index_reply,
 )
-from larkhelm.card_builder import _make_card, _make_simple_v1_card, _split_md, _fmt_elapsed
+from larkhelm.card_builder import _make_card, _split_md, _fmt_elapsed
 from larkhelm.ai_runner import query_claude, query_gemini, query_kimi, QueryCancelledError
 
 # ── Card UX parameters (from config) ────────────────────────────────
@@ -244,8 +244,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
         # ── Push card ─────────────────────────────────────
         def _push_if_needed(force: bool = False, include_cancel: bool = True):
             nonlocal _last_pushed_body, _dirty
-            # Cancel signal fired: stop heartbeat pushes to avoid overwriting the final "cancelled" card
-            if cancel_ev.is_set():
+            if cancel_ev.is_set() or _stop_hb.is_set():
                 return
             title, tools_md, response_md = _render_body()
             combined = f"{title}||{tools_md}||{response_md}"
@@ -365,6 +364,11 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 output = "✅ 完成（无文本输出）"
             log_entry(chat_id, "assistant", output, model=model, trace_id=trace_id)
 
+            # Stop heartbeat before patching the final card to eliminate the race
+            # where the heartbeat fires after the final patch and overwrites it.
+            _stop_hb.set()
+            hb_thread.join(timeout=2.0)
+
             with _tools_lock:
                 now_mono = time.monotonic()
                 for tid, t in list(active_tools.items()):
@@ -386,11 +390,6 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                                     tools_list=final_tools if final_tools else None,
                                     tools_expanded=False)
             if not _patch_card_raw(mid, final_card):
-                # Streaming card is JSON 1.0 (has cancel button); final card is JSON 2.0.
-                # Feishu rejects V1→V2 schema change on patch (ErrCode 200830).
-                # Clean up the streaming card first (remove the stale cancel button),
-                # then create a new message with the JSON 2.0 final card.
-                _patch_card_raw(mid, _make_simple_v1_card(f"✅ {m_name} 完成", f"耗时 {elapsed}"))
                 mid = _send_card_raw(chat_id, final_card)
             for i, chunk in enumerate(chunks[1:], 2):
                 chunk_note = note if i == len(chunks) else ""
