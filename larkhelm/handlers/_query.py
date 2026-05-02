@@ -150,6 +150,10 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
 
         # Use nonlocal instead of single-element list
         _state_lock_local = threading.Lock()
+        # Serialises _patch_card_raw calls between heartbeat and main thread.
+        # The main thread acquires this (without holding it) after _stop_hb.set()
+        # to wait for any in-flight heartbeat patch before writing the final card.
+        _card_patch_lock  = threading.Lock()
 
         def _get_state():
             with _state_lock_local:
@@ -255,7 +259,12 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 card_json = _make_card(title, response_md, color="grey",
                                        tools_md=tools_md, tools_expanded=True,
                                        buttons=btns)
-                _patch_card_raw(mid, card_json)
+                with _card_patch_lock:
+                    # Re-check inside the lock: if the main thread already set _stop_hb
+                    # and drained this lock, don't overwrite the final card.
+                    if cancel_ev.is_set() or _stop_hb.is_set():
+                        return
+                    _patch_card_raw(mid, card_json)
                 with _state_lock_local:
                     _last_pushed_body = combined
                     _dirty = False
@@ -364,10 +373,14 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 output = "✅ 完成（无文本输出）"
             log_entry(chat_id, "assistant", output, model=model, trace_id=trace_id)
 
-            # Stop heartbeat before patching the final card to eliminate the race
-            # where the heartbeat fires after the final patch and overwrites it.
+            # Stop the heartbeat and wait for any in-flight patch to complete
+            # before writing the final card.  join(timeout) alone is insufficient
+            # because Feishu API calls can exceed 2 s; the lock drain is the real
+            # guarantee — the join is just cleanup.
             _stop_hb.set()
-            hb_thread.join(timeout=2.0)
+            with _card_patch_lock:   # blocks until any in-flight heartbeat patch finishes
+                pass
+            hb_thread.join(timeout=0.5)
 
             with _tools_lock:
                 now_mono = time.monotonic()

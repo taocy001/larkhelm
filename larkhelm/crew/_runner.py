@@ -889,8 +889,8 @@ def _run_crew(state: CrewState, total_timeout: int):
     from larkhelm.crew._state import _register_crew_card
     from larkhelm.crew._checkpoint import _clear_checkpoint
 
-    hb_stop = threading.Event()
-    _start_heartbeat(state, hb_stop)
+    hb_stop   = threading.Event()
+    hb_thread = _start_heartbeat(state, hb_stop)
 
     try:
         # ── Execute agents ───────────────────────────────
@@ -984,6 +984,13 @@ def _run_crew(state: CrewState, total_timeout: int):
             if _cur and _cur != state.git_head_before:
                 _ws_note += f"\n📝 Code changed (start: `{state.git_head_before}` → current: `{_cur}`)"
         final = final + _ws_note
+
+        # Stop the heartbeat before writing the terminal state.  Without this,
+        # a heartbeat that read the old phase ("synthesizing") just before we set
+        # "done" can complete its API call after _crew_update_card and overwrite
+        # the final card.
+        hb_stop.set()
+        hb_thread.join(timeout=10.0)
 
         with state.lock:
             state.phase        = "done"
