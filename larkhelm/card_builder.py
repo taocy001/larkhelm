@@ -85,8 +85,8 @@ def _parse_md_table(table_lines: list[str]) -> dict | None:
         return None
 
     col_keys = [f"c{i}" for i in range(len(headers))]
-    columns = [{"data_source_column": col_keys[i], "width": "auto",
-                "horizontal_align": "left", "name": headers[i]}
+    columns = [{"name": col_keys[i], "display_name": headers[i],
+                "width": "auto", "horizontal_align": "left"}
                for i in range(len(headers))]
     rows = [{col_keys[i]: (cells[i] if i < len(cells) else "")
              for i in range(len(col_keys))}
