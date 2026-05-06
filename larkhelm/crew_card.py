@@ -18,7 +18,7 @@ from larkhelm.chat_state import _get_cwd
 from larkhelm.crew_types import (
     AgentStatus, CrewState, CREW_RESULT_PREVIEW, CREW_CARD_INTERVAL,
 )
-from larkhelm.lark_client import _patch_card_raw
+from larkhelm.lark_client import _patch_card_raw, _send_card_raw
 from larkhelm.log import _debug_log
 
 
@@ -262,14 +262,20 @@ def _build_card(state: CrewState) -> str:
 def _crew_update_card(state: CrewState):
     if not state.card_mid:
         return
-    try:
-        _patch_card_raw(state.card_mid, _build_card(state))
-    except Exception as e:
-        _debug_log(f"[Crew] card update error: {e}")
+    card = _build_card(state)
+    ok = _patch_card_raw(state.card_mid, card)
+    if not ok:
+        # Schema mismatch (e.g. ErrCode 200830: schemaV2 cannot patch schemaV1).
+        # Send a fresh card and redirect future patches to it.
+        new_mid = _send_card_raw(state.chat_id, card)
+        if new_mid:
+            with state.lock:
+                state.card_mid = new_mid
+            _debug_log(f"[Crew] replaced stale card → {new_mid}")
 
 
-def _start_heartbeat(state: CrewState, stop_ev: threading.Event):
-    """Push a progress card every CREW_CARD_INTERVAL seconds."""
+def _start_heartbeat(state: CrewState, stop_ev: threading.Event) -> threading.Thread:
+    """Push a progress card every CREW_CARD_INTERVAL seconds. Returns the thread."""
     def _loop():
         while not stop_ev.is_set():
             try:
@@ -277,4 +283,6 @@ def _start_heartbeat(state: CrewState, stop_ev: threading.Event):
             except Exception as e:
                 _debug_log(f"[CrewHeartbeat] error: {e}")
             stop_ev.wait(timeout=CREW_CARD_INTERVAL)
-    threading.Thread(target=_loop, daemon=True, name=f"crew-hb-{state.crew_id[:6]}").start()
+    t = threading.Thread(target=_loop, daemon=True, name=f"crew-hb-{state.crew_id[:6]}")
+    t.start()
+    return t
