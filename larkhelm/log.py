@@ -8,10 +8,9 @@ from datetime import datetime
 from pathlib import Path
 
 import larkhelm.config as _cfg
+from larkhelm.concurrency import _jsonl_lock as _log_lock  # shared with token_stats.py
 
 __all__ = ["_log_lock", "log_entry", "_read_logs", "_debug_log"]
-
-_log_lock = threading.Lock()
 
 
 def _log_file(chat_id: str) -> Path:

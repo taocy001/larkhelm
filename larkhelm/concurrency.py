@@ -12,6 +12,7 @@ __all__ = [
     "_shutting_down", "set_shutting_down", "is_shutting_down", "wait_for_idle",
     "_pending_msg", "_set_pending", "_pop_pending", "_update_pending_card_mid",
     "_cron_lock",
+    "_jsonl_lock",
     "get_busy_chat_ids",
 ]
 
@@ -36,6 +37,9 @@ _pending_meta = threading.Lock()
 
 _cron_lock = threading.Lock()
 
+# Shared lock for all writes to all.jsonl (used by both log.py and token_stats.py to prevent interleaved writes)
+_jsonl_lock = threading.Lock()
+
 _shutting_down = False
 
 
@@ -46,7 +50,12 @@ def _get_chat_lock(chat_id: str) -> threading.Lock:
         else:
             _chat_locks[chat_id] = threading.Lock()
             if len(_chat_locks) > _LOCK_CACHE_MAX:
-                _chat_locks.popitem(last=False)
+                # Only evict if the LRU lock is not held; skip eviction otherwise
+                # to prevent a new caller from getting a different lock object for the same chat_id.
+                lru_cid, lru_lock = next(iter(_chat_locks.items()))
+                if lru_lock.acquire(blocking=False):
+                    lru_lock.release()
+                    _chat_locks.pop(lru_cid, None)
         return _chat_locks[chat_id]
 
 
@@ -57,7 +66,10 @@ def _get_btw_lock(chat_id: str) -> threading.Lock:
         else:
             _btw_locks[chat_id] = threading.Lock()
             if len(_btw_locks) > _LOCK_CACHE_MAX:
-                _btw_locks.popitem(last=False)
+                lru_cid, lru_lock = next(iter(_btw_locks.items()))
+                if lru_lock.acquire(blocking=False):
+                    lru_lock.release()
+                    _btw_locks.pop(lru_cid, None)
         return _btw_locks[chat_id]
 
 

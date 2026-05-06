@@ -22,7 +22,7 @@ __all__ = [
 # ═══════════════════════════════════════════════════
 #  Persistent state
 # ═══════════════════════════════════════════════════
-_state_lock = threading.Lock()
+_state_lock = threading.RLock()  # RLock allows _set_chat_field to call _save_state while holding the lock
 _chat_state_store: dict = {}
 
 
@@ -38,12 +38,12 @@ def _load_global_state() -> None:
 
 
 def _save_state() -> None:
-    # Caller must hold _state_lock before calling this function
     try:
-        data = json.dumps(_chat_state_store, ensure_ascii=False, indent=2)
-        tmp = _cfg.STATE_FILE.with_suffix(".json.tmp")
-        tmp.write_text(data, encoding="utf-8")
-        os.replace(tmp, _cfg.STATE_FILE)
+        with _state_lock:
+            data = json.dumps(_chat_state_store, ensure_ascii=False, indent=2)
+            tmp = _cfg.STATE_FILE.with_suffix(".json.tmp")
+            tmp.write_text(data, encoding="utf-8")
+            os.replace(tmp, _cfg.STATE_FILE)
     except Exception as e:
         _debug_log(f"[State] 保存失败: {e}")
 

@@ -106,14 +106,22 @@ def _bash_needs_approval(command: str, cwd: str) -> bool:
     Determine whether a Bash command requires interactive approval.
     Rules:
     1. Contains dangerous operation keywords → requires approval
-    2. Contains absolute paths outside cwd and /tmp → requires approval
+    2. Contains absolute paths that resolve outside cwd → requires approval
     3. Everything else → auto-allowed
+
+    Note: /tmp is intentionally NOT unconditionally safe here — a symlink inside cwd
+    can point to an arbitrary /tmp subdirectory that is outside the cwd boundary.
+    Writes to /tmp are already exempt via the _is_dangerous_cmd redirect pattern.
     """
     cmd = command.strip()
     if _is_dangerous_cmd(cmd, cwd):
         return True
 
-    safe_prefixes = get_safe_prefixes(cwd)
+    safe_prefixes = []
+    if cwd:
+        safe_prefixes.append(cwd.rstrip("/") + "/")
+        safe_prefixes.append(cwd.rstrip("/"))
+
     abs_paths = re.findall(r'(?<!\w)(\/[^\s\'\";,|&>]+)', cmd)
     for path in abs_paths:
         path = path.rstrip(".,;\"')")

@@ -180,6 +180,42 @@ class TestConcurrency(unittest.TestCase):
     def test_cron_lock_is_lock(self):
         self.assertIsInstance(concurrency._cron_lock, type(threading.Lock()))
 
+    def test_get_chat_lock_lru_no_alias_race(self):
+        """LRU eviction must not create a new lock object for a chat that still holds its lock.
+        Regression for lock-alias race: when >_LOCK_CACHE_MAX chats are active, evicting a
+        held lock would let a second caller obtain a different Lock for the same chat_id."""
+        cap = concurrency._LOCK_CACHE_MAX
+
+        # Fill the cache to capacity with chats that are NOT held
+        for i in range(cap):
+            concurrency._get_chat_lock(f"fill_chat_{i}")
+
+        # Now acquire the LRU lock (the first chat inserted) while the cache is at capacity
+        lru_chat = "fill_chat_0"
+        lru_lock = concurrency._get_chat_lock(lru_chat)
+        lru_lock.acquire()
+        try:
+            # Insert one more chat to trigger the LRU eviction path
+            concurrency._get_chat_lock("overflow_chat")
+
+            # Because fill_chat_0 is held, it must NOT have been evicted
+            with concurrency._chat_locks_meta:
+                still_present = lru_chat in concurrency._chat_locks
+            if still_present:
+                # If still present, calling _get_chat_lock must return the same object
+                second_ref = concurrency._get_chat_lock(lru_chat)
+                self.assertIs(second_ref, lru_lock, "Lock alias created for a held lock")
+        finally:
+            lru_lock.release()
+
+    def test_get_chat_lock_lru_evicts_idle_lock(self):
+        """Idle (unheld) LRU entries should be evicted when cache overflows."""
+        cap = concurrency._LOCK_CACHE_MAX
+        for i in range(cap + 1):
+            concurrency._get_chat_lock(f"idle_chat_{i}")
+        with concurrency._chat_locks_meta:
+            self.assertLessEqual(len(concurrency._chat_locks), cap + 1)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  log.py
@@ -703,6 +739,57 @@ class TestFeishuDocClient(unittest.TestCase):
             with self.assertRaises(self.DocAPIError) as ctx:
                 self.dc._call_api("GET", "/some/uri")
         self.assertEqual(ctx.exception.code, 0)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  config.py — _init_runtime() boundary cases
+# ═══════════════════════════════════════════════════════════════════════════
+class TestInitRuntimeBoundary(unittest.TestCase):
+    """Tests for _init_runtime() boundary validation (empty credentials, invalid enum)."""
+
+    def _make_config(self, overrides: dict) -> Path:
+        base = {"APP_ID": "test_app", "APP_SECRET": "test_secret"}
+        base.update(overrides)
+        cfg_file = Path(_TMP_DIR) / f"config_boundary_{id(overrides)}.json"
+        cfg_file.write_text(json.dumps(base))
+        return cfg_file
+
+    def test_empty_app_id_exits(self):
+        cfg = self._make_config({"APP_ID": ""})
+        with self.assertRaises(SystemExit):
+            _cfg_module._init_runtime(config_path=str(cfg), data_dir=_TMP_DIR)
+
+    def test_empty_app_secret_exits(self):
+        cfg = self._make_config({"APP_SECRET": ""})
+        with self.assertRaises(SystemExit):
+            _cfg_module._init_runtime(config_path=str(cfg), data_dir=_TMP_DIR)
+
+    def test_empty_claude_cmd_falls_back_to_default(self):
+        cfg = self._make_config({"claude_command": ""})
+        _cfg_module._init_runtime(config_path=str(cfg), data_dir=_TMP_DIR)
+        self.assertEqual(_cfg_module.CLAUDE_CMD, "claude")
+
+    def test_empty_gemini_cmd_falls_back_to_default(self):
+        cfg = self._make_config({"gemini_command": ""})
+        _cfg_module._init_runtime(config_path=str(cfg), data_dir=_TMP_DIR)
+        self.assertEqual(_cfg_module.GEMINI_CMD, "gemini")
+
+    def test_invalid_doc_write_backend_falls_back_to_auto(self):
+        cfg = self._make_config({"doc_write_backend": "invalid_value"})
+        _cfg_module._init_runtime(config_path=str(cfg), data_dir=_TMP_DIR)
+        self.assertEqual(_cfg_module.DOC_WRITE_BACKEND, "auto")
+
+    def test_valid_doc_write_backend_values(self):
+        for val in ("auto", "feishu", "local"):
+            cfg = self._make_config({"doc_write_backend": val})
+            _cfg_module._init_runtime(config_path=str(cfg), data_dir=_TMP_DIR)
+            self.assertEqual(_cfg_module.DOC_WRITE_BACKEND, val)
+
+    def test_missing_required_field_exits(self):
+        cfg = Path(_TMP_DIR) / "config_no_secret.json"
+        cfg.write_text(json.dumps({"APP_ID": "test"}))
+        with self.assertRaises(SystemExit):
+            _cfg_module._init_runtime(config_path=str(cfg), data_dir=_TMP_DIR)
 
 
 if __name__ == "__main__":

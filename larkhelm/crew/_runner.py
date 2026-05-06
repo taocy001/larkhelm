@@ -100,8 +100,13 @@ def _sync_output_file(state: CrewState, agent_id: str) -> str:
         _debug_log(f"[Crew] {agent_id} 读取 output_file 失败: {e}")
         return ""
 
-    project_prefix = (state.plan.title or "crew")[:20].strip()
-    title         = f"{project_prefix} · {out_path.stem}"
+    _STEM_NAMES = {
+        "prd": "产品需求文档", "design": "技术设计方案",
+        "changes": "代码变更记录", "qa_report": "测试报告", "review": "代码审查报告",
+    }
+    display_stem  = _STEM_NAMES.get(out_path.stem, out_path.stem)
+    project_prefix = (state.plan.title or "crew")[:30].strip()
+    title         = f"{project_prefix} · {display_stem}"
     folder_token  = state.feishu_folder_token
     owner_open_id = _crew_owner_open_id(state)
 
@@ -455,11 +460,8 @@ def _run_agent_wrapper(state: CrewState, agent_id: str) -> None:
 # ═══════════════════════════════════════════════════════════════
 
 def _wait_for_breakpoint(state: CrewState, agent_id: str) -> bool:
-    """Pause after PM completes, send a confirmation card and wait for the user to click. Returns True=continue, False=cancel."""
+    """Pause after PM completes, update main card to show 继续/取消 buttons and wait for the user to click. Returns True=continue, False=cancel."""
     import larkhelm.config as _cfg
-    from larkhelm.chat_state import _get_cwd
-    from larkhelm.card_builder import _make_card
-    from larkhelm.lark_client import _send_card_raw
     from larkhelm.crew._state import (
         _breakpoint_meta, _breakpoint_events, _breakpoint_results,
     )
@@ -478,36 +480,11 @@ def _wait_for_breakpoint(state: CrewState, agent_id: str) -> bool:
         else:
             _breakpoint_results[crew_id] = False  # Default: cancel on timeout
 
-    # Update main card to breakpoint phase
+    # Update main card to breakpoint phase — _build_card shows "继续/取消" buttons for this phase
     with state.lock:
         state.phase              = "breakpoint"
         state.breakpoint_agent_id = agent_id
     _crew_update_card(state)
-
-    # Read PRD preview (prefer file, fall back to agent output tail)
-    cwd      = _get_cwd(state.chat_id)
-    prd_path = Path(cwd) / ".crew_workspace" / "prd.md"
-    prd_preview = ""
-    try:
-        text        = prd_path.read_text(encoding="utf-8")
-        prd_preview = text[:700] + ("\n\n…（完整内容见 `.crew_workspace/prd.md`）" if len(text) > 700 else "")
-    except Exception:
-        ag = state.agents.get(agent_id)
-        if ag:
-            prd_preview = ag.result[:700]
-
-    # Send confirmation card
-    agent_role   = state.agents[agent_id].spec.role if state.agents.get(agent_id) else "Agent"
-    confirm_card = _make_card(
-        f"⏸ {agent_role}已完成，请确认是否继续执行",
-        f"**任务：** {state.plan.title}\n\n{prd_preview}",
-        color="yellow",
-        buttons=[
-            ("✅ 继续执行", f"crew_bp:confirm:{crew_id}"),
-            ("❌ 取消",    f"crew_bp:cancel:{crew_id}"),
-        ],
-    )
-    _send_card_raw(state.chat_id, confirm_card)
 
     # Wait for user decision; poll to support /cancel interruption; max 10 minutes
     bp_deadline = time.time() + min(_cfg.RESPONSE_TIMEOUT * 2, 600)

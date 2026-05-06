@@ -14,6 +14,7 @@ import dataclasses
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 
@@ -157,13 +158,16 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         config = json.loads(CONFIG_PATH.read_text())
         APP_ID     = config["APP_ID"]
         APP_SECRET = config["APP_SECRET"]
+        if not APP_ID or not APP_SECRET:
+            print("❌ 配置加载失败: APP_ID/APP_SECRET 不能为空字符串")
+            sys.exit(1)
     except Exception as e:
         print(f"❌ 配置加载失败: {e}")
         sys.exit(1)
 
-    CLAUDE_CMD       = config.get("claude_command", "claude")
-    GEMINI_CMD       = config.get("gemini_command", "gemini")
-    KIMI_CMD         = config.get("kimi_command", "kimi")
+    CLAUDE_CMD       = config.get("claude_command", "claude") or "claude"
+    GEMINI_CMD       = config.get("gemini_command", "gemini") or "gemini"
+    KIMI_CMD         = config.get("kimi_command",   "kimi")   or "kimi"
     DEFAULT_MODEL    = config.get("default_model", "claude")
     SKIP_PERMISSIONS = bool(config.get("skip_permissions", False))
     RESPONSE_TIMEOUT = int(config.get("response_timeout", 300))   # soft timeout: release lock but don't kill process
@@ -182,12 +186,18 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         HARD_TIMEOUT = RESPONSE_TIMEOUT + 60
 
     DOC_AUTO_INJECT      = config.get("doc_auto_inject",      True)
-    DOC_INJECT_MAX_CHARS = config.get("doc_inject_max_chars", 2000)
-    DOC_INJECT_MAX_DOCS  = config.get("doc_inject_max_docs",  2)
-    DOC_READ_MAX_CHARS   = config.get("doc_read_max_chars",   6000)
+    DOC_INJECT_MAX_CHARS = int(config.get("doc_inject_max_chars", 2000))
+    DOC_INJECT_MAX_DOCS  = int(config.get("doc_inject_max_docs",  2))
+    DOC_READ_MAX_CHARS   = int(config.get("doc_read_max_chars",   6000))
     DEFAULT_DRIVE_FOLDER = config.get("default_drive_folder", "")
     DOC_WRITE_CONFIRM    = config.get("doc_write_confirm",    True)
     DOC_WRITE_BACKEND    = config.get("doc_write_backend",   "auto")
+    if DOC_WRITE_BACKEND not in ("auto", "feishu", "local"):
+        print(
+            f"⚠️  doc_write_backend 值 '{DOC_WRITE_BACKEND}' 无效（允许: auto/feishu/local），已回退为 'auto'",
+            file=sys.stderr,
+        )
+        DOC_WRITE_BACKEND = "auto"
 
     DEFAULT_WIKI_SPACE_ID     = config.get("default_wiki_space_id",     "")
     DEFAULT_WIKI_PARENT_TOKEN = config.get("default_wiki_parent_token", "")
@@ -230,7 +240,7 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
 _runtime: _RuntimeConfig = None  # None means _init_runtime has not been called yet
 
 
-_config_write_lock = __import__("threading").Lock()
+_config_write_lock = threading.Lock()
 
 
 def save_config_field(key: str, value) -> None:
@@ -246,9 +256,8 @@ def save_config_field(key: str, value) -> None:
         elif key == "default_wiki_parent_token":
             DEFAULT_WIKI_PARENT_TOKEN = value
         try:
-            import os as _os
             _tmp = CONFIG_PATH.with_suffix(".json.tmp")
             _tmp.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-            _os.replace(_tmp, CONFIG_PATH)
+            os.replace(_tmp, CONFIG_PATH)
         except Exception as e:
             print(f"[config] 写入 config.json 失败: {e}")

@@ -1,29 +1,26 @@
 """larkhelm · Feishu client wrapper (client, send_card, update_card, reply_card, and other Feishu API wrappers)."""
 import json as _json_mod
 import re
+import sys
 import threading
+import urllib.request as _urllib_req
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
-
 import lark_oapi as lark
 from lark_oapi import BaseRequest, HttpMethod, AccessTokenType
 from lark_oapi.api.im.v1 import (
     CreateMessageRequestBuilder, CreateMessageRequestBodyBuilder,
     PatchMessageRequestBuilder, PatchMessageRequestBodyBuilder,
     CreateMessageReactionRequestBuilder, CreateMessageReactionRequestBodyBuilder,
-    DeleteMessageReactionRequestBuilder,
-    EmojiBuilder,
-    GetMessageResourceRequestBuilder,
-    GetMessageRequest,
-    CreatePinRequest, CreatePinRequestBody,
-    DeletePinRequest,
+    DeleteMessageReactionRequestBuilder, EmojiBuilder,
+    GetMessageResourceRequestBuilder, GetMessageRequest,
+    CreatePinRequest, CreatePinRequestBody, DeletePinRequest,
 )
 from lark_oapi.api.im.v1.model.reply_message_request import ReplyMessageRequest
-from lark_oapi.api.im.v1.model.reply_message_request_body import (
-    ReplyMessageRequestBody, ReplyMessageRequestBodyBuilder)
-
+from lark_oapi.api.im.v1.model.reply_message_request_body import (ReplyMessageRequestBody, ReplyMessageRequestBodyBuilder)
+from lark_oapi.api.docx.v1 import (CreateDocumentRequest, CreateDocumentRequestBody)
 import larkhelm.config as _cfg
 from larkhelm.card_builder import _make_card, _split_md
 from larkhelm.log import _debug_log
@@ -50,16 +47,13 @@ def _fetch_bot_open_id() -> None:
                 BOT_OPEN_ID = bot_open_id
                 _debug_log(f"[Bot] 获取 open_id={bot_open_id}")
             else:
-                import sys as _sys
-                print(f"[larkhelm] ⚠️  BOT_OPEN_ID fetch failed — group @mention filter disabled: {data}", file=_sys.stderr)
+                print(f"[larkhelm] ⚠️  BOT_OPEN_ID fetch failed — group @mention filter disabled: {data}", file=sys.stderr)
                 _debug_log(f"[Bot] 未能获取 open_id，响应: {data}")
         else:
-            import sys as _sys
-            print(f"[larkhelm] ⚠️  BOT_OPEN_ID fetch failed (code={resp.code}) — group @mention filter disabled", file=_sys.stderr)
+            print(f"[larkhelm] ⚠️  BOT_OPEN_ID fetch failed (code={resp.code}) — group @mention filter disabled", file=sys.stderr)
             _debug_log(f"[Bot] 获取 open_id 失败 code={resp.code} msg={resp.msg}")
     except Exception as e:
-        import sys as _sys
-        print(f"[larkhelm] ⚠️  BOT_OPEN_ID fetch exception — group @mention filter disabled: {e}", file=_sys.stderr)
+        print(f"[larkhelm] ⚠️  BOT_OPEN_ID fetch exception — group @mention filter disabled: {e}", file=sys.stderr)
         _debug_log(f"[Bot] 获取 open_id 异常: {e}")
 
 
@@ -608,7 +602,6 @@ class FeishuDocClient:
 
     def _append_blocks_http(self, doc_id: str, blocks: list) -> None:
         """Append blocks to the end of a document via direct HTTP calls (batched, max 50 per batch)."""
-        import urllib.request as _urllib_req
         token = self._get_tenant_token()
         url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{doc_id}/blocks/{doc_id}/children"
         batch_size = 50
@@ -631,11 +624,9 @@ class FeishuDocClient:
 
     def _get_tenant_token(self) -> str:
         """Fetch a tenant_access_token (fetched live each time; TTL is controlled by Feishu)."""
-        import urllib.request as _urllib_req
-        import larkhelm.config as _cfg_mod
         body = _json_mod.dumps({
-            "app_id": _cfg_mod.APP_ID,
-            "app_secret": _cfg_mod.APP_SECRET,
+            "app_id": _cfg.APP_ID,
+            "app_secret": _cfg.APP_SECRET,
         }).encode()
         req = _urllib_req.Request(
             "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
@@ -672,7 +663,6 @@ class FeishuDocClient:
 
     def _http_request(self, method: str, url: str, body: dict) -> dict:
         """Direct HTTP request (bypasses SDK double-encode issue); returns the response dict."""
-        import urllib.request as _urllib_req
         token     = self._get_tenant_token()
         data_bytes = _json_mod.dumps(body, ensure_ascii=False).encode()
         req = _urllib_req.Request(url, data=data_bytes, headers={
@@ -881,7 +871,6 @@ class FeishuDocClient:
 
     def transfer_doc_owner(self, doc_token: str, open_id: str, doc_type: str = "docx") -> None:
         """Transfer document ownership to the given user (by open_id). Requires docs:doc scope."""
-        import urllib.request as _urllib_req
         token = self._get_tenant_token()
         url   = (f"https://open.feishu.cn/open-apis/drive/v1/permissions"
                  f"/{doc_token}/members/transfer_owner"
@@ -908,9 +897,6 @@ class FeishuDocClient:
         If owner_open_id is given, transfers ownership immediately after creation.
         Uses the SDK native interface (raw request has a double-encode issue for docx create).
         """
-        from lark_oapi.api.docx.v1 import (
-            CreateDocumentRequest, CreateDocumentRequestBody,
-        )
         body_builder = CreateDocumentRequestBody.builder().title(title)
         if folder_token:
             body_builder = body_builder.folder_token(folder_token)
@@ -997,7 +983,6 @@ class FeishuDocClient:
 
     def get_root_folder_token(self) -> str:
         """Return the Drive root folder token for the current app/user."""
-        import urllib.request as _urllib_req
         token = self._get_tenant_token()
         req = _urllib_req.Request(
             "https://open.feishu.cn/open-apis/drive/explorer/v2/root_folder/meta",
@@ -1108,15 +1093,13 @@ _PERM_GUIDES: "dict[str, tuple[str, str, str]]" = {
 
 def send_permission_guide(chat_id: str, operation: str, code: int = 0) -> None:
     """Send a permission-insufficient guide card to a Feishu chat, explaining which permission is missing and the exact fix steps."""
-    import larkhelm.config as _cfg_mod
-
     title, resource_fix, scope_name = _PERM_GUIDES.get(operation, (
         "🔒 飞书权限不足",
         "请将目标资源（文档/文件夹/知识库）共享给本应用",
         "对应操作所需的 API 权限",
     ))
 
-    app_id      = _cfg_mod.APP_ID
+    app_id      = _cfg.APP_ID
     console_url = f"https://open.feishu.cn/app/{app_id}/permission/api"
 
     # Determine the primary cause from the error code to decide which path to show

@@ -10,6 +10,7 @@ import re
 import threading
 import time
 import traceback
+import uuid
 
 import larkhelm.config as _cfg
 from larkhelm.log import _debug_log, log_entry
@@ -26,6 +27,7 @@ from larkhelm.lark_client import (
 )
 from larkhelm.card_builder import _make_card, _split_md, _fmt_elapsed
 from larkhelm.ai_runner import query_claude, query_gemini, query_kimi, QueryCancelledError
+from larkhelm.chat_state import _get_cwd
 
 # ── Card UX parameters (from config) ────────────────────────────────
 TOOL_HISTORY_CAP   = _cfg.TOOL_HISTORY_CAP
@@ -88,7 +90,6 @@ def _inject_doc_context(text: str, chat_id: str) -> str:
 
 def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
               images: list = None):
-    import uuid
     trace_id = uuid.uuid4().hex[:12]
 
     chat_lock = _get_chat_lock(chat_id)
@@ -120,7 +121,6 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
     lock_released = False   # Set to True when the soft-timeout releases the lock early, preventing double-release in finally
 
     try:
-        from larkhelm.chat_state import _get_cwd
         m_name = {"claude": "Claude", "gemini": "Gemini", "kimi": "Kimi"}.get(model, model.capitalize())
         cwd = _get_cwd(chat_id)
         start = time.time()
@@ -336,11 +336,15 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                     with _state_lock_local:
                         last_hb = _last_heartbeat
                         dirty_now = _dirty
+                        in_bg = _in_background
+                    # After soft timeout the task runs in background; cancel button
+                    # is no longer wired to the new cancel event, so hide it.
+                    show_cancel = not in_bg
                     if now - last_hb >= CARD_PUSH_INTERVAL:
-                        _push_if_needed(force=True)
+                        _push_if_needed(force=True, include_cancel=show_cancel)
                         _update_heartbeat()
                     elif dirty_now:
-                        _push_if_needed(force=False)
+                        _push_if_needed(force=False, include_cancel=show_cancel)
                 except Exception as e:
                     _debug_log(f"[Heartbeat] exception: {e}")
                 _stop_hb.wait(timeout=CURSOR_INTERVAL)
@@ -397,17 +401,36 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             note = (f"使用了 {n_tools} 次工具 · " if n_tools else "") + f"耗时 {elapsed}"
 
             chunks = _split_md(output.strip())
-            first_chunk = chunks[0]
-            final_card = _make_card(f"🤖 {m_name}", first_chunk, color="blue",
-                                    note=note,
-                                    tools_list=final_tools if final_tools else None,
+            n = len(chunks)
+
+            # When the response spans multiple cards, keep the first card JSON small
+            # (text only, no tools_list) to avoid exceeding Feishu's payload limit.
+            # tools_list can be 100 KB+ with many tool calls; that causes both
+            # _patch_card_raw and the fallback _send_card_raw to fail silently,
+            # leaving the user with only the later numbered cards.
+            first_title = f"🤖 {m_name}" + (f" (1/{n})" if n > 1 else "")
+            first_card = _make_card(first_title, chunks[0], color="blue",
+                                    note=note if n == 1 else "",
+                                    tools_list=(final_tools if final_tools else None) if n == 1 else None,
                                     tools_expanded=False)
-            if not _patch_card_raw(mid, final_card):
-                mid = _send_card_raw(chat_id, final_card)
+            if not _patch_card_raw(mid, first_card):
+                _debug_log(f"[{trace_id}][DoQuery] final patch failed, falling back to send mid={mid}")
+                fallback_text = f"[🤖 {m_name}]\n{chunks[0][:500]}"
+                mid = _send_card_raw(chat_id, first_card, _fallback_text=fallback_text)
+
             for i, chunk in enumerate(chunks[1:], 2):
-                chunk_note = note if i == len(chunks) else ""
-                send_card(chat_id, f"🤖 {m_name} ({i}/{len(chunks)})",
-                          chunk, color="blue", note=chunk_note)
+                is_last = (i == n)
+                chunk_title = f"🤖 {m_name} ({i}/{n})"
+                if is_last:
+                    # Last card carries the note and tools summary
+                    last_card = _make_card(chunk_title, chunk, color="blue",
+                                           note=note,
+                                           tools_list=final_tools if final_tools else None,
+                                           tools_expanded=False)
+                    fallback_text = f"[{chunk_title}]\n{chunk[:500]}"
+                    _send_card_raw(chat_id, last_card, _fallback_text=fallback_text)
+                else:
+                    send_card(chat_id, chunk_title, chunk, color="blue")
 
             if user_msg_id and _eyes_reaction_id[0]:
                 delete_reaction(user_msg_id, _eyes_reaction_id[0])

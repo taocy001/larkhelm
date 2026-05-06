@@ -152,10 +152,34 @@ def _spawn_claude_proc(
     if sid:
         args += ["--resume", sid]
 
-    # MCP configuration
-    _mcp_cfg = _cfg.config.get("mcp_config_file", "")
-    if _mcp_cfg and Path(_mcp_cfg).exists():
-        args += ["--mcp-config", _mcp_cfg]
+    # MCP configuration: auto-generate a temp config that always includes the
+    # larkhelm MCP server, merged with any user-configured mcp_config_file.
+    mcp_tmp_file: str = None
+    try:
+        base: dict = {}
+        user_mcp_cfg = _cfg.config.get("mcp_config_file", "")
+        if user_mcp_cfg and Path(user_mcp_cfg).exists():
+            try:
+                base = json.loads(Path(user_mcp_cfg).read_text())
+            except Exception:
+                pass
+        larkhelm_bin = str(Path(sys.executable).parent / "larkhelm")
+        servers = dict(base.get("mcpServers", {}))
+        servers["larkhelm"] = {
+            "command": larkhelm_bin,
+            "args": [
+                "mcp-server",
+                "--config", str(_cfg.CONFIG_PATH),
+                "--data-dir", str(_cfg.DATA_DIR),
+            ],
+        }
+        mcp_fd, mcp_tmp_file = tempfile.mkstemp(prefix="larkhelm_mcp_", suffix=".json")
+        os.chmod(mcp_tmp_file, 0o600)
+        with os.fdopen(mcp_fd, "w") as _f:
+            json.dump({**base, "mcpServers": servers}, _f)
+        args += ["--mcp-config", mcp_tmp_file]
+    except Exception as e:
+        _debug_log(f"[MCP] failed to build mcp config: {e}")
 
     _debug_log(f"[claude] starting cwd={cwd} sid={sid} skip_perm={_cfg.SKIP_PERMISSIONS} "
                f"images={len(images) if images else 0} ns={ns}")
@@ -178,11 +202,15 @@ def _spawn_claude_proc(
         _ai_proc_sem.release()
         if settings_file:
             Path(settings_file).unlink(missing_ok=True)
+        if mcp_tmp_file:
+            Path(mcp_tmp_file).unlink(missing_ok=True)
         raise RuntimeError(f"Claude CLI not found: {_cfg.CLAUDE_CMD}")
     except Exception:
         _ai_proc_sem.release()
         if settings_file:
             Path(settings_file).unlink(missing_ok=True)
+        if mcp_tmp_file:
+            Path(mcp_tmp_file).unlink(missing_ok=True)
         raise
     # Notify caller: process slot acquired, timeout countdown can begin
     if on_start:
@@ -203,6 +231,8 @@ def _spawn_claude_proc(
         _ai_proc_sem.release()
         if settings_file:
             Path(settings_file).unlink(missing_ok=True)
+        if mcp_tmp_file:
+            Path(mcp_tmp_file).unlink(missing_ok=True)
         raise RuntimeError(f"Claude stdin write failed: {e}")
 
     stderr_buf: list[str] = []
@@ -389,6 +419,8 @@ def _spawn_claude_proc(
         _dec_active()
         if settings_file:
             Path(settings_file).unlink(missing_ok=True)
+        if mcp_tmp_file:
+            Path(mcp_tmp_file).unlink(missing_ok=True)
 
     if cancelled_flag.is_set():
         raise QueryCancelledError("query cancelled")

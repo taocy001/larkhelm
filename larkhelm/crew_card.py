@@ -137,7 +137,7 @@ def _build_card(state: CrewState) -> str:
 
     # Agent details (shown during running/synthesizing/breakpoint/done; flat markdown to avoid nested collapsibles)
     if phase in ("running", "synthesizing", "breakpoint", "done", "cancelled", "failed"):
-        detail_lines: list[str] = []
+        agent_blocks: list[str] = []
         for spec in plan.agents:
             a = agents.get(spec.id)
             if not a or a.status == AgentStatus.PENDING:
@@ -152,7 +152,6 @@ def _build_card(state: CrewState) -> str:
             elif a.start_time and a.status == AgentStatus.RUNNING:
                 t_str = f" · {_fmt_elapsed(time.time() - a.start_time)}…"
 
-            # Token info for completed agents
             tok_info = ""
             if a.tokens:
                 tok = a.tokens.get("input_tokens", 0) + a.tokens.get("output_tokens", 0)
@@ -160,33 +159,30 @@ def _build_card(state: CrewState) -> str:
                     tok_info = f" · {tok // 1000}k tok"
 
             round_tag = f" · _{a.round_label}_" if a.round_label else ""
-            detail_lines.append(f"**{icon} {spec.role}**{t_str}{tok_info}{round_tag}")
+            # Build each agent's block with compact line joins (no intra-block blank lines)
+            block: list[str] = [f"**{icon} {spec.role}**{t_str}{tok_info}{round_tag}"]
 
             if a.status == AgentStatus.FAILED:
-                detail_lines.append(f"❌ 失败：{a.error[:200]}")
+                block.append(f"❌ 失败：{a.error[:200]}")
             elif a.status == AgentStatus.CANCELLED:
-                detail_lines.append("🛑 已取消")
+                block.append("🛑 已取消")
             elif a.status == AgentStatus.RUNNING:
-                preview = a.result[:200] if a.result else "运行中..."
-                detail_lines.append(preview + " ▌")
+                block.append((a.result[:200] if a.result else "运行中...") + " ▌")
             else:
                 preview = a.result[:CREW_RESULT_PREVIEW]
-                suffix  = "\n\n…（更多内容见结果文件）" if len(a.result) > CREW_RESULT_PREVIEW else ""
-                detail_lines.append(preview + suffix)
+                suffix  = "\n…（更多内容见结果文件）" if len(a.result) > CREW_RESULT_PREVIEW else ""
+                block.append(preview + suffix)
                 if a.feishu_doc_url:
-                    detail_lines.append(f"📄 [飞书文档]({a.feishu_doc_url})")
+                    block.append(f"📄 [飞书文档]({a.feishu_doc_url})")
 
-            detail_lines.append("---")
+            agent_blocks.append("\n".join(block))
 
-        if detail_lines:
-            # Remove the trailing redundant ---
-            if detail_lines[-1] == "---":
-                detail_lines.pop()
+        if agent_blocks:
             elements.append({
                 "tag": "collapsible_panel",
                 "header": {"title": {"tag": "plain_text", "content": "**🤖 Agent 详情**"}},
                 "expanded": phase in ("running", "synthesizing", "breakpoint"),
-                "elements": [{"tag": "markdown", "content": "\n\n".join(detail_lines)}],
+                "elements": [{"tag": "markdown", "content": "\n\n---\n\n".join(agent_blocks)}],
             })
 
     # Final deliverable
@@ -207,7 +203,7 @@ def _build_card(state: CrewState) -> str:
 
         body_parts: list[str] = [f"**{plan.title}**"]
 
-        # Agent status list
+        # Agent status list — join with \n\n so _normalize_newlines won't insert extra blanks
         status_lines: list[str] = []
         for spec in plan.agents:
             a     = agents.get(spec.id)
@@ -220,7 +216,7 @@ def _build_card(state: CrewState) -> str:
                 t_str = f" ({_fmt_elapsed(time.time() - a.start_time)}…)"
             status_lines.append(f"{icon} **{spec.id}** {spec.role} [{spec.model}]{dep}{t_str}")
         if status_lines:
-            body_parts.append("\n".join(status_lines))
+            body_parts.append("\n\n".join(status_lines))
 
         # Progress preview for running agents
         running_previews: list[str] = []
@@ -230,12 +226,31 @@ def _build_card(state: CrewState) -> str:
                 continue
             t_str = f" · {_fmt_elapsed(time.time() - a.start_time)}…" if a.start_time else ""
             preview = (a.result[:300] if a.result else "运行中...") + " ▌"
-            running_previews.append(f"**🔄 {spec.role}**{t_str}\n{preview}")
+            running_previews.append(f"**🔄 {spec.role}**{t_str}\n\n{preview}")
         if running_previews:
-            body_parts.append("---\n" + "\n\n".join(running_previews))
+            body_parts.append("---\n\n" + "\n\n---\n\n".join(running_previews))
+
+        # Breakpoint: PRD preview + confirm/cancel buttons on the main card
+        if phase == "breakpoint":
+            from pathlib import Path as _Path
+            prd_path = _Path(_get_cwd(state.chat_id)) / ".crew_workspace" / "prd.md"
+            prd_preview = ""
+            try:
+                _text = prd_path.read_text(encoding="utf-8")
+                prd_preview = _text[:600] + ("…" if len(_text) > 600 else "")
+            except Exception:
+                ag = state.agents.get(state.breakpoint_agent_id)
+                if ag:
+                    prd_preview = ag.result[:400]
+            if prd_preview:
+                body_parts.append(prd_preview)
+            body_md = "\n\n".join(body_parts)
+            return _make_card(title, body_md, color=color, normalize=False,
+                              buttons=[("✅ 继续执行", f"crew_bp:confirm:{state.crew_id}"),
+                                       ("❌ 取消",    f"crew_bp:cancel:{state.crew_id}")])
 
         body_md = "\n\n".join(body_parts)
-        return _make_card(title, body_md, color=color,
+        return _make_card(title, body_md, color=color, normalize=False,
                           buttons=[("🛑 取消", f"cancel:{state.chat_id}"),
                                    ("⏸ 暂停", f"crew_pause:{state.crew_id}")])
 

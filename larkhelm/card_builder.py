@@ -14,10 +14,9 @@ body parameter accepts str or list[str].
   list[str] — each element becomes an independent markdown block (useful when content
                has multiple sections that should not be merged, e.g. perm cards)
 
-Schema: always JSON 2.0.
-  Buttons — direct button element (single) or column_set (multiple).
-            Callbacks use behaviors/callback; server receives action.value == behaviors[0].value,
-            compatible with the existing _card_action.py handler.
+Schema: JSON 2.0 by default; JSON 1.0 when buttons are present (required for action/callback support).
+  Buttons — cards with buttons use JSON 1.0 format (_make_card_json10_dict); cards without buttons
+            use JSON 2.0 format with button elements via column_set / behaviors/callback.
   Tables  — markdown pipe tables auto-converted to Feishu native table elements.
 """
 import json
@@ -86,9 +85,10 @@ def _parse_md_table(table_lines: list[str]) -> dict | None:
 
     col_keys = [f"c{i}" for i in range(len(headers))]
     columns = [{"name": col_keys[i], "display_name": headers[i],
-                "width": "auto", "horizontal_align": "left"}
+                "data_type": "text", "width": "auto", "horizontal_align": "left"}
                for i in range(len(headers))]
-    rows = [{col_keys[i]: (cells[i] if i < len(cells) else "")
+    # Feishu JSON 2.0 table cells must be {"text": value} objects, not plain strings.
+    rows = [{col_keys[i]: {"text": cells[i] if i < len(cells) else ""}
              for i in range(len(col_keys))}
             for cells in (split_cells(l) for l in non_sep[1:])]
 
@@ -98,7 +98,6 @@ def _parse_md_table(table_lines: list[str]) -> dict | None:
     return {
         "tag": "table",
         "page_size": min(len(rows), 100),
-        "row_height": "medium",
         "header_style": {"text_align": "left", "bold": True, "lines": 1},
         "columns": columns,
         "rows": rows,
@@ -172,33 +171,48 @@ def _split_md(text: str) -> list[str]:
     return chunks or [text]
 
 
-# ── Button helpers ───────────────────────────────────────────────────────────
+# ── JSON 1.0 builder (used when buttons are present) ─────────────────────────
 
-def _btn_element(label: str, cmd: str, idx: int = 0) -> dict:
+def _make_card_json10_dict(
+    title: str,
+    body: "str | list[str]",
+    color: str,
+    note: str,
+    buttons: list,
+    subtitle: str,
+    normalize: bool,
+) -> dict:
+    """Build a JSON 1.0 Feishu card (required format for action/button callbacks)."""
+    elements: list = []
+    sections: list[str] = [body] if isinstance(body, str) else list(body)
+    for sec in sections:
+        if sec:
+            content = _normalize_newlines(sec.strip()) if normalize else sec.strip()
+            if content:
+                elements.append({"tag": "div", "text": {"tag": "lark_md", "content": content}})
+
+    actions = [
+        {
+            "tag": "button",
+            "text": {"tag": "lark_md", "content": label},
+            "type": _btn_type(label),
+            "value": {"cmd": cmd},
+        }
+        for label, cmd in buttons
+    ]
+    elements.append({"tag": "action", "actions": actions})
+
+    if note:
+        elements.append({"tag": "note", "elements": [{"tag": "lark_md", "content": note}]})
+
+    header: dict = {"template": color, "title": {"tag": "lark_md", "content": title}}
+    if subtitle:
+        header["subtitle"] = {"tag": "lark_md", "content": subtitle}
+
     return {
-        "tag": "button",
-        "element_id": f"btn_{idx}",
-        "text": {"tag": "plain_text", "content": label},
-        "type": _btn_type(label),
-        "behaviors": [{"type": "callback", "value": {"cmd": cmd}}],
-    }
-
-
-def _buttons_element(buttons: list[tuple[str, str]]) -> dict | None:
-    """Return a single button element or a column_set for multiple buttons."""
-    if not buttons:
-        return None
-    if len(buttons) == 1:
-        return _btn_element(buttons[0][0], buttons[0][1], 0)
-    return {
-        "tag": "column_set",
-        "flex_mode": "flow",
-        "horizontal_spacing": "small",
-        "columns": [
-            {"tag": "column", "width": "auto",
-             "elements": [_btn_element(label, cmd, i)]}
-            for i, (label, cmd) in enumerate(buttons)
-        ],
+        "config": {"wide_screen_mode": True},
+        "header": header,
+        "elements": elements,
     }
 
 
@@ -229,6 +243,10 @@ def _make_card_dict(
                    tools_* are ignored and the list is used as-is. For complex cards
                    (e.g. crew_card.py terminal phase) that build their own element tree.
     """
+    # Cards with buttons use JSON 1.0 format (required for action/callback support)
+    if buttons and raw_elements is None:
+        return _make_card_json10_dict(title, body, color, note, buttons, subtitle, normalize)
+
     # Fast path: caller supplies pre-built elements (e.g. crew_card terminal phase)
     if raw_elements is not None:
         header: dict = {"template": color, "title": {"tag": "plain_text", "content": title}}
@@ -293,12 +311,6 @@ def _make_card_dict(
             body_elements[-1]["content"] += "\n\n" + note_md
         else:
             body_elements.append({"tag": "markdown", "content": note_md})
-
-    # ── Buttons ───────────────────────────────────────────────────────────
-    if buttons:
-        if body_elements:  # only add divider when there is content above
-            body_elements.append({"tag": "hr"})
-        body_elements.append(_buttons_element(buttons))
 
     # ── Header ───────────────────────────────────────────────────────────
     header: dict = {"template": color, "title": {"tag": "plain_text", "content": title}}

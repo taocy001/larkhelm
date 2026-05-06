@@ -302,7 +302,7 @@ def handle_message(data: P2ImMessageReceiveV1):
             threading.Thread(target=_cmd_run, args=(chat_id, text[5:].strip(), _mid),
                              daemon=True).start()
             return
-        if tl.startswith("/model"):
+        if tl == "/model" or tl.startswith("/model "):
             parts = text.split(None, 1)
             if len(parts) == 2:
                 _cmd_model(chat_id, parts[1], _mid)
@@ -327,8 +327,10 @@ def handle_message(data: P2ImMessageReceiveV1):
             return
         if tl.startswith("/btw ") or tl == "/btw":
             question = text[5:].strip() if tl.startswith("/btw ") else ""
-            if question:
-                _cmd_btw(chat_id, question, message.message_id)
+            if not question:
+                send_card_reply(chat_id, _mid, "⚠️ 用法", "`/btw <问题>` — 快速追问（不占用主锁）", color="orange")
+                return
+            _cmd_btw(chat_id, question, message.message_id)
             return
         if _is_btw_reply(chat_id, message.parent_id):
             _register_btw_msg(chat_id, message.message_id)

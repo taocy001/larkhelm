@@ -87,6 +87,14 @@ def cli():
     # Keep the version sub-command for backward compatibility (prefer the --version flag)
     sub.add_parser("version", help="print version (prefer --version)")
 
+    # `larkhelm mcp-server` — MCP stdio server spawned by Claude Code per session
+    mcp_parser = sub.add_parser(
+        "mcp-server",
+        help="run as an MCP stdio server (spawned automatically by Claude Code)",
+    )
+    mcp_parser.add_argument("--config", metavar="PATH", help="path to config file")
+    mcp_parser.add_argument("--data-dir", metavar="DIR", help="path to data directory")
+
     args = parser.parse_args()
 
     if args.command == "version":
@@ -99,6 +107,9 @@ def cli():
             doc_parser.print_help()
             sys.exit(0)
         _cmd_doc(args)
+    elif args.command == "mcp-server":
+        from larkhelm.mcp_server import run as mcp_run
+        mcp_run(config_path=args.config, data_dir=args.data_dir)
     else:
         # No subcommand given: show help and require the user to make an explicit choice
         parser.print_help()

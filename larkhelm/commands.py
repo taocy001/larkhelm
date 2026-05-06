@@ -199,7 +199,7 @@ def _cmd_status(chat_id: str, msg_id: str = None):
         ("🔗 接入终端", "/pickup"),
         (f"切换 {other_model}", f"/model {other_model}"),
     ]
-    send_card_reply(chat_id, msg_id, "📊 运行状态", "\n".join(lines), color="turquoise", buttons=buttons)
+    send_card_reply(chat_id, msg_id, "📊 运行状态", "\n".join(lines), color="turquoise", buttons=buttons, normalize=False)
 
 
 def _cmd_help(chat_id: str, msg_id: str = None):
@@ -254,7 +254,7 @@ def _cmd_help(chat_id: str, msg_id: str = None):
         ("🛑 取消查询", "/cancel"),
         (f"切换 {other}", f"/model {other}"),
     ]
-    send_card_reply(chat_id, msg_id, "📖 帮助", body, color="blue", buttons=buttons)
+    send_card_reply(chat_id, msg_id, "📖 帮助", body, color="blue", buttons=buttons, normalize=False)
 
 
 def _cmd_pickup(chat_id: str, msg_id: str = None):

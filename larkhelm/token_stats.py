@@ -1,15 +1,11 @@
-"""larkhelm · in-memory token usage statistics and persistent read/write
-
-Note: writing to all.jsonl uses _log_lock imported from log.py, sharing the same lock as log.py
-to prevent interleaved writes from the two modules.
-"""
+"""larkhelm · in-memory token usage statistics and persistent read/write"""
 import json
 import threading
 from collections import OrderedDict
 from datetime import datetime
 
 import larkhelm.config as _cfg
-from larkhelm.log import _log_lock
+from larkhelm.concurrency import _jsonl_lock
 
 __all__ = [
     "_token_stats", "_token_stats_lock", "_jsonl_lock",
@@ -23,7 +19,6 @@ __all__ = [
 _TOKEN_STATS_MAX = 5000
 _token_stats: OrderedDict[str, dict[str, dict]] = OrderedDict()
 _token_stats_lock = threading.Lock()
-_jsonl_lock = _log_lock  # share the same lock as log.py to avoid interleaved writes to all.jsonl
 
 # Per crew-agent token stats (in-memory only, keyed by crew_ns = "chat_id__crew_X_agent_Y").
 # Each crew run with N agents creates N entries; LRU cap prevents unbounded growth across many runs.
