@@ -32,7 +32,7 @@ from larkhelm.lark_client import (
     send_permission_guide,
 )
 from larkhelm.card_builder import _make_card, _fmt_elapsed
-from larkhelm.ai_runner import query_gemini, _spawn_claude_proc
+from larkhelm.ai_runner import query_gemini
 
 
 # ═══════════════════════════════════════════════════
@@ -84,10 +84,7 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
     if which in (None, "claude", "gemini", "kimi"):
         try:
             from larkhelm.memory import maybe_auto_update
-            threading.Thread(
-                target=maybe_auto_update, args=(chat_id,), kwargs={"force": True},
-                daemon=True, name=f"memory-reset-{chat_id[:8]}"
-            ).start()
+            maybe_auto_update(chat_id, force=True)
         except Exception:
             pass
 
@@ -107,14 +104,29 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
         send_card_reply(chat_id, msg_id, "♻️ 已重置", "所有 AI 会话均已清空（记忆已保留）。", color="green")
     elif which == "claude":
         _clear_sid(chat_id, "claude")
+        try:
+            from larkhelm.api_session import clear_history as _clear_api_hist
+            _clear_api_hist("anthropic_api", chat_id)
+        except Exception:
+            pass
         log_entry(chat_id, "reset", "reset:claude", model="system")
         send_card_reply(chat_id, msg_id, "♻️ 已重置", "Claude 会话已清空。", color="green")
     elif which == "gemini":
         _clear_sid(chat_id, "gemini")
+        try:
+            from larkhelm.api_session import clear_history as _clear_api_hist
+            _clear_api_hist("google_api", chat_id)
+        except Exception:
+            pass
         log_entry(chat_id, "reset", "reset:gemini", model="system")
         send_card_reply(chat_id, msg_id, "♻️ 已重置", "Gemini 会话已清空。", color="green")
     elif which == "kimi":
         _clear_sid(chat_id, "kimi")
+        try:
+            from larkhelm.api_session import clear_history as _clear_api_hist
+            _clear_api_hist("openai_compat_api", chat_id)
+        except Exception:
+            pass
         log_entry(chat_id, "reset", "reset:kimi", model="system")
         send_card_reply(chat_id, msg_id, "♻️ 已重置", "Kimi 会话已清空。", color="green")
     elif which in ("perm", "permissions"):
@@ -859,8 +871,13 @@ def _cmd_btw(chat_id: str, question: str, user_msg_id: str):
                 if model == "gemini":
                     output = query_gemini(chat_id, question, cwd, None, None, _on_text)
                 else:
-                    output = _spawn_claude_proc(
-                        chat_id=chat_id, message=question, sid=sid, cwd=cwd,
+                    from larkhelm.backend_cli import run_claude as _bc_run_claude
+                    from larkhelm.backend_registry import BACKEND_REGISTRY as _reg
+                    _spec = _reg.get_orchestrator()
+                    if _spec is None:
+                        raise RuntimeError("No orchestrator backend available for /btw")
+                    output = _bc_run_claude(
+                        spec=_spec, chat_id=chat_id, message=question, sid=sid, cwd=cwd,
                         cancel_ev=None, on_text=_on_text, allow_retry=True,
                     )
 

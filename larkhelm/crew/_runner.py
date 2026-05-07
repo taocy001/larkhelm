@@ -153,7 +153,7 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
     from larkhelm.concurrency import _get_cancel_event
     from larkhelm.card_builder import _fmt_elapsed
     from larkhelm.perm import grant_yolo, revoke_yolo
-    from larkhelm.ai_runner import _spawn_claude_proc, query_gemini, query_kimi
+    from larkhelm.ai_runner import query_gemini, query_kimi
     from larkhelm.crew._scheduler import _resolve_prompt
     from larkhelm.crew._state import _git_head
     from larkhelm.crew._hermes_orchestrator import _run_hermes_orchestrator
@@ -318,19 +318,35 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
                 on_text=_on_text,
             )
         else:
-            output = _spawn_claude_proc(
-                chat_id=crew_ns,
-                message=full_prompt,
-                sid=sid,
-                cwd=cwd,
-                cancel_ev=agent_cancel,
-                on_text=_on_text,
-                on_tool=None,        # Crew agents do not surface tool call details
-                on_tool_result=None,
-                allow_retry=False,
-                on_start=_on_start,  # Fired when semaphore is acquired; timeout starts from here
-                session_namespace=crew_ns,
-            )
+            from larkhelm.backend_cli import run_claude as _bc_run_claude
+            from larkhelm.backend_registry import BACKEND_REGISTRY as _reg
+            _spec = _reg.get_orchestrator()
+            if _spec is None:
+                raise RuntimeError("No orchestrator backend available for crew agent")
+            _API_PROVIDERS = ("anthropic_api", "google_api", "openai_compat_api")
+            if _spec.provider in _API_PROVIDERS:
+                import larkhelm.backend_api as _bapi
+                _fn = {"anthropic_api": _bapi.run_anthropic,
+                       "google_api": _bapi.run_google,
+                       "openai_compat_api": _bapi.run_openai_compat}[_spec.provider]
+                _on_start()
+                output, _ = _fn(spec=_spec, chat_id=crew_ns, message=full_prompt,
+                                history=[], cancel_ev=agent_cancel, on_text=_on_text)
+            else:
+                output = _bc_run_claude(
+                    spec=_spec,
+                    chat_id=crew_ns,
+                    message=full_prompt,
+                    sid=sid,
+                    cwd=cwd,
+                    cancel_ev=agent_cancel,
+                    on_text=_on_text,
+                    on_tool=None,
+                    on_tool_result=None,
+                    allow_retry=False,
+                    on_start=_on_start,
+                    session_namespace=crew_ns,
+                )
     except QueryCancelledError:
         if cancel_ev.is_set():
             raise  # Crew-level cancellation → propagate → wrapper marks CANCELLED
@@ -777,7 +793,8 @@ def _synthesize(state: CrewState) -> str:
     """Manager synthesizes all agent results and produces the final deliverable."""
     from larkhelm.chat_state import _get_cwd
     from larkhelm.perm import grant_yolo, revoke_yolo
-    from larkhelm.ai_runner import _spawn_claude_proc
+    from larkhelm.backend_cli import run_claude as _bc_run_claude
+    from larkhelm.backend_registry import BACKEND_REGISTRY as _reg
 
     cancel_ev = state.cancel_ev
     cwd       = _get_cwd(state.chat_id)
@@ -836,17 +853,30 @@ def _synthesize(state: CrewState) -> str:
     threading.Thread(target=_watch_cancel, daemon=True).start()
 
     grant_yolo(synth_ns)
+    _synth_spec = _reg.get_orchestrator()
+    if _synth_spec is None:
+        raise RuntimeError("No orchestrator backend available for synthesis")
+    _API_PROVIDERS = ("anthropic_api", "google_api", "openai_compat_api")
     try:
-        result = _spawn_claude_proc(
-            chat_id=synth_ns,
-            message=full_prompt,
-            sid=None,
-            cwd=cwd,
-            cancel_ev=synth_cancel,
-            on_text=None,
-            allow_retry=False,
-            session_namespace=synth_ns,
-        )
+        if _synth_spec.provider in _API_PROVIDERS:
+            import larkhelm.backend_api as _bapi
+            _fn = {"anthropic_api": _bapi.run_anthropic,
+                   "google_api": _bapi.run_google,
+                   "openai_compat_api": _bapi.run_openai_compat}[_synth_spec.provider]
+            result, _ = _fn(spec=_synth_spec, chat_id=synth_ns, message=full_prompt,
+                            history=[], cancel_ev=synth_cancel, on_text=None)
+        else:
+            result = _bc_run_claude(
+                spec=_synth_spec,
+                chat_id=synth_ns,
+                message=full_prompt,
+                sid=None,
+                cwd=cwd,
+                cancel_ev=synth_cancel,
+                on_text=None,
+                allow_retry=False,
+                session_namespace=synth_ns,
+            )
     finally:
         synth_cancel.set()
         revoke_yolo(synth_ns)
