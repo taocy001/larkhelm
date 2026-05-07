@@ -419,6 +419,24 @@ def handle_message(data: P2ImMessageReceiveV1):
                     f"{prompt}"
                 )
 
+        # Workspace context: if .crew_workspace/ has relevant files, tell the AI so it
+        # can read them naturally (enables "fix failed /dev" or "revise /plan" via chat).
+        try:
+            from pathlib import Path as _Path
+            _ws = _Path(_get_cwd(chat_id)) / ".crew_workspace"
+            _ws_files = sorted(
+                f.name for f in _ws.iterdir()
+                if f.is_file() and f.suffix in (".md", ".json") and f.name != "crew_checkpoint.json"
+            ) if _ws.is_dir() else []
+            if _ws_files:
+                prompt = (
+                    f"[工作区] .crew_workspace/ 下有以下文件可供参考：{', '.join(_ws_files)}。"
+                    f"如需了解当前任务背景，请读取这些文件。\n\n"
+                    f"{prompt}"
+                )
+        except Exception:
+            pass
+
         log_entry(chat_id, "user", prompt, model=target_model)
         _reset_cancel(chat_id)
         user_msg_id = message.message_id

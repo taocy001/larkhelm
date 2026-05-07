@@ -191,11 +191,19 @@ def _build_plan_card(state: MultiPlanState) -> str:
 def _update_plan_card(state: MultiPlanState) -> None:
     if not state.card_mid:
         return
-    from larkhelm.lark_client import _patch_card_raw
+    from larkhelm.lark_client import _patch_card_raw, _send_card_raw
+    card = _build_plan_card(state)
     try:
-        _patch_card_raw(state.card_mid, _build_plan_card(state))
+        ok = _patch_card_raw(state.card_mid, card)
     except Exception as e:
         _debug_log(f"[Plan] card patch error: {e}")
+        ok = False
+    if not ok:
+        new_mid = _send_card_raw(state.chat_id, card)
+        if new_mid:
+            with state.lock:
+                state.card_mid = new_mid
+            _debug_log(f"[Plan] replaced stale card → {new_mid}")
 
 
 # ── Smart planner ────────────────────────────────────────────────
@@ -292,6 +300,7 @@ def _run_dev_step(state: MultiPlanState, step: PlanStep, crew_id: str) -> bool:
             user_msg_id=None,   # each step sends its own card into the chat
             no_confirm=True,    # plan handles human-in-the-loop between steps
             crew_id=crew_id,
+            force_replan=True,  # each [dev] step re-runs PM/Architect for its specific requirement
         )
         return not state.cancel_ev.is_set()
     except Exception as e:
@@ -341,7 +350,7 @@ def _run_single_agent_step(state: MultiPlanState, step: PlanStep) -> bool:
                 "只修复明确列出的问题，不要顺手重构其他代码。"
             ),
             prompt=step.desc or "修复 qa_report.md 和 review.md 中列出的所有问题，更新 changes.md。\n\n**重要**：请直接输出结果，不要等待用户确认。",
-            depends_on=[], timeout=_cfg.HARD_TIMEOUT,
+            depends_on=[], timeout=_cfg.RESPONSE_TIMEOUT * 8,
             output_file="changes.md",
         )
     elif step.type == "test":
