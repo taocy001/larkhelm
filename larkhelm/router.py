@@ -52,7 +52,9 @@ def resolve_backend(
             _debug_log(f"[router] {chat_id}: short+cheap → {spec.id}")
             return spec
 
-    # Rule 4: user preference (backend_id or model stored in chat_state)
+    # Rule 4: user preference (backend_id or model set via /model command)
+    # Note: legacy configs use "model" field (values: claude/gemini/kimi) which
+    # happen to match the auto-migrated backend IDs. New configs should use backend_id.
     state = _get_chat_state(chat_id)
     preferred_id = state.get("backend_id") or state.get("model")
     if preferred_id:

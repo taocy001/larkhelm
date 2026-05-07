@@ -27,7 +27,7 @@ from larkhelm.lark_client import (
 )
 from larkhelm.card_builder import _make_card, _split_md, _fmt_elapsed
 from larkhelm.ai_runner import query_claude, query_gemini, query_kimi, QueryCancelledError
-from larkhelm.chat_state import _get_cwd
+from larkhelm.chat_state import _get_cwd, _load_sid, _increment_turn_count
 
 # ── Card UX parameters (from config) ────────────────────────────────
 TOOL_HISTORY_CAP   = _cfg.TOOL_HISTORY_CAP
@@ -123,6 +123,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
     try:
         m_name = {"claude": "Claude", "gemini": "Gemini", "kimi": "Kimi"}.get(model, model.capitalize())
         cwd = _get_cwd(chat_id)
+        spec = None  # resolved by resolve_backend inside the try block below
         start = time.time()
 
         init_card = _make_card(f"⏳ {m_name} 连接中",
@@ -354,28 +355,96 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
         hb_thread.start()
 
         try:
-            if model == "gemini":
-                output = query_gemini(chat_id, message, cwd, cancel_ev,
-                                      on_tool=on_tool, on_text=on_text,
-                                      on_tool_result=on_tool_result,
-                                      on_soft_timeout=_on_soft_timeout)
-            elif model == "kimi":
-                output = query_kimi(chat_id, message, cwd, cancel_ev,
-                                    on_tool=on_tool, on_text=on_text,
-                                    on_tool_result=on_tool_result,
-                                    on_soft_timeout=_on_soft_timeout,
-                                    images=images)
+            # ── Memory injection + backend routing ──────────────────────────
+            try:
+                from larkhelm.memory import inject_memory, maybe_auto_update
+                enriched_message = inject_memory(chat_id, message)
+            except Exception as _mem_err:
+                _debug_log(f"[{trace_id}][DoQuery] memory inject error: {_mem_err}")
+                enriched_message = message
+
+            has_doc_urls = bool(_extract_feishu_urls(message))
+
+            try:
+                from larkhelm.router import resolve_backend
+                from larkhelm.backend_cli import run_claude, run_gemini, run_kimi
+                from larkhelm.backend_api import run_anthropic, run_google, run_openai_compat
+                from larkhelm.api_session import load_history, save_history
+                spec = resolve_backend(chat_id, enriched_message, bool(images), has_doc_urls)
+                m_name = spec.display_name
+            except Exception as _route_err:
+                _debug_log(f"[{trace_id}][DoQuery] routing error: {_route_err}, fallback to model={model}")
+                spec = None
+
+            if spec is not None:
+                provider = spec.provider
+                if provider == "anthropic_api":
+                    history = load_history(provider, chat_id)
+                    output, new_history = run_anthropic(
+                        spec, chat_id, enriched_message, history, cancel_ev, on_text)
+                    save_history(provider, chat_id, new_history)
+                elif provider == "google_api":
+                    history = load_history(provider, chat_id)
+                    output, new_history = run_google(
+                        spec, chat_id, enriched_message, history, cancel_ev, on_text)
+                    save_history(provider, chat_id, new_history)
+                elif provider == "openai_compat_api":
+                    history = load_history(provider, chat_id)
+                    output, new_history = run_openai_compat(
+                        spec, chat_id, enriched_message, history, cancel_ev, on_text)
+                    save_history(provider, chat_id, new_history)
+                elif provider == "gemini_cli":
+                    sid = _load_sid(chat_id, "gemini")
+                    output = run_gemini(
+                        spec, chat_id, enriched_message, sid, cwd, cancel_ev,
+                        on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
+                        on_soft_timeout=_on_soft_timeout)
+                elif provider == "kimi_cli":
+                    sid = _load_sid(chat_id, "kimi")
+                    output = run_kimi(
+                        spec, chat_id, enriched_message, sid, cwd, cancel_ev,
+                        on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
+                        on_soft_timeout=_on_soft_timeout, images=images)
+                else:  # claude_cli (default)
+                    sid = _load_sid(chat_id, "claude")
+                    output = run_claude(
+                        spec, chat_id, enriched_message, sid, cwd, cancel_ev,
+                        on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
+                        on_soft_timeout=_on_soft_timeout, images=images, allow_retry=True)
             else:
-                output = query_claude(chat_id, message, cwd, cancel_ev,
-                                      on_tool=on_tool, on_text=on_text,
-                                      on_tool_result=on_tool_result,
-                                      on_soft_timeout=_on_soft_timeout,
-                                      images=images)
+                # Fallback to legacy routing when backend_registry unavailable
+                if model == "gemini":
+                    output = query_gemini(chat_id, enriched_message, cwd, cancel_ev,
+                                          on_tool=on_tool, on_text=on_text,
+                                          on_tool_result=on_tool_result,
+                                          on_soft_timeout=_on_soft_timeout)
+                elif model == "kimi":
+                    output = query_kimi(chat_id, enriched_message, cwd, cancel_ev,
+                                        on_tool=on_tool, on_text=on_text,
+                                        on_tool_result=on_tool_result,
+                                        on_soft_timeout=_on_soft_timeout,
+                                        images=images)
+                else:
+                    output = query_claude(chat_id, enriched_message, cwd, cancel_ev,
+                                          on_tool=on_tool, on_text=on_text,
+                                          on_tool_result=on_tool_result,
+                                          on_soft_timeout=_on_soft_timeout,
+                                          images=images)
 
             elapsed = _fmt_elapsed(time.time() - start)
             if not output:
                 output = "✅ 完成（无文本输出）"
-            log_entry(chat_id, "assistant", output, model=model, trace_id=trace_id)
+            log_model = spec.id if spec is not None else model
+            log_entry(chat_id, "assistant", output, model=log_model, trace_id=trace_id)
+
+            # Increment turn count and trigger memory auto-update in background
+            try:
+                _increment_turn_count(chat_id)
+                if spec is not None:
+                    from larkhelm.memory import maybe_auto_update
+                    maybe_auto_update(chat_id)
+            except Exception as _mc_err:
+                _debug_log(f"[{trace_id}][DoQuery] post-query memory error: {_mc_err}")
 
             # Stop the heartbeat and wait for any in-flight patch to complete
             # before writing the final card.  join(timeout) alone is insufficient

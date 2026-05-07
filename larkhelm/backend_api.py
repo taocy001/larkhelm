@@ -31,7 +31,10 @@ def run_anthropic(
         raise RuntimeError("anthropic SDK not installed; run: pip install anthropic")
 
     api_key = spec.api_key or _resolve_env_vars(os.environ.get("ANTHROPIC_API_KEY", ""))
-    client = anthropic.Anthropic(api_key=api_key)
+    client_kwargs: dict = {"api_key": api_key}
+    if spec.base_url:
+        client_kwargs["base_url"] = spec.base_url
+    client = anthropic.Anthropic(**client_kwargs)
 
     messages = list(history)
     messages.append({"role": "user", "content": message})
@@ -42,8 +45,6 @@ def run_anthropic(
         max_tokens=8192,
         messages=messages,
     )
-    if spec.base_url:
-        client = anthropic.Anthropic(api_key=api_key, base_url=spec.base_url)
 
     _debug_log(f"[anthropic_api] {spec.id} model={kwargs['model']} chat={chat_id}")
 

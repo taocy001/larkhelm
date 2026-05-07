@@ -15,7 +15,6 @@ from datetime import datetime
 from pathlib import Path
 
 import larkhelm.config as _cfg
-from larkhelm.concurrency import _get_chat_lock
 from larkhelm.chat_state import _get_turn_count
 from larkhelm.log import _read_logs, _debug_log
 
@@ -59,22 +58,20 @@ def load_memory(chat_id: str) -> str | None:
 
 
 def save_memory(chat_id: str, content: str) -> None:
-    """Atomically write memory file (holds chat lock). content is Markdown body."""
+    """Atomically write memory file. content is Markdown body."""
     try:
-        lock = _get_chat_lock(chat_id)
-        with lock:
-            now = datetime.now().isoformat(timespec="seconds")
-            turns = _get_turn_count(chat_id)
-            frontmatter = (
-                f"---\nchat_id: {chat_id}\nupdated_at: \"{now}\"\n"
-                f"turns: {turns}\nversion: 1\n---\n\n"
-            )
-            body = content[:MEMORY_MAX_CHARS]
-            f = _memory_file(chat_id)
-            tmp = f.with_suffix(".md.tmp")
-            tmp.write_text(frontmatter + body, encoding="utf-8")
-            tmp.replace(f)
-            _debug_log(f"[memory] saved {chat_id} ({len(body)} chars, turns={turns})")
+        now = datetime.now().isoformat(timespec="seconds")
+        turns = _get_turn_count(chat_id)
+        frontmatter = (
+            f"---\nchat_id: {chat_id}\nupdated_at: \"{now}\"\n"
+            f"turns: {turns}\nversion: 1\n---\n\n"
+        )
+        body = content[:MEMORY_MAX_CHARS]
+        f = _memory_file(chat_id)
+        tmp = f.with_suffix(".md.tmp")
+        tmp.write_text(frontmatter + body, encoding="utf-8")
+        tmp.replace(f)
+        _debug_log(f"[memory] saved {chat_id} ({len(body)} chars, turns={turns})")
     except Exception as e:
         _debug_log(f"[memory] save_memory error {chat_id}: {e}")
 

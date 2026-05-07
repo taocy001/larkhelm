@@ -65,6 +65,7 @@ class BackendRegistry:
             for spec in self._specs.values():
                 if not spec.enabled:
                     continue
+                spec.healthy = True  # reset before re-checking; stays True if no failure found
                 try:
                     if spec.provider.endswith("_cli"):
                         if not spec.command or not shutil.which(spec.command):

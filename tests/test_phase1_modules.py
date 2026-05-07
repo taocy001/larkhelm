@@ -479,11 +479,24 @@ class TestMaybeAutoUpdate(unittest.TestCase):
     def test_no_logs_no_memory_written(self, mock_turns):
         """Empty logs → generate_memory never called even at trigger point"""
         from larkhelm.memory import maybe_auto_update
+        thread_done = threading.Event()
+        _real_start = threading.Thread.start
+
+        def _patched_start(self_thread):
+            original_fn = self_thread._target
+            def _wrapped(*args, **kwargs):
+                try:
+                    original_fn(*args, **kwargs)
+                finally:
+                    thread_done.set()
+            self_thread._target = _wrapped
+            _real_start(self_thread)
+
         with patch("larkhelm.memory._read_logs", return_value=[]):
             with patch("larkhelm.memory.generate_memory") as mock_gen:
-                maybe_auto_update("chat_nologs")
-                # Give thread time to run
-                import time; time.sleep(0.1)
+                with patch.object(threading.Thread, "start", _patched_start):
+                    maybe_auto_update("chat_nologs")
+                thread_done.wait(timeout=2.0)
         mock_gen.assert_not_called()
 
 
