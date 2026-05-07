@@ -111,12 +111,19 @@ class TestScenarios(unittest.TestCase):
         # 1. Start with default gemini
         _set_chat_model("chat_switch", "gemini")
         
-        # 2. Switch to kimi
+        # 2. Switch to kimi (Phase 4: /model is alias for /lock, writes locked_backend)
         from larkhelm.commands import _cmd_model
-        with patch("larkhelm.commands.send_card_reply"):
+        from larkhelm.backend_registry import BackendRegistry
+        mock_reg = BackendRegistry()
+        mock_reg.load([{"id": "kimi", "provider": "kimi_cli", "display_name": "Kimi",
+                        "tags": ["tools"], "command": "kimi", "role": "orchestrator"}])
+        with patch("larkhelm.backend_registry.BACKEND_REGISTRY", mock_reg), \
+             patch("larkhelm.commands.send_card_reply"):
             _cmd_model("chat_switch", "kimi", "msg_switch")
-        
-        self.assertEqual(_get_chat_model("chat_switch"), "kimi")
+
+        # Phase 4: locked_backend is stored in real state
+        from larkhelm.chat_state import _get_chat_state
+        self.assertEqual(_get_chat_state("chat_switch").get("locked_backend"), "kimi")
 
         # 3. Send a text message
         mock_event = MagicMock()

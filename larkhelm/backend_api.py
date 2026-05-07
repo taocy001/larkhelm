@@ -23,6 +23,7 @@ def run_anthropic(
     history: list[dict],
     cancel_ev: threading.Event = None,
     on_text: Callable = None,
+    extra_system: str = "",
 ) -> tuple[str, list[dict]]:
     """Stream via Anthropic SDK. Returns (response_text, updated_history)."""
     try:
@@ -30,21 +31,27 @@ def run_anthropic(
     except ImportError:
         raise RuntimeError("anthropic SDK not installed; run: pip install anthropic")
 
-    api_key = spec.api_key or _resolve_env_vars(os.environ.get("ANTHROPIC_API_KEY", ""))
+    api_key = spec.api_key if spec.api_key else _resolve_env_vars(os.environ.get("ANTHROPIC_API_KEY", ""))
     client_kwargs: dict = {"api_key": api_key}
     if spec.base_url:
         client_kwargs["base_url"] = spec.base_url
     client = anthropic.Anthropic(**client_kwargs)
 
-    messages = list(history)
+    # Anthropic only allows user/assistant roles in messages; extract system separately
+    system_parts = [h["content"] for h in history if h["role"] == "system"]
+    if extra_system:
+        system_parts.insert(0, extra_system)
+    messages = [h for h in history if h["role"] != "system"]
     messages.append({"role": "user", "content": message})
 
     result_text = ""
-    kwargs = dict(
+    kwargs: dict = dict(
         model=spec.model or "claude-sonnet-4-6",
         max_tokens=8192,
         messages=messages,
     )
+    if system_parts:
+        kwargs["system"] = "\n\n".join(system_parts)
 
     _debug_log(f"[anthropic_api] {spec.id} model={kwargs['model']} chat={chat_id}")
 
@@ -77,6 +84,7 @@ def run_google(
     history: list[dict],
     cancel_ev: threading.Event = None,
     on_text: Callable = None,
+    extra_system: str = "",
 ) -> tuple[str, list[dict]]:
     """Stream via google-genai SDK. Returns (response_text, updated_history)."""
     try:
@@ -85,11 +93,13 @@ def run_google(
     except ImportError:
         raise RuntimeError("google-genai SDK not installed; run: pip install google-genai")
 
-    api_key = spec.api_key or _resolve_env_vars(os.environ.get("GOOGLE_API_KEY", ""))
+    api_key = spec.api_key if spec.api_key else _resolve_env_vars(os.environ.get("GOOGLE_API_KEY", ""))
     client = genai.Client(api_key=api_key)
 
     # Separate system messages from conversational history
     system_texts: list[str] = []
+    if extra_system:
+        system_texts.append(extra_system)
     contents = []
     for h in history:
         if h["role"] == "system":
@@ -140,6 +150,7 @@ def run_openai_compat(
     history: list[dict],
     cancel_ev: threading.Event = None,
     on_text: Callable = None,
+    extra_system: str = "",
 ) -> tuple[str, list[dict]]:
     """Stream via OpenAI-compat SDK (DeepSeek etc.). Returns (response_text, updated_history)."""
     try:
@@ -147,13 +158,15 @@ def run_openai_compat(
     except ImportError:
         raise RuntimeError("openai SDK not installed; run: pip install openai")
 
-    api_key = spec.api_key or _resolve_env_vars(os.environ.get("OPENAI_API_KEY", ""))
+    api_key = spec.api_key if spec.api_key else _resolve_env_vars(os.environ.get("OPENAI_API_KEY", ""))
     kwargs = dict(api_key=api_key)
     if spec.base_url:
         kwargs["base_url"] = spec.base_url
     client = openai.OpenAI(**kwargs)
 
     messages = list(history)
+    if extra_system:
+        messages.insert(0, {"role": "system", "content": extra_system})
     messages.append({"role": "user", "content": message})
 
     model_name = spec.model or "gpt-4o"

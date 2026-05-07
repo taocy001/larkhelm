@@ -184,9 +184,11 @@ class TestBackendRegistryLoad(unittest.TestCase):
             del os.environ["_TEST_API_KEY_XYZ"]
 
     def test_api_key_missing_env_stays_placeholder(self):
+        # Phase 4: unresolved ${} placeholder → api_key cleared to "", enabled=False
         os.environ.pop("_MISSING_KEY_ZZZZ", None)
         self._load([{"id": "g", "provider": "anthropic_api", "api_key": "${_MISSING_KEY_ZZZZ}"}])
-        self.assertEqual(self.reg.get("g").api_key, "${_MISSING_KEY_ZZZZ}")
+        self.assertEqual(self.reg.get("g").api_key, "")
+        self.assertFalse(self.reg.get("g").enabled)
 
 
 class TestBackendRegistryQueries(unittest.TestCase):

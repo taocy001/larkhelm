@@ -88,6 +88,160 @@ def _inject_doc_context(text: str, chat_id: str) -> str:
 #  AI query execution
 # ═══════════════════════════════════════════════════
 
+def _run_backend_single(spec, chat_id: str, message: str, cwd: str, cancel_ev,
+                        on_text, on_tool, on_tool_result, on_soft_timeout,
+                        images=None, extra_system: str = "") -> str:
+    """Run a single backend and return its output string.
+
+    extra_system: for API backends, injected through the proper system channel;
+                  for CLI backends, prepended as [System]...[User Query] text.
+    """
+    from larkhelm.backend_cli import run_claude, run_gemini, run_kimi
+    from larkhelm.backend_api import run_anthropic, run_google, run_openai_compat
+    from larkhelm.api_session import load_history, save_history
+    from larkhelm.chat_state import _load_sid
+
+    provider = spec.provider
+    if provider == "anthropic_api":
+        history = load_history(provider, chat_id)
+        output, new_history = run_anthropic(spec, chat_id, message, history, cancel_ev, on_text,
+                                            extra_system=extra_system)
+        save_history(provider, chat_id, new_history)
+    elif provider == "google_api":
+        history = load_history(provider, chat_id)
+        output, new_history = run_google(spec, chat_id, message, history, cancel_ev, on_text,
+                                         extra_system=extra_system)
+        save_history(provider, chat_id, new_history)
+    elif provider == "openai_compat_api":
+        history = load_history(provider, chat_id)
+        output, new_history = run_openai_compat(spec, chat_id, message, history, cancel_ev, on_text,
+                                                extra_system=extra_system)
+        save_history(provider, chat_id, new_history)
+    elif provider == "gemini_cli":
+        sid = _load_sid(chat_id, "gemini")
+        cli_msg = f"[System]\n{extra_system}\n\n[User Query]\n{message}" if extra_system else message
+        output = run_gemini(spec, chat_id, cli_msg, sid, cwd, cancel_ev,
+                            on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
+                            on_soft_timeout=on_soft_timeout)
+    elif provider == "kimi_cli":
+        sid = _load_sid(chat_id, "kimi")
+        cli_msg = f"[System]\n{extra_system}\n\n[User Query]\n{message}" if extra_system else message
+        output = run_kimi(spec, chat_id, cli_msg, sid, cwd, cancel_ev,
+                          on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
+                          on_soft_timeout=on_soft_timeout, images=images)
+    else:  # claude_cli (default)
+        sid = _load_sid(chat_id, "claude")
+        cli_msg = f"[System]\n{extra_system}\n\n[User Query]\n{message}" if extra_system else message
+        output = run_claude(spec, chat_id, cli_msg, sid, cwd, cancel_ev,
+                            on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
+                            on_soft_timeout=on_soft_timeout, images=images, allow_retry=True)
+    return output
+
+
+def _do_query_with_delegation(
+    chat_id: str,
+    enriched_msg: str,
+    orch_spec,
+    worker_specs: dict,
+    cwd: str,
+    cancel_ev,
+    on_text,
+    on_tool,
+    on_tool_result,
+    on_soft_timeout,
+    images=None,
+    hop: int = 0,
+) -> str:
+    """Execute query with delegation support (max 2 hops).
+
+    Phase 1: Stream orchestrator response, buffer first 60 chars for DELEGATE detection.
+    Phase 2: If DELEGATE found, run specialist; on_tool/on_tool_result show progress.
+    Phase 3: Re-run orchestrator with specialist result for synthesis.
+    Falls back to direct answer if specialist unavailable or delegation malformed.
+    """
+    from larkhelm.orchestration import build_orchestrator_system_prompt, _detect_delegation
+    from larkhelm.backend_registry import BACKEND_REGISTRY
+
+    if hop >= 2:
+        return _run_backend_single(orch_spec, chat_id, enriched_msg, cwd, cancel_ev,
+                                   on_text, on_tool, on_tool_result, on_soft_timeout, images)
+
+    # Build system prompt listing specialists
+    system_prompt = build_orchestrator_system_prompt(BACKEND_REGISTRY)
+
+    # Phase 1: run orchestrator with buffered on_text to detect DELEGATE prefix
+    BUFFER_THRESHOLD = 60
+    _buf_state = {"text": "", "delegation": None, "flushed": False}
+
+    def _buffered_on_text(text: str, status: str = "typing"):
+        _buf_state["text"] = text
+        if _buf_state["delegation"] is not None:
+            return  # delegation already detected, hide all orchestrator text
+        if len(text) >= BUFFER_THRESHOLD and not _buf_state["flushed"]:
+            result = _detect_delegation(text)
+            if result:
+                _buf_state["delegation"] = result
+                return  # hide from card
+            _buf_state["flushed"] = True
+            on_text(text, status)
+        elif _buf_state["flushed"]:
+            on_text(text, status)
+        # else: still buffering (< BUFFER_THRESHOLD), show nothing yet
+
+    orch_output = _run_backend_single(orch_spec, chat_id, enriched_msg, cwd, cancel_ev,
+                                      _buffered_on_text, on_tool, on_tool_result, on_soft_timeout,
+                                      images, extra_system=system_prompt)
+
+    # Final check on complete output (catches END_DELEGATE arriving late)
+    delegation = _buf_state["delegation"] or _detect_delegation(orch_output)
+
+    if not delegation:
+        # No delegation: flush accumulated text if heartbeat hasn't seen it yet
+        if not _buf_state["flushed"]:
+            on_text(orch_output)
+        return orch_output
+
+    # Phase 2: Specialist execution
+    backend_id, sub_query = delegation
+    specialist_spec = worker_specs.get(backend_id)
+
+    if specialist_spec is None or not specialist_spec.healthy or not specialist_spec.enabled:
+        _debug_log(f"[Delegation] specialist {backend_id} unavailable, falling back to direct orchestrator")
+        on_text(f"> ⚠️ 专家 {backend_id} 不可用，正在直接回答...")
+        # Call without extra_system so orchestrator won't receive DELEGATE instructions and answers directly
+        return _run_backend_single(orch_spec, chat_id, enriched_msg, cwd, cancel_ev,
+                                   on_text, on_tool, on_tool_result, on_soft_timeout, images)
+
+    on_tool(f"🔀 委托 {specialist_spec.display_name}", sub_query[:120], "delegation")
+
+    _spec_start = time.monotonic()
+    try:
+        specialist_output = _run_backend_single(
+            specialist_spec, chat_id, sub_query, cwd, cancel_ev,
+            lambda t, s="typing": None,  # suppress specialist text from main card
+            lambda *a: None,
+            lambda *a: None,
+            lambda: None,
+        )
+    except Exception as _spec_err:
+        _debug_log(f"[Delegation] specialist {backend_id} failed: {_spec_err}")
+        specialist_output = f"[Specialist {backend_id} failed: {_spec_err}]"
+
+    _spec_elapsed = time.monotonic() - _spec_start
+    on_tool_result("delegation", specialist_output[:500], False, _spec_elapsed)
+
+    # Phase 3: Orchestrator synthesis
+    synthesis_msg = (
+        f"{enriched_msg}\n\n"
+        f"[{specialist_spec.display_name} specialist result:]\n{specialist_output}"
+    )
+    return _do_query_with_delegation(
+        chat_id, synthesis_msg, orch_spec, worker_specs,
+        cwd, cancel_ev, on_text, on_tool, on_tool_result, on_soft_timeout,
+        images=images, hop=hop + 1,
+    )
+
+
 def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
               images: list = None):
     trace_id = uuid.uuid4().hex[:12]
@@ -365,54 +519,37 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
 
             has_doc_urls = bool(_extract_feishu_urls(message))
 
-            try:
-                from larkhelm.router import resolve_backend
-                from larkhelm.backend_cli import run_claude, run_gemini, run_kimi
-                from larkhelm.backend_api import run_anthropic, run_google, run_openai_compat
-                from larkhelm.api_session import load_history, save_history
-                spec = resolve_backend(chat_id, enriched_message, bool(images), has_doc_urls)
-                m_name = spec.display_name
-            except Exception as _route_err:
-                _debug_log(f"[{trace_id}][DoQuery] routing error: {_route_err}, fallback to model={model}")
-                spec = None
+            from larkhelm.router import resolve_backend, LockedBackendUnavailableError
+            from larkhelm.backend_registry import BACKEND_REGISTRY
+            from larkhelm.backend_cli import run_claude, run_gemini, run_kimi
+            from larkhelm.backend_api import run_anthropic, run_google, run_openai_compat
+            from larkhelm.api_session import load_history, save_history
 
-            if spec is not None:
-                provider = spec.provider
-                if provider == "anthropic_api":
-                    history = load_history(provider, chat_id)
-                    output, new_history = run_anthropic(
-                        spec, chat_id, enriched_message, history, cancel_ev, on_text)
-                    save_history(provider, chat_id, new_history)
-                elif provider == "google_api":
-                    history = load_history(provider, chat_id)
-                    output, new_history = run_google(
-                        spec, chat_id, enriched_message, history, cancel_ev, on_text)
-                    save_history(provider, chat_id, new_history)
-                elif provider == "openai_compat_api":
-                    history = load_history(provider, chat_id)
-                    output, new_history = run_openai_compat(
-                        spec, chat_id, enriched_message, history, cancel_ev, on_text)
-                    save_history(provider, chat_id, new_history)
-                elif provider == "gemini_cli":
-                    sid = _load_sid(chat_id, "gemini")
-                    output = run_gemini(
-                        spec, chat_id, enriched_message, sid, cwd, cancel_ev,
-                        on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
-                        on_soft_timeout=_on_soft_timeout)
-                elif provider == "kimi_cli":
-                    sid = _load_sid(chat_id, "kimi")
-                    output = run_kimi(
-                        spec, chat_id, enriched_message, sid, cwd, cancel_ev,
-                        on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
-                        on_soft_timeout=_on_soft_timeout, images=images)
-                else:  # claude_cli (default)
-                    sid = _load_sid(chat_id, "claude")
-                    output = run_claude(
-                        spec, chat_id, enriched_message, sid, cwd, cancel_ev,
-                        on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
-                        on_soft_timeout=_on_soft_timeout, images=images, allow_retry=True)
-            else:
-                # Fallback to legacy routing when backend_registry unavailable
+            # Resolve primary backend (respects Rule 0 locked_backend, vision, doc routing)
+            try:
+                primary_spec = resolve_backend(chat_id, enriched_message, bool(images), has_doc_urls)
+                m_name = primary_spec.display_name
+            except LockedBackendUnavailableError as _lbe:
+                # User explicitly locked this backend; show error card, do not silently re-route
+                _stop_hb.set()
+                send_card(chat_id, "❌ 锁定后端不可用",
+                          f"{_lbe}\n\n使用 **/lock off** 恢复自动路由。", color="red")
+                return
+            except Exception as _route_err:
+                _debug_log(f"[{trace_id}][DoQuery] routing error: {_route_err}, using orchestrator chain")
+                primary_spec = None
+
+            # Build failover chain: primary spec first, then remaining orchestrators
+            chain = BACKEND_REGISTRY.get_orchestrator_chain()
+            if primary_spec is not None and primary_spec.healthy:
+                chain_ids = [s.id for s in chain]
+                if primary_spec.id not in chain_ids:
+                    chain = [primary_spec] + chain
+                elif chain and chain[0].id != primary_spec.id:
+                    chain = [primary_spec] + [s for s in chain if s.id != primary_spec.id]
+
+            if not chain:
+                # Last resort: fall back to legacy routing
                 if model == "gemini":
                     output = query_gemini(chat_id, enriched_message, cwd, cancel_ev,
                                           on_tool=on_tool, on_text=on_text,
@@ -430,11 +567,54 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                                           on_tool_result=on_tool_result,
                                           on_soft_timeout=_on_soft_timeout,
                                           images=images)
+            else:
+                # Failover loop: iterate orchestrator chain, mark unhealthy on exception
+                worker_specs = {
+                    s.id: s for s in BACKEND_REGISTRY.all_enabled()
+                    if s.healthy and s.role != "orchestrator"
+                }
+                output = None
+                successful_spec = None
+                last_err: Exception | None = None
+                for attempt_spec in chain:
+                    try:
+                        m_name = attempt_spec.display_name
+                        if worker_specs:
+                            output = _do_query_with_delegation(
+                                chat_id, enriched_message, attempt_spec, worker_specs,
+                                cwd, cancel_ev, on_text, on_tool, on_tool_result,
+                                _on_soft_timeout, images=images)
+                        else:
+                            output = _run_backend_single(
+                                attempt_spec, chat_id, enriched_message, cwd, cancel_ev,
+                                on_text, on_tool, on_tool_result, _on_soft_timeout, images)
+                        successful_spec = attempt_spec
+                        break
+                    except QueryCancelledError:
+                        raise
+                    except TimeoutError:
+                        raise
+                    except Exception as _be:
+                        _debug_log(f"[{trace_id}][DoQuery] backend {attempt_spec.id} failed: {_be}, marking unhealthy")
+                        attempt_spec.healthy = False
+                        attempt_spec.last_error = str(_be)[:200]
+                        last_err = _be
+                        # Show brief failover notice to user if more backends remain
+                        remaining = [s for s in chain if s.healthy and s.id != attempt_spec.id]
+                        if remaining:
+                            _set_current_text(
+                                f"> ⚠️ {attempt_spec.display_name} 不可用，切换至 {remaining[0].display_name}..."
+                            )
+
+                if output is None:
+                    raise RuntimeError(
+                        f"所有 backend 均不可用。最近错误: {last_err}"
+                    )
 
             elapsed = _fmt_elapsed(time.time() - start)
             if not output:
                 output = "✅ 完成（无文本输出）"
-            log_model = spec.id if spec is not None else model
+            log_model = successful_spec.id if successful_spec is not None else model
             log_entry(chat_id, "assistant", output, model=log_model, trace_id=trace_id)
 
             # Increment turn count and trigger memory auto-update in background

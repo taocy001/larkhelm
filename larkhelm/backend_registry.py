@@ -24,6 +24,7 @@ class BackendSpec:
     base_url: str = ""      # API backends: custom endpoint
     healthy: bool = True
     enabled: bool = True
+    last_error: str | None = None  # last health_check failure reason
 
 
 def _resolve_env_vars(raw: str) -> str:
@@ -31,6 +32,17 @@ def _resolve_env_vars(raw: str) -> str:
     def _replace(m: re.Match) -> str:
         return os.environ.get(m.group(1), m.group(0))
     return re.sub(r'\$\{([^}]+)\}', _replace, raw)
+
+
+# Normalize PRD hyphen-style provider names to internal underscore names
+_PROVIDER_ALIASES: dict[str, str] = {
+    "claude-cli":   "claude_cli",
+    "gemini-cli":   "gemini_cli",
+    "kimi-cli":     "kimi_cli",
+    "claude-api":   "anthropic_api",
+    "gemini-api":   "google_api",
+    "openai-api":   "openai_compat_api",
+}
 
 
 class BackendRegistry:
@@ -45,18 +57,40 @@ class BackendRegistry:
                 tags = s.get("tags", [])
                 if isinstance(tags, str):
                     tags = [t.strip() for t in tags.split(",") if t.strip()]
+                raw_provider = s.get("provider", "")
+                provider = _PROVIDER_ALIASES.get(raw_provider, raw_provider)
+                # Also pull api_key/base_url from legacy "extra" dict if not top-level
+                extra = s.get("extra", {})
+
+                raw_api_key = s.get("api_key", "") or extra.get("api_key", "")
+                resolved_api_key = _resolve_env_vars(raw_api_key)
+                enabled = s.get("enabled", True)
+                # Unresolved placeholder → disable backend without logging (avoids leaking var names)
+                if "${" in resolved_api_key:
+                    resolved_api_key = ""
+                    enabled = False
+
+                # Auto-infer role when not explicitly set
+                raw_role = s.get("role", "")
+                if raw_role:
+                    role = raw_role
+                elif provider.endswith("_cli") and "tools" in list(tags):
+                    role = "orchestrator"
+                else:
+                    role = "worker"
+
                 spec = BackendSpec(
                     id=s["id"],
-                    provider=s["provider"],
+                    provider=provider,
                     display_name=s.get("display_name", s["id"]),
-                    role=s.get("role", "worker"),
+                    role=role,
                     tags=list(tags),
-                    command=s.get("command", ""),
+                    command=s.get("command", "") or extra.get("command", ""),
                     model=s.get("model", ""),
-                    api_key=_resolve_env_vars(s.get("api_key", "")),
-                    base_url=s.get("base_url", ""),
+                    api_key=resolved_api_key,
+                    base_url=s.get("base_url", "") or extra.get("base_url", ""),
                     healthy=True,
-                    enabled=s.get("enabled", True),
+                    enabled=enabled,
                 )
                 self._specs[spec.id] = spec
 
@@ -65,57 +99,77 @@ class BackendRegistry:
             for spec in self._specs.values():
                 if not spec.enabled:
                     continue
-                spec.healthy = True  # reset before re-checking; stays True if no failure found
+                spec.healthy = True   # reset before re-checking
+                spec.last_error = None
                 try:
                     if spec.provider.endswith("_cli"):
                         if not spec.command or not shutil.which(spec.command):
                             spec.healthy = False
-                            _debug_log(f"[BackendRegistry] {spec.id}: command not found: {spec.command!r}")
+                            spec.last_error = f"command not found: {spec.command!r}"
+                            _debug_log(f"[BackendRegistry] {spec.id}: {spec.last_error}")
                     elif spec.provider == "anthropic_api":
                         try:
                             import anthropic  # noqa: F401
                         except ImportError:
                             spec.healthy = False
-                            _debug_log(f"[BackendRegistry] {spec.id}: anthropic SDK not installed")
+                            spec.last_error = "anthropic SDK not installed"
+                            _debug_log(f"[BackendRegistry] {spec.id}: {spec.last_error}")
                             continue
-                        if not spec.api_key:
+                        if not spec.api_key or "${" in spec.api_key:
                             spec.healthy = False
-                            _debug_log(f"[BackendRegistry] {spec.id}: api_key empty")
+                            spec.last_error = "api_key missing or unresolved"
+                            _debug_log(f"[BackendRegistry] {spec.id}: {spec.last_error}")
                     elif spec.provider == "google_api":
                         try:
                             import google.genai  # noqa: F401
                         except ImportError:
                             spec.healthy = False
-                            _debug_log(f"[BackendRegistry] {spec.id}: google-genai SDK not installed")
+                            spec.last_error = "google-genai SDK not installed"
+                            _debug_log(f"[BackendRegistry] {spec.id}: {spec.last_error}")
                             continue
-                        if not spec.api_key:
+                        if not spec.api_key or "${" in spec.api_key:
                             spec.healthy = False
-                            _debug_log(f"[BackendRegistry] {spec.id}: api_key empty")
+                            spec.last_error = "api_key missing or unresolved"
+                            _debug_log(f"[BackendRegistry] {spec.id}: {spec.last_error}")
                     elif spec.provider == "openai_compat_api":
                         try:
                             import openai  # noqa: F401
                         except ImportError:
                             spec.healthy = False
-                            _debug_log(f"[BackendRegistry] {spec.id}: openai SDK not installed")
+                            spec.last_error = "openai SDK not installed"
+                            _debug_log(f"[BackendRegistry] {spec.id}: {spec.last_error}")
                             continue
-                        if not spec.api_key:
+                        if not spec.api_key or "${" in spec.api_key:
                             spec.healthy = False
-                            _debug_log(f"[BackendRegistry] {spec.id}: api_key empty")
+                            spec.last_error = "api_key missing or unresolved"
+                            _debug_log(f"[BackendRegistry] {spec.id}: {spec.last_error}")
                 except Exception as e:
                     spec.healthy = False
+                    spec.last_error = str(e)
                     _debug_log(f"[BackendRegistry] {spec.id}: health_check error: {e}")
 
     def get(self, id: str) -> BackendSpec | None:
         with self._lock:
             return self._specs.get(id)
 
-    def get_by_tag(self, tags: list[str]) -> BackendSpec | None:
-        """Return first BackendSpec that contains ALL specified tags and is healthy+enabled."""
+    def get_by_tag(self, tags: list[str], prefer_role: str = "") -> BackendSpec | None:
+        """Return first BackendSpec matching ALL tags, healthy+enabled.
+
+        If prefer_role is set, a matching spec with that role is returned first;
+        falls back to any matching spec if no preferred-role match exists.
+        """
         with self._lock:
-            for spec in self._specs.values():
-                if spec.enabled and spec.healthy and all(t in spec.tags for t in tags):
-                    return spec
-        return None
+            candidates = [
+                s for s in self._specs.values()
+                if s.enabled and s.healthy and all(t in s.tags for t in tags)
+            ]
+        if not candidates:
+            return None
+        if prefer_role:
+            preferred = [s for s in candidates if s.role == prefer_role]
+            if preferred:
+                return preferred[0]
+        return candidates[0]
 
     def get_orchestrator(self) -> BackendSpec | None:
         """Return first role='orchestrator' healthy+enabled BackendSpec."""
@@ -124,6 +178,84 @@ class BackendRegistry:
                 if spec.role == "orchestrator" and spec.healthy and spec.enabled:
                     return spec
         return None
+
+    def get_orchestrator_chain(self) -> list[BackendSpec]:
+        """Return ordered list of healthy+enabled backends for failover.
+
+        Priority:
+          1. role=orchestrator + 'tools' in tags + CLI provider
+          2. role=orchestrator + 'tools' in tags + API provider
+          3. role=orchestrator (any)
+          4. any healthy+enabled (fallback)
+        Deduplication via seen-set; all groups concatenated.
+        """
+        with self._lock:
+            candidates = [s for s in self._specs.values() if s.healthy and s.enabled]
+
+        seen: set[str] = set()
+        result: list[BackendSpec] = []
+
+        groups = [
+            [s for s in candidates
+             if s.role == "orchestrator" and "tools" in s.tags and s.provider.endswith("_cli")],
+            [s for s in candidates
+             if s.role == "orchestrator" and "tools" in s.tags and not s.provider.endswith("_cli")],
+            [s for s in candidates if s.role == "orchestrator"],
+            candidates,
+        ]
+        for group in groups:
+            for spec in group:
+                if spec.id not in seen:
+                    seen.add(spec.id)
+                    result.append(spec)
+        return result
+
+    def recover_check(self) -> None:
+        """Re-probe only healthy=False backends; set healthy=True on success.
+
+        Does NOT reset healthy=True backends (avoids unnecessary overhead).
+        Thread-safe. Exceptions per-spec are caught and logged.
+        """
+        with self._lock:
+            to_check = [s for s in self._specs.values() if not s.healthy and s.enabled]
+
+        for spec in to_check:
+            try:
+                recovered = False
+                if spec.provider.endswith("_cli"):
+                    if spec.command and shutil.which(spec.command):
+                        recovered = True
+                elif spec.provider == "anthropic_api":
+                    try:
+                        import anthropic  # noqa: F401
+                        if spec.api_key and "${" not in spec.api_key:
+                            recovered = True
+                    except ImportError:
+                        pass
+                elif spec.provider == "google_api":
+                    try:
+                        import google.genai  # noqa: F401
+                        if spec.api_key and "${" not in spec.api_key:
+                            recovered = True
+                    except ImportError:
+                        pass
+                elif spec.provider == "openai_compat_api":
+                    try:
+                        import openai  # noqa: F401
+                        if spec.api_key and "${" not in spec.api_key:
+                            recovered = True
+                    except ImportError:
+                        pass
+
+                if recovered:
+                    with self._lock:
+                        spec.healthy = True
+                        spec.last_error = None
+                    _debug_log(f"[BackendRegistry] recovered: {spec.id}")
+                else:
+                    _debug_log(f"[BackendRegistry] still unhealthy: {spec.id}")
+            except Exception as e:
+                _debug_log(f"[BackendRegistry] recover_check error for {spec.id}: {e}")
 
     def all_enabled(self) -> list[BackendSpec]:
         with self._lock:

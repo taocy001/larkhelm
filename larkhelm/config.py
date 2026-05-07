@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import shutil
 import sys
 import threading
 from pathlib import Path
@@ -107,40 +108,50 @@ STALL_THRESHOLD    = 30.0    # threshold for detecting a stalled tool (seconds)
 CURSOR_FRAMES      = ["▌", "▍", "▎", "▏"]
 
 
+def _auto_discover_cli() -> list[dict]:
+    """Probe known CLIs in PATH: claude, gemini, kimi, kimi-code.
+
+    Returns list of BackendSpec dicts (without 'role' — inferred by BackendRegistry.load()).
+    Only includes CLIs found via shutil.which().
+    """
+    known = [
+        {"id": "claude",    "provider": "claude_cli", "display_name": "Claude",    "tags": ["vision", "tools"], "command": "claude"},
+        {"id": "gemini",    "provider": "gemini_cli", "display_name": "Gemini",    "tags": ["tools"],           "command": "gemini"},
+        {"id": "kimi",      "provider": "kimi_cli",   "display_name": "Kimi",      "tags": ["vision", "tools"], "command": "kimi"},
+        {"id": "kimi-code", "provider": "kimi_cli",   "display_name": "Kimi-Code", "tags": ["tools"],           "command": "kimi-code"},
+    ]
+    return [spec for spec in known if shutil.which(spec["command"])]
+
+
 def _migrate_legacy_backends(config: dict) -> list[dict]:
-    """If 'backends' key is absent, auto-generate from legacy claude/gemini/kimi_command fields."""
-    if "backends" in config:
-        return config["backends"]
-    backends: list[dict] = []
-    claude_cmd = config.get("claude_command", "claude") or "claude"
-    gemini_cmd = config.get("gemini_command", "gemini") or "gemini"
-    kimi_cmd   = config.get("kimi_command",   "kimi")   or "kimi"
-    default    = config.get("default_model",   "claude")
-    backends.append({
-        "id": "claude",
-        "provider": "claude_cli",
-        "display_name": "Claude",
-        "role": "orchestrator" if default == "claude" else "worker",
-        "tags": ["vision", "tools"],
-        "command": claude_cmd,
-    })
-    backends.append({
-        "id": "gemini",
-        "provider": "gemini_cli",
-        "display_name": "Gemini",
-        "role": "orchestrator" if default == "gemini" else "worker",
-        "tags": ["tools"],
-        "command": gemini_cmd,
-    })
-    backends.append({
-        "id": "kimi",
-        "provider": "kimi_cli",
-        "display_name": "Kimi",
-        "role": "orchestrator" if default == "kimi" else "worker",
-        "tags": ["vision", "tools"],
-        "command": kimi_cmd,
-    })
-    return backends
+    """Three-layer merge: config explicit > auto-discover > empty.
+
+    Layer 1: config 'backends' (highest priority).
+    Layer 2: auto-discover CLIs in PATH supplement IDs not already in Layer 1.
+    Layer 3: if all empty, return [].
+    """
+    explicit: list[dict] = config.get("backends", [])
+    auto_discovered = _auto_discover_cli()
+
+    explicit_ids = {b["id"] for b in explicit}
+    supplement = [b for b in auto_discovered if b["id"] not in explicit_ids]
+    return explicit + supplement
+
+
+def _start_recover_thread() -> None:
+    """Start background daemon thread that calls BACKEND_REGISTRY.recover_check() every 300s."""
+    def _recover_loop():
+        import time as _time
+        while True:
+            _time.sleep(300)
+            try:
+                BACKEND_REGISTRY.recover_check()
+            except Exception as e:
+                from larkhelm.log import _debug_log
+                _debug_log(f"[recover_thread] error: {e}")
+
+    t = threading.Thread(target=_recover_loop, daemon=True, name="backend-recover")
+    t.start()
 
 
 def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
@@ -267,6 +278,8 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     # Also update the module-level singleton in backend_registry so imports of it stay fresh
     import larkhelm.backend_registry as _br_mod
     _br_mod.BACKEND_REGISTRY = BACKEND_REGISTRY
+
+    _start_recover_thread()
 
     # Build the typed config object (for mypy etc.; module-level globals remain for backward compat)
     global _runtime

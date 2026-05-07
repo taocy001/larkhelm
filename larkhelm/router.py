@@ -8,6 +8,8 @@ Routing rules (priority high → low):
   5. get_orchestrator() or all_enabled()[0]
 
 Fallback: RuntimeError if no healthy backend found.
+
+Special: LockedBackendUnavailableError raised when Rule 0 locked_backend is unhealthy.
 """
 from __future__ import annotations
 
@@ -17,6 +19,18 @@ from larkhelm.chat_state import _get_chat_state
 from larkhelm.log import _debug_log
 
 _SHORT_MSG_THRESHOLD = 100
+
+
+class LockedBackendUnavailableError(RuntimeError):
+    """Raised when the chat's locked_backend is set but currently unhealthy.
+
+    Callers must catch this before the broad Exception handler to show a
+    user-facing error card rather than silently falling back to other backends.
+    """
+    def __init__(self, backend_id: str, last_error: str = ""):
+        self.backend_id = backend_id
+        detail = f"：{last_error}" if last_error else ""
+        super().__init__(f"锁定的后端 {backend_id} 当前不可用{detail}")
 
 
 def resolve_backend(
@@ -30,6 +44,17 @@ def resolve_backend(
         enable_cheap = getattr(_cfg, "config", {}).get("enable_cheap_routing", False)
     except Exception:
         enable_cheap = False
+
+    # Rule 0: locked_backend in chat state → fast-fail if unhealthy, else return spec
+    locked_state = _get_chat_state(chat_id)
+    locked_id = locked_state.get("locked_backend")
+    if locked_id:
+        spec = BACKEND_REGISTRY.get(locked_id)
+        if spec and spec.enabled:
+            if not spec.healthy:
+                raise LockedBackendUnavailableError(spec.id, spec.last_error or "")
+            _debug_log(f"[router] {chat_id}: locked_backend → {spec.id}")
+            return spec
 
     # Rule 1: image → vision-capable backend
     if has_images:
@@ -55,15 +80,21 @@ def resolve_backend(
     # Rule 4: user preference (backend_id or model set via /model command)
     # Note: legacy configs use "model" field (values: claude/gemini/kimi) which
     # happen to match the auto-migrated backend IDs. New configs should use backend_id.
-    state = _get_chat_state(chat_id)
-    preferred_id = state.get("backend_id") or state.get("model")
+    preferred_id = locked_state.get("backend_id") or locked_state.get("model")
     if preferred_id:
         spec = BACKEND_REGISTRY.get(preferred_id)
         if spec and spec.healthy and spec.enabled:
             _debug_log(f"[router] {chat_id}: user_pref → {spec.id}")
             return spec
 
-    # Rule 5: default orchestrator or first enabled
+    # Rule 5: config default_backend → orchestrator → first healthy enabled
+    default_bid = getattr(_cfg, "config", {}).get("default_backend", "")
+    if default_bid:
+        spec = BACKEND_REGISTRY.get(default_bid)
+        if spec and spec.healthy and spec.enabled:
+            _debug_log(f"[router] {chat_id}: default_backend → {spec.id}")
+            return spec
+
     spec = BACKEND_REGISTRY.get_orchestrator()
     if spec:
         _debug_log(f"[router] {chat_id}: orchestrator → {spec.id}")

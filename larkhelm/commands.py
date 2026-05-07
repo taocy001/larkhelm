@@ -32,7 +32,6 @@ from larkhelm.lark_client import (
     send_permission_guide,
 )
 from larkhelm.card_builder import _make_card, _fmt_elapsed
-from larkhelm.ai_runner import query_gemini
 
 
 # ═══════════════════════════════════════════════════
@@ -129,6 +128,14 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
             pass
         log_entry(chat_id, "reset", "reset:kimi", model="system")
         send_card_reply(chat_id, msg_id, "♻️ 已重置", "Kimi 会话已清空。", color="green")
+    elif which == "memory":
+        try:
+            from larkhelm.memory import _memory_file
+            _memory_file(chat_id).unlink(missing_ok=True)
+        except Exception:
+            pass
+        log_entry(chat_id, "reset", "reset:memory", model="system")
+        send_card_reply(chat_id, msg_id, "♻️ 已重置", "持久记忆已清除。", color="green")
     elif which in ("perm", "permissions"):
         revoke_yolo(chat_id)
         send_card_reply(chat_id, msg_id, "🔐 权限已重置", "「允许所有」已取消，后续工具调用将重新弹出审批。", color="green")
@@ -199,10 +206,23 @@ def _cmd_status(chat_id: str, msg_id: str = None):
     backend_summary = ""
     try:
         from larkhelm.backend_registry import BACKEND_REGISTRY
+        from larkhelm.api_session import load_history as _load_hist
+        _API_PROVIDERS = ("anthropic_api", "google_api", "openai_compat_api")
+        _MAX_HIST = 40
         all_specs = BACKEND_REGISTRY.all_enabled()
         healthy_count = sum(1 for s in all_specs if s.healthy)
         if all_specs:
-            spec_lines = [f"  • **{s.id}** `{s.provider}` {'✅' if s.healthy else '❌'}" for s in all_specs]
+            spec_lines = []
+            for s in all_specs:
+                status = '✅' if s.healthy else '❌'
+                detail = ""
+                if not s.healthy and s.last_error:
+                    detail = f" _{s.last_error}_"
+                elif s.provider in _API_PROVIDERS:
+                    hist_len = len(_load_hist(s.provider, chat_id))
+                    if hist_len:
+                        detail = f" `{hist_len}/{_MAX_HIST}msgs`"
+                spec_lines.append(f"  • **{s.id}** `{s.provider}` {status}{detail}")
             backend_summary = f"**Backends** {healthy_count}/{len(all_specs)} healthy\n" + "\n".join(spec_lines)
     except Exception:
         pass
@@ -271,8 +291,9 @@ def _cmd_help(chat_id: str, msg_id: str = None):
         "\n"
         "**会话**\n"
         "**/reset** claude · gemini · kimi — 单独重置\n"
-        "**/reset perm** — 重置权限审批\n"
-        "**/model** claude · gemini · kimi — 切换默认模型\n"
+        "**/reset perm** — 重置权限审批　　**/reset memory** — 清除持久记忆\n"
+        "**/lock <id>** — 锁定到指定 backend　　**/lock off** — 解除锁定（恢复自动路由）\n"
+        "**/model** claude · gemini · kimi — 切换默认模型（等同 /lock）\n"
         "\n"
         "**目录 & Shell**\n"
         "**/pwd**　**/ls** [路径]　**/run** 命令（30s 超时）\n"
@@ -641,62 +662,69 @@ def _cmd_run(chat_id: str, cmd: str, msg_id: str = None):
     reply_card(chat_id, mid, f"{icon} Shell", body, color=color)
 
 
-def _cmd_model(chat_id: str, model_name: str = "", msg_id: str = None):
-    from larkhelm.chat_state import _set_backend_id
-    model_name = model_name.strip()
+def _cmd_lock(chat_id: str, args: str = "", msg_id: str = None) -> None:
+    """Handle /lock command.
 
-    if not model_name:
-        # Show all enabled backends
-        try:
-            from larkhelm.backend_registry import BACKEND_REGISTRY
+    /lock <backend_id>  — lock to specific backend (validates exists + healthy)
+    /lock off           — clear locked_backend, restore auto-routing
+    /lock               — show current locked_backend status
+    """
+    from larkhelm.backend_registry import BACKEND_REGISTRY
+    args = args.strip()
+
+    if not args:
+        # Show current locked backend
+        locked_id = _get_chat_state(chat_id).get("locked_backend")
+        if locked_id:
+            spec = BACKEND_REGISTRY.get(locked_id)
+            name = spec.display_name if spec else locked_id
+            health = "✅" if (spec and spec.healthy) else "❌"
+            send_card_reply(chat_id, msg_id, "🔒 已锁定 Backend",
+                            f"{health} **{name}** (`{locked_id}`)\n\n解锁: `/lock off`",
+                            color="blue")
+        else:
             specs = BACKEND_REGISTRY.all_enabled()
-            cur_bid = _get_chat_state(chat_id).get("backend_id") or _get_chat_model(chat_id)
-            lines = [f"当前: **{cur_bid}**\n"]
-            lines.append("可用 Backends:")
+            lines = ["_当前使用自动路由_\n", "可用 Backends:"]
             for s in specs:
                 mark = "✅" if s.healthy else "❌"
-                cur_mark = " ◀ 当前" if s.id == cur_bid else ""
-                lines.append(f"  {mark} `{s.id}` — {s.display_name} (`{s.provider}`){cur_mark}")
-            lines.append("\n切换: `/model <id>`")
-            send_card_reply(chat_id, msg_id, "🤖 Backend 列表",
+                lines.append(f"  {mark} `{s.id}` — {s.display_name} (`{s.provider}`)")
+            lines.append("\n锁定: `/lock <id>`")
+            send_card_reply(chat_id, msg_id, "🔓 自动路由中",
                             "\n".join(lines), color="blue", normalize=False)
-        except Exception:
-            cur = _get_chat_model(chat_id)
-            send_card_reply(chat_id, msg_id, "🤖 模型",
-                            f"当前: **{cur}**\n切换: `/model claude` / `/model gemini` / `/model kimi`",
-                            color="blue")
         return
 
-    model_lower = model_name.lower()
-    # Check if it's a registered backend_id first
-    try:
-        from larkhelm.backend_registry import BACKEND_REGISTRY
-        spec = BACKEND_REGISTRY.get(model_lower) or BACKEND_REGISTRY.get(model_name)
-    except Exception:
-        spec = None
-
-    if spec is not None:
-        _set_backend_id(chat_id, spec.id)
-        # Also update legacy model field for backward compat
-        if spec.provider.endswith("_cli"):
-            legacy = {"claude_cli": "claude", "gemini_cli": "gemini", "kimi_cli": "kimi"}.get(spec.provider)
-            if legacy:
-                _set_chat_field(chat_id, "model", legacy)
-        send_card_reply(chat_id, msg_id, "✅ Backend 已切换",
-                        f"本 chat 默认 backend: **{spec.display_name}** (`{spec.id}`)", color="green")
+    if args.lower() == "off":
+        _set_chat_field(chat_id, "locked_backend", None)
+        send_card_reply(chat_id, msg_id, "🔓 已解锁",
+                        "已恢复自动路由，不再锁定特定 backend。", color="green")
         return
 
-    # Legacy model names
-    if model_lower in ("claude", "gemini", "kimi"):
-        _set_chat_field(chat_id, "model", model_lower)
-        _set_backend_id(chat_id, model_lower)
-        send_card_reply(chat_id, msg_id, "✅ 模型已切换",
-                        f"本 chat 默认模型: **{model_lower}**", color="green")
+    # Lock to specific backend
+    backend_id = args
+    spec = BACKEND_REGISTRY.get(backend_id)
+    if spec is None:
+        send_card_reply(chat_id, msg_id, "❌ Backend 不存在",
+                        f"未找到 backend: `{backend_id}`\n发送 `/lock` 查看所有可用 backends。",
+                        color="red")
         return
 
-    send_card_reply(chat_id, msg_id, "⚠️ 未知 backend",
-                    f"未找到 backend: `{model_name}`\n发送 `/model` 查看所有可用 backends。",
-                    color="orange")
+    if not spec.healthy:
+        send_card_reply(chat_id, msg_id, "❌ Backend 不可用",
+                        f"`{backend_id}` 当前不可用（health check 失败）。\n\n"
+                        f"错误: {spec.last_error or '未知'}\n\n"
+                        f"可用: 等待恢复后重试，或 `/lock` 选择其他 backend。",
+                        color="red")
+        return
+
+    _set_chat_field(chat_id, "locked_backend", spec.id)
+    send_card_reply(chat_id, msg_id, "🔒 已锁定 Backend",
+                    f"本 chat 已锁定到 **{spec.display_name}** (`{spec.id}`)。\n\n解锁: `/lock off`",
+                    color="green")
+
+
+def _cmd_model(chat_id: str, model_name: str = "", msg_id: str = None):
+    """Alias for /lock: switches default backend for this chat."""
+    _cmd_lock(chat_id, model_name, msg_id)
 
 
 # Native command sets for Claude CLI / Gemini CLI / Kimi CLI
@@ -846,13 +874,30 @@ def _cmd_btw(chat_id: str, question: str, user_msg_id: str):
         eyes_id = react_to_message(user_msg_id, EMOJI_PROCESSING)
 
         with btw_lock:
-            cwd   = _get_cwd(chat_id)
-            model = _get_chat_model(chat_id)
-            if main_free:
-                sid_key = "claude" if model == "claude" else "gemini"
-            else:
-                sid_key = f"btw_{model}"
-            sid = _load_sid(chat_id, sid_key)
+            cwd = _get_cwd(chat_id)
+
+            from larkhelm.backend_registry import BACKEND_REGISTRY as _reg
+            from larkhelm.backend_cli import (
+                run_claude as _bc_run_claude,
+                run_gemini as _bc_run_gemini,
+                run_kimi as _bc_run_kimi,
+            )
+            import larkhelm.backend_api as _bapi
+
+            # Resolve backend via registry (respects /model user preference)
+            _state = _get_chat_state(chat_id)
+            _pref = _state.get("backend_id") or _state.get("model") or ""
+            _spec = (_reg.get(_pref) if _pref else None)
+            if _spec is None or not _spec.healthy or not _spec.enabled:
+                _spec = _reg.get_orchestrator()
+            if _spec is None:
+                raise RuntimeError("No backend available for /btw")
+
+            # SID: reuse main session when free, else dedicated btw session
+            sid = None
+            if _spec.provider.endswith("_cli"):
+                sid_key = _spec.id if main_free else f"btw_{_spec.id}"
+                sid = _load_sid(chat_id, sid_key)
 
             mid = _reply_card_raw(
                 user_msg_id,
@@ -868,18 +913,30 @@ def _cmd_btw(chat_id: str, question: str, user_msg_id: str):
                     if mid:
                         _patch_card_raw(mid, _make_card("💬", text.strip() or "> 正在思考...", color="grey"))
 
-                if model == "gemini":
-                    output = query_gemini(chat_id, question, cwd, None, None, _on_text)
-                else:
-                    from larkhelm.backend_cli import run_claude as _bc_run_claude
-                    from larkhelm.backend_registry import BACKEND_REGISTRY as _reg
-                    _spec = _reg.get_orchestrator()
-                    if _spec is None:
-                        raise RuntimeError("No orchestrator backend available for /btw")
+                _API_PROVIDERS = ("anthropic_api", "google_api", "openai_compat_api")
+                if _spec.provider == "claude_cli":
                     output = _bc_run_claude(
                         spec=_spec, chat_id=chat_id, message=question, sid=sid, cwd=cwd,
                         cancel_ev=None, on_text=_on_text, allow_retry=True,
                     )
+                elif _spec.provider == "gemini_cli":
+                    output = _bc_run_gemini(
+                        spec=_spec, chat_id=chat_id, message=question, sid=sid, cwd=cwd,
+                        cancel_ev=None, on_text=_on_text,
+                    )
+                elif _spec.provider == "kimi_cli":
+                    output = _bc_run_kimi(
+                        spec=_spec, chat_id=chat_id, message=question, sid=sid, cwd=cwd,
+                        cancel_ev=None, on_text=_on_text, allow_retry=True,
+                    )
+                elif _spec.provider in _API_PROVIDERS:
+                    _fn = {"anthropic_api": _bapi.run_anthropic,
+                           "google_api": _bapi.run_google,
+                           "openai_compat_api": _bapi.run_openai_compat}[_spec.provider]
+                    output, _ = _fn(spec=_spec, chat_id=chat_id, message=question,
+                                    history=[], on_text=_on_text)
+                else:
+                    raise RuntimeError(f"Unknown provider for /btw: {_spec.provider}")
 
                 final = (output or cur_text[0]).strip() or "（无输出）"
                 final_card = _make_card("💬", final, color="blue")

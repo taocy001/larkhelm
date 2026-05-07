@@ -206,7 +206,7 @@ def handle_message(data: P2ImMessageReceiveV1):
         from larkhelm.commands import (
             _cmd_reset, _cmd_status, _cmd_help, _cmd_pickup, _cmd_history,
             _cmd_stats, _cmd_cron, _cmd_cd, _cmd_pwd, _cmd_ls, _cmd_run,
-            _cmd_model, _cmd_cli_native, _cmd_btw, _cmd_upgrade, _cmd_memory,
+            _cmd_model, _cmd_lock, _cmd_cli_native, _cmd_btw, _cmd_upgrade, _cmd_memory,
             _strip_at_mention,
         )
         from larkhelm.cmd_doc import _cmd_doc
@@ -221,6 +221,8 @@ def handle_message(data: P2ImMessageReceiveV1):
             _cmd_reset(chat_id, "kimi", _mid); return
         if tl in ("/reset permissions", "/reset perm"):
             _cmd_reset(chat_id, "perm", _mid); return
+        if tl == "/reset memory":
+            _cmd_reset(chat_id, "memory", _mid); return
         if tl == "/status":
             _cmd_status(chat_id, _mid); return
         if tl == "/help":
@@ -307,7 +309,12 @@ def handle_message(data: P2ImMessageReceiveV1):
         if tl == "/model" or tl.startswith("/model "):
             parts = text.split(None, 1)
             arg = parts[1].strip() if len(parts) == 2 else ""
-            _cmd_model(chat_id, arg, _mid)
+            _cmd_lock(chat_id, arg, _mid)
+            return
+        if tl == "/lock" or tl.startswith("/lock "):
+            parts = text.split(None, 1)
+            arg = parts[1].strip() if len(parts) == 2 else ""
+            _cmd_lock(chat_id, arg, _mid)
             return
         if tl.startswith("/rename "):
             import re as _re
