@@ -532,6 +532,8 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             except LockedBackendUnavailableError as _lbe:
                 # User explicitly locked this backend; show error card, do not silently re-route
                 _stop_hb.set()
+                with _card_patch_lock:   # drain any in-flight heartbeat patch before overwriting
+                    pass
                 send_card(chat_id, "❌ 锁定后端不可用",
                           f"{_lbe}\n\n使用 **/lock off** 恢复自动路由。", color="red")
                 return

@@ -149,6 +149,11 @@ def _split_md(text: str) -> list[str]:
             in_code = not in_code
         line_len = len(line) + 1
         if line_len > _cfg.MAX_CARD_LEN:
+            if in_code:
+                # Don't split inside a code block; accumulate and let Feishu truncate
+                buf.append(line)
+                buf_len += line_len
+                continue
             if buf:
                 chunks.append("\n".join(buf))
                 buf, buf_len = [], 0
