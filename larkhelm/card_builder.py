@@ -150,9 +150,13 @@ def _split_md(text: str) -> list[str]:
         line_len = len(line) + 1
         if line_len > _cfg.MAX_CARD_LEN:
             if in_code:
-                # Don't split inside a code block; accumulate and let Feishu truncate
+                # Close fence, flush, reopen — keeps each chunk a valid code block
                 buf.append(line)
                 buf_len += line_len
+                if buf_len > _cfg.MAX_CARD_LEN:
+                    buf.append("```")
+                    chunks.append("\n".join(buf))
+                    buf, buf_len = ["```"], len("```") + 1
                 continue
             if buf:
                 chunks.append("\n".join(buf))
@@ -170,6 +174,11 @@ def _split_md(text: str) -> list[str]:
             buf, buf_len = [], 0
         buf.append(line)
         buf_len += line_len
+        # Within code blocks the `not in_code` guard above never fires; flush here instead
+        if in_code and buf_len > _cfg.MAX_CARD_LEN:
+            buf.append("```")
+            chunks.append("\n".join(buf))
+            buf, buf_len = ["```"], len("```") + 1
     if buf:
         chunks.append("\n".join(buf))
     return chunks or [text]

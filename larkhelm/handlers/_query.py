@@ -170,7 +170,7 @@ def _do_query_with_delegation(
     system_prompt = build_orchestrator_system_prompt(BACKEND_REGISTRY)
 
     # Phase 1: run orchestrator with buffered on_text to detect DELEGATE prefix
-    BUFFER_THRESHOLD = 60
+    BUFFER_THRESHOLD = 300
     _buf_state = {"text": "", "delegation": None, "flushed": False}
 
     def _buffered_on_text(text: str, status: str = "typing"):
@@ -233,7 +233,7 @@ def _do_query_with_delegation(
     # Phase 3: Orchestrator synthesis
     synthesis_msg = (
         f"{enriched_msg}\n\n"
-        f"[{specialist_spec.display_name} specialist result:]\n{specialist_output}"
+        f"[{specialist_spec.display_name} specialist result:]\n{specialist_output[:8000]}"
     )
     return _do_query_with_delegation(
         chat_id, synthesis_msg, orch_spec, worker_specs,
@@ -461,9 +461,12 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
         # ── Soft-timeout callback ────────────────────────────────
         def _on_soft_timeout():
             nonlocal lock_released
+            if lock_released:   # already fired once (e.g. during delegation phase 1 + phase 2)
+                return
             elapsed_now = _fmt_elapsed(time.time() - start)
             _debug_log(f"[{trace_id}][DoQuery] soft timeout ({elapsed_now}), lock released, continuing in background")
             _set_in_background(True)
+            _stop_hb.set()   # stop heartbeat so it no longer patches the shared card mid
             try:
                 chat_lock.release()
             except RuntimeError:
@@ -517,7 +520,15 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 _debug_log(f"[{trace_id}][DoQuery] memory inject error: {_mem_err}")
                 enriched_message = message
 
-            has_doc_urls = bool(_extract_feishu_urls(message))
+            has_doc_urls = bool(_extract_feishu_urls(enriched_message))
+
+            # Doc injection runs here (background thread) not in the SDK event callback,
+            # so a slow/hanging Feishu API call cannot block the event dispatch loop.
+            if _cfg.DOC_AUTO_INJECT:
+                try:
+                    enriched_message = _inject_doc_context(enriched_message, chat_id)
+                except Exception as _doc_err:
+                    _debug_log(f"[{trace_id}][DoQuery] doc inject error: {_doc_err}")
 
             from larkhelm.router import resolve_backend, LockedBackendUnavailableError
             from larkhelm.backend_registry import BACKEND_REGISTRY
@@ -534,6 +545,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 _stop_hb.set()
                 with _card_patch_lock:   # drain any in-flight heartbeat patch before overwriting
                     pass
+                hb_thread.join(timeout=0.5)
                 send_card(chat_id, "❌ 锁定后端不可用",
                           f"{_lbe}\n\n使用 **/lock off** 恢复自动路由。", color="red")
                 return
@@ -577,7 +589,6 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                     if s.healthy and s.role != "orchestrator"
                 }
                 output = None
-                successful_spec = None
                 last_err: Exception | None = None
                 for attempt_spec in chain:
                     try:
@@ -660,9 +671,17 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             # _patch_card_raw and the fallback _send_card_raw to fail silently,
             # leaving the user with only the later numbered cards.
             first_title = f"🤖 {m_name}" + (f" (1/{n})" if n > 1 else "")
+            _tools_payload = (final_tools if final_tools else None) if n == 1 else None
+            if _tools_payload:
+                import json as _json
+                try:
+                    if len(_json.dumps(_tools_payload, ensure_ascii=False)) > 20_000:
+                        _tools_payload = None  # drop detailed results to stay within Feishu limit
+                except Exception:
+                    _tools_payload = None
             first_card = _make_card(first_title, chunks[0], color="blue",
                                     note=note if n == 1 else "",
-                                    tools_list=(final_tools if final_tools else None) if n == 1 else None,
+                                    tools_list=_tools_payload,
                                     tools_expanded=False)
             if not _patch_card_raw(mid, first_card):
                 _debug_log(f"[{trace_id}][DoQuery] final patch failed, falling back to send mid={mid}")
@@ -701,6 +720,8 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 _index_reply(mid, chat_id, message, model)
 
         except QueryCancelledError:
+            _stop_hb.set()
+            with _card_patch_lock: pass   # drain any in-flight heartbeat patch first
             elapsed = _fmt_elapsed(time.time() - start)
             # The card was synchronously updated to "cancelling" in the cancel callback response;
             # here we just patch with the final elapsed time; patch failure is safe (no stale cancel button)
@@ -709,6 +730,8 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 delete_reaction(user_msg_id, _eyes_reaction_id[0])
                 _eyes_reaction_id[0] = None
         except TimeoutError as e:
+            _stop_hb.set()
+            with _card_patch_lock: pass   # drain any in-flight heartbeat patch first
             elapsed = _fmt_elapsed(time.time() - start)
             log_entry(chat_id, "error", str(e), model=model, trace_id=trace_id)
             reply_card(chat_id, mid, f"⏰ 强制终止 ({elapsed})",
@@ -719,6 +742,8 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 react_to_message(user_msg_id, EMOJI_ERROR)
                 _eyes_reaction_id[0] = None
         except Exception as e:
+            _stop_hb.set()
+            with _card_patch_lock: pass   # drain any in-flight heartbeat patch first
             import sys
             print(traceback.format_exc(), file=sys.stderr)
             _debug_log(f"[{trace_id}][DoQuery] exception: {e}\n{traceback.format_exc()}")
@@ -732,7 +757,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 react_to_message(user_msg_id, EMOJI_ERROR)
                 _eyes_reaction_id[0] = None
         finally:
-            _stop_hb.set()
+            _stop_hb.set()   # idempotent; ensures stop even if exception path skipped it
             hb_thread.join(timeout=1.0)
 
     finally:

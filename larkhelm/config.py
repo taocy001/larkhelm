@@ -138,8 +138,20 @@ def _migrate_legacy_backends(config: dict) -> list[dict]:
     return explicit + supplement
 
 
+_recover_thread_started = False
+
+
 def _start_recover_thread() -> None:
-    """Start background daemon thread that calls BACKEND_REGISTRY.recover_check() every 300s."""
+    """Start background daemon thread that calls BACKEND_REGISTRY.recover_check() every 300s.
+
+    Guard against duplicate starts when _init_runtime() is called more than once
+    (e.g. during tests or if both bridge and MCP server share a process).
+    """
+    global _recover_thread_started
+    if _recover_thread_started:
+        return
+    _recover_thread_started = True
+
     def _recover_loop():
         import time as _time
         while True:

@@ -67,6 +67,11 @@ class BackendRegistry:
                 enabled = s.get("enabled", True)
                 # Unresolved placeholder → disable backend without logging (avoids leaking var names)
                 if "${" in resolved_api_key:
+                    # Unresolved placeholder — backend never usable
+                    resolved_api_key = ""
+                    enabled = False
+                elif raw_api_key and not resolved_api_key:
+                    # Key was specified but env var resolved to empty string
                     resolved_api_key = ""
                     enabled = False
 
@@ -249,8 +254,9 @@ class BackendRegistry:
 
                 if recovered:
                     with self._lock:
-                        spec.healthy = True
-                        spec.last_error = None
+                        if not spec.healthy:  # re-check: could have failed again since snapshot
+                            spec.healthy = True
+                            spec.last_error = None
                     _debug_log(f"[BackendRegistry] recovered: {spec.id}")
                 else:
                     _debug_log(f"[BackendRegistry] still unhealthy: {spec.id}")

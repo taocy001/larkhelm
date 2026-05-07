@@ -23,7 +23,7 @@ from larkhelm.lark_client import (
     REACTION_ACTIONS, _reply_index, _reply_index_lock,
 )
 from larkhelm.concurrency import is_shutting_down
-from larkhelm.handlers._query import _do_query, _inject_doc_context
+from larkhelm.handlers._query import _do_query
 
 
 def handle_reaction_created(data: P2ImMessageReactionCreatedV1):
@@ -97,7 +97,7 @@ def handle_message(data: P2ImMessageReceiveV1):
         # Group chat @mention filter: only respond when the bot itself is mentioned.
         # If BOT_OPEN_ID is unknown (fetch failed at startup), fail-closed and ignore the message
         # rather than responding to all group messages indiscriminately.
-        if message.chat_type == "group":
+        if message.chat_type != "p2p":  # covers "group" and any future non-DM chat types
             import larkhelm.lark_client as _lc_mod
             bot_id = _lc_mod.BOT_OPEN_ID
             if not bot_id:
@@ -339,7 +339,7 @@ def handle_message(data: P2ImMessageReceiveV1):
                 return
             _cmd_btw(chat_id, question, message.message_id)
             return
-        if _is_btw_reply(chat_id, message.parent_id):
+        if _is_btw_reply(chat_id, getattr(message, "parent_id", None)):
             _register_btw_msg(chat_id, message.message_id)
             _cmd_btw(chat_id, text, message.message_id)
             return
@@ -447,12 +447,12 @@ def handle_message(data: P2ImMessageReceiveV1):
         log_entry(chat_id, "user", prompt, model=target_model)
         _reset_cancel(chat_id)
         user_msg_id = message.message_id
-        # Auto-inject Feishu document content from the message (can be disabled via doc_auto_inject config)
-        enriched = _inject_doc_context(prompt, chat_id) if _cfg.DOC_AUTO_INJECT else prompt
+        # Doc injection is done inside _do_query (background thread) to avoid blocking
+        # the SDK event dispatch loop on slow Feishu API calls.
         threading.Thread(
             target=_do_query,
             kwargs={
-                "chat_id": chat_id, "message": enriched, "model": target_model,
+                "chat_id": chat_id, "message": prompt, "model": target_model,
                 "user_msg_id": user_msg_id,
                 "images": _msg_images if _msg_images else None,
             },
