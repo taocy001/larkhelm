@@ -44,6 +44,18 @@ def _get_per_chat_cwd(chat_id: str, data_dir: Path) -> str:
         return ""
 
 
+def _get_per_chat_sender(chat_id: str, data_dir: Path) -> str:
+    """Read sender_open_id for a chat (or crew agent namespace) from the state file."""
+    # Crew agent namespaces are formatted as "{chat_id}__crew_..." — strip suffix.
+    base_id = chat_id.split("__")[0] if "__" in chat_id else chat_id
+    state_file = data_dir / ".feishu_state.json"
+    try:
+        data = json.loads(state_file.read_text())
+        return data.get(base_id, {}).get("sender_open_id", "")
+    except Exception:
+        return ""
+
+
 def run(config_path: str | None, data_dir: str | None) -> None:
     """Start the MCP stdio server. Blocks until the client disconnects."""
     from mcp.server.fastmcp import FastMCP
@@ -108,7 +120,10 @@ def run(config_path: str | None, data_dir: str | None) -> None:
         _ensure_client()
         try:
             client = FeishuDocClient()
-            doc_ref = client.create_doc(title, owner_open_id=_cfg.DEFAULT_OWNER_OPEN_ID)
+            chat_id = os.environ.get("FEISHU_CHAT_ID", "")
+            owner_open_id = (_get_per_chat_sender(chat_id, _cfg.DATA_DIR)
+                             or _cfg.DEFAULT_OWNER_OPEN_ID)
+            doc_ref = client.create_doc(title, owner_open_id=owner_open_id)
             if content.strip():
                 client.append(doc_ref, content)
             return f"https://feishu.cn/docx/{doc_ref.token}"
