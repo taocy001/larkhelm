@@ -105,8 +105,8 @@ def record_token_usage(chat_id: str, model: str, usage: dict) -> None:
         try:
             with (_cfg.LOG_DIR / "all.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[token_stats] JSONL write failed: {e}", file=__import__("sys").stderr)
 
 
 def get_token_stats(chat_id: str = None) -> dict:

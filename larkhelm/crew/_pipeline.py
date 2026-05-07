@@ -93,7 +93,7 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
                 "**注意**：严格遵循现有代码风格；类图中已定义的类名、方法名、参数类型不得擅自修改。"
             ),
             prompt="请读取 tasks.json 和 design.md，按 task_list 顺序逐文件实现，完成后写入 changes.md。\n\n**重要**：请直接输出结果，不要等待用户确认，不要交互式提问。",
-            depends_on=["architect"], timeout=_cfg.HARD_TIMEOUT,
+            depends_on=["architect"], timeout=_cfg.RESPONSE_TIMEOUT * 12,
             output_file="changes.md",
         ),
         AgentSpec(
@@ -111,7 +111,7 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
                 "**注意**：只修复 qa_report.md 中明确列出的问题，不要顺手重构其他代码。"
             ),
             prompt="请读取 tasks.json 了解文件职责，然后修复 qa_report.md 中的问题，更新 changes.md。\n\n**重要**：请直接输出结果，不要等待用户确认，不要交互式提问。",
-            depends_on=["implementer"], timeout=_cfg.HARD_TIMEOUT,
+            depends_on=["implementer"], timeout=_cfg.RESPONSE_TIMEOUT * 8,
             trigger_only=True,
             output_file="changes.md",
         ),
