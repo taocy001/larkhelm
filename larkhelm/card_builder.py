@@ -87,8 +87,7 @@ def _parse_md_table(table_lines: list[str]) -> dict | None:
     columns = [{"name": col_keys[i], "display_name": headers[i],
                 "data_type": "text", "width": "auto", "horizontal_align": "left"}
                for i in range(len(headers))]
-    # Feishu JSON 2.0 table cells must be {"text": value} objects, not plain strings.
-    rows = [{col_keys[i]: {"text": cells[i] if i < len(cells) else ""}
+    rows = [{col_keys[i]: cells[i] if i < len(cells) else ""
              for i in range(len(col_keys))}
             for cells in (split_cells(l) for l in non_sep[1:])]
 
