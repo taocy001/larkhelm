@@ -80,11 +80,31 @@ def _strip_at_mention(text: str) -> str:
 
 def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
     """Unified reset logic. which=None resets everything; otherwise 'claude'/'gemini'/'perm'."""
+    # Trigger memory snapshot before clearing session (async, non-blocking)
+    if which in (None, "claude", "gemini", "kimi"):
+        try:
+            from larkhelm.memory import maybe_auto_update
+            threading.Thread(
+                target=maybe_auto_update, args=(chat_id,), kwargs={"force": True},
+                daemon=True, name=f"memory-reset-{chat_id[:8]}"
+            ).start()
+        except Exception:
+            pass
+
     if which is None:
         _clear_sid(chat_id, "claude")
         _clear_sid(chat_id, "gemini")
+        _clear_sid(chat_id, "kimi")
+        try:
+            from larkhelm.api_session import clear_history as _clear_api_hist
+            from larkhelm.backend_registry import BACKEND_REGISTRY as _REG
+            for _spec in _REG.all_enabled():
+                if _spec.provider in ("anthropic_api", "google_api", "openai_compat_api"):
+                    _clear_api_hist(_spec.provider, chat_id)
+        except Exception:
+            pass
         log_entry(chat_id, "reset", "reset:all", model="system")
-        send_card_reply(chat_id, msg_id, "♻️ 已重置", "Claude 和 Gemini 会话均已清空。", color="green")
+        send_card_reply(chat_id, msg_id, "♻️ 已重置", "所有 AI 会话均已清空（记忆已保留）。", color="green")
     elif which == "claude":
         _clear_sid(chat_id, "claude")
         log_entry(chat_id, "reset", "reset:claude", model="system")
@@ -163,6 +183,18 @@ def _cmd_status(chat_id: str, msg_id: str = None):
             parts.append(f"{mdl} {m['input_tokens']+m['output_tokens']:,}tok{cost_str}")
         token_summary = "　　".join(parts)
 
+    # Backend registry summary
+    backend_summary = ""
+    try:
+        from larkhelm.backend_registry import BACKEND_REGISTRY
+        all_specs = BACKEND_REGISTRY.all_enabled()
+        healthy_count = sum(1 for s in all_specs if s.healthy)
+        if all_specs:
+            spec_lines = [f"  • **{s.id}** `{s.provider}` {'✅' if s.healthy else '❌'}" for s in all_specs]
+            backend_summary = f"**Backends** {healthy_count}/{len(all_specs)} healthy\n" + "\n".join(spec_lines)
+    except Exception:
+        pass
+
     lines = [
         f"**模型** {model}　　**目录** {cwd}"
         + (f"　　**会话名** {_get_chat_state(chat_id).get('name', '').replace('**','').replace('`','')}"
@@ -175,6 +207,7 @@ def _cmd_status(chat_id: str, msg_id: str = None):
         f"**权限模式** {perm_status}",
         *([ crew_info ] if crew_info else []),
         *([ f"**Token（本次启动）** {token_summary}" ] if token_summary else []),
+        *([ backend_summary ] if backend_summary else []),
         "",
     ]
 
@@ -596,16 +629,62 @@ def _cmd_run(chat_id: str, cmd: str, msg_id: str = None):
     reply_card(chat_id, mid, f"{icon} Shell", body, color=color)
 
 
-def _cmd_model(chat_id: str, model_name: str, msg_id: str = None):
-    model_name = model_name.lower().strip()
-    if model_name not in ("claude", "gemini", "kimi"):
-        send_card_reply(chat_id, msg_id, "⚠️ 无效模型",
-                        f"可用: `claude` / `gemini` / `kimi`\n当前: `{_get_chat_model(chat_id)}`",
-                        color="orange")
+def _cmd_model(chat_id: str, model_name: str = "", msg_id: str = None):
+    from larkhelm.chat_state import _set_backend_id
+    model_name = model_name.strip()
+
+    if not model_name:
+        # Show all enabled backends
+        try:
+            from larkhelm.backend_registry import BACKEND_REGISTRY
+            specs = BACKEND_REGISTRY.all_enabled()
+            cur_bid = _get_chat_state(chat_id).get("backend_id") or _get_chat_model(chat_id)
+            lines = [f"当前: **{cur_bid}**\n"]
+            lines.append("可用 Backends:")
+            for s in specs:
+                mark = "✅" if s.healthy else "❌"
+                cur_mark = " ◀ 当前" if s.id == cur_bid else ""
+                lines.append(f"  {mark} `{s.id}` — {s.display_name} (`{s.provider}`){cur_mark}")
+            lines.append("\n切换: `/model <id>`")
+            send_card_reply(chat_id, msg_id, "🤖 Backend 列表",
+                            "\n".join(lines), color="blue", normalize=False)
+        except Exception:
+            cur = _get_chat_model(chat_id)
+            send_card_reply(chat_id, msg_id, "🤖 模型",
+                            f"当前: **{cur}**\n切换: `/model claude` / `/model gemini` / `/model kimi`",
+                            color="blue")
         return
-    _set_chat_field(chat_id, "model", model_name)
-    send_card_reply(chat_id, msg_id, "✅ 模型已切换",
-                    f"本 chat 默认模型: **{model_name}**", color="green")
+
+    model_lower = model_name.lower()
+    # Check if it's a registered backend_id first
+    try:
+        from larkhelm.backend_registry import BACKEND_REGISTRY
+        spec = BACKEND_REGISTRY.get(model_lower) or BACKEND_REGISTRY.get(model_name)
+    except Exception:
+        spec = None
+
+    if spec is not None:
+        _set_backend_id(chat_id, spec.id)
+        # Also update legacy model field for backward compat
+        if spec.provider.endswith("_cli"):
+            legacy = {"claude_cli": "claude", "gemini_cli": "gemini", "kimi_cli": "kimi"}.get(spec.provider)
+            if legacy:
+                _set_chat_field(chat_id, "model", legacy)
+        send_card_reply(chat_id, msg_id, "✅ Backend 已切换",
+                        f"本 chat 默认 backend: **{spec.display_name}** (`{spec.id}`)", color="green")
+        return
+
+    # Legacy model names
+    if model_lower in ("claude", "gemini", "kimi"):
+        _set_chat_field(chat_id, "model", model_lower)
+        _set_backend_id(chat_id, model_lower)
+        send_card_reply(chat_id, msg_id, "✅ 模型已切换",
+                        f"本 chat 默认模型: **{model_lower}**", color="green")
+        return
+
+    send_card_reply(chat_id, msg_id, "⚠️ 未知 backend",
+                    f"未找到 backend: `{model_name}`\n发送 `/model` 查看所有可用 backends。",
+                    color="orange")
 
 
 # Native command sets for Claude CLI / Gemini CLI / Kimi CLI
@@ -809,6 +888,41 @@ def _cmd_btw(chat_id: str, question: str, user_msg_id: str):
                 react_to_message(user_msg_id, EMOJI_ERROR)
 
     threading.Thread(target=_run, daemon=True, name=f"btw-{chat_id[:8]}").start()
+
+
+# ═══════════════════════════════════════════════════
+#  /memory command
+# ═══════════════════════════════════════════════════
+
+def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None):
+    """/memory [update|clear] — show, force-update, or clear persistent memory."""
+    from larkhelm.memory import load_memory, save_memory, maybe_auto_update
+    sub = args.strip().lower()
+
+    if sub == "clear":
+        try:
+            from larkhelm.memory import _memory_file
+            _memory_file(chat_id).unlink(missing_ok=True)
+            send_card_reply(chat_id, msg_id, "🗑️ 记忆已清除", "已删除本 chat 的持久记忆。", color="green")
+        except Exception as e:
+            send_card_reply(chat_id, msg_id, "❌ 清除失败", str(e)[:200], color="red")
+        return
+
+    if sub == "update":
+        send_card_reply(chat_id, msg_id, "🔄 生成记忆中", "正在后台生成记忆摘要，完成后可 `/memory` 查看。", color="grey")
+        maybe_auto_update(chat_id, force=True)
+        return
+
+    # Show current memory
+    content = load_memory(chat_id)
+    if content:
+        send_card_reply(chat_id, msg_id, "🧠 持久记忆",
+                        content + "\n\n---\n`/memory update` 更新 · `/memory clear` 清除",
+                        color="blue", normalize=False)
+    else:
+        send_card_reply(chat_id, msg_id, "🧠 持久记忆",
+                        "_暂无记忆。每 20 轮对话自动生成，或发送 `/memory update` 立即生成。_",
+                        color="blue")
 
 
 # ═══════════════════════════════════════════════════
