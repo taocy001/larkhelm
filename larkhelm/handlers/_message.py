@@ -14,7 +14,7 @@ from lark_oapi.api.im.v1 import P2ImMessageReceiveV1, P2ImMessageReactionCreated
 import larkhelm.config as _cfg
 from larkhelm.log import _debug_log, log_entry
 from larkhelm.dedup import _is_duplicate
-from larkhelm.chat_state import _get_chat_model, _is_btw_reply, _register_btw_msg, _set_chat_field
+from larkhelm.chat_state import _get_chat_model, _get_cwd, _is_btw_reply, _register_btw_msg, _set_chat_field
 from larkhelm.concurrency import (
     _get_chat_lock, _trigger_cancel, _reset_cancel, _pop_pending,
 )
@@ -97,11 +97,14 @@ def handle_message(data: P2ImMessageReceiveV1):
         # Group chat @mention filter: only respond when the bot itself is mentioned.
         # If BOT_OPEN_ID is unknown (fetch failed at startup), fail-closed and ignore the message
         # rather than responding to all group messages indiscriminately.
-        if message.chat_type == "group" and message.mentions:
+        if message.chat_type == "group":
             import larkhelm.lark_client as _lc_mod
             bot_id = _lc_mod.BOT_OPEN_ID
             if not bot_id:
                 _debug_log("[Filter] BOT_OPEN_ID unknown, ignoring group message to avoid broadcast")
+                return
+            if not message.mentions:
+                # No mentions at all in a group message — bot was not addressed
                 return
             mentioned_ids = {
                 m.id.open_id for m in message.mentions

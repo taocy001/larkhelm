@@ -708,6 +708,13 @@ def _cmd_lock(chat_id: str, args: str = "", msg_id: str = None) -> None:
                         color="red")
         return
 
+    if not spec.enabled:
+        send_card_reply(chat_id, msg_id, "❌ Backend 已禁用",
+                        f"`{backend_id}` 已被禁用（enabled=false），无法锁定。\n\n"
+                        f"发送 `/lock` 查看可用 backends。",
+                        color="red")
+        return
+
     if not spec.healthy:
         send_card_reply(chat_id, msg_id, "❌ Backend 不可用",
                         f"`{backend_id}` 当前不可用（health check 失败）。\n\n"

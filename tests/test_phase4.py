@@ -591,10 +591,10 @@ class TestAC12RouterRule0Unhealthy(unittest.TestCase):
         self.assertEqual(ctx.exception.backend_id, "claude")
         self.assertIn("不可用", str(ctx.exception))
 
-    def test_locked_disabled_backend_falls_through_to_rules(self):
-        """Rule 0: locked_backend with enabled=False falls through to normal routing."""
+    def test_locked_disabled_backend_raises(self):
+        """Rule 0: locked_backend with enabled=False raises LockedBackendUnavailableError."""
         from larkhelm.backend_registry import BackendRegistry
-        from larkhelm.router import resolve_backend
+        from larkhelm.router import resolve_backend, LockedBackendUnavailableError
 
         reg = BackendRegistry()
         reg.load([
@@ -608,14 +608,15 @@ class TestAC12RouterRule0Unhealthy(unittest.TestCase):
         with patch("larkhelm.backend_registry.BACKEND_REGISTRY", reg), \
              patch("larkhelm.router.BACKEND_REGISTRY", reg), \
              patch("larkhelm.router._get_chat_state", return_value={"locked_backend": "claude"}):
-            spec = resolve_backend("chat1", "hello")
+            with self.assertRaises(LockedBackendUnavailableError) as ctx:
+                resolve_backend("chat1", "hello")
 
-        self.assertEqual(spec.id, "gemini")
+        self.assertEqual(ctx.exception.backend_id, "claude")
 
-    def test_locked_missing_id_falls_through_to_rules(self):
-        """Rule 0: unknown locked_backend ID falls through to normal routing."""
+    def test_locked_missing_id_raises(self):
+        """Rule 0: unknown locked_backend ID raises LockedBackendUnavailableError."""
         from larkhelm.backend_registry import BackendRegistry
-        from larkhelm.router import resolve_backend
+        from larkhelm.router import resolve_backend, LockedBackendUnavailableError
 
         reg = BackendRegistry()
         reg.load([
@@ -626,9 +627,10 @@ class TestAC12RouterRule0Unhealthy(unittest.TestCase):
         with patch("larkhelm.backend_registry.BACKEND_REGISTRY", reg), \
              patch("larkhelm.router.BACKEND_REGISTRY", reg), \
              patch("larkhelm.router._get_chat_state", return_value={"locked_backend": "nonexistent"}):
-            spec = resolve_backend("chat1", "hello")
+            with self.assertRaises(LockedBackendUnavailableError) as ctx:
+                resolve_backend("chat1", "hello")
 
-        self.assertEqual(spec.id, "gemini")
+        self.assertEqual(ctx.exception.backend_id, "nonexistent")
 
 
 # ─── AC-13: Router Rule 4 — user backend preference ─────────────────────────

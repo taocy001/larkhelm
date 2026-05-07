@@ -50,11 +50,15 @@ def resolve_backend(
     locked_id = locked_state.get("locked_backend")
     if locked_id:
         spec = BACKEND_REGISTRY.get(locked_id)
-        if spec and spec.enabled:
-            if not spec.healthy:
-                raise LockedBackendUnavailableError(spec.id, spec.last_error or "")
-            _debug_log(f"[router] {chat_id}: locked_backend → {spec.id}")
-            return spec
+        if spec is None or not spec.enabled:
+            # Backend removed from config or explicitly disabled — treat as unavailable
+            _id = locked_id if spec is None else spec.id
+            _err = "" if spec is None else "已禁用"
+            raise LockedBackendUnavailableError(_id, _err)
+        if not spec.healthy:
+            raise LockedBackendUnavailableError(spec.id, spec.last_error or "")
+        _debug_log(f"[router] {chat_id}: locked_backend → {spec.id}")
+        return spec
 
     # Rule 1: image → vision-capable backend
     if has_images:
@@ -95,10 +99,10 @@ def resolve_backend(
             _debug_log(f"[router] {chat_id}: default_backend → {spec.id}")
             return spec
 
-    spec = BACKEND_REGISTRY.get_orchestrator()
-    if spec:
-        _debug_log(f"[router] {chat_id}: orchestrator → {spec.id}")
-        return spec
+    orch_chain = BACKEND_REGISTRY.get_orchestrator_chain()
+    if orch_chain:
+        _debug_log(f"[router] {chat_id}: orchestrator → {orch_chain[0].id}")
+        return orch_chain[0]
 
     healthy = [s for s in BACKEND_REGISTRY.all_enabled() if s.healthy]
     if healthy:

@@ -221,7 +221,7 @@ def _do_query_with_delegation(
             lambda t, s="typing": None,  # suppress specialist text from main card
             lambda *a: None,
             lambda *a: None,
-            lambda: None,
+            on_soft_timeout,  # propagate so chat lock is released if specialist stalls
         )
     except Exception as _spec_err:
         _debug_log(f"[Delegation] specialist {backend_id} failed: {_spec_err}")
@@ -550,6 +550,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 elif chain and chain[0].id != primary_spec.id:
                     chain = [primary_spec] + [s for s in chain if s.id != primary_spec.id]
 
+            successful_spec = None
             if not chain:
                 # Last resort: fall back to legacy routing
                 if model == "gemini":
