@@ -1,15 +1,14 @@
 """larkhelm · backend routing — resolve_backend()
 
 Routing rules (priority high → low):
+  0. locked_backend in chat state → raise LockedBackendUnavailableError if unhealthy
   1. has_images → get_by_tag(["vision"])
   2. has_doc_urls → get_by_tag(["tools"])
   3. enable_cheap_routing + short message + no images/docs → get_by_tag(["cheap", "fast"])
   4. user preference backend_id (chat_state) → registry.get(backend_id)
-  5. get_orchestrator() or all_enabled()[0]
+  5. config default_backend → orchestrator chain → first healthy enabled
 
 Fallback: RuntimeError if no healthy backend found.
-
-Special: LockedBackendUnavailableError raised when Rule 0 locked_backend is unhealthy.
 """
 from __future__ import annotations
 
@@ -66,6 +65,7 @@ def resolve_backend(
         if spec:
             _debug_log(f"[router] {chat_id}: image → {spec.id}")
             return spec
+        _debug_log(f"[router] {chat_id}: no vision backend available, falling through")
 
     # Rule 2: doc URLs → tools-capable backend
     if has_doc_urls:
@@ -73,6 +73,7 @@ def resolve_backend(
         if spec:
             _debug_log(f"[router] {chat_id}: doc_url → {spec.id}")
             return spec
+        _debug_log(f"[router] {chat_id}: no tools backend available, falling through")
 
     # Rule 3: cheap routing for short messages
     if enable_cheap and not has_images and not has_doc_urls and len(message) < _SHORT_MSG_THRESHOLD:
@@ -91,7 +92,7 @@ def resolve_backend(
             _debug_log(f"[router] {chat_id}: user_pref → {spec.id}")
             return spec
 
-    # Rule 5: config default_backend → orchestrator → first healthy enabled
+    # Rule 5: config default_backend → orchestrator chain → first healthy enabled
     default_bid = getattr(_cfg, "config", {}).get("default_backend", "")
     if default_bid:
         spec = BACKEND_REGISTRY.get(default_bid)
@@ -103,10 +104,5 @@ def resolve_backend(
     if orch_chain:
         _debug_log(f"[router] {chat_id}: orchestrator → {orch_chain[0].id}")
         return orch_chain[0]
-
-    healthy = [s for s in BACKEND_REGISTRY.all_enabled() if s.healthy]
-    if healthy:
-        _debug_log(f"[router] {chat_id}: first_enabled → {healthy[0].id}")
-        return healthy[0]
 
     raise RuntimeError("No healthy backend available — all backends are down or disabled")

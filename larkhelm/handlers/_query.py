@@ -196,9 +196,9 @@ def _do_query_with_delegation(
     delegation = _buf_state["delegation"] or _detect_delegation(orch_output)
 
     if not delegation:
-        # No delegation: flush accumulated text if heartbeat hasn't seen it yet
-        if not _buf_state["flushed"]:
-            on_text(orch_output)
+        # Always sync final state; ensures card shows the complete output even
+        # when flushed=True but the last incremental call predated stream end.
+        on_text(orch_output)
         return orch_output
 
     # Phase 2: Specialist execution
@@ -208,9 +208,11 @@ def _do_query_with_delegation(
     if specialist_spec is None or not specialist_spec.healthy or not specialist_spec.enabled:
         _debug_log(f"[Delegation] specialist {backend_id} unavailable, falling back to direct orchestrator")
         on_text(f"> ⚠️ 专家 {backend_id} 不可用，正在直接回答...")
-        # Call without extra_system so orchestrator won't receive DELEGATE instructions and answers directly
+        # Pass fallback system prompt so orchestrator knows not to use DELEGATE format again
+        from larkhelm.orchestration import _FALLBACK_SYSTEM
         return _run_backend_single(orch_spec, chat_id, enriched_msg, cwd, cancel_ev,
-                                   on_text, on_tool, on_tool_result, on_soft_timeout, images)
+                                   on_text, on_tool, on_tool_result, on_soft_timeout, images,
+                                   extra_system=_FALLBACK_SYSTEM)
 
     on_tool(f"🔀 委托 {specialist_spec.display_name}", sub_query[:120], "delegation")
 
@@ -221,7 +223,7 @@ def _do_query_with_delegation(
             lambda t, s="typing": None,  # suppress specialist text from main card
             lambda *a: None,
             lambda *a: None,
-            on_soft_timeout,  # propagate so chat lock is released if specialist stalls
+            lambda: None,  # specialist must not trigger top-level soft-timeout / cancel_ev replacement
         )
     except Exception as _spec_err:
         _debug_log(f"[Delegation] specialist {backend_id} failed: {_spec_err}")
@@ -466,7 +468,8 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             elapsed_now = _fmt_elapsed(time.time() - start)
             _debug_log(f"[{trace_id}][DoQuery] soft timeout ({elapsed_now}), lock released, continuing in background")
             _set_in_background(True)
-            _stop_hb.set()   # stop heartbeat so it no longer patches the shared card mid
+            # Heartbeat keeps running in background (shows "后台·" prefix, hides cancel button).
+            # It is stopped by the success/error finally block when the AI finishes.
             try:
                 chat_lock.release()
             except RuntimeError:
@@ -546,6 +549,9 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 with _card_patch_lock:   # drain any in-flight heartbeat patch before overwriting
                     pass
                 hb_thread.join(timeout=0.5)
+                if user_msg_id and _eyes_reaction_id[0]:
+                    delete_reaction(user_msg_id, _eyes_reaction_id[0])
+                    _eyes_reaction_id[0] = None
                 send_card(chat_id, "❌ 锁定后端不可用",
                           f"{_lbe}\n\n使用 **/lock off** 恢复自动路由。", color="red")
                 return

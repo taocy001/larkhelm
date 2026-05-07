@@ -52,7 +52,7 @@ def _save_state() -> None:
 
 def _get_chat_state(chat_id: str) -> dict:
     with _state_lock:
-        return _chat_state_store.setdefault(chat_id, {})
+        return dict(_chat_state_store.setdefault(chat_id, {}))
 
 
 def _set_chat_field(chat_id: str, key: str, value: object) -> None:

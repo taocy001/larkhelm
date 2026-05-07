@@ -52,6 +52,8 @@ def handle_reaction_created(data: P2ImMessageReactionCreatedV1):
         if action == "positive":
             _debug_log(f"[Reaction] user liked chat={chat_id}")
         elif action == "retry":
+            if is_shutting_down():
+                return
             _debug_log(f"[Reaction] user requested retry chat={chat_id}")
             send_card(chat_id, "🔁 重试", "正在重新执行上一条查询...", color="grey")
             _reset_cancel(chat_id)
@@ -248,39 +250,36 @@ def handle_message(data: P2ImMessageReceiveV1):
             _cmd_cron(chat_id, text[5:].strip(), _mid); return
         if tl.startswith("/crew"):
             from larkhelm.crew import cmd_crew
-            from larkhelm.log import _debug_log as _dl
             def _crew_target(*a):
                 try:
                     cmd_crew(*a)
                 except Exception as _e:
                     import traceback as _tb
-                    _dl(f"[crew] unhandled exception: {_e}\n{_tb.format_exc()}")
+                    _debug_log(f"[crew] unhandled exception: {_e}\n{_tb.format_exc()}")
             threading.Thread(target=_crew_target, args=(chat_id, text[5:].strip(), message.message_id),
-                             daemon=True, name="crew-handler").start()
+                             daemon=True, name=f"crew-{chat_id[:8]}").start()
             return
-        if tl.startswith("/dev"):
+        if tl == "/dev" or tl.startswith("/dev "):
             from larkhelm.crew import cmd_dev
-            from larkhelm.log import _debug_log as _dl
             def _dev_target(*a):
                 try:
                     cmd_dev(*a)
                 except Exception as _e:
                     import traceback as _tb
-                    _dl(f"[dev] unhandled exception: {_e}\n{_tb.format_exc()}")
-            threading.Thread(target=_dev_target, args=(chat_id, text[4:].strip(), message.message_id),
-                             daemon=True, name="dev-handler").start()
+                    _debug_log(f"[dev] unhandled exception: {_e}\n{_tb.format_exc()}")
+            threading.Thread(target=_dev_target, args=(chat_id, text[5:].strip(), message.message_id),
+                             daemon=True, name=f"dev-{chat_id[:8]}").start()
             return
         if tl.startswith("/plan"):
             from larkhelm.cmd_plan import cmd_plan
-            from larkhelm.log import _debug_log as _dl
             def _plan_target(*a):
                 try:
                     cmd_plan(*a)
                 except Exception as _e:
                     import traceback as _tb
-                    _dl(f"[plan] unhandled exception: {_e}\n{_tb.format_exc()}")
+                    _debug_log(f"[plan] unhandled exception: {_e}\n{_tb.format_exc()}")
             threading.Thread(target=_plan_target, args=(chat_id, text[5:].strip(), message.message_id),
-                             daemon=True, name="plan-handler").start()
+                             daemon=True, name=f"plan-{chat_id[:8]}").start()
             return
         if tl == "/cancel":
             chat_lock = _get_chat_lock(chat_id)

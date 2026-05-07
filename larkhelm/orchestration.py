@@ -10,6 +10,18 @@ import re
 
 from larkhelm.backend_registry import BackendRegistry
 
+# Only alphanumeric, hyphens, and underscores are valid backend IDs (max 64 chars).
+# Rejects whitespace, path separators, injection characters, etc.
+_BACKEND_ID_RE = re.compile(r'^[a-zA-Z0-9_\-]{1,64}$')
+
+# Max allowed sub_query length to prevent context explosion via malformed delegation
+_MAX_SUB_QUERY_LEN = 8000
+
+_FALLBACK_SYSTEM = (
+    "Answer the user's question directly and completely. "
+    "Do NOT use the DELEGATE format — all specialists are unavailable."
+)
+
 
 def build_orchestrator_system_prompt(registry: BackendRegistry) -> str:
     """Generate system prompt listing available specialists.
@@ -51,12 +63,14 @@ def _detect_delegation(buffer: str) -> tuple[str, str] | None:
     Args:
         buffer: accumulated streaming text (should be called when len >= 60)
     Returns:
-        (backend_id, sub_query) if DELEGATE block found and complete
-        None if no delegation or block incomplete
+        (backend_id, sub_query) if DELEGATE block found, complete, and backend_id valid
+        None if no delegation, block incomplete, or backend_id fails validation
     """
     m = re.search(r'DELEGATE\s+(\S+)\s*\n(.*?)\nEND_DELEGATE', buffer, re.DOTALL)
     if m:
         backend_id = m.group(1).strip()
-        sub_query = m.group(2).strip()
+        if not _BACKEND_ID_RE.match(backend_id):
+            return None  # reject injected or malformed backend_id
+        sub_query = m.group(2).strip()[:_MAX_SUB_QUERY_LEN]
         return (backend_id, sub_query)
     return None

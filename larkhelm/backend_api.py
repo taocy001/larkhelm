@@ -9,10 +9,9 @@ SDKs are optional: if not installed, health_check marks the backend unhealthy.
 from __future__ import annotations
 
 import os
-import threading
 from typing import Callable
 
-from larkhelm.backend_registry import BackendSpec, _resolve_env_vars
+from larkhelm.backend_registry import BackendSpec
 from larkhelm.log import _debug_log
 
 
@@ -21,23 +20,25 @@ def run_anthropic(
     chat_id: str,
     message: str,
     history: list[dict],
-    cancel_ev: threading.Event = None,
+    cancel_ev: "object | None" = None,
     on_text: Callable = None,
     extra_system: str = "",
 ) -> tuple[str, list[dict]]:
     """Stream via Anthropic SDK. Returns (response_text, updated_history)."""
+    from larkhelm.ai_runner import QueryCancelledError
     try:
         import anthropic
     except ImportError:
         raise RuntimeError("anthropic SDK not installed; run: pip install anthropic")
 
-    api_key = spec.api_key if spec.api_key else _resolve_env_vars(os.environ.get("ANTHROPIC_API_KEY", ""))
+    api_key = spec.api_key or os.environ.get("ANTHROPIC_API_KEY", "")
     client_kwargs: dict = {"api_key": api_key}
     if spec.base_url:
         client_kwargs["base_url"] = spec.base_url
     client = anthropic.Anthropic(**client_kwargs)
 
-    # Anthropic only allows user/assistant roles in messages; extract system separately
+    # Anthropic only allows user/assistant roles in messages; extract system separately.
+    # extra_system (per-query injection) takes highest priority → prepended before history systems.
     system_parts = [h["content"] for h in history if h["role"] == "system"]
     if extra_system:
         system_parts.insert(0, extra_system)
@@ -70,6 +71,9 @@ def run_anthropic(
         _debug_log(f"[anthropic_api] {spec.id} error: {e}")
         raise
 
+    if cancel_ev and cancel_ev.is_set():
+        raise QueryCancelledError("Query cancelled during anthropic_api streaming")
+
     updated_history = list(history) + [
         {"role": "user", "content": message},
         {"role": "assistant", "content": result_text},
@@ -82,31 +86,30 @@ def run_google(
     chat_id: str,
     message: str,
     history: list[dict],
-    cancel_ev: threading.Event = None,
+    cancel_ev: "object | None" = None,
     on_text: Callable = None,
     extra_system: str = "",
 ) -> tuple[str, list[dict]]:
     """Stream via google-genai SDK. Returns (response_text, updated_history)."""
+    from larkhelm.ai_runner import QueryCancelledError
     try:
         from google import genai
         from google.genai import types as genai_types
     except ImportError:
         raise RuntimeError("google-genai SDK not installed; run: pip install google-genai")
 
-    api_key = spec.api_key if spec.api_key else _resolve_env_vars(os.environ.get("GOOGLE_API_KEY", ""))
+    api_key = spec.api_key or os.environ.get("GOOGLE_API_KEY", "")
     client = genai.Client(api_key=api_key)
 
-    # Separate system messages from conversational history
+    # extra_system takes highest priority; history should not contain system-role messages
+    # (api_session only stores user/assistant turns), but guard defensively.
     system_texts: list[str] = []
     if extra_system:
         system_texts.append(extra_system)
     contents = []
     for h in history:
-        if h["role"] == "system":
-            system_texts.append(h["content"])
-        else:
-            role = "user" if h["role"] == "user" else "model"
-            contents.append(genai_types.Content(role=role, parts=[genai_types.Part(text=h["content"])]))
+        role = "user" if h["role"] == "user" else "model"
+        contents.append(genai_types.Content(role=role, parts=[genai_types.Part(text=h["content"])]))
     contents.append(genai_types.Content(role="user", parts=[genai_types.Part(text=message)]))
 
     model_name = spec.model or "gemini-2.0-flash"
@@ -136,6 +139,9 @@ def run_google(
         _debug_log(f"[google_api] {spec.id} error: {e}")
         raise
 
+    if cancel_ev and cancel_ev.is_set():
+        raise QueryCancelledError("Query cancelled during google_api streaming")
+
     updated_history = list(history) + [
         {"role": "user", "content": message},
         {"role": "assistant", "content": result_text},
@@ -148,17 +154,18 @@ def run_openai_compat(
     chat_id: str,
     message: str,
     history: list[dict],
-    cancel_ev: threading.Event = None,
+    cancel_ev: "object | None" = None,
     on_text: Callable = None,
     extra_system: str = "",
 ) -> tuple[str, list[dict]]:
     """Stream via OpenAI-compat SDK (DeepSeek etc.). Returns (response_text, updated_history)."""
+    from larkhelm.ai_runner import QueryCancelledError
     try:
         import openai
     except ImportError:
         raise RuntimeError("openai SDK not installed; run: pip install openai")
 
-    api_key = spec.api_key if spec.api_key else _resolve_env_vars(os.environ.get("OPENAI_API_KEY", ""))
+    api_key = spec.api_key or os.environ.get("OPENAI_API_KEY", "")
     kwargs = dict(api_key=api_key)
     if spec.base_url:
         kwargs["base_url"] = spec.base_url
@@ -193,6 +200,9 @@ def run_openai_compat(
     except Exception as e:
         _debug_log(f"[openai_compat_api] {spec.id} error: {e}")
         raise
+
+    if cancel_ev and cancel_ev.is_set():
+        raise QueryCancelledError("Query cancelled during openai_compat_api streaming")
 
     updated_history = list(history) + [
         {"role": "user", "content": message},
