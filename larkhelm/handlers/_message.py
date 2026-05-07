@@ -206,7 +206,7 @@ def handle_message(data: P2ImMessageReceiveV1):
         from larkhelm.commands import (
             _cmd_reset, _cmd_status, _cmd_help, _cmd_pickup, _cmd_history,
             _cmd_stats, _cmd_cron, _cmd_cd, _cmd_pwd, _cmd_ls, _cmd_run,
-            _cmd_model, _cmd_cli_native, _cmd_btw, _cmd_upgrade,
+            _cmd_model, _cmd_cli_native, _cmd_btw, _cmd_upgrade, _cmd_memory,
             _strip_at_mention,
         )
         from larkhelm.cmd_doc import _cmd_doc
@@ -235,6 +235,8 @@ def handle_message(data: P2ImMessageReceiveV1):
             _cmd_upgrade(chat_id, _mid); return
         if tl == "/stats":
             _cmd_stats(chat_id, _mid); return
+        if tl == "/memory" or tl.startswith("/memory "):
+            _cmd_memory(chat_id, text[7:].strip(), _mid); return
         if tl.startswith("/doc"):
             _cmd_doc(chat_id, text[4:].strip()); return
         if tl.startswith("/cron"):
@@ -304,13 +306,8 @@ def handle_message(data: P2ImMessageReceiveV1):
             return
         if tl == "/model" or tl.startswith("/model "):
             parts = text.split(None, 1)
-            if len(parts) == 2:
-                _cmd_model(chat_id, parts[1], _mid)
-            else:
-                cur = _get_chat_model(chat_id)
-                send_card_reply(chat_id, _mid, "🤖 模型",
-                                f"当前: **{cur}**\n切换: `/model claude` / `/model gemini` / `/model kimi`",
-                                color="blue")
+            arg = parts[1].strip() if len(parts) == 2 else ""
+            _cmd_model(chat_id, arg, _mid)
             return
         if tl.startswith("/rename "):
             import re as _re

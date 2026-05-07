@@ -28,6 +28,11 @@ dev = [
     "mypy>=1.10",
     "ruff>=0.4",
 ]
+api-backends = [
+    "anthropic>=0.30",
+    "google-genai>=0.8",
+    "openai>=1.30",
+]
 
 [tool.hatch.version]
 path = "larkhelm/__init__.py"

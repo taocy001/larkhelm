@@ -108,17 +108,20 @@ def _spawn_claude_proc(
     on_start=None,
     images: list = None,
     session_namespace: str = None,
+    command: str = None,
 ) -> str:
     """
     Spawn a Claude CLI subprocess and stream its output.
 
     session_namespace: If provided, use this namespace for session isolation (used by crew agents).
                        When None, chat_id is used as the namespace (normal queries).
+    command: Override the executable (defaults to _cfg.CLAUDE_CMD).
     """
     # Session namespace determines where the sid is stored
     ns = session_namespace if session_namespace is not None else chat_id
+    cmd = command if command else _cfg.CLAUDE_CMD
 
-    args = [_cfg.CLAUDE_CMD, "--print", "--output-format", "stream-json", "--verbose"]
+    args = [cmd, "--print", "--output-format", "stream-json", "--verbose"]
     if images:
         args += ["--input-format", "stream-json"]
     settings_file: str = None
@@ -182,7 +185,7 @@ def _spawn_claude_proc(
         _debug_log(f"[MCP] failed to build mcp config: {e}")
 
     _debug_log(f"[claude] starting cwd={cwd} sid={sid} skip_perm={_cfg.SKIP_PERMISSIONS} "
-               f"images={len(images) if images else 0} ns={ns}")
+               f"images={len(images) if images else 0} ns={ns} cmd={cmd}")
     env = {
         **os.environ,
         "DBUS_SESSION_BUS_ADDRESS": "",
@@ -204,7 +207,7 @@ def _spawn_claude_proc(
             Path(settings_file).unlink(missing_ok=True)
         if mcp_tmp_file:
             Path(mcp_tmp_file).unlink(missing_ok=True)
-        raise RuntimeError(f"Claude CLI not found: {_cfg.CLAUDE_CMD}")
+        raise RuntimeError(f"Claude CLI not found: {cmd}")
     except Exception:
         _ai_proc_sem.release()
         if settings_file:
@@ -453,14 +456,22 @@ def query_claude(chat_id: str, message: str, cwd: str,
                  on_tool=None, on_text=None, on_tool_result=None,
                  on_soft_timeout=None,
                  images: list = None) -> str:
-    """Public interface: query Claude using chat_id as the session namespace."""
+    """Public interface: query Claude. Thin shim → backend_cli.run_claude."""
+    from larkhelm.backend_cli import run_claude
+    from larkhelm.backend_registry import BACKEND_REGISTRY, BackendSpec
+    spec = BACKEND_REGISTRY.get("claude")
+    if spec is None:
+        # Fallback: build a minimal spec from legacy config
+        spec = BackendSpec(
+            id="claude", provider="claude_cli", display_name="Claude",
+            role="orchestrator", tags=[], command=_cfg.CLAUDE_CMD,
+        )
     sid = _load_sid(chat_id, "claude")
-    return _spawn_claude_proc(
-        chat_id=chat_id, message=message, sid=sid, cwd=cwd,
+    return run_claude(
+        spec=spec, chat_id=chat_id, message=message, sid=sid, cwd=cwd,
         cancel_ev=cancel_ev, on_text=on_text, on_tool=on_tool,
-        on_tool_result=on_tool_result, allow_retry=True,
-        on_soft_timeout=on_soft_timeout, images=images,
-        session_namespace=None,
+        on_tool_result=on_tool_result, on_soft_timeout=on_soft_timeout,
+        images=images, allow_retry=True,
     )
 
 
@@ -478,6 +489,7 @@ def _spawn_kimi_proc(
     on_start=None,
     images: list = None,
     session_namespace: str = None,
+    command: str = None,
 ) -> str:
     """Spawn a Kimi CLI subprocess and stream its output.
 
@@ -488,11 +500,13 @@ def _spawn_kimi_proc(
     - Skip permissions: --yolo instead of --dangerously-skip-permissions
     - Output events: distinguished by role field; tool calls in tool_calls[] array
     - Tool name mapping: Shell→Bash, FetchURL→WebFetch, SearchWeb→WebSearch
+    command: Override the executable (defaults to _cfg.KIMI_CMD).
     """
     ns = session_namespace if session_namespace is not None else chat_id
+    cmd = command if command else _cfg.KIMI_CMD
 
     args = [
-        _cfg.KIMI_CMD, "--print", "--output-format", "stream-json",
+        cmd, "--print", "--output-format", "stream-json",
         "--input-format", "stream-json",
         "--verbose",
         "--work-dir", cwd,
@@ -503,7 +517,7 @@ def _spawn_kimi_proc(
         args += ["--yolo"]
 
     _debug_log(f"[kimi] starting cwd={cwd} sid={sid} skip_perm={_cfg.SKIP_PERMISSIONS} "
-               f"images={len(images) if images else 0} ns={ns}")
+               f"images={len(images) if images else 0} ns={ns} cmd={cmd}")
     env = {**os.environ, "DBUS_SESSION_BUS_ADDRESS": "", "GCM_CREDENTIAL_STORAGE": "file"}
 
     _acquire_ai_sem(cancel_ev)
@@ -514,7 +528,7 @@ def _spawn_kimi_proc(
         )
     except FileNotFoundError:
         _ai_proc_sem.release()
-        raise RuntimeError(f"Kimi CLI not found: {_cfg.KIMI_CMD}")
+        raise RuntimeError(f"Kimi CLI not found: {cmd}")
     except Exception:
         _ai_proc_sem.release()
         raise
@@ -761,37 +775,48 @@ def query_kimi(chat_id: str, message: str, cwd: str,
                images: list = None,
                use_session: bool = True,
                record_under: str = None) -> str:
-    """Public interface: query Kimi using chat_id as the session namespace.
-    use_session=False disables session load/save (for crew agents).
-    record_under: chat_id used for token usage recording (defaults to chat_id).
-    """
+    """Public interface: query Kimi. Thin shim → backend_cli.run_kimi."""
+    from larkhelm.backend_cli import run_kimi
+    from larkhelm.backend_registry import BACKEND_REGISTRY, BackendSpec
+    spec = BACKEND_REGISTRY.get("kimi")
+    if spec is None:
+        spec = BackendSpec(
+            id="kimi", provider="kimi_cli", display_name="Kimi",
+            role="worker", tags=[], command=_cfg.KIMI_CMD,
+        )
     sid = _load_sid(chat_id, "kimi") if use_session else None
-    return _spawn_kimi_proc(
-        chat_id=chat_id, message=message, sid=sid, cwd=cwd,
+    return run_kimi(
+        spec=spec, chat_id=chat_id, message=message, sid=sid, cwd=cwd,
         cancel_ev=cancel_ev, on_text=on_text, on_tool=on_tool,
-        on_tool_result=on_tool_result, allow_retry=True,
-        on_soft_timeout=on_soft_timeout, images=images,
-        session_namespace=None,
+        on_tool_result=on_tool_result, on_soft_timeout=on_soft_timeout,
+        images=images, allow_retry=True,
     )
 
 
-def query_gemini(chat_id: str, message: str, cwd: str,
-                 cancel_ev: threading.Event = None,
-                 on_tool=None, on_text=None, on_tool_result=None,
-                 on_soft_timeout=None,
-                 use_session: bool = True,
-                 record_under: str = None) -> str:
-    """Query Gemini CLI (per-query process mode).
-    use_session=False disables session load/save (for crew agents).
-    record_under: chat_id used for token usage recording (defaults to chat_id).
+def _spawn_gemini_proc(
+    chat_id: str,
+    message: str,
+    sid: str,
+    cwd: str,
+    cancel_ev: threading.Event = None,
+    on_tool=None,
+    on_text=None,
+    on_tool_result=None,
+    on_soft_timeout=None,
+    use_session: bool = True,
+    record_under: str = None,
+    command: str = None,
+) -> str:
+    """Spawn a Gemini CLI subprocess (per-query process mode).
+    command: Override the executable (defaults to _cfg.GEMINI_CMD).
     """
-    sid = _load_sid(chat_id, "gemini") if use_session else None
-    args = [_cfg.GEMINI_CMD, "-y", "--output-format", "stream-json", "-p", message]
+    cmd = command if command else _cfg.GEMINI_CMD
+    args = [cmd, "-y", "--output-format", "stream-json", "-p", message]
     if sid:
         args += ["--resume", sid]
 
     env = {**os.environ, "DBUS_SESSION_BUS_ADDRESS": "", "GCM_CREDENTIAL_STORAGE": "file"}
-    _debug_log(f"[gemini] starting query cwd={cwd} resume={sid} use_session={use_session}")
+    _debug_log(f"[gemini] starting query cwd={cwd} resume={sid} use_session={use_session} cmd={cmd}")
 
     _acquire_ai_sem(cancel_ev)
     try:
@@ -801,7 +826,7 @@ def query_gemini(chat_id: str, message: str, cwd: str,
         )
     except FileNotFoundError:
         _ai_proc_sem.release()
-        raise RuntimeError(f"Gemini CLI not found: {_cfg.GEMINI_CMD}")
+        raise RuntimeError(f"Gemini CLI not found: {cmd}")
     except Exception:
         _ai_proc_sem.release()
         raise
@@ -974,3 +999,27 @@ def query_gemini(chat_id: str, message: str, cwd: str,
             + ("\n".join(stderr_buf[-5:]) if stderr_buf else "no error output")
         )
     return result_text.strip()
+
+
+def query_gemini(chat_id: str, message: str, cwd: str,
+                 cancel_ev: threading.Event = None,
+                 on_tool=None, on_text=None, on_tool_result=None,
+                 on_soft_timeout=None,
+                 use_session: bool = True,
+                 record_under: str = None) -> str:
+    """Public interface: query Gemini CLI. Thin shim → backend_cli.run_gemini."""
+    from larkhelm.backend_cli import run_gemini
+    from larkhelm.backend_registry import BACKEND_REGISTRY, BackendSpec
+    spec = BACKEND_REGISTRY.get("gemini")
+    if spec is None:
+        spec = BackendSpec(
+            id="gemini", provider="gemini_cli", display_name="Gemini",
+            role="worker", tags=[], command=_cfg.GEMINI_CMD,
+        )
+    sid = _load_sid(chat_id, "gemini") if use_session else None
+    return run_gemini(
+        spec=spec, chat_id=chat_id, message=message, sid=sid, cwd=cwd,
+        cancel_ev=cancel_ev, on_text=on_text, on_tool=on_tool,
+        on_tool_result=on_tool_result, on_soft_timeout=on_soft_timeout,
+        use_session=use_session,
+    )

@@ -97,6 +97,7 @@ DEFAULT_OWNER_OPEN_ID:     str
 PERM_HOOK_SCRIPT: str
 PERM_SOCKET_PATH: str
 SOURCE_DIR: "Path"  # source repo root directory (auto-detected for editable installs)
+BACKEND_REGISTRY: "object"  # BackendRegistry singleton (set by _init_runtime)
 
 # ── Card UX parameters (module-level constants) ────────────────────────────────────
 TOOL_HISTORY_CAP   = 20      # max number of completed tool pairs kept in history
@@ -104,6 +105,42 @@ CARD_PUSH_INTERVAL = 5.0     # heartbeat push interval (seconds)
 CURSOR_INTERVAL    = 0.3     # local cursor-blink interval (seconds)
 STALL_THRESHOLD    = 30.0    # threshold for detecting a stalled tool (seconds)
 CURSOR_FRAMES      = ["▌", "▍", "▎", "▏"]
+
+
+def _migrate_legacy_backends(config: dict) -> list[dict]:
+    """If 'backends' key is absent, auto-generate from legacy claude/gemini/kimi_command fields."""
+    if "backends" in config:
+        return config["backends"]
+    backends: list[dict] = []
+    claude_cmd = config.get("claude_command", "claude") or "claude"
+    gemini_cmd = config.get("gemini_command", "gemini") or "gemini"
+    kimi_cmd   = config.get("kimi_command",   "kimi")   or "kimi"
+    default    = config.get("default_model",   "claude")
+    backends.append({
+        "id": "claude",
+        "provider": "claude_cli",
+        "display_name": "Claude",
+        "role": "orchestrator" if default == "claude" else "worker",
+        "tags": ["vision", "tools"],
+        "command": claude_cmd,
+    })
+    backends.append({
+        "id": "gemini",
+        "provider": "gemini_cli",
+        "display_name": "Gemini",
+        "role": "orchestrator" if default == "gemini" else "worker",
+        "tags": ["tools"],
+        "command": gemini_cmd,
+    })
+    backends.append({
+        "id": "kimi",
+        "provider": "kimi_cli",
+        "display_name": "Kimi",
+        "role": "orchestrator" if default == "kimi" else "worker",
+        "tags": ["vision", "tools"],
+        "command": kimi_cmd,
+    })
+    return backends
 
 
 def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
@@ -119,6 +156,7 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     global DOC_AUTO_INJECT, DOC_INJECT_MAX_CHARS, DOC_INJECT_MAX_DOCS
     global DOC_READ_MAX_CHARS, DEFAULT_DRIVE_FOLDER, DOC_WRITE_CONFIRM, DOC_WRITE_BACKEND
     global DEFAULT_WIKI_SPACE_ID, DEFAULT_WIKI_PARENT_TOKEN, DEFAULT_OWNER_OPEN_ID
+    global BACKEND_REGISTRY
 
     _sys_cfg  = Path("/etc/larkhelm/config.json")
     _sys_data = Path("/var/lib/larkhelm")
@@ -219,6 +257,17 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         SOURCE_DIR = _candidate          # git repo root (editable install)
     else:
         SOURCE_DIR = Path(__file__).parent  # fall back to package directory for non-editable installs
+
+    # Initialize BackendRegistry from config (must happen after all globals are set)
+    from larkhelm.backend_registry import BackendRegistry
+    global BACKEND_REGISTRY
+    BACKEND_REGISTRY = BackendRegistry()
+    _backends_list = _migrate_legacy_backends(config)
+    BACKEND_REGISTRY.load(_backends_list)
+    BACKEND_REGISTRY.health_check()
+    # Also update the module-level singleton in backend_registry so imports of it stay fresh
+    import larkhelm.backend_registry as _br_mod
+    _br_mod.BACKEND_REGISTRY = BACKEND_REGISTRY
 
     # Build the typed config object (for mypy etc.; module-level globals remain for backward compat)
     global _runtime

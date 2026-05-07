@@ -33,7 +33,7 @@ class TestSoftTimeout(unittest.TestCase):
         from larkhelm.concurrency import _chat_locks
         _chat_locks.clear()
 
-    @patch("larkhelm.handlers._query.query_claude")
+    @patch("larkhelm.backend_cli.run_claude")
     @patch("larkhelm.handlers._query._patch_card_raw")
     @patch("larkhelm.handlers._query._send_card_raw")
     @patch("larkhelm.handlers._query._reply_card_raw")
@@ -67,18 +67,25 @@ class TestSoftTimeout(unittest.TestCase):
             return "mid_123"
         mock_reply.side_effect = reply_side_effect
 
-        # Mock query_claude to trigger soft timeout
-        def mock_query_impl(chat_id, message, cwd, cancel_ev, on_tool, on_text, on_tool_result, on_soft_timeout, images=None):
+        # Mock run_claude (new routing path) to trigger soft timeout
+        def mock_query_impl(spec, chat_id, message, sid, cwd,
+                            cancel_ev=None, on_text=None, on_tool=None,
+                            on_tool_result=None, on_soft_timeout=None,
+                            on_start=None, images=None, session_namespace=None,
+                            allow_retry=False):
             # 1. Simulate some progress
-            on_text("Starting...")
+            if on_text:
+                on_text("Starting...")
             time.sleep(0.2)
-            
+
             # 2. Trigger soft timeout
-            on_soft_timeout()
-            
+            if on_soft_timeout:
+                on_soft_timeout()
+
             # 3. Simulate more progress after soft timeout
-            on_text("Continuing in background...")
-            time.sleep(0.5) # Wait for heartbeat to pick it up or direct push
+            if on_text:
+                on_text("Continuing in background...")
+            time.sleep(0.5)  # Wait for heartbeat to pick it up or direct push
             return "Final output"
 
         mock_query.side_effect = mock_query_impl

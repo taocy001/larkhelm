@@ -15,6 +15,8 @@ __all__ = [
     "_load_global_state", "_save_state", "_get_chat_state", "_set_chat_field",
     "_sid_file", "_load_sid", "_save_sid", "_clear_sid",
     "_get_cwd", "_set_cwd", "_get_chat_model", "_set_chat_model",
+    "_get_turn_count", "_increment_turn_count",
+    "_get_backend_id", "_set_backend_id",
     "_register_btw_msg", "_is_btw_reply",
     "set_pending_doc_write", "pop_pending_doc_write",
 ]
@@ -107,6 +109,32 @@ def _get_chat_model(chat_id: str) -> str:
 
 def _set_chat_model(chat_id: str, model: str) -> None:
     _set_chat_field(chat_id, "model", model)
+
+
+# ═══════════════════════════════════════════════════
+#  Turn count (for memory auto-update trigger)
+# ═══════════════════════════════════════════════════
+def _get_turn_count(chat_id: str) -> int:
+    return int(_get_chat_state(chat_id).get("turn_count", 0))
+
+
+def _increment_turn_count(chat_id: str) -> int:
+    with _state_lock:
+        new_count = _get_chat_state(chat_id).get("turn_count", 0) + 1
+        _chat_state_store.setdefault(chat_id, {})["turn_count"] = new_count
+        _save_state()
+    return new_count
+
+
+# ═══════════════════════════════════════════════════
+#  Backend preference (backend_id field)
+# ═══════════════════════════════════════════════════
+def _get_backend_id(chat_id: str) -> str | None:
+    return _get_chat_state(chat_id).get("backend_id")
+
+
+def _set_backend_id(chat_id: str, backend_id: str) -> None:
+    _set_chat_field(chat_id, "backend_id", backend_id)
 
 
 # ═══════════════════════════════════════════════════
