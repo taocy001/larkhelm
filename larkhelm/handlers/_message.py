@@ -350,6 +350,10 @@ def handle_message(data: P2ImMessageReceiveV1):
             target_model = "kimi"
             prompt = text.split(" ", 1)[1].strip()
 
+        # Vision routing: gemini CLI doesn't support image input; force to a vision-capable model
+        if _msg_images and target_model not in ("claude", "kimi"):
+            target_model = "claude"
+
         if not prompt:
             send_card_reply(chat_id, _mid, "⚠️ 空消息", "消息内容不能为空。", color="orange")
             return

@@ -169,6 +169,12 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     GEMINI_CMD       = config.get("gemini_command", "gemini") or "gemini"
     KIMI_CMD         = config.get("kimi_command",   "kimi")   or "kimi"
     DEFAULT_MODEL    = config.get("default_model", "claude")
+    if DEFAULT_MODEL not in ("claude", "gemini", "kimi"):
+        print(
+            f"⚠️  default_model 值 '{DEFAULT_MODEL}' 无效（允许: claude/gemini/kimi），已回退为 'claude'",
+            file=sys.stderr,
+        )
+        DEFAULT_MODEL = "claude"
     SKIP_PERMISSIONS = bool(config.get("skip_permissions", False))
     RESPONSE_TIMEOUT = int(config.get("response_timeout", 300))   # soft timeout: release lock but don't kill process
     HARD_TIMEOUT     = int(config.get("hard_timeout", 21600))      # hard timeout: force kill (default 6 hours)

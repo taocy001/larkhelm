@@ -791,6 +791,17 @@ class TestInitRuntimeBoundary(unittest.TestCase):
         with self.assertRaises(SystemExit):
             _cfg_module._init_runtime(config_path=str(cfg), data_dir=_TMP_DIR)
 
+    def test_invalid_default_model_falls_back_to_claude(self):
+        cfg = self._make_config({"default_model": "invalid_model"})
+        _cfg_module._init_runtime(config_path=str(cfg), data_dir=_TMP_DIR)
+        self.assertEqual(_cfg_module.DEFAULT_MODEL, "claude")
+
+    def test_valid_default_model_values(self):
+        for val in ("claude", "gemini", "kimi"):
+            cfg = self._make_config({"default_model": val})
+            _cfg_module._init_runtime(config_path=str(cfg), data_dir=_TMP_DIR)
+            self.assertEqual(_cfg_module.DEFAULT_MODEL, val)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

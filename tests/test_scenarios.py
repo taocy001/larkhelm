@@ -16,7 +16,8 @@ import larkhelm.config as cfg
 _MINIMAL_CONFIG = {
     "APP_ID": "test_app_id",
     "APP_SECRET": "test_app_secret",
-    "default_model": "gemini"
+    "default_model": "claude",
+    "default_cwd": _TMP_DIR,
 }
 _cfg_file = Path(_TMP_DIR) / "config.json"
 _cfg_file.write_text(json.dumps(_MINIMAL_CONFIG))
@@ -34,7 +35,13 @@ class TestScenarios(unittest.TestCase):
         _chat_state_store.clear()
 
     def tearDown(self):
-        pass
+        from larkhelm.concurrency import _trigger_cancel, wait_for_idle
+        for cid in ("chat_vision", "chat_switch"):
+            try:
+                _trigger_cancel(cid)
+            except Exception:
+                pass
+        wait_for_idle(timeout=2.0)
 
     @patch("larkhelm.lark_client.send_card")
     @patch("lark_oapi.ws.Client.start")
