@@ -186,6 +186,14 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
         else:
             full_prompt = resolved
 
+    # Inject output_file requirement so the agent knows it must write the file
+    if spec.output_file and not spec.model.startswith("hermes_"):
+        full_prompt += (
+            f"\n\n---\n\n**Output requirement**: When you have finished, write your complete "
+            f"output to `.crew_workspace/{spec.output_file}` using the Write tool. "
+            f"Do not skip this step."
+        )
+
     # Inject Feishu doc URLs from completed upstream agents so this agent can reference them
     _upstream_doc_refs = []
     for _dep_id in spec.depends_on:
