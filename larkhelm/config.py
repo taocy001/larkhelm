@@ -260,7 +260,6 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
 
     # Initialize BackendRegistry from config (must happen after all globals are set)
     from larkhelm.backend_registry import BackendRegistry
-    global BACKEND_REGISTRY
     BACKEND_REGISTRY = BackendRegistry()
     _backends_list = _migrate_legacy_backends(config)
     BACKEND_REGISTRY.load(_backends_list)

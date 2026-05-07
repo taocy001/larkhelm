@@ -440,9 +440,8 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             # Increment turn count and trigger memory auto-update in background
             try:
                 _increment_turn_count(chat_id)
-                if spec is not None:
-                    from larkhelm.memory import maybe_auto_update
-                    maybe_auto_update(chat_id)
+                from larkhelm.memory import maybe_auto_update
+                maybe_auto_update(chat_id)
             except Exception as _mc_err:
                 _debug_log(f"[{trace_id}][DoQuery] post-query memory error: {_mc_err}")
 

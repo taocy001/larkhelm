@@ -88,19 +88,31 @@ def run_google(
     api_key = spec.api_key or _resolve_env_vars(os.environ.get("GOOGLE_API_KEY", ""))
     client = genai.Client(api_key=api_key)
 
-    # Convert history to google-genai Content format
+    # Separate system messages from conversational history
+    system_texts: list[str] = []
     contents = []
     for h in history:
-        role = "user" if h["role"] in ("user", "system") else "model"
-        contents.append(genai_types.Content(role=role, parts=[genai_types.Part(text=h["content"])]))
+        if h["role"] == "system":
+            system_texts.append(h["content"])
+        else:
+            role = "user" if h["role"] == "user" else "model"
+            contents.append(genai_types.Content(role=role, parts=[genai_types.Part(text=h["content"])]))
     contents.append(genai_types.Content(role="user", parts=[genai_types.Part(text=message)]))
 
     model_name = spec.model or "gemini-2.0-flash"
     _debug_log(f"[google_api] {spec.id} model={model_name} chat={chat_id}")
 
+    gen_config = None
+    if system_texts:
+        gen_config = genai_types.GenerateContentConfig(
+            system_instruction="\n\n".join(system_texts)
+        )
+
     result_text = ""
     try:
-        for chunk in client.models.generate_content_stream(model=model_name, contents=contents):
+        for chunk in client.models.generate_content_stream(
+            model=model_name, contents=contents, config=gen_config
+        ):
             if cancel_ev and cancel_ev.is_set():
                 break
             chunk_text = chunk.text or ""

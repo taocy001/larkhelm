@@ -76,10 +76,12 @@ def save_memory(chat_id: str, content: str) -> None:
         _debug_log(f"[memory] save_memory error {chat_id}: {e}")
 
 
+_API_PROVIDERS = ("anthropic_api", "google_api", "openai_compat_api")
+
+
 def generate_memory(chat_id: str, recent_logs: str) -> str:
-    """Call Claude CLI to generate a memory summary. Returns Markdown string (≤ MEMORY_MAX_CHARS)."""
+    """Generate a memory summary via the orchestrator backend (CLI or API). Returns Markdown ≤ MEMORY_MAX_CHARS."""
     from larkhelm.backend_registry import BACKEND_REGISTRY
-    from larkhelm.backend_cli import run_claude
 
     spec = BACKEND_REGISTRY.get_orchestrator()
     if spec is None:
@@ -94,14 +96,16 @@ def generate_memory(chat_id: str, recent_logs: str) -> str:
         collected.append(text)
 
     try:
-        output = run_claude(
-            spec=spec,
-            chat_id=chat_id,
-            message=prompt,
-            sid=None,
-            cwd=str(_cfg.DATA_DIR),
-            on_text=_on_text,
-        )
+        if spec.provider in _API_PROVIDERS:
+            import larkhelm.backend_api as _bapi
+            _fn = {"anthropic_api": _bapi.run_anthropic,
+                   "google_api": _bapi.run_google,
+                   "openai_compat_api": _bapi.run_openai_compat}[spec.provider]
+            output, _ = _fn(spec=spec, chat_id=chat_id, message=prompt, history=[], on_text=_on_text)
+        else:
+            from larkhelm.backend_cli import run_claude
+            output = run_claude(spec=spec, chat_id=chat_id, message=prompt,
+                                sid=None, cwd=str(_cfg.DATA_DIR), on_text=_on_text)
         return (output or "".join(collected))[:MEMORY_MAX_CHARS]
     except Exception as e:
         _debug_log(f"[memory] generate_memory error {chat_id}: {e}")

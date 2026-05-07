@@ -26,7 +26,7 @@ from larkhelm.card_builder import _make_card, _split_md
 from larkhelm.log import _debug_log
 
 # ── Global client (assigned by main()) ─────────────────────────────
-client: lark.Client  # noqa: F821
+client: lark.Client = None  # type: ignore[assignment]  # assigned by main() before use
 BOT_OPEN_ID: str = ""  # This bot's open_id, fetched at startup, used to filter group @mentions
 
 
