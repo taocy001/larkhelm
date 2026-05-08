@@ -630,8 +630,8 @@ class FeishuDocClient:
     def _get_tenant_token(self) -> str:
         """Return a cached tenant_access_token, refreshing when within TTL margin."""
         import time
-        with DocAPIClient._token_lock:
-            cache = DocAPIClient._token_cache
+        with FeishuDocClient._token_lock:
+            cache = FeishuDocClient._token_cache
             if cache["token"] and time.time() < cache["expires_at"]:
                 return cache["token"]
             body = _json_mod.dumps({

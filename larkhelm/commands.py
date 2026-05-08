@@ -43,7 +43,7 @@ from larkhelm.card_builder import _make_card, _fmt_elapsed
 _SENSITIVE_ENV_PREFIXES = frozenset({
     "API_KEY", "SECRET", "PASSWORD", "TOKEN", "CREDENTIAL",
     "ACCESS_KEY", "PRIVATE_KEY", "AUTH_KEY",
-    "PAT", "DSN", "WEBHOOK", "SMTP", "DATABASE_URL",
+    "GITHUB_PAT", "DSN", "WEBHOOK", "SMTP", "DATABASE_URL",
     "SENTRY", "SIGNING_KEY", "ENCRYPTION_KEY",
 })
 
