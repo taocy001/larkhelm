@@ -82,7 +82,7 @@ class ClaudeRunner(BaseProcessRunner):
         if self._model:
             args += ["--model", self._model]
         if self._system_prompt:
-            args += ["--system", self._system_prompt]
+            args += ["--system-prompt", self._system_prompt]
         if self.images:
             args += ["--input-format", "stream-json"]
 
