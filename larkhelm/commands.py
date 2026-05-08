@@ -187,7 +187,8 @@ def _cmd_status(chat_id: str, msg_id: str = None):
         try:
             r = subprocess.run([cmd, "--version"], capture_output=True, timeout=15, text=True)
             return (r.stdout.strip() or r.stderr.strip()).split("\n")[0] if r.returncode == 0 else None
-        except Exception:
+        except Exception as e:
+            _debug_log(f"[status] version probe failed for {cmd!r}: {e}")
             return None
 
     s_k = _load_sid(chat_id, "kimi")

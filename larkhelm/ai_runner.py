@@ -164,8 +164,8 @@ def _spawn_claude_proc(
         if user_mcp_cfg and Path(user_mcp_cfg).exists():
             try:
                 base = json.loads(Path(user_mcp_cfg).read_text())
-            except Exception:
-                pass
+            except Exception as e:
+                _debug_log(f"[ai_runner] mcp_config_file parse failed ({user_mcp_cfg}): {e}")
         larkhelm_bin = str(Path(sys.executable).parent / "larkhelm")
         servers = dict(base.get("mcpServers", {}))
         servers["larkhelm"] = {

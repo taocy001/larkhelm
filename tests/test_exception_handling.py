@@ -180,5 +180,119 @@ class TestLarkClientOwnerTransferFails(unittest.TestCase):
                          f"Expected 3 owner transfer _debug_log calls, found {count}")
 
 
+class TestBackendApiOnTextCallback(unittest.TestCase):
+    """REQ-13 (runtime): on_text callback exceptions must be caught and logged, not propagate."""
+
+    def _make_spec(self, provider="anthropic_api"):
+        spec = MagicMock()
+        spec.id = "test-backend"
+        spec.provider = provider
+        spec.model = "claude-3-haiku"
+        spec.api_key = "sk-test"
+        spec.api_base_url = None
+        return spec
+
+    def test_anthropic_on_text_exception_is_logged_not_raised(self):
+        """Raising on_text must not abort streaming; _debug_log must be called."""
+        logged: list[str] = []
+
+        mock_stream_ctx = MagicMock()
+        mock_stream_ctx.__enter__ = MagicMock(return_value=mock_stream_ctx)
+        mock_stream_ctx.__exit__ = MagicMock(return_value=False)
+        mock_stream_ctx.text_stream = iter(["hello", " world"])
+
+        mock_api_client = MagicMock()
+        mock_api_client.messages.stream.return_value = mock_stream_ctx
+
+        mock_anthropic_module = MagicMock()
+        mock_anthropic_module.Anthropic.return_value = mock_api_client
+
+        def failing_on_text(text, status):
+            raise ValueError("card update failed")
+
+        with patch("larkhelm.backend_api._debug_log", side_effect=logged.append), \
+             patch.dict("sys.modules", {"anthropic": mock_anthropic_module}):
+            from larkhelm.backend_api import run_anthropic
+            result, _ = run_anthropic(
+                self._make_spec(), "chat1", "hello", [], on_text=failing_on_text
+            )
+
+        self.assertEqual(result, "hello world")
+        self.assertTrue(any("[anthropic_api] on_text callback failed" in m for m in logged),
+                        f"Expected on_text log, got: {logged}")
+
+    def test_google_on_text_exception_is_logged_not_raised(self):
+        """Google backend: raising on_text must not abort streaming."""
+        logged: list[str] = []
+
+        mock_chunk = MagicMock()
+        mock_chunk.text = "hi"
+        mock_api_client = MagicMock()
+        mock_api_client.models.generate_content_stream.return_value = iter([mock_chunk])
+
+        mock_genai = MagicMock()
+        mock_genai.Client.return_value = mock_api_client
+        mock_google_pkg = MagicMock()
+        mock_google_pkg.genai = mock_genai
+
+        def failing_on_text(text, status):
+            raise RuntimeError("render error")
+
+        with patch("larkhelm.backend_api._debug_log", side_effect=logged.append), \
+             patch.dict("sys.modules", {
+                 "google": mock_google_pkg,
+                 "google.genai": mock_genai,
+                 "google.genai.types": MagicMock(),
+             }):
+            from larkhelm.backend_api import run_google
+            result, _ = run_google(
+                self._make_spec("google_api"), "chat1", "hello", [], on_text=failing_on_text
+            )
+
+        self.assertEqual(result, "hi")
+        self.assertTrue(any("[google_api] on_text callback failed" in m for m in logged),
+                        f"Expected on_text log, got: {logged}")
+
+
+class TestLarkClientOwnerTransferRuntime(unittest.TestCase):
+    """REQ-10 (runtime): create_doc owner transfer failure must call _debug_log, not raise."""
+
+    def _make_client(self):
+        import tempfile, json, pathlib
+        cfg_dir = pathlib.Path(tempfile.mkdtemp())
+        cfg = cfg_dir / "config.json"
+        cfg.write_text(json.dumps({"APP_ID": "a", "APP_SECRET": "s"}))
+        import larkhelm.config as _cfg
+        _cfg._init_runtime(config_path=str(cfg), data_dir=str(cfg_dir))
+
+        from larkhelm.lark_client import FeishuDocClient
+        return FeishuDocClient()
+
+    def test_create_doc_owner_transfer_failure_logged_not_raised(self):
+        """transfer_doc_owner raising must log via _debug_log, not propagate."""
+        logged: list[str] = []
+        doc_client = self._make_client()
+
+        mock_resp = MagicMock()
+        mock_resp.success.return_value = True
+        mock_resp.data.document.document_id = "doc123"
+
+        mock_lark_client = MagicMock()
+        mock_lark_client.docx.v1.document.create.return_value = mock_resp
+
+        with patch("larkhelm.lark_client.client", mock_lark_client), \
+             patch.object(doc_client, "transfer_doc_owner",
+                          side_effect=Exception("permission denied")), \
+             patch("larkhelm.lark_client._debug_log", side_effect=logged.append):
+
+            from larkhelm.lark_client import DocRef
+            result = doc_client.create_doc("Test Title", "", owner_open_id="uid_123")
+
+        # Owner transfer failure must not raise — create_doc returns normally
+        self.assertIsInstance(result, DocRef)
+        self.assertTrue(any("[lark_client] owner transfer failed" in m for m in logged),
+                        f"Expected owner-transfer log, got: {logged}")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -356,7 +356,7 @@ resp = client.sheets.v3.spreadsheet_sheet.query(
 
 | 位置 | 原因 |
 |---|---|
-| `ai_runner.py` `proc.kill()`（3处） | OS 级，进程已退出为预期 |
+| `ai_runner.py` `proc.kill()`（9处，Claude/Kimi/Gemini 各 3） | OS 级，进程已退出为预期 |
 | `ai_runner.py` stderr drain 线程 | display-only，失败无副作用 |
 | `log.py` `_debug_log` 内部两处 pass | 调试基础设施，递归报错无意义 |
 | `log.py:105` JSONL 行解析跳过 | 设计意图：容错读取损坏行 |
