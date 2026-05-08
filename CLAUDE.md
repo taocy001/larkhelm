@@ -335,3 +335,31 @@ resp = client.sheets.v3.spreadsheet_sheet.query(
     .spreadsheet_token("sheet_token_xxx")
     .build()
 )
+
+## 异常处理规范
+
+**三类分类标准**（禁止未经分类就引入新的 `except Exception: pass`）：
+
+| 分类 | 处理方式 | 典型场景 |
+|---|---|---|
+| 高危—业务静默失败 | `_debug_log` + 用户 ⚠️ 卡片 | `/reset` API history 清除失败 |
+| 中危—辅助操作失败 | `_debug_log` 记录，不打断主流程 | token 统计、回调、所有权转移、memory 加载 |
+| 低危/零危—可接受静默 | 保持 `except Exception: pass` | `proc.kill()`、stderr drain、调试 I/O |
+
+**日志格式**（写入 `_cfg.DEBUG_LOG`）：
+
+```
+[HH:MM:SS] [{module}] {operation} failed: {exception}
+```
+
+**保留静默清单**（已确认无需改动）：
+
+| 位置 | 原因 |
+|---|---|
+| `ai_runner.py` `proc.kill()`（3处） | OS 级，进程已退出为预期 |
+| `ai_runner.py` stderr drain 线程 | display-only，失败无副作用 |
+| `log.py` `_debug_log` 内部两处 pass | 调试基础设施，递归报错无意义 |
+| `log.py:105` JSONL 行解析跳过 | 设计意图：容错读取损坏行 |
+| `memory.py` `_global_memory_file` chat_state 访问 | 已有明确 fallback（返回 None） |
+| `crew/_runner.py` git diff | 非 git 仓库为预期行为 |
+| `mcp_server.py` config inner parse | MCP config 行级容错，解析失败继续下一行 |

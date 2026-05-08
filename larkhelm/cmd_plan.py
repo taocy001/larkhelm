@@ -260,8 +260,8 @@ def _auto_plan(requirement: str, chat_id: str,
     try:
         from larkhelm.memory import get_memory_context
         _mem_ctx = get_memory_context(chat_id, cwd=cwd)
-    except Exception:
-        pass
+    except Exception as e:
+        _debug_log(f"[plan] memory load failed: {e}")
     _mem_prefix = f"\n\n[Background Context from Memory]\n{_mem_ctx}" if _mem_ctx else ""
 
     # Put user requirement BEFORE doc context so Claude knows the scope
@@ -485,8 +485,8 @@ def _run_plan(state: MultiPlanState) -> None:
                     _unregister_crew_thread(crew_id)
                     try:
                         evict_crew_agent_tokens(f"{state.chat_id}__crew_{crew_id}")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _debug_log(f"[plan] token eviction failed: {e}")
             else:
                 _hold_slot()
                 try:

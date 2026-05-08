@@ -104,8 +104,8 @@ def _read_logs(chat_id: str) -> list[dict]:
                             result.append(r)
                     except Exception:
                         continue
-        except Exception:
-            pass
+        except Exception as e:
+            _debug_log(f"[log] read_logs failed: {e}")
     return result
 
 

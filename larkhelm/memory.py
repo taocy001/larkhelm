@@ -239,8 +239,8 @@ def _load_md_frontmatter(path: Path | None) -> dict[str, str]:
             if ":" in line:
                 k, _, v = line.partition(":")
                 result[k.strip()] = v.strip().strip('"')
-    except Exception:
-        pass
+    except Exception as e:
+        _debug_log(f"[memory] frontmatter parse error: {e}")
     return result
 
 
@@ -310,8 +310,8 @@ def load_memory(chat_id: str) -> str | None:
             save_memory(chat_id, content)
             try:
                 old.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except Exception as e:
+                _debug_log(f"[memory] session file cleanup failed: {e}")
     return content
 
 
@@ -437,8 +437,8 @@ def _run_one_shot(prompt: str, ns: str) -> str:
         try:
             from larkhelm.chat_state import _clear_sid
             _clear_sid(ns, "claude")
-        except Exception:
-            pass
+        except Exception as e:
+            _debug_log(f"[memory] clear_sid failed: {e}")
 
 
 # ── Session memory generation ─────────────────────────────────────────────────

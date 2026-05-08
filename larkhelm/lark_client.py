@@ -928,8 +928,8 @@ class FeishuDocClient:
         if owner_open_id:
             try:
                 self.transfer_doc_owner(doc_id, owner_open_id)
-            except Exception:
-                pass
+            except Exception as e:
+                _debug_log(f"[lark_client] owner transfer failed: {e}")
         return DocRef(doc_type="docx", token=doc_id, raw_url="", title=title)
 
     def create_wiki_node(
@@ -961,8 +961,8 @@ class FeishuDocClient:
         if owner_open_id:
             try:
                 self.transfer_doc_owner(obj_token, owner_open_id)
-            except Exception:
-                pass
+            except Exception as e:
+                _debug_log(f"[lark_client] owner transfer failed: {e}")
         return DocRef(
             doc_type="docx",
             token=obj_token,
@@ -989,8 +989,8 @@ class FeishuDocClient:
         if owner_open_id:
             try:
                 self.transfer_doc_owner(folder_token, owner_open_id, doc_type="folder")
-            except Exception:
-                pass
+            except Exception as e:
+                _debug_log(f"[lark_client] owner transfer failed: {e}")
         return folder_token
 
     def get_root_folder_token(self) -> str:

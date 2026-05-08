@@ -444,8 +444,8 @@ def _run_generic_crew(chat_id: str, requirement: str,
         try:
             from larkhelm.token_stats import evict_crew_agent_tokens
             evict_crew_agent_tokens(f"{chat_id}__crew_{crew_id}")
-        except Exception:
-            pass
+        except Exception as e:
+            _debug_log(f"[crew] token eviction failed: {e}")
 
 
 def _run_generic_crew_inner(chat_id: str, requirement: str,
@@ -543,8 +543,8 @@ def _run_dev_crew(chat_id: str, requirement: str, user_msg_id: str,
         try:
             from larkhelm.token_stats import evict_crew_agent_tokens
             evict_crew_agent_tokens(f"{chat_id}__crew_{crew_id}")
-        except Exception:
-            pass
+        except Exception as e:
+            _debug_log(f"[crew] token eviction failed: {e}")
 
 
 def _run_dev_crew_inner(chat_id: str, requirement: str, user_msg_id: str,

@@ -219,8 +219,8 @@ def _spawn_claude_proc(
     if on_start:
         try:
             on_start()
-        except Exception:
-            pass
+        except Exception as e:
+            _debug_log(f"[ai_runner] on_start callback failed: {e}")
 
     try:
         if images:
@@ -280,8 +280,8 @@ def _spawn_claude_proc(
                 if on_soft_timeout:
                     try:
                         on_soft_timeout()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _debug_log(f"[ai_runner] on_soft_timeout callback failed: {e}")
             time.sleep(0.3)
         _debug_log(f"[claude] hard timeout ({_cfg.HARD_TIMEOUT}s), force killing process")
         try:
@@ -395,8 +395,8 @@ def _spawn_claude_proc(
                             "cache_create":  usage.get("cache_creation_input_tokens", 0),
                             "cost_usd":      cost,
                         })
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _debug_log(f"[ai_runner] token_stats update failed: {e}")
                     # Also track per crew-agent (for per-agent display in crew card)
                     if "__crew_" in chat_id:
                         try:
@@ -408,8 +408,8 @@ def _spawn_claude_proc(
                                 "cache_create":  usage.get("cache_creation_input_tokens", 0),
                                 "cost_usd":      cost,
                             })
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            _debug_log(f"[ai_runner] token_stats update failed: {e}")
                 break
     finally:
         completed.set()
@@ -536,8 +536,8 @@ def _spawn_kimi_proc(
     if on_start:
         try:
             on_start()
-        except Exception:
-            pass
+        except Exception as e:
+            _debug_log(f"[ai_runner] on_start callback failed: {e}")
 
     try:
         if images:
@@ -590,8 +590,8 @@ def _spawn_kimi_proc(
                 if on_soft_timeout:
                     try:
                         on_soft_timeout()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _debug_log(f"[ai_runner] on_soft_timeout callback failed: {e}")
             time.sleep(0.3)
         _debug_log(f"[kimi] hard timeout ({_cfg.HARD_TIMEOUT}s), force killing process")
         try:
@@ -697,8 +697,8 @@ def _spawn_kimi_proc(
                             "cache_create":  0,
                             "cost_usd":      cost,
                         })
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _debug_log(f"[ai_runner] token_stats update failed: {e}")
                     if "__crew_" in chat_id:
                         try:
                             from larkhelm.token_stats import record_crew_agent_tokens
@@ -709,8 +709,8 @@ def _spawn_kimi_proc(
                                 "cache_create":  0,
                                 "cost_usd":      cost,
                             })
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            _debug_log(f"[ai_runner] token_stats update failed: {e}")
                 break
     finally:
         completed.set()
@@ -873,8 +873,8 @@ def _spawn_gemini_proc(
                 if on_soft_timeout:
                     try:
                         on_soft_timeout()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _debug_log(f"[ai_runner] on_soft_timeout callback failed: {e}")
             time.sleep(0.3)
         _debug_log(f"[gemini] hard timeout ({_cfg.HARD_TIMEOUT}s), force killing process")
         try:
@@ -961,8 +961,8 @@ def _spawn_gemini_proc(
                             "cache_create":  0,
                             "cost_usd":      _gemini_cost,
                         })
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _debug_log(f"[ai_runner] token_stats update failed: {e}")
                     # Also track per crew-agent (for per-agent display in crew card)
                     if "__crew_" in chat_id:
                         try:
@@ -974,8 +974,8 @@ def _spawn_gemini_proc(
                                 "cache_create":  0,
                                 "cost_usd":      _gemini_cost,
                             })
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            _debug_log(f"[ai_runner] token_stats update failed: {e}")
                 break
     finally:
         completed.set()

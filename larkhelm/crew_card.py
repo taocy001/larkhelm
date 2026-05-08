@@ -132,8 +132,8 @@ def _build_card(state: CrewState) -> str:
                         "expanded": False,
                         "elements": [{"tag": "markdown", "content": "\n".join(_file_lines)}],
                     })
-            except Exception:
-                pass
+            except Exception as e:
+                _debug_log(f"[crew_card] file list build failed: {e}")
 
     # Agent details (shown during running/synthesizing/breakpoint/done; flat markdown to avoid nested collapsibles)
     if phase in ("running", "synthesizing", "breakpoint", "done", "cancelled", "failed"):

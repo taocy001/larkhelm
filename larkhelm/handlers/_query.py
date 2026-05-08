@@ -157,7 +157,7 @@ def _do_query_with_delegation(
 ) -> str:
     """Execute query with delegation support (max 2 hops).
 
-    Phase 1: Stream orchestrator response, buffer first 60 chars for DELEGATE detection.
+    Phase 1: Stream orchestrator response, buffer first 300 chars for DELEGATE detection.
     Phase 2: If DELEGATE found, run specialist; on_tool/on_tool_result show progress.
     Phase 3: Re-run orchestrator with specialist result for synthesis.
     Falls back to direct answer if specialist unavailable or delegation malformed.
@@ -720,7 +720,8 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 try:
                     if len(_json.dumps(_tools_payload, ensure_ascii=False)) > 20_000:
                         _tools_payload = None  # drop detailed results to stay within Feishu limit
-                except Exception:
+                except Exception as e:
+                    _debug_log(f"[query] tools payload serialize failed: {e}")
                     _tools_payload = None
             first_card = _make_card(first_title, chunks[0], color="blue",
                                     note=note if n == 1 else "",
@@ -826,5 +827,5 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 try:
                     if _img and str(_img).startswith("/tmp/"):
                         _os.unlink(_img)
-                except Exception:
-                    pass
+                except Exception as e:
+                    _debug_log(f"[query] temp image cleanup failed: {e}")

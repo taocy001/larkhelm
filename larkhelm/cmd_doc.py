@@ -143,8 +143,8 @@ def _cmd_doc_append(chat_id: str, rest: str):
         try:
             r = doc_client.read(ref, max_chars=1)
             title = r.title or url
-        except Exception:
-            pass
+        except Exception as e:
+            _debug_log(f"[doc] title read failed: {e}")
         doc_client.append(ref, content)
     except DocPermissionError as e:
         send_permission_guide(chat_id, "write_doc", code=e.code)
@@ -436,8 +436,8 @@ def _cmd_doc_wiki_create(chat_id: str, rest: str):
         if sender_open_id:
             try:
                 doc_client.transfer_doc_owner(doc_ref.token, sender_open_id)
-            except Exception:
-                pass
+            except Exception as e:
+                _debug_log(f"[doc] owner transfer failed: {e}")
         send_card(chat_id, "✅ 已创建知识库页面",
                   f"**标题：** {title}\n"
                   f"**文档 ID：** `{doc_ref.token}`\n"

@@ -89,6 +89,8 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
         except Exception as e:
             _debug_log(f"[reset] maybe_auto_update failed: {e}")
 
+    _api_clear_failed: bool = False
+
     if which is None:
         _clear_sid(chat_id, "claude")
         _clear_sid(chat_id, "gemini")
@@ -99,51 +101,75 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
             for _spec in _REG.all_enabled():
                 if _spec.provider in ("anthropic_api", "google_api", "openai_compat_api"):
                     _clear_api_hist(_spec.provider, chat_id)
-        except Exception:
-            pass
+        except Exception as e:
+            _debug_log(f"[reset] clear_history failed: {e}")
+            _api_clear_failed = True
         log_entry(chat_id, "reset", "reset:all", model="system")
-        send_card_reply(chat_id, msg_id, "♻️ 已重置",
-                        "所有 AI 会话均已清空（三层记忆已保留）。\n\n"
-                        "如需同时清除会话记忆：`/memory clear session`", color="green")
+        if _api_clear_failed:
+            send_card_reply(chat_id, msg_id, "⚠️ 部分重置",
+                            "会话 ID 已清除，但 API 历史清除失败，AI 可能仍记得部分上下文。",
+                            color="orange")
+        else:
+            send_card_reply(chat_id, msg_id, "♻️ 已重置",
+                            "所有 AI 会话均已清空（三层记忆已保留）。\n\n"
+                            "如需同时清除会话记忆：`/memory clear session`", color="green")
     elif which == "claude":
         _clear_sid(chat_id, "claude")
         try:
             from larkhelm.api_session import clear_history as _clear_api_hist
             _clear_api_hist("anthropic_api", chat_id)
-        except Exception:
-            pass
+        except Exception as e:
+            _debug_log(f"[reset] clear_history failed: {e}")
+            _api_clear_failed = True
         log_entry(chat_id, "reset", "reset:claude", model="system")
-        send_card_reply(chat_id, msg_id, "♻️ 已重置",
-                        "Claude 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
-                        color="green")
+        if _api_clear_failed:
+            send_card_reply(chat_id, msg_id, "⚠️ 部分重置",
+                            "会话 ID 已清除，但 API 历史清除失败，AI 可能仍记得部分上下文。",
+                            color="orange")
+        else:
+            send_card_reply(chat_id, msg_id, "♻️ 已重置",
+                            "Claude 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
+                            color="green")
     elif which == "gemini":
         _clear_sid(chat_id, "gemini")
         try:
             from larkhelm.api_session import clear_history as _clear_api_hist
             _clear_api_hist("google_api", chat_id)
-        except Exception:
-            pass
+        except Exception as e:
+            _debug_log(f"[reset] clear_history failed: {e}")
+            _api_clear_failed = True
         log_entry(chat_id, "reset", "reset:gemini", model="system")
-        send_card_reply(chat_id, msg_id, "♻️ 已重置",
-                        "Gemini 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
-                        color="green")
+        if _api_clear_failed:
+            send_card_reply(chat_id, msg_id, "⚠️ 部分重置",
+                            "会话 ID 已清除，但 API 历史清除失败，AI 可能仍记得部分上下文。",
+                            color="orange")
+        else:
+            send_card_reply(chat_id, msg_id, "♻️ 已重置",
+                            "Gemini 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
+                            color="green")
     elif which == "kimi":
         _clear_sid(chat_id, "kimi")
         try:
             from larkhelm.api_session import clear_history as _clear_api_hist
             _clear_api_hist("openai_compat_api", chat_id)
-        except Exception:
-            pass
+        except Exception as e:
+            _debug_log(f"[reset] clear_history failed: {e}")
+            _api_clear_failed = True
         log_entry(chat_id, "reset", "reset:kimi", model="system")
-        send_card_reply(chat_id, msg_id, "♻️ 已重置",
-                        "Kimi 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
-                        color="green")
+        if _api_clear_failed:
+            send_card_reply(chat_id, msg_id, "⚠️ 部分重置",
+                            "会话 ID 已清除，但 API 历史清除失败，AI 可能仍记得部分上下文。",
+                            color="orange")
+        else:
+            send_card_reply(chat_id, msg_id, "♻️ 已重置",
+                            "Kimi 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
+                            color="green")
     elif which == "memory":
         try:
             from larkhelm.memory import _session_memory_file
             _session_memory_file(chat_id).unlink(missing_ok=True)
-        except Exception:
-            pass
+        except Exception as e:
+            _debug_log(f"[reset] memory unlink failed: {e}")
         log_entry(chat_id, "reset", "reset:memory", model="system")
         send_card_reply(chat_id, msg_id, "♻️ 已重置", "会话记忆已清除（全局/项目记忆保留）。", color="green")
     elif which in ("perm", "permissions"):
@@ -966,8 +992,8 @@ def _cmd_btw(chat_id: str, question: str, user_msg_id: str):
                 try:
                     from larkhelm.memory import get_memory_context as _get_mem_ctx
                     _btw_mem_ctx = _get_mem_ctx(chat_id, cwd=cwd)
-                except Exception:
-                    pass
+                except Exception as e:
+                    _debug_log(f"[btw] memory load failed: {e}")
 
                 _API_PROVIDERS = ("anthropic_api", "google_api", "openai_compat_api")
                 if _spec.provider == "claude_cli":
@@ -1329,8 +1355,8 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
                 send_card(busy_cid, "⚠️ 查询已中断",
                           "服务正在升级重启，当前查询被中断，请稍后重新发送。",
                           color="orange")
-            except Exception:
-                pass
+            except Exception as e:
+                _debug_log(f"[upgrade] restart card failed: {e}")
 
     # Write a marker file so the new process can confirm back to the upgrade requester
     import json as _json

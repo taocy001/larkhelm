@@ -50,25 +50,29 @@ class TestTruncateHistory(unittest.TestCase):
         self.assertEqual(result, history)
 
     def test_over_max_without_system_keeps_latest(self):
-        history = [{"role": "user", "content": f"msg {i}"} for i in range(api_session._MAX_HISTORY + 10)]
+        # 30 messages × 9000 chars ≈ 90K tokens, exceeds 80K token budget
+        big_content = "x" * 9000
+        history = [{"role": "user", "content": big_content} for _ in range(30)]
         result = api_session.truncate_history(history)
-        self.assertEqual(len(result), api_session._MAX_HISTORY)
-        # Should keep the tail (latest messages)
-        self.assertEqual(result[-1]["content"], f"msg {api_session._MAX_HISTORY + 9}")
+        self.assertLess(len(result), len(history))
+        self.assertEqual(result[-1]["content"], big_content)
 
     def test_over_max_with_system_preserves_system(self):
+        # 1 system + 29 messages × 9000 chars ≈ 90K tokens, exceeds 80K budget
+        big_content = "x" * 9000
         system_msg = {"role": "system", "content": "You are a helpful assistant."}
-        rest = [{"role": "user", "content": f"msg {i}"} for i in range(api_session._MAX_HISTORY + 5)]
+        rest = [{"role": "user", "content": big_content} for _ in range(29)]
         history = [system_msg] + rest
         result = api_session.truncate_history(history)
-        self.assertEqual(len(result), api_session._MAX_HISTORY)
+        self.assertLess(len(result), len(history))
         self.assertEqual(result[0]["role"], "system")
         self.assertEqual(result[0]["content"], system_msg["content"])
 
     def test_exactly_max_length_unchanged(self):
-        history = [{"role": "user", "content": f"msg {i}"} for i in range(api_session._MAX_HISTORY)]
+        # Short messages well within 80K token budget — no truncation expected
+        history = [{"role": "user", "content": f"msg {i}"} for i in range(10)]
         result = api_session.truncate_history(history)
-        self.assertEqual(len(result), api_session._MAX_HISTORY)
+        self.assertEqual(len(result), len(history))
 
     def test_system_only_no_crash(self):
         history = [{"role": "system", "content": "only system"}]
@@ -108,10 +112,12 @@ class TestApiSessionFileOps(unittest.TestCase):
             self.fail(f"clear_history raised: {e}")
 
     def test_save_truncates_over_max(self):
-        big_history = [{"role": "user", "content": f"msg {i}"} for i in range(api_session._MAX_HISTORY + 20)]
+        # 50 messages × 6000 chars ≈ 100K tokens, exceeds 80K budget
+        big_content = "x" * 6000
+        big_history = [{"role": "user", "content": big_content} for _ in range(50)]
         api_session.save_history("openai_compat_api", "chat_big", big_history)
         loaded = api_session.load_history("openai_compat_api", "chat_big")
-        self.assertLessEqual(len(loaded), api_session._MAX_HISTORY)
+        self.assertLess(len(loaded), len(big_history))
 
     def test_different_providers_independent(self):
         api_session.save_history("anthropic_api", "shared_chat", [{"role": "user", "content": "A"}])

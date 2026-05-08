@@ -65,8 +65,8 @@ def run_anthropic(
                 if on_text:
                     try:
                         on_text(result_text, status="typing")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _debug_log(f"[anthropic_api] on_text callback failed: {e}")
     except Exception as e:
         _debug_log(f"[anthropic_api] {spec.id} error: {e}")
         raise
@@ -133,8 +133,8 @@ def run_google(
             if on_text and chunk_text:
                 try:
                     on_text(result_text, status="typing")
-                except Exception:
-                    pass
+                except Exception as e:
+                    _debug_log(f"[google_api] on_text callback failed: {e}")
     except Exception as e:
         _debug_log(f"[google_api] {spec.id} error: {e}")
         raise
@@ -195,8 +195,8 @@ def run_openai_compat(
                     if on_text:
                         try:
                             on_text(result_text, status="typing")
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            _debug_log(f"[openai_compat_api] on_text callback failed: {e}")
     except Exception as e:
         _debug_log(f"[openai_compat_api] {spec.id} error: {e}")
         raise

@@ -85,8 +85,8 @@ def handle_message(data: P2ImMessageReceiveV1):
             ) else ""
             if sender_open_id:
                 _set_chat_field(chat_id, "sender_open_id", sender_open_id)
-        except Exception:
-            pass
+        except Exception as e:
+            _debug_log(f"[message] sender_open_id save failed: {e}")
 
         if is_shutting_down():
             send_card(chat_id, '⏳ 服务升级中', '正在重启，请稍后重试。', color='orange')
@@ -420,8 +420,8 @@ def handle_message(data: P2ImMessageReceiveV1):
                     f"如需了解当前任务背景，请读取这些文件。\n\n"
                     f"{prompt}"
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            _debug_log(f"[message] workspace listing failed: {e}")
 
         log_entry(chat_id, "user", prompt, model=target_model)
         _reset_cancel(chat_id)
