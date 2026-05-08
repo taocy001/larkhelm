@@ -180,7 +180,8 @@ def resume_interrupted_crews():
     for cp_path in found:
         try:
             data = json.loads(Path(cp_path).read_text(encoding="utf-8"))
-        except Exception:
+        except Exception as e:
+            _debug_log(f"[Checkpoint] failed to read {cp_path}: {e}")
             continue
         if data.get("version") != 1:
             continue

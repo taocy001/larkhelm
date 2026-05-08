@@ -6,6 +6,7 @@ from datetime import datetime
 
 import larkhelm.config as _cfg
 from larkhelm.concurrency import _jsonl_lock
+from larkhelm.log import _debug_log
 
 __all__ = [
     "_token_stats", "_token_stats_lock", "_jsonl_lock",
@@ -168,6 +169,6 @@ def get_token_stats_persistent(chat_id: str, date_prefix: str = None) -> dict:
                 t["cache_create"]  += r.get("cache_create", 0)
                 t["cost_usd"]      += r.get("cost_usd", 0.0)
                 t["calls"]         += 1
-    except Exception:
-        pass
+    except Exception as e:
+        _debug_log(f"[token_stats] get_token_stats_persistent failed: {e}")
     return totals

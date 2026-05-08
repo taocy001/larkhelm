@@ -86,8 +86,8 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
         try:
             from larkhelm.memory import maybe_auto_update
             maybe_auto_update(chat_id, force=True)
-        except Exception:
-            pass
+        except Exception as e:
+            _debug_log(f"[reset] maybe_auto_update failed: {e}")
 
     if which is None:
         _clear_sid(chat_id, "claude")
@@ -199,8 +199,8 @@ def _cmd_status(chat_id: str, msg_id: str = None):
             crew_info = f"**Crew 进行中** {crew_id[:8]}…　{_phase_label}　{n_done}/{n_total} 完成"
         elif crew_id:
             crew_info = f"**Crew 进行中** {crew_id[:8]}…"
-    except Exception:
-        pass
+    except Exception as e:
+        _debug_log(f"[status] crew info failed: {e}")
 
     # Token summary (current process lifetime, current chat)
     token_summary = ""
@@ -234,8 +234,8 @@ def _cmd_status(chat_id: str, msg_id: str = None):
                         detail = f" `{hist_len}/{_MAX_HIST}msgs`"
                 spec_lines.append(f"  • **{s.id}** `{s.provider}` {status}{detail}")
             backend_summary = f"**Backends** {healthy_count}/{len(all_specs)} healthy\n" + "\n".join(spec_lines)
-    except Exception:
-        pass
+    except Exception as e:
+        _debug_log(f"[status] backend summary failed: {e}")
 
     lines = [
         f"**模型** {model}　　**目录** {cwd}"

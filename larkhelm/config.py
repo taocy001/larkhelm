@@ -271,7 +271,7 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     DEFAULT_OWNER_OPEN_ID     = config.get("default_owner_open_id",     "")
 
     PERM_HOOK_SCRIPT  = str(Path(__file__).parent / "perm_hook.py")
-    PERM_SOCKET_PATH  = f"/tmp/feishu_perm_{os.getpid()}.sock"
+    PERM_SOCKET_PATH  = str(DATA_DIR / "perm.sock")
 
     global SOURCE_DIR
     # For editable installs __file__ = <repo>/larkhelm/config.py; two levels up is the repo root
