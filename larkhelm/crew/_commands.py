@@ -512,6 +512,9 @@ def _run_generic_crew_inner(chat_id: str, requirement: str,
     clear_recent_crew_context(chat_id)
 
     try:
+        # Clear leftover workspace files from previous /crew runs so agents don't read stale data.
+        _clear_workspace(Path(cwd) / ".crew_workspace")
+
         from larkhelm.card_builder import _make_card
         init_card = _make_card(
             "🧠 Crew · 规划中",
