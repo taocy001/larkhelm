@@ -50,6 +50,9 @@ def run_claude(
         images=images,
         session_namespace=session_namespace,
         command=spec.command or None,
+        model=spec.model or None,
+        extra_args=spec.extra_args or None,
+        session_key=spec.id,
     )
 
 
@@ -79,6 +82,9 @@ def run_gemini(
         on_soft_timeout=on_soft_timeout,
         use_session=use_session,
         command=spec.command or None,
+        model=spec.model or None,
+        extra_args=spec.extra_args or None,
+        session_key=spec.id,
     )
 
 
@@ -113,4 +119,7 @@ def run_kimi(
         images=images,
         session_namespace=session_namespace,
         command=spec.command or None,
+        model=spec.model or None,
+        extra_args=spec.extra_args or None,
+        session_key=spec.id,
     )

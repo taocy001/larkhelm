@@ -20,30 +20,52 @@ class GeminiRunner(BaseProcessRunner):
         on_tool=None,
         on_tool_result=None,
         on_soft_timeout=None,
+        allow_retry: bool = False,
+        images: list | None = None,
+        session_namespace: str | None = None,
         use_session: bool = True,
         record_under: str | None = None,
         command: str | None = None,
+        model: str | None = None,
+        extra_args: list | None = None,
+        session_key: str | None = None,
     ) -> None:
         super().__init__(
             "gemini", chat_id, message, sid, cwd,
             cancel_ev=cancel_ev, on_text=on_text, on_tool=on_tool,
             on_tool_result=on_tool_result, on_soft_timeout=on_soft_timeout,
+            allow_retry=allow_retry, images=images, session_namespace=session_namespace,
             use_session=use_session, record_under=record_under, command=command,
         )
+        self._model = model
+        self._extra_args = list(extra_args) if extra_args else []
+        self._session_key = session_key or "gemini"
         self._ctor_kwargs = dict(
             cancel_ev=cancel_ev, on_text=on_text, on_tool=on_tool,
             on_tool_result=on_tool_result, on_soft_timeout=on_soft_timeout,
+            allow_retry=allow_retry, images=images, session_namespace=session_namespace,
             use_session=use_session, record_under=record_under, command=command,
+            model=model, extra_args=extra_args, session_key=session_key,
         )
+
+    @property
+    def _no_checkpointing(self) -> bool:
+        return "--no-checkpointing" in self._extra_args
 
     def build_args(self) -> list[str]:
         cmd = self.command or _cfg.GEMINI_CMD
-        args = [cmd, "-y", "--output-format", "stream-json", "-p", self.message]
-        if self.sid:
+        args = [cmd, "-y", "--skip-trust", "--output-format", "stream-json"]
+        if self._model:
+            args += ["-m", self._model]
+        args += ["-p", self.message]
+        if self.sid and not self._no_checkpointing:
             args += ["--resume", self.sid]
+        # Filter out larkhelm-internal flags that gemini CLI doesn't understand
+        _INTERNAL_FLAGS = {"--no-checkpointing"}
+        args += [a for a in self._extra_args if a not in _INTERNAL_FLAGS]
         _debug_log(
             f"[gemini] starting query cwd={self.cwd} resume={self.sid} "
-            f"use_session={self.use_session} cmd={cmd}"
+            f"use_session={self.use_session} cmd={cmd} model={self._model or '(default)'}"
         )
         return args
 
@@ -64,8 +86,8 @@ class GeminiRunner(BaseProcessRunner):
             cand = ev.get("session_id")
             if cand:
                 self._new_sid = cand
-                if self.use_session:
-                    _save_sid(self.chat_id, cand, "gemini")
+                if self.use_session and not self._no_checkpointing:
+                    _save_sid(self.chat_id, cand, self._session_key)
         elif etype == "message" and ev.get("role") == "assistant":
             content = ev.get("content", "")
             if isinstance(content, list):
@@ -100,8 +122,8 @@ class GeminiRunner(BaseProcessRunner):
             cand = ev.get("session_id")
             if cand:
                 self._new_sid = cand
-                if self.use_session:
-                    _save_sid(self.chat_id, cand, "gemini")
+                if self.use_session and not self._no_checkpointing:
+                    _save_sid(self.chat_id, cand, self._session_key)
             usage = ev.get("usage", {})
             cost = ev.get("total_cost_usd", 0.0)
             if usage:

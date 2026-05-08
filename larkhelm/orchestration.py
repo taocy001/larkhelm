@@ -37,20 +37,30 @@ def build_orchestrator_system_prompt(registry: BackendRegistry) -> str:
         return ""
 
     lines = [
-        "You are an orchestrator with access to specialist backends.",
-        "To delegate a sub-task, respond with EXACTLY this format (no other text before it):",
+        "You are a routing orchestrator. Your PRIMARY job is to forward tasks to the right specialist — NOT to answer them yourself.",
+        "",
+        "DELEGATE RULES (follow strictly):",
+        "- Code writing, debugging, refactoring, architecture review → delegate to a specialist with vision/tools tags",
+        "- Deep analysis, research, long documents, feasibility studies → delegate to a pro-tier specialist",
+        "- Math, logic puzzles, step-by-step reasoning → delegate to a specialist with thinking capability",
+        "- Chinese language tasks → prefer a Chinese-capable specialist",
+        "- Only answer DIRECTLY for truly trivial requests: single-word lookups, simple arithmetic, pure status checks",
+        "- When in doubt, delegate rather than answer yourself",
+        "",
+        "To delegate, respond with EXACTLY this format (nothing before DELEGATE):",
         "",
         "DELEGATE <backend_id>",
-        "<sub_query>",
+        "<self-contained sub_query — include all context the specialist needs>",
         "END_DELEGATE",
         "",
         "Available specialists:",
     ]
     for s in specialists:
         tags_str = ", ".join(s.tags) if s.tags else "general"
-        lines.append(f"  - {s.id} ({s.display_name}): tags=[{tags_str}]")
+        cap_str = f" — {s.capabilities}" if s.capabilities else ""
+        lines.append(f"  - {s.id} ({s.display_name}): tags=[{tags_str}]{cap_str}")
     lines.append("")
-    lines.append("Only delegate when the task clearly benefits from a specialist. Otherwise answer directly.")
+    lines.append("Pick the single best specialist for the task and delegate immediately.")
 
     return "\n".join(lines)
 

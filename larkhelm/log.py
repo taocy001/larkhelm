@@ -10,7 +10,7 @@ from pathlib import Path
 import larkhelm.config as _cfg
 from larkhelm.concurrency import _jsonl_lock as _log_lock  # shared with token_stats.py
 
-__all__ = ["_log_lock", "log_entry", "_read_logs", "_debug_log", "rotate_jsonl_if_needed"]
+__all__ = ["_log_lock", "log_entry", "_read_logs", "_get_recent_turns", "_debug_log", "rotate_jsonl_if_needed"]
 
 _MAX_JSONL_BYTES = 100 * 1024 * 1024  # 100 MB
 _jsonl_write_count = 0
@@ -34,7 +34,7 @@ def rotate_jsonl_if_needed() -> None:
 
 def _log_file(chat_id: str) -> Path:
     d = _cfg.LOG_DIR / chat_id
-    d.mkdir(exist_ok=True)
+    d.mkdir(parents=True, exist_ok=True)
     return d / f"{datetime.now().strftime('%Y-%m-%d')}.md"
 
 
@@ -70,6 +70,7 @@ def log_entry(
         except OSError as e:
             print(f"[log] MD 写入失败: {e}", file=sys.stderr)
         try:
+            _cfg.LOG_DIR.mkdir(parents=True, exist_ok=True)
             with (_cfg.LOG_DIR / "all.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
         except OSError as e:
@@ -106,6 +107,55 @@ def _read_logs(chat_id: str) -> list[dict]:
                         continue
         except Exception as e:
             _debug_log(f"[log] read_logs failed: {e}")
+    return result
+
+
+def _get_recent_turns(chat_id: str, max_turns: int = 6, max_chars: int = 2000) -> str:
+    """Return last N user/assistant turns as compact context for orchestrator injection.
+
+    Reads the tail of all.jsonl (100 KB) to avoid scanning the full file.
+    Skips tool/error/shell entries — only user and assistant text.
+    """
+    TAIL_BYTES = 100 * 1024
+    jsonl_path = _cfg.LOG_DIR / "all.jsonl"
+    if not jsonl_path.exists():
+        return ""
+    try:
+        with jsonl_path.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - TAIL_BYTES))
+            raw = f.read().decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+    turns = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+            if r.get("chat_id") == chat_id and r.get("role") in ("user", "assistant"):
+                turns.append(r)
+        except Exception:
+            continue
+
+    turns = turns[-(max_turns * 2):]
+    if not turns:
+        return ""
+
+    lines = ["[Recent conversation]"]
+    for r in turns:
+        role = "User" if r["role"] == "user" else "Assistant"
+        content = r.get("content", "").strip()
+        if len(content) > 400:
+            content = content[:400] + "..."
+        lines.append(f"{role}: {content}")
+
+    result = "\n".join(lines)
+    if len(result) > max_chars:
+        result = result[-max_chars:]
     return result
 
 

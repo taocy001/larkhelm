@@ -59,17 +59,17 @@ def resolve_backend(
         _debug_log(f"[router] {chat_id}: locked_backend → {spec.id}")
         return spec
 
-    # Rule 1: image → vision-capable backend
+    # Rule 1: image → vision-capable backend (prefer orchestrator so delegation works)
     if has_images:
-        spec = BACKEND_REGISTRY.get_by_tag(["vision"])
+        spec = BACKEND_REGISTRY.get_by_tag(["vision"], prefer_role="orchestrator")
         if spec:
             _debug_log(f"[router] {chat_id}: image → {spec.id}")
             return spec
         _debug_log(f"[router] {chat_id}: no vision backend available, falling through")
 
-    # Rule 2: doc URLs → tools-capable backend
+    # Rule 2: doc URLs → tools-capable backend (prefer orchestrator so delegation works)
     if has_doc_urls:
-        spec = BACKEND_REGISTRY.get_by_tag(["tools"])
+        spec = BACKEND_REGISTRY.get_by_tag(["tools"], prefer_role="orchestrator")
         if spec:
             _debug_log(f"[router] {chat_id}: doc_url → {spec.id}")
             return spec

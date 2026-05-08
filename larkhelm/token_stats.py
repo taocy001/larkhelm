@@ -104,6 +104,7 @@ def record_token_usage(chat_id: str, model: str, usage: dict) -> None:
     }
     with _jsonl_lock:
         try:
+            _cfg.LOG_DIR.mkdir(parents=True, exist_ok=True)
             with (_cfg.LOG_DIR / "all.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception as e:

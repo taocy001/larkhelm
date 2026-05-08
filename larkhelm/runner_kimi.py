@@ -51,6 +51,9 @@ class KimiRunner(BaseProcessRunner):
         images: list | None = None,
         session_namespace: str | None = None,
         command: str | None = None,
+        model: str | None = None,
+        extra_args: list | None = None,
+        session_key: str | None = None,
     ) -> None:
         super().__init__(
             "kimi", chat_id, message, sid, cwd,
@@ -59,11 +62,15 @@ class KimiRunner(BaseProcessRunner):
             on_start=on_start, allow_retry=allow_retry, images=images,
             session_namespace=session_namespace, command=command,
         )
+        self._model = model
+        self._extra_args = list(extra_args) if extra_args else []
+        self._session_key = session_key or "kimi"
         self._ctor_kwargs = dict(
             cancel_ev=cancel_ev, on_text=on_text, on_tool=on_tool,
             on_tool_result=on_tool_result, on_soft_timeout=on_soft_timeout,
             on_start=on_start, allow_retry=allow_retry, images=images,
             session_namespace=session_namespace, command=command,
+            model=model, extra_args=extra_args, session_key=session_key,
         )
 
     def build_args(self) -> list[str]:
@@ -74,14 +81,17 @@ class KimiRunner(BaseProcessRunner):
             "--verbose",
             "--work-dir", self.cwd,
         ]
+        if self._model:
+            args += ["--model", self._model]
         if self.sid:
             args += ["--session", self.sid]
         if _cfg.SKIP_PERMISSIONS:
             args += ["--yolo"]
+        args += self._extra_args
         _debug_log(
             f"[kimi] starting cwd={self.cwd} sid={self.sid} "
             f"skip_perm={_cfg.SKIP_PERMISSIONS} images={len(self.images)} "
-            f"ns={self._ns} cmd={cmd}"
+            f"ns={self._ns} cmd={cmd} model={self._model or '(default)'}"
         )
         return args
 
@@ -94,7 +104,7 @@ class KimiRunner(BaseProcessRunner):
         cand_sid = ev.get("session_id") or ev.get("session")
         if cand_sid and not self._new_sid:
             self._new_sid = cand_sid
-            _save_sid(self._ns, cand_sid, "kimi")
+            _save_sid(self._ns, cand_sid, self._session_key)
 
         role = ev.get("role", "")
         etype = ev.get("type", "")

@@ -120,19 +120,19 @@ def _run_backend_single(spec, chat_id: str, message: str, cwd: str, cancel_ev,
                                                 extra_system=extra_system)
         save_history(provider, chat_id, new_history)
     elif provider == "gemini_cli":
-        sid = _load_sid(chat_id, "gemini")
+        sid = _load_sid(chat_id, spec.id)
         cli_msg = f"[System]\n{extra_system}\n\n[User Query]\n{message}" if (extra_system and not sid) else message
         output = run_gemini(spec, chat_id, cli_msg, sid, cwd, cancel_ev,
                             on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
                             on_soft_timeout=on_soft_timeout)
     elif provider == "kimi_cli":
-        sid = _load_sid(chat_id, "kimi")
+        sid = _load_sid(chat_id, spec.id)
         cli_msg = f"[System]\n{extra_system}\n\n[User Query]\n{message}" if (extra_system and not sid) else message
         output = run_kimi(spec, chat_id, cli_msg, sid, cwd, cancel_ev,
                           on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
                           on_soft_timeout=on_soft_timeout, images=images)
     else:  # claude_cli (default)
-        sid = _load_sid(chat_id, "claude")
+        sid = _load_sid(chat_id, spec.id)
         cli_msg = f"[System]\n{extra_system}\n\n[User Query]\n{message}" if (extra_system and not sid) else message
         output = run_claude(spec, chat_id, cli_msg, sid, cwd, cancel_ev,
                             on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
@@ -177,30 +177,24 @@ def _do_query_with_delegation(
                                    on_text, on_tool, on_tool_result, on_soft_timeout, images,
                                    extra_system=combined_system)
 
-    # Phase 1: run orchestrator with buffered on_text to detect DELEGATE prefix
-    BUFFER_THRESHOLD = 300
-    _buf_state = {"text": "", "delegation": None, "flushed": False}
+    # Phase 1: run orchestrator, buffer ALL output until stream ends for DELEGATE detection.
+    # We never flush to on_text during streaming — delegation can appear anywhere in the output.
+    # Once complete, if DELEGATE found we clear the card; if not, we sync the full output.
+    _buf_state = {"text": "", "delegation": None}
 
     def _buffered_on_text(text: str, status: str = "typing"):
         _buf_state["text"] = text
-        if _buf_state["delegation"] is not None:
-            return  # delegation already detected, hide all orchestrator text
-        if len(text) >= BUFFER_THRESHOLD and not _buf_state["flushed"]:
+        # Optimisation: once we've seen END_DELEGATE we can stop checking
+        if _buf_state["delegation"] is None and "END_DELEGATE" in text:
             result = _detect_delegation(text)
             if result:
                 _buf_state["delegation"] = result
-                return  # hide from card
-            _buf_state["flushed"] = True
-            on_text(text, status)
-        elif _buf_state["flushed"]:
-            on_text(text, status)
-        # else: still buffering (< BUFFER_THRESHOLD), show nothing yet
 
     orch_output = _run_backend_single(orch_spec, chat_id, enriched_msg, cwd, cancel_ev,
                                       _buffered_on_text, on_tool, on_tool_result, on_soft_timeout,
                                       images, extra_system=combined_system)
 
-    # Final check on complete output (catches END_DELEGATE arriving late)
+    # Final check on complete output
     delegation = _buf_state["delegation"] or _detect_delegation(orch_output)
 
     if not delegation:
@@ -223,15 +217,16 @@ def _do_query_with_delegation(
                                    on_text, on_tool, on_tool_result, on_soft_timeout, images,
                                    extra_system=fallback_system)
 
+    on_text(f"> 🔀 委托 {specialist_spec.display_name} 处理中...")
     on_tool(f"🔀 委托 {specialist_spec.display_name}", sub_query[:120], "delegation")
 
     _spec_start = time.monotonic()
     try:
         specialist_output = _run_backend_single(
             specialist_spec, chat_id, sub_query, cwd, cancel_ev,
-            lambda t, s="typing": None,  # suppress specialist text from main card
-            lambda *a: None,
-            lambda *a: None,
+            lambda t, **_: None,  # suppress specialist text from main card; accept status kwarg
+            lambda *a, **_: None,
+            lambda *a, **_: None,
             lambda: None,  # specialist must not trigger top-level soft-timeout / cancel_ev replacement
         )
     except Exception as _spec_err:
@@ -241,16 +236,11 @@ def _do_query_with_delegation(
     _spec_elapsed = time.monotonic() - _spec_start
     on_tool_result("delegation", specialist_output[:500], False, _spec_elapsed)
 
-    # Phase 3: Orchestrator synthesis
-    synthesis_msg = (
-        f"{enriched_msg}\n\n"
-        f"[{specialist_spec.display_name} specialist result:]\n{specialist_output[:8000]}"
-    )
-    return _do_query_with_delegation(
-        chat_id, synthesis_msg, orch_spec, worker_specs,
-        cwd, cancel_ev, on_text, on_tool, on_tool_result, on_soft_timeout,
-        images=images, hop=hop + 1, memory_ctx=memory_ctx,
-    )
+    # Return specialist output directly; no synthesis pass needed.
+    # Orchestrator has full rolling history context and crafts self-contained sub_queries,
+    # so the specialist's output is already the final answer.
+    on_text(specialist_output)
+    return specialist_output
 
 
 def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
@@ -286,9 +276,20 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
     lock_released = False   # Set to True when the soft-timeout releases the lock early, preventing double-release in finally
 
     try:
-        m_name = {"claude": "Claude", "gemini": "Gemini", "kimi": "Kimi"}.get(model, model.capitalize())
         cwd = _get_cwd(chat_id)
         start = time.time()
+
+        # Resolve backend early (pure registry lookup, no network) so the initial card
+        # shows the correct model name instead of the legacy default_model value.
+        m_name = {"claude": "Claude", "gemini": "Gemini", "kimi": "Kimi"}.get(model, model.capitalize())
+        try:
+            from larkhelm.router import resolve_backend as _early_resolve
+            from larkhelm.backend_registry import BACKEND_REGISTRY as _early_reg
+            _early_has_docs = bool(_extract_feishu_urls(message))
+            _early_spec = _early_resolve(chat_id, message, bool(images), _early_has_docs)
+            m_name = _early_spec.display_name
+        except Exception:
+            pass  # fall back to legacy m_name; full routing happens below
 
         init_card = _make_card(f"⏳ {m_name} 连接中",
                                f"> 正在启动...\n\n目录: `{cwd}`", color="grey",
@@ -564,6 +565,14 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 memory_ctx = get_memory_context(chat_id, cwd=cwd)
             except Exception as _mem_err:
                 _debug_log(f"[{trace_id}][DoQuery] memory context error: {_mem_err}")
+
+            try:
+                from larkhelm.log import _get_recent_turns
+                recent = _get_recent_turns(chat_id)
+                if recent:
+                    memory_ctx = "\n\n".join(filter(None, [memory_ctx, recent]))
+            except Exception as _hist_err:
+                _debug_log(f"[{trace_id}][DoQuery] rolling history error: {_hist_err}")
 
             from larkhelm.router import resolve_backend, LockedBackendUnavailableError
             from larkhelm.backend_registry import BACKEND_REGISTRY

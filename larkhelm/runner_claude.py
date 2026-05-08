@@ -51,6 +51,9 @@ class ClaudeRunner(BaseProcessRunner):
         images: list | None = None,
         session_namespace: str | None = None,
         command: str | None = None,
+        model: str | None = None,
+        extra_args: list | None = None,
+        session_key: str | None = None,
     ) -> None:
         super().__init__(
             "claude", chat_id, message, sid, cwd,
@@ -59,16 +62,22 @@ class ClaudeRunner(BaseProcessRunner):
             on_start=on_start, allow_retry=allow_retry, images=images,
             session_namespace=session_namespace, command=command,
         )
+        self._model = model
+        self._extra_args = list(extra_args) if extra_args else []
+        self._session_key = session_key or "claude"
         self._ctor_kwargs = dict(
             cancel_ev=cancel_ev, on_text=on_text, on_tool=on_tool,
             on_tool_result=on_tool_result, on_soft_timeout=on_soft_timeout,
             on_start=on_start, allow_retry=allow_retry, images=images,
             session_namespace=session_namespace, command=command,
+            model=model, extra_args=extra_args, session_key=session_key,
         )
 
     def build_args(self) -> list[str]:
         cmd = self.command or _cfg.CLAUDE_CMD
         args = [cmd, "--print", "--output-format", "stream-json", "--verbose"]
+        if self._model:
+            args += ["--model", self._model]
         if self.images:
             args += ["--input-format", "stream-json"]
 
@@ -130,10 +139,12 @@ class ClaudeRunner(BaseProcessRunner):
         if self.sid:
             args += ["--resume", self.sid]
 
+        args += self._extra_args
+
         _debug_log(
             f"[claude] starting cwd={self.cwd} sid={self.sid} "
             f"skip_perm={_cfg.SKIP_PERMISSIONS} images={len(self.images)} "
-            f"ns={self._ns} cmd={cmd}"
+            f"ns={self._ns} cmd={cmd} model={self._model or '(default)'}"
         )
         return args
 
@@ -159,7 +170,7 @@ class ClaudeRunner(BaseProcessRunner):
             cand = ev.get("session_id")
             if cand:
                 self._new_sid = cand
-                _save_sid(self._ns, cand, "claude")
+                _save_sid(self._ns, cand, self._session_key)
         elif etype == "assistant":
             for block in ev.get("message", {}).get("content", []) or []:
                 btype = block.get("type", "")
@@ -203,7 +214,7 @@ class ClaudeRunner(BaseProcessRunner):
             new_sid = ev.get("session_id") or self._new_sid
             if new_sid:
                 self._new_sid = new_sid
-                _save_sid(self._ns, new_sid, "claude")
+                _save_sid(self._ns, new_sid, self._session_key)
             usage = ev.get("usage", {})
             cost = ev.get("total_cost_usd", 0.0)
             if usage:

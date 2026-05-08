@@ -23,7 +23,8 @@ from larkhelm.chat_state import _load_sid
 def _spawn_claude_proc(chat_id, message, sid, cwd, cancel_ev=None, on_text=None,
                        on_tool=None, on_tool_result=None, allow_retry=False,
                        on_soft_timeout=None, on_start=None, images=None,
-                       session_namespace=None, command=None) -> str:
+                       session_namespace=None, command=None,
+                       model=None, extra_args=None, session_key=None) -> str:
     from larkhelm.runner_claude import ClaudeRunner
     return ClaudeRunner(
         chat_id, message, sid, cwd,
@@ -31,13 +32,15 @@ def _spawn_claude_proc(chat_id, message, sid, cwd, cancel_ev=None, on_text=None,
         on_tool_result=on_tool_result, allow_retry=allow_retry,
         on_soft_timeout=on_soft_timeout, on_start=on_start,
         images=images, session_namespace=session_namespace, command=command,
+        model=model, extra_args=extra_args, session_key=session_key,
     ).run()
 
 
 def _spawn_kimi_proc(chat_id, message, sid, cwd, cancel_ev=None, on_text=None,
                      on_tool=None, on_tool_result=None, allow_retry=False,
                      on_soft_timeout=None, on_start=None, images=None,
-                     session_namespace=None, command=None) -> str:
+                     session_namespace=None, command=None,
+                     model=None, extra_args=None, session_key=None) -> str:
     from larkhelm.runner_kimi import KimiRunner
     return KimiRunner(
         chat_id, message, sid, cwd,
@@ -45,18 +48,21 @@ def _spawn_kimi_proc(chat_id, message, sid, cwd, cancel_ev=None, on_text=None,
         on_tool_result=on_tool_result, allow_retry=allow_retry,
         on_soft_timeout=on_soft_timeout, on_start=on_start,
         images=images, session_namespace=session_namespace, command=command,
+        model=model, extra_args=extra_args, session_key=session_key,
     ).run()
 
 
 def _spawn_gemini_proc(chat_id, message, sid, cwd, cancel_ev=None, on_tool=None,
                        on_text=None, on_tool_result=None, on_soft_timeout=None,
-                       use_session=True, record_under=None, command=None) -> str:
+                       use_session=True, record_under=None, command=None,
+                       model=None, extra_args=None, session_key=None) -> str:
     from larkhelm.runner_gemini import GeminiRunner
     return GeminiRunner(
         chat_id, message, sid, cwd,
         cancel_ev=cancel_ev, on_text=on_text, on_tool=on_tool,
         on_tool_result=on_tool_result, on_soft_timeout=on_soft_timeout,
         use_session=use_session, record_under=record_under, command=command,
+        model=model, extra_args=extra_args, session_key=session_key,
     ).run()
 
 

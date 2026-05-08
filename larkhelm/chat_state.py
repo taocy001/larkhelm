@@ -43,6 +43,7 @@ def _save_state() -> None:
     try:
         with _state_lock:
             data = json.dumps(_chat_state_store, ensure_ascii=False, indent=2)
+            _cfg.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
             tmp = _cfg.STATE_FILE.with_suffix(".json.tmp")
             tmp.write_text(data, encoding="utf-8")
             os.replace(tmp, _cfg.STATE_FILE)
@@ -79,6 +80,7 @@ def _load_sid(chat_id: str, model: str) -> str:
 
 def _save_sid(chat_id: str, sid: str, model: str) -> None:
     try:
+        _cfg.SESSION_DIR.mkdir(parents=True, exist_ok=True)
         _sid_file(chat_id, model).write_text(sid)
     except Exception as e:
         _debug_log(f"[Session] 保存失败: {e}")

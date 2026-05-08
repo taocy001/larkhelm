@@ -256,44 +256,39 @@ class BaseProcessRunner(abc.ABC):
             popen_kw["stdin"] = subprocess.PIPE
 
         _acquire_ai_sem(self.cancel_ev)
+        sem_held = True
+        active_inc = False
         try:
-            self._proc = subprocess.Popen(args, **popen_kw)
-        except FileNotFoundError:
-            _ai_proc_sem.release()
-            self._cleanup_tmp()
-            raise RuntimeError(f"{self.backend_name} CLI not found: {args[0]}")
-        except Exception:
-            _ai_proc_sem.release()
-            self._cleanup_tmp()
-            raise
-
-        if self.on_start:
             try:
-                self.on_start()
-            except Exception as e:
-                _debug_log(f"[{self.backend_name}] on_start callback failed: {e}")
+                self._proc = subprocess.Popen(args, **popen_kw)
+            except FileNotFoundError:
+                raise RuntimeError(f"{self.backend_name} CLI not found: {args[0]}")
 
-        if stdin_content is not None:
-            try:
-                self._proc.stdin.write(stdin_content + "\n")
-                self._proc.stdin.close()
-            except OSError as e:
-                self._proc.kill()
-                _ai_proc_sem.release()
-                self._cleanup_tmp()
-                raise RuntimeError(f"{self.backend_name} stdin write failed: {e}")
+            if self.on_start:
+                try:
+                    self.on_start()
+                except Exception as e:
+                    _debug_log(f"[{self.backend_name}] on_start callback failed: {e}")
 
-        threading.Thread(target=self._drain_stderr, daemon=True).start()
-        threading.Thread(target=self._watch, daemon=True).start()
+            if stdin_content is not None:
+                try:
+                    self._proc.stdin.write(stdin_content + "\n")
+                    self._proc.stdin.close()
+                except OSError as e:
+                    raise RuntimeError(f"{self.backend_name} stdin write failed: {e}")
 
-        if self.on_text:
-            try:
-                self.on_text("", status="init")
-            except Exception as e:
-                _debug_log(f"[{self.backend_name}] on_text init callback failed: {e}")
+            threading.Thread(target=self._drain_stderr, daemon=True).start()
+            threading.Thread(target=self._watch, daemon=True).start()
 
-        _inc_active()
-        try:
+            _inc_active()
+            active_inc = True
+
+            if self.on_text:
+                try:
+                    self.on_text("", status="init")
+                except Exception as e:
+                    _debug_log(f"[{self.backend_name}] on_text init callback failed: {e}")
+
             for line in self._proc.stdout:
                 line = line.strip()
                 if not line:
@@ -309,13 +304,19 @@ class BaseProcessRunner(abc.ABC):
                     break
         finally:
             self._completed.set()
-            try:
-                self._proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._proc.kill()
-                self._proc.wait()
-            _ai_proc_sem.release()
-            _dec_active()
+            if self._proc:
+                try:
+                    self._proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        self._proc.kill()
+                        self._proc.wait()
+                    except Exception:
+                        pass
+            if sem_held:
+                _ai_proc_sem.release()
+            if active_inc:
+                _dec_active()
             self._cleanup_tmp()
             self.cleanup_extra()
 

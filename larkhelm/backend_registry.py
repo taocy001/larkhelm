@@ -19,10 +19,12 @@ class BackendSpec:
     role: str               # "orchestrator" | "worker" | "cheap"
     tags: list[str]         # e.g. ["vision", "tools", "cheap", "fast"]
     command: str = ""       # CLI backends: executable path
-    model: str = ""         # API backends: model name
+    model: str = ""         # model name passed to CLI (e.g. --model, -m)
     api_key: str = ""       # API backends: resolved key (no ${} placeholders)
     base_url: str = ""      # API backends: custom endpoint
     instructions: str = ""  # extra system instructions injected for this backend when it acts as orchestrator
+    capabilities: str = ""  # human-readable description used in orchestrator routing decisions
+    extra_args: list[str] = dataclasses.field(default_factory=list)  # extra CLI flags (e.g. ["--thinking"])
     healthy: bool = True
     enabled: bool = True
     last_error: str | None = None  # last health_check failure reason
@@ -85,6 +87,10 @@ class BackendRegistry:
                 else:
                     role = "worker"
 
+                extra_args = s.get("extra_args", [])
+                if isinstance(extra_args, str):
+                    extra_args = extra_args.split()
+
                 spec = BackendSpec(
                     id=s["id"],
                     provider=provider,
@@ -96,6 +102,8 @@ class BackendRegistry:
                     api_key=resolved_api_key,
                     base_url=s.get("base_url", "") or extra.get("base_url", ""),
                     instructions=s.get("instructions", ""),
+                    capabilities=s.get("capabilities", ""),
+                    extra_args=list(extra_args),
                     healthy=True,
                     enabled=enabled,
                 )
@@ -264,6 +272,15 @@ class BackendRegistry:
                     _debug_log(f"[BackendRegistry] still unhealthy: {spec.id}")
             except Exception as e:
                 _debug_log(f"[BackendRegistry] recover_check error for {spec.id}: {e}")
+
+    def set_probe_result(self, spec_id: str, ok: bool, error: str = "") -> None:
+        """Update healthy/last_error for a spec after async probe completes. Thread-safe."""
+        with self._lock:
+            spec = self._specs.get(spec_id)
+            if spec is None:
+                return
+            spec.healthy = ok
+            spec.last_error = error if not ok else None
 
     def all_enabled(self) -> list[BackendSpec]:
         with self._lock:

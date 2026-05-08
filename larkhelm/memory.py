@@ -425,18 +425,26 @@ def _run_one_shot(prompt: str, ns: str) -> str:
             }[spec.provider]
             output, _ = fn(spec=spec, chat_id=ns, message=prompt, history=[], on_text=_on_text)
         else:
-            from larkhelm.backend_cli import run_claude
+            from larkhelm.backend_cli import run_claude, run_gemini, run_kimi
             grant_yolo(ns)
             try:
-                output = run_claude(spec=spec, chat_id=ns, message=prompt,
-                                    sid=None, cwd=str(_cfg.DATA_DIR), on_text=_on_text)
+                if spec.provider == "gemini_cli":
+                    output = run_gemini(spec=spec, chat_id=ns, message=prompt,
+                                        sid=None, cwd=str(_cfg.DATA_DIR),
+                                        on_text=_on_text, use_session=False)
+                elif spec.provider == "kimi_cli":
+                    output = run_kimi(spec=spec, chat_id=ns, message=prompt,
+                                      sid=None, cwd=str(_cfg.DATA_DIR), on_text=_on_text)
+                else:
+                    output = run_claude(spec=spec, chat_id=ns, message=prompt,
+                                        sid=None, cwd=str(_cfg.DATA_DIR), on_text=_on_text)
             finally:
                 revoke_yolo(ns)
         return output or "".join(collected)
     finally:
         try:
             from larkhelm.chat_state import _clear_sid
-            _clear_sid(ns, "claude")
+            _clear_sid(ns, spec.id)
         except Exception as e:
             _debug_log(f"[memory] clear_sid failed: {e}")
 

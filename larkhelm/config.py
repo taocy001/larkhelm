@@ -130,7 +130,7 @@ def _migrate_legacy_backends(config: dict) -> list[dict]:
     Layer 2: auto-discover CLIs in PATH supplement IDs not already in Layer 1.
     Layer 3: if all empty, return [].
     """
-    explicit: list[dict] = config.get("backends", [])
+    explicit: list[dict] = config.get("probe_models", config.get("backends", []))
     auto_discovered = _auto_discover_cli()
 
     explicit_ids = {b["id"] for b in explicit}
@@ -290,6 +290,9 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     # Also update the module-level singleton in backend_registry so imports of it stay fresh
     import larkhelm.backend_registry as _br_mod
     _br_mod.BACKEND_REGISTRY = BACKEND_REGISTRY
+
+    from larkhelm.model_probe import run_probes_async
+    run_probes_async(BACKEND_REGISTRY.all_enabled(), BACKEND_REGISTRY)
 
     _start_recover_thread()
 

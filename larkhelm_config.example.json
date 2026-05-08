@@ -1,14 +1,10 @@
 {
   "APP_ID":            "YOUR_APP_ID",
   "APP_SECRET":        "YOUR_APP_SECRET",
-  "claude_command":    "claude",
-  "gemini_command":    "gemini",
-  "kimi_command":      "kimi",
-  "default_model":     "claude",
   "default_cwd":       "/home/YOUR_USER/code",
   "skip_permissions":  true,
   "response_timeout":  300,
-  "hard_timeout":      3600,
+  "hard_timeout":      21600,
   "max_card_len":      3000,
   "allowed_chat_ids":  [],
   "gemini_idle_ttl":   1800,
@@ -24,5 +20,97 @@
 
   "default_wiki_space_id":     "",
   "default_wiki_parent_token": "",
-  "default_owner_open_id":     ""
+  "default_owner_open_id":     "",
+
+  "_comment_probe_models": "Optional. If omitted, installed CLIs are auto-discovered from PATH (no model pinning or capabilities). Uncomment and customize to pin models and enable orchestrator routing hints.",
+  "probe_models": [
+    {
+      "id":           "gemini-3-flash",
+      "provider":     "gemini_cli",
+      "display_name": "Gemini 3 Flash",
+      "role":         "orchestrator",
+      "tags":         ["tools"],
+      "command":      "gemini",
+      "model":        "gemini-3-flash-preview",
+      "capabilities": "Latest flash orchestrator for routing and coordination. Best for quick queries and tool-assisted tasks."
+    },
+    {
+      "id":           "gemini",
+      "provider":     "gemini_cli",
+      "display_name": "Gemini 2.5 Flash",
+      "role":         "orchestrator",
+      "tags":         ["tools"],
+      "command":      "gemini",
+      "model":        "gemini-2.5-flash",
+      "capabilities": "Stable flash orchestrator fallback. Fast and reliable for routing and coordination."
+    },
+    {
+      "id":           "claude",
+      "provider":     "claude_cli",
+      "display_name": "Claude",
+      "role":         "worker",
+      "tags":         ["vision", "tools"],
+      "command":      "claude",
+      "capabilities": "Best for complex reasoning, code review, document understanding, and vision tasks."
+    },
+    {
+      "id":           "gemini-3-pro",
+      "provider":     "gemini_cli",
+      "display_name": "Gemini 3.1 Pro",
+      "role":         "worker",
+      "tags":         ["tools"],
+      "command":      "gemini",
+      "model":        "gemini-3.1-pro-preview",
+      "capabilities": "Latest and most capable model. Best for the hardest reasoning, coding, and analysis tasks."
+    },
+    {
+      "id":           "gemini-pro",
+      "provider":     "gemini_cli",
+      "display_name": "Gemini 2.5 Pro",
+      "role":         "worker",
+      "tags":         ["tools"],
+      "command":      "gemini",
+      "model":        "gemini-2.5-pro",
+      "capabilities": "Stable pro model. Best for deep analysis, long-context tasks, and complex multi-step reasoning."
+    },
+    {
+      "id":           "gemini-3-flash-lite",
+      "provider":     "gemini_cli",
+      "display_name": "Gemini 3.1 Flash Lite",
+      "role":         "worker",
+      "tags":         ["tools", "cheap", "fast"],
+      "command":      "gemini",
+      "model":        "gemini-3.1-flash-lite-preview",
+      "capabilities": "Latest lightweight model. Best for simple, high-volume, or latency-sensitive tasks."
+    },
+    {
+      "id":           "gemini-flash-lite",
+      "provider":     "gemini_cli",
+      "display_name": "Gemini 2.5 Flash Lite",
+      "role":         "worker",
+      "tags":         ["tools", "cheap", "fast"],
+      "command":      "gemini",
+      "model":        "gemini-2.5-flash-lite",
+      "capabilities": "Stable lightweight model. Best for simple, high-volume, or latency-sensitive tasks."
+    },
+    {
+      "id":           "kimi",
+      "provider":     "kimi_cli",
+      "display_name": "Kimi",
+      "role":         "worker",
+      "tags":         ["vision", "tools"],
+      "command":      "kimi",
+      "capabilities": "Best for Chinese language tasks, multi-step reasoning, and web search."
+    },
+    {
+      "id":           "kimi-thinking",
+      "provider":     "kimi_cli",
+      "display_name": "Kimi Thinking",
+      "role":         "worker",
+      "tags":         ["tools"],
+      "command":      "kimi",
+      "extra_args":   ["--thinking"],
+      "capabilities": "Best for hard math, logic puzzles, and problems requiring extended step-by-step reasoning."
+    }
+  ]
 }
