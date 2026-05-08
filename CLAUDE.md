@@ -91,7 +91,11 @@ larkhelm/
 ├── token_stats.py      (146 行)  - Token 使用量统计与持久化
 ├── lark_client.py      (1021 行) - 飞书 API 调用封装、卡片操作、权限引导卡片
 ├── card_builder.py     (166 行)  - 卡片 JSON 构建、Markdown 分割
-├── ai_runner.py        (900+ 行) - Claude/Gemini/Kimi CLI 子进程运行
+├── ai_runner.py        (112 行)  - thin shim，re-export runner_base/runner_claude 等公共接口
+├── runner_base.py      (358 行)  - BaseProcessRunner 抽象基类（信号量、watch、retry 模板方法）
+├── runner_claude.py    (225 行)  - ClaudeRunner 子类（MCP config、设置文件临时文件管理）
+├── runner_kimi.py      (155 行)  - KimiRunner 子类
+├── runner_gemini.py    (120 行)  - GeminiRunner 子类
 ├── crew/                        - 多 Agent 协作子包
 │   ├── __init__.py     (118 行)  - re-export
 │   ├── _commands.py    (686 行)  - /crew 和 /dev 入口命令
@@ -356,8 +360,9 @@ resp = client.sheets.v3.spreadsheet_sheet.query(
 
 | 位置 | 原因 |
 |---|---|
-| `ai_runner.py` `proc.kill()`（9处，Claude/Kimi/Gemini 各 3） | OS 级，进程已退出为预期 |
-| `ai_runner.py` stderr drain 线程 | display-only，失败无副作用 |
+| `runner_base.py` `proc.kill()`（3处：watch/stdin/FileNotFoundError）+ `runner_claude/kimi/gemini` 各 0 | OS 级，进程已退出为预期 |
+| `runner_base.py` `_drain_stderr` 线程 | display-only，失败无副作用 |
+| `runner_base.py` `_cleanup_tmp` unlink | 临时文件已不存在为预期 |
 | `log.py` `_debug_log` 内部两处 pass | 调试基础设施，递归报错无意义 |
 | `log.py:105` JSONL 行解析跳过 | 设计意图：容错读取损坏行 |
 | `memory.py` `_global_memory_file` chat_state 访问 | 已有明确 fallback（返回 None） |
