@@ -93,13 +93,15 @@ def _run_backend_single(spec, chat_id: str, message: str, cwd: str, cancel_ev,
                         images=None, extra_system: str = "") -> str:
     """Run a single backend and return its output string.
 
-    extra_system: for API backends, injected through the proper system channel;
-                  for CLI backends, prepended as [System]...[User Query] text.
+    extra_system:
+      - API backends: injected via the proper system channel (every call; stateless).
+      - CLI backends: prepended as [System]...[User Query] ONLY when no existing session
+        (sid=None). Resumed sessions already carry the context from the first turn, so
+        re-injecting every message would multiply context size by N turns.
     """
     from larkhelm.backend_cli import run_claude, run_gemini, run_kimi
     from larkhelm.backend_api import run_anthropic, run_google, run_openai_compat
     from larkhelm.api_session import load_history, save_history
-    from larkhelm.chat_state import _load_sid
 
     provider = spec.provider
     if provider == "anthropic_api":
@@ -119,19 +121,19 @@ def _run_backend_single(spec, chat_id: str, message: str, cwd: str, cancel_ev,
         save_history(provider, chat_id, new_history)
     elif provider == "gemini_cli":
         sid = _load_sid(chat_id, "gemini")
-        cli_msg = f"[System]\n{extra_system}\n\n[User Query]\n{message}" if extra_system else message
+        cli_msg = f"[System]\n{extra_system}\n\n[User Query]\n{message}" if (extra_system and not sid) else message
         output = run_gemini(spec, chat_id, cli_msg, sid, cwd, cancel_ev,
                             on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
                             on_soft_timeout=on_soft_timeout)
     elif provider == "kimi_cli":
         sid = _load_sid(chat_id, "kimi")
-        cli_msg = f"[System]\n{extra_system}\n\n[User Query]\n{message}" if extra_system else message
+        cli_msg = f"[System]\n{extra_system}\n\n[User Query]\n{message}" if (extra_system and not sid) else message
         output = run_kimi(spec, chat_id, cli_msg, sid, cwd, cancel_ev,
                           on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
                           on_soft_timeout=on_soft_timeout, images=images)
     else:  # claude_cli (default)
         sid = _load_sid(chat_id, "claude")
-        cli_msg = f"[System]\n{extra_system}\n\n[User Query]\n{message}" if extra_system else message
+        cli_msg = f"[System]\n{extra_system}\n\n[User Query]\n{message}" if (extra_system and not sid) else message
         output = run_claude(spec, chat_id, cli_msg, sid, cwd, cancel_ev,
                             on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
                             on_soft_timeout=on_soft_timeout, images=images, allow_retry=True)
@@ -599,9 +601,12 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
 
             successful_spec = None
             if not chain:
-                # Last resort: fall back to legacy routing (memory_ctx prepended for CLI backends)
+                # Last resort: fall back to legacy routing.
+                # Same new-session-only rule: only prepend memory when no existing sid.
+                _legacy_sid = _load_sid(chat_id, "gemini" if model == "gemini" else
+                                        "kimi" if model == "kimi" else "claude")
                 _legacy_msg = (f"[System]\n{memory_ctx}\n\n[User Query]\n{message}"
-                               if memory_ctx else message)
+                               if memory_ctx and not _legacy_sid else message)
                 if model == "gemini":
                     output = query_gemini(chat_id, _legacy_msg, cwd, cancel_ev,
                                           on_tool=on_tool, on_text=on_text,

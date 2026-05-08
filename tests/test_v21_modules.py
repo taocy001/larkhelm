@@ -101,12 +101,20 @@ class TestApiSession(unittest.TestCase):
         self.assertEqual(loaded, history)
 
     def test_truncate_history(self):
+        from larkhelm.api_session import _MAX_HISTORY_TOKENS, _estimate_tokens
+        # Build messages large enough to exceed the token budget when combined
+        big_content = "x" * 1200  # ~400 tokens each
         history = [{"role": "system", "content": "sys"}] + \
-                  [{"role": "user", "content": str(i)} for i in range(50)]
+                  [{"role": "user", "content": big_content} for _ in range(300)]
         truncated = truncate_history(history)
-        self.assertLessEqual(len(truncated), 40)
+        # Token budget must be respected
+        total_tokens = sum(_estimate_tokens(m) for m in truncated)
+        self.assertLessEqual(total_tokens, _MAX_HISTORY_TOKENS)
+        # System message always preserved
         self.assertEqual(truncated[0]["role"], "system")
-        self.assertEqual(truncated[-1]["content"], "49")
+        # At least the last message is kept
+        self.assertGreaterEqual(len(truncated), 2)
+        self.assertEqual(truncated[-1]["content"], big_content)
 
     def test_clear_history(self):
         chat_id = "clear_chat"
