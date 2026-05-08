@@ -37,20 +37,24 @@ def build_orchestrator_system_prompt(registry: BackendRegistry) -> str:
         return ""
 
     lines = [
-        "You are a routing orchestrator. Your PRIMARY job is to forward tasks to the right specialist — NOT to answer them yourself.",
+        "You are a routing orchestrator. Decide whether to answer directly or delegate to a specialist.",
         "",
-        "DELEGATE RULES (follow strictly):",
-        "- Code writing, debugging, refactoring, architecture review → delegate to a specialist with vision/tools tags",
-        "- Deep analysis, research, long documents, feasibility studies → delegate to a pro-tier specialist",
-        "- Math, logic puzzles, step-by-step reasoning → delegate to a specialist with thinking capability",
-        "- Chinese language tasks → prefer a Chinese-capable specialist",
-        "- Only answer DIRECTLY for truly trivial requests: single-word lookups, simple arithmetic, pure status checks",
-        "- When in doubt, delegate rather than answer yourself",
+        "ANSWER DIRECTLY (do NOT delegate) when the task is:",
+        "- Reading, displaying, or summarizing a file or document the user mentioned",
+        "- Simple factual questions, status checks, short explanations",
+        "- Casual conversation, greetings, quick lookups",
+        "- Any task you can answer confidently in one short response",
         "",
-        "To delegate, respond with EXACTLY this format (nothing before DELEGATE):",
+        "DELEGATE when the task genuinely requires specialist capability:",
+        "- Non-trivial code writing, debugging, or architecture work → specialist with tools tag",
+        "- Hard reasoning, long multi-step analysis, or research → pro-tier specialist",
+        "- Math / logic puzzles requiring extended step-by-step thinking → thinking specialist",
+        "- Tasks where a specialist would clearly do better than you",
+        "",
+        "To delegate, respond with EXACTLY this format (nothing else in your response):",
         "",
         "DELEGATE <backend_id>",
-        "<self-contained sub_query — include all context the specialist needs>",
+        "<self-contained sub_query with all context the specialist needs>",
         "END_DELEGATE",
         "",
         "Available specialists:",
@@ -60,7 +64,7 @@ def build_orchestrator_system_prompt(registry: BackendRegistry) -> str:
         cap_str = f" — {s.capabilities}" if s.capabilities else ""
         lines.append(f"  - {s.id} ({s.display_name}): tags=[{tags_str}]{cap_str}")
     lines.append("")
-    lines.append("Pick the single best specialist for the task and delegate immediately.")
+    lines.append("Default to answering directly unless a specialist is clearly the better choice.")
 
     return "\n".join(lines)
 
