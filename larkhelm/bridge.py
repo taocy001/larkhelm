@@ -29,7 +29,7 @@ import lark_oapi.ws as ws
 
 import larkhelm.lark_client as _lc
 from larkhelm.config import _init_runtime
-from larkhelm.log import _debug_log
+from larkhelm.log import _debug_log, rotate_jsonl_if_needed
 from larkhelm.chat_state import _load_global_state, _get_chat_state, _state_lock, _chat_state_store
 from larkhelm.concurrency import _cron_lock, set_shutting_down, wait_for_idle
 from larkhelm.perm import _start_perm_server
@@ -131,6 +131,7 @@ def main(config_path: str = None, data_dir: str = None) -> None:
         )
         sys.exit(1)
 
+    rotate_jsonl_if_needed()
     _load_global_state()
 
     if not _cfg.SKIP_PERMISSIONS:

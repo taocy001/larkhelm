@@ -10,7 +10,22 @@ from pathlib import Path
 import larkhelm.config as _cfg
 from larkhelm.concurrency import _jsonl_lock as _log_lock  # shared with token_stats.py
 
-__all__ = ["_log_lock", "log_entry", "_read_logs", "_debug_log"]
+__all__ = ["_log_lock", "log_entry", "_read_logs", "_debug_log", "rotate_jsonl_if_needed"]
+
+_MAX_JSONL_BYTES = 100 * 1024 * 1024  # 100 MB
+
+
+def rotate_jsonl_if_needed() -> None:
+    """Rotate all.jsonl if it exceeds _MAX_JSONL_BYTES; keeps one backup (.jsonl.1)."""
+    p = _cfg.LOG_DIR / "all.jsonl"
+    try:
+        if p.exists() and p.stat().st_size > _MAX_JSONL_BYTES:
+            backup = p.with_suffix(".jsonl.1")
+            backup.unlink(missing_ok=True)
+            p.rename(backup)
+            _debug_log(f"[log] all.jsonl rotated → all.jsonl.1 ({backup.stat().st_size // 1024 // 1024} MB)")
+    except Exception as e:
+        print(f"[log] JSONL rotation failed: {e}", file=sys.stderr)
 
 
 def _log_file(chat_id: str) -> Path:
@@ -56,29 +71,30 @@ def log_entry(
 
 
 def _read_logs(chat_id: str) -> list[dict]:
-    """Read records belonging to chat_id from all.jsonl.
+    """Read records belonging to chat_id from all.jsonl (and .jsonl.1 backup if present).
 
-    The file is append-only; each JSON record is written on one line.  Reading
-    without holding _log_lock is safe: the worst case is we miss the very last
-    incomplete line (handled by the inner try/except).  Holding the lock for a
-    full file scan would stall log writes for the entire duration.
+    Reading without holding _log_lock is safe: the worst case is we miss the very last
+    incomplete line (handled by the inner try/except).  Holding the lock for a full
+    file scan would stall log writes for the entire duration.
     """
-    log_path = _cfg.LOG_DIR / "all.jsonl"
+    log_dir = _cfg.LOG_DIR
+    candidates = [log_dir / "all.jsonl.1", log_dir / "all.jsonl"]
     result = []
-    try:
-        with log_path.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    r = json.loads(line)
-                    if r.get("chat_id") == chat_id:
-                        result.append(r)
-                except Exception:
-                    continue
-    except Exception:
-        pass
+    for log_path in candidates:
+        try:
+            with log_path.open(encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        r = json.loads(line)
+                        if r.get("chat_id") == chat_id:
+                            result.append(r)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
     return result
 
 

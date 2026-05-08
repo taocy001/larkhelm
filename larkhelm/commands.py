@@ -43,6 +43,8 @@ from larkhelm.card_builder import _make_card, _fmt_elapsed
 _SENSITIVE_ENV_PREFIXES = frozenset({
     "API_KEY", "SECRET", "PASSWORD", "TOKEN", "CREDENTIAL",
     "ACCESS_KEY", "PRIVATE_KEY", "AUTH_KEY",
+    "PAT", "DSN", "WEBHOOK", "SMTP", "DATABASE_URL",
+    "SENTRY", "SIGNING_KEY", "ENCRYPTION_KEY",
 })
 
 
@@ -622,6 +624,18 @@ def _cmd_cron(chat_id: str, args: str, msg_id: str = None):
                     color="orange")
 
 
+def _check_cwd_root(p: Path) -> bool:
+    """Return False if cwd_root is configured and p escapes it."""
+    root = _cfg.config.get("cwd_root")
+    if not root:
+        return True
+    try:
+        p.resolve().relative_to(Path(root).resolve())
+        return True
+    except ValueError:
+        return False
+
+
 def _cmd_cd(chat_id: str, path: str, msg_id: str = None):
     try:
         p = Path(path).expanduser()
@@ -630,6 +644,10 @@ def _cmd_cd(chat_id: str, path: str, msg_id: str = None):
         p = p.resolve()
         if not p.is_dir():
             send_card_reply(chat_id, msg_id, "❌ 目录不存在", f"`{p}`", color="red")
+            return
+        if not _check_cwd_root(p):
+            send_card_reply(chat_id, msg_id, "❌ 超出允许范围",
+                            f"配置的 `cwd_root` 限制了可访问路径", color="red")
             return
         _set_chat_field(chat_id, "cwd", str(p))
         send_card_reply(chat_id, msg_id, "📁 目录已切换", f"`{p}`", color="green")
@@ -644,6 +662,10 @@ def _cmd_pwd(chat_id: str, msg_id: str = None):
 def _cmd_ls(chat_id: str, path: str = "", msg_id: str = None):
     cwd = _get_cwd(chat_id)
     target = (Path(cwd) / path if path else Path(cwd)).resolve()
+    if not _check_cwd_root(target):
+        send_card_reply(chat_id, msg_id, "❌ 超出允许范围",
+                        f"配置的 `cwd_root` 限制了可访问路径", color="red")
+        return
     try:
         entries = sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
         lines = [f"`{target}/`\n"]

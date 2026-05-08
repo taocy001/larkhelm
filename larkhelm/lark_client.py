@@ -622,23 +622,35 @@ class FeishuDocClient:
             except Exception as e:
                 raise DocAPIError(0, f"HTTP append 失败: {e}")
 
+    # Module-level token cache shared across all DocAPIClient instances.
+    _token_cache: dict = {"token": "", "expires_at": 0.0}
+    _token_lock = threading.Lock()
+    _TOKEN_TTL = 6000  # 100 minutes (Feishu TTL is 2h, 20-minute safety margin)
+
     def _get_tenant_token(self) -> str:
-        """Fetch a tenant_access_token (fetched live each time; TTL is controlled by Feishu)."""
-        body = _json_mod.dumps({
-            "app_id": _cfg.APP_ID,
-            "app_secret": _cfg.APP_SECRET,
-        }).encode()
-        req = _urllib_req.Request(
-            "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
-            data=body,
-            headers={"Content-Type": "application/json"},
-        )
-        with _urllib_req.urlopen(req, timeout=10) as resp:
-            data = _json_mod.loads(resp.read())
-        token = data.get("tenant_access_token", "")
-        if not token:
-            raise DocAPIError(0, "获取 tenant_access_token 失败")
-        return token
+        """Return a cached tenant_access_token, refreshing when within TTL margin."""
+        import time
+        with DocAPIClient._token_lock:
+            cache = DocAPIClient._token_cache
+            if cache["token"] and time.time() < cache["expires_at"]:
+                return cache["token"]
+            body = _json_mod.dumps({
+                "app_id": _cfg.APP_ID,
+                "app_secret": _cfg.APP_SECRET,
+            }).encode()
+            req = _urllib_req.Request(
+                "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+                data=body,
+                headers={"Content-Type": "application/json"},
+            )
+            with _urllib_req.urlopen(req, timeout=10) as resp:
+                data = _json_mod.loads(resp.read())
+            token = data.get("tenant_access_token", "")
+            if not token:
+                raise DocAPIError(0, "获取 tenant_access_token 失败")
+            cache["token"] = token
+            cache["expires_at"] = time.time() + DocAPIClient._TOKEN_TTL
+            return token
 
     def replace_all(self, ref: "DocRef", content: str) -> bool:
         """Delete all blocks in the document then rewrite. Destructive operation — must be confirmed by user before calling."""

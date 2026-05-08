@@ -66,6 +66,10 @@ def handle_card_action(event: P2CardActionTrigger) -> P2CardActionTriggerRespons
             parts = cmd.split(":", 2)
             if len(parts) == 3:
                 bp_action, crew_id = parts[1], parts[2]
+                from larkhelm.crew._state import _active_crew
+                if _active_crew.get(chat_id) != crew_id:
+                    _debug_log(f"[Security] crew_bp rejected: chat={chat_id} does not own crew={crew_id}")
+                    return resp
                 confirmed = (bp_action == "confirm")
                 from larkhelm.crew import signal_breakpoint
                 signal_breakpoint(crew_id, confirmed)
