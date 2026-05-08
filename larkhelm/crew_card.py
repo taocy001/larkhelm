@@ -203,7 +203,7 @@ def _build_card(state: CrewState) -> str:
 
         body_parts: list[str] = [f"**{plan.title}**"]
 
-        # Agent status list — join with \n\n so _normalize_newlines won't insert extra blanks
+        # Agent status list — one line per agent, no blank lines between them
         status_lines: list[str] = []
         for spec in plan.agents:
             a     = agents.get(spec.id)
@@ -216,7 +216,7 @@ def _build_card(state: CrewState) -> str:
                 t_str = f" ({_fmt_elapsed(time.time() - a.start_time)}…)"
             status_lines.append(f"{icon} **{spec.id}** {spec.role} [{spec.model}]{dep}{t_str}")
         if status_lines:
-            body_parts.append("\n\n".join(status_lines))
+            body_parts.append("\n".join(status_lines))
 
         # Progress preview for running agents
         running_previews: list[str] = []
