@@ -13,6 +13,8 @@ from larkhelm.concurrency import _jsonl_lock as _log_lock  # shared with token_s
 __all__ = ["_log_lock", "log_entry", "_read_logs", "_debug_log", "rotate_jsonl_if_needed"]
 
 _MAX_JSONL_BYTES = 100 * 1024 * 1024  # 100 MB
+_jsonl_write_count = 0
+_JSONL_ROTATION_CHECK_EVERY = 1000  # check rotation every N log entries
 
 
 def rotate_jsonl_if_needed() -> None:
@@ -38,6 +40,7 @@ def log_entry(
     chat_id: str, role: str, content: str,
     model: str = "claude", trace_id: str = None,
 ) -> None:
+    global _jsonl_write_count
     now = datetime.now()
     model_tag = "Claude" if model == "claude" else "Gemini"
     role_label = {
@@ -53,6 +56,7 @@ def log_entry(
     }
     if trace_id:
         record["trace_id"] = trace_id
+    should_rotate = False
     with _log_lock:
         try:
             p = _log_file(chat_id)
@@ -68,6 +72,11 @@ def log_entry(
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
         except OSError as e:
             print(f"[log] JSONL 写入失败: {e}", file=sys.stderr)
+        _jsonl_write_count += 1
+        should_rotate = (_jsonl_write_count % _JSONL_ROTATION_CHECK_EVERY == 0)
+    # Call outside the lock: rotate_jsonl_if_needed calls _debug_log which also needs _log_lock
+    if should_rotate:
+        rotate_jsonl_if_needed()
 
 
 def _read_logs(chat_id: str) -> list[dict]:
