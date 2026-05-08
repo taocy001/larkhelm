@@ -15,19 +15,21 @@ __all__ = ["_log_lock", "log_entry", "_read_logs", "_debug_log", "rotate_jsonl_i
 _MAX_JSONL_BYTES = 100 * 1024 * 1024  # 100 MB
 _jsonl_write_count = 0
 _JSONL_ROTATION_CHECK_EVERY = 1000  # check rotation every N log entries
+_rotation_lock = threading.Lock()   # separate lock so rotation never deadlocks with _log_lock
 
 
 def rotate_jsonl_if_needed() -> None:
     """Rotate all.jsonl if it exceeds _MAX_JSONL_BYTES; keeps one backup (.jsonl.1)."""
     p = _cfg.LOG_DIR / "all.jsonl"
-    try:
-        if p.exists() and p.stat().st_size > _MAX_JSONL_BYTES:
-            backup = p.with_suffix(".jsonl.1")
-            backup.unlink(missing_ok=True)
-            p.rename(backup)
-            _debug_log(f"[log] all.jsonl rotated → all.jsonl.1 ({backup.stat().st_size // 1024 // 1024} MB)")
-    except Exception as e:
-        print(f"[log] JSONL rotation failed: {e}", file=sys.stderr)
+    with _rotation_lock:
+        try:
+            if p.exists() and p.stat().st_size > _MAX_JSONL_BYTES:
+                backup = p.with_suffix(".jsonl.1")
+                backup.unlink(missing_ok=True)
+                p.rename(backup)
+                _debug_log(f"[log] all.jsonl rotated → all.jsonl.1 ({backup.stat().st_size // 1024 // 1024} MB)")
+        except Exception as e:
+            print(f"[log] JSONL rotation failed: {e}", file=sys.stderr)
 
 
 def _log_file(chat_id: str) -> Path:

@@ -622,7 +622,7 @@ class FeishuDocClient:
             except Exception as e:
                 raise DocAPIError(0, f"HTTP append 失败: {e}")
 
-    # Module-level token cache shared across all DocAPIClient instances.
+    # Class-level token cache shared across all FeishuDocClient instances.
     _token_cache: dict = {"token": "", "expires_at": 0.0}
     _token_lock = threading.Lock()
     _TOKEN_TTL = 6000  # 100 minutes (Feishu TTL is 2h, 20-minute safety margin)
@@ -649,7 +649,7 @@ class FeishuDocClient:
             if not token:
                 raise DocAPIError(0, "获取 tenant_access_token 失败")
             cache["token"] = token
-            cache["expires_at"] = time.time() + DocAPIClient._TOKEN_TTL
+            cache["expires_at"] = time.time() + FeishuDocClient._TOKEN_TTL
             return token
 
     def replace_all(self, ref: "DocRef", content: str) -> bool:
