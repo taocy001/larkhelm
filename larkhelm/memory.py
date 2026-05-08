@@ -1,19 +1,20 @@
 """larkhelm · three-tier persistent memory
 
 Storage: ~/.larkhelm/memory/
-  global_{open_id}.md    — user-level: preferences, identity, cross-project facts (≤500 chars)
+  global_{open_id}.md    — user-level: preferences, style, cross-project habits (≤800 chars)
                            keyed by sender_open_id; returns None when open_id unknown (group safety)
-  project_{hash16}.md    — project-level: tech stack, conventions, keyed by resolved cwd (≤1000 chars)
-  session_{chat_id}.md   — session-level: per-chat context, auto-updated every 20 turns (≤1500 chars)
+  project_{hash16}.md    — project-level: tech stack, conventions, keyed by resolved cwd (≤1500 chars)
+  session_{chat_id}.md   — session-level: current work, decisions, context (≤2000 chars)
+                           auto-updated every 10 turns; cascades to project/global after each update
 
-Injection order: global → project → session (passed via extra_system channel).
+Injection order: global → project → session (passed via extra_system channel, new sessions only).
 
-Usage flow:
-  1. _do_query() calls get_memory_context(chat_id, cwd) → formatted context string
-  2. Context is passed as extra_system to AI backends (not prepended to user message)
-  3. After query, _do_query() calls maybe_auto_update(chat_id) in background thread
-  4. /memory set [global|project] <text> writes manually; /memory clear <layer> deletes
-  5. /reset memory clears the session layer only
+Auto-learning flow:
+  1. Every 10 turns: session summary is regenerated from recent logs
+  2. After each session update: background cascade tries to extract new facts into
+     project memory (tech stack, conventions) and global memory (user preferences)
+  3. Extraction uses "UNCHANGED" sentinel — only writes when genuinely new info is found
+  4. /reset triggers a forced session snapshot + cascade before clearing the session
 
   inject_memory() is a legacy compatibility shim — do not call in new code.
 """
@@ -36,17 +37,18 @@ MEMORY_HOME_DIR = Path.home() / ".larkhelm" / "memory"
 
 # ── Per-layer size budgets ────────────────────────────────────────────────────
 
-GLOBAL_MAX_CHARS  = 500
-PROJECT_MAX_CHARS = 1000
-SESSION_MAX_CHARS = 1500
-TOTAL_MEMORY_BUDGET = 3000  # combined cap; tag overhead counted separately
+GLOBAL_MAX_CHARS  = 800
+PROJECT_MAX_CHARS = 1500
+SESSION_MAX_CHARS = 2000
+TOTAL_MEMORY_BUDGET = 4500  # combined cap; tag overhead counted separately
 
 _TAG_OVERHEAD_PER_LAYER = 50  # chars for open/close tag + surrounding newlines
 
 # ── Auto-update tuning ────────────────────────────────────────────────────────
 
-AUTO_UPDATE_EVERY         = 20   # session auto-update every N turns
+AUTO_UPDATE_EVERY         = 10   # session auto-update every N turns
 MEMORY_GENERATION_TIMEOUT = 120  # seconds before abandoning a slow generate call
+_EXTRACT_TIMEOUT          = 60   # shorter timeout for cascade extraction calls
 
 # ── Lock pools ────────────────────────────────────────────────────────────────
 # Both dicts are bounded to prevent unbounded growth in long-running processes.
@@ -64,7 +66,6 @@ def _get_update_lock(chat_id: str) -> threading.Lock:
     with _update_locks_meta:
         if chat_id in _update_locks:
             return _update_locks[chat_id]
-        # Bounded pool: evict the oldest unheld lock when at capacity
         if len(_update_locks) >= _MAX_POOL_SIZE:
             for old_key in list(_update_locks):
                 if not _update_locks[old_key].locked():
@@ -90,17 +91,71 @@ def _get_file_write_lock(path: Path) -> threading.Lock:
         return lock
 
 
+# ── Prompts ───────────────────────────────────────────────────────────────────
+
 _SUMMARIZE_PROMPT = """\
-You are a memory assistant. Based on the existing memory and recent conversation below, \
-write an updated concise persistent memory summary (max {max_chars} characters) in the \
-same language as the conversation. Preserve important facts from the existing memory \
-and incorporate new information from the recent log. Focus on: project context, user \
-goals, key decisions, and important facts. Use Markdown headings. \
-Output ONLY the summary — no preamble, no meta-commentary.
+You are a session memory assistant. Write a structured, concise memory summary \
+(max {max_chars} chars) in the SAME LANGUAGE as the conversation.
+
+Use these Markdown sections (omit any section that has nothing to say):
+
+## Work Context
+What project/repo, what task is in progress right now.
+
+## Key Decisions & Facts
+Important choices made, constraints discovered, technical conclusions.
+
+## Next Steps
+Pending items or open questions, if any.
+
+Preserve important facts from existing memory; incorporate new information from the log.
+Output ONLY the memory content — no preamble, no commentary.
 
 {existing_memory_section}---RECENT CONVERSATION---
 {logs}
 ---END LOG---
+"""
+
+# Extraction prompts: output "UNCHANGED" (exact, no punctuation) if nothing new to add.
+
+_EXTRACT_PROJECT_PROMPT = """\
+You are a project knowledge extractor. Review the session memory and decide whether it \
+reveals NEW project-specific facts not already captured in existing project memory.
+
+NEW facts to look for: tech stack choices, architecture decisions, file/folder conventions, \
+testing approach, coding style rules, recurring patterns, project constraints.
+
+If nothing new: output exactly the word UNCHANGED (nothing else).
+Otherwise: output updated project memory (max {max_chars} chars, Markdown, same language) \
+that merges existing facts with the new ones. Do not repeat information already in existing memory.
+
+<existing_project_memory>
+{existing}
+</existing_project_memory>
+
+<session_memory>
+{session}
+</session_memory>
+"""
+
+_EXTRACT_GLOBAL_PROMPT = """\
+You are a personal preference extractor. Review the session memory and decide whether it \
+reveals NEW cross-project user preferences not already captured in existing global memory.
+
+NEW facts to look for: communication style, language preference, response format habits, \
+working style, domain expertise, personal conventions that apply across ALL projects.
+
+If nothing new: output exactly the word UNCHANGED (nothing else).
+Otherwise: output updated global memory (max {max_chars} chars, Markdown, same language) \
+that merges existing facts with the new ones. Do not repeat existing information.
+
+<existing_global_memory>
+{existing}
+</existing_global_memory>
+
+<session_memory>
+{session}
+</session_memory>
 """
 
 # ── File helpers ──────────────────────────────────────────────────────────────
@@ -118,12 +173,12 @@ def _global_memory_file(chat_id: str | None = None) -> Path | None:
     """
     _ensure_dir()
     if not chat_id:
-        return None  # no chat_id → skip global layer entirely
+        return None
     try:
         state = _get_chat_state(chat_id)
         open_id = state.get("sender_open_id", "") or ""
         if not open_id:
-            return None  # open_id unavailable → group chat safety
+            return None
         return MEMORY_HOME_DIR / f"global_{open_id}.md"
     except Exception:
         return None
@@ -190,10 +245,7 @@ def _load_md_frontmatter(path: Path | None) -> dict[str, str]:
 
 
 def _save_md(path: Path | None, content: str, max_chars: int, extra_fm: str = "") -> None:
-    """Atomically write a memory file with YAML frontmatter, protected by a per-file lock.
-
-    Uses rename-then-replace; falls back to shutil.move for cross-filesystem scenarios.
-    """
+    """Atomically write a memory file with YAML frontmatter, protected by a per-file lock."""
     if path is None:
         return
     lock = _get_file_write_lock(path)
@@ -207,7 +259,6 @@ def _save_md(path: Path | None, content: str, max_chars: int, extra_fm: str = ""
             try:
                 tmp.replace(path)
             except OSError:
-                # Cross-filesystem move (e.g. tmpfs → NFS)
                 shutil.move(str(tmp), str(path))
             _debug_log(f"[memory] saved {path.name} ({len(body)} chars)")
         except Exception as e:
@@ -265,7 +316,6 @@ def load_memory(chat_id: str) -> str | None:
 
 
 def save_memory(chat_id: str, content: str) -> None:
-    """Save session memory."""
     turns = _get_turn_count(chat_id)
     _save_md(_session_memory_file(chat_id), content, SESSION_MAX_CHARS,
              f"chat_id: {chat_id}\nturns: {turns}\nversion: 1\n")
@@ -280,7 +330,7 @@ def get_memory_context(chat_id: str, cwd: str | None = None) -> str:
     proportionally when the combined total exceeds the budget.
     Returns empty string when no memory is active.
     """
-    parts: list[tuple[str, str, str]] = []  # (open_tag, content, close_tag)
+    parts: list[tuple[str, str, str]] = []
 
     g = load_global_memory(chat_id)
     if g:
@@ -298,7 +348,6 @@ def get_memory_context(chat_id: str, cwd: str | None = None) -> str:
     if not parts:
         return ""
 
-    # Budget enforcement: include per-layer tag overhead in total
     total = sum(len(c) + _TAG_OVERHEAD_PER_LAYER for _, c, _ in parts)
     if total > TOTAL_MEMORY_BUDGET:
         available = max(0, TOTAL_MEMORY_BUDGET - _TAG_OVERHEAD_PER_LAYER * len(parts))
@@ -317,8 +366,7 @@ def get_project_memory_context(chat_id: str, cwd: str | None = None) -> str:
     """Build project + session memory context (no global layer).
 
     Used by crew agents for task-scoped context. Global layer is intentionally
-    excluded to keep the function behaviour predictable — callers that need
-    global memory should call get_memory_context() directly.
+    excluded to keep the function behaviour predictable.
     """
     parts: list[str] = []
     if cwd:
@@ -343,20 +391,61 @@ def inject_memory(chat_id: str, message: str, cwd: str | None = None) -> str:
     return ctx + "\n\n" + message
 
 
-# ── Generation ────────────────────────────────────────────────────────────────
+# ── LLM one-shot helper ───────────────────────────────────────────────────────
 
 _API_PROVIDERS = ("anthropic_api", "google_api", "openai_compat_api")
 
 
-def generate_memory(chat_id: str, recent_logs: str,
-                    existing_memory: str | None = None) -> str:
-    """Generate a session memory summary via the orchestrator backend. Returns Markdown."""
+def _run_one_shot(prompt: str, ns: str) -> str:
+    """Run a single stateless LLM prompt and return the text output.
+
+    Uses the orchestrator backend. ns is an isolated chat namespace so the call
+    never touches any real chat's session state.
+    """
     from larkhelm.backend_registry import BACKEND_REGISTRY
+    from larkhelm.perm import grant_yolo, revoke_yolo
 
     spec = BACKEND_REGISTRY.get_orchestrator()
     if spec is None:
-        raise RuntimeError("No orchestrator backend available for memory generation")
+        raise RuntimeError("No orchestrator backend available")
 
+    collected: list[str] = []
+
+    def _on_text(text: str, status: str = "typing") -> None:
+        collected.clear()
+        collected.append(text)
+
+    try:
+        if spec.provider in _API_PROVIDERS:
+            import larkhelm.backend_api as _bapi
+            fn = {
+                "anthropic_api":    _bapi.run_anthropic,
+                "google_api":       _bapi.run_google,
+                "openai_compat_api": _bapi.run_openai_compat,
+            }[spec.provider]
+            output, _ = fn(spec=spec, chat_id=ns, message=prompt, history=[], on_text=_on_text)
+        else:
+            from larkhelm.backend_cli import run_claude
+            grant_yolo(ns)
+            try:
+                output = run_claude(spec=spec, chat_id=ns, message=prompt,
+                                    sid=None, cwd=str(_cfg.DATA_DIR), on_text=_on_text)
+            finally:
+                revoke_yolo(ns)
+        return output or "".join(collected)
+    finally:
+        try:
+            from larkhelm.chat_state import _clear_sid
+            _clear_sid(ns, "claude")
+        except Exception:
+            pass
+
+
+# ── Session memory generation ─────────────────────────────────────────────────
+
+def generate_memory(chat_id: str, recent_logs: str,
+                    existing_memory: str | None = None) -> str:
+    """Generate a session memory summary. Returns Markdown (≤SESSION_MAX_CHARS)."""
     if existing_memory:
         existing_memory_section = (
             f"---EXISTING MEMORY (preserve important facts and update)---\n"
@@ -369,50 +458,98 @@ def generate_memory(chat_id: str, recent_logs: str,
     prompt = _SUMMARIZE_PROMPT.format(
         max_chars=SESSION_MAX_CHARS,
         existing_memory_section=existing_memory_section,
-        logs=recent_logs[:8000],
+        logs=recent_logs[:10000],
     )
-    collected: list[str] = []
-
-    def _on_text(text: str, status: str = "typing") -> None:
-        collected.clear()
-        collected.append(text)
-
-    # Isolated namespace prevents writing into the main chat's session state.
-    _mem_chat_id = f"_mem_{chat_id}"
     try:
-        if spec.provider in _API_PROVIDERS:
-            import larkhelm.backend_api as _bapi
-            _fn = {"anthropic_api": _bapi.run_anthropic,
-                   "google_api":    _bapi.run_google,
-                   "openai_compat_api": _bapi.run_openai_compat}[spec.provider]
-            output, _ = _fn(spec=spec, chat_id=_mem_chat_id, message=prompt,
-                            history=[], on_text=_on_text)
-        else:
-            from larkhelm.backend_cli import run_claude
-            output = run_claude(spec=spec, chat_id=_mem_chat_id, message=prompt,
-                                sid=None, cwd=str(_cfg.DATA_DIR), on_text=_on_text)
-        return (output or "".join(collected))[:SESSION_MAX_CHARS]
+        result = _run_one_shot(prompt, ns=f"_mem_{chat_id}")
+        return result[:SESSION_MAX_CHARS]
     except Exception as e:
         _debug_log(f"[memory] generate_memory error {chat_id}: {e}")
         raise
-    finally:
-        # Clean up the isolated CLI session file created during generation
-        try:
-            from larkhelm.chat_state import _clear_sid
-            _clear_sid(_mem_chat_id, "claude")
-        except Exception:
-            pass
 
 
-# ── Auto-update (session layer) ───────────────────────────────────────────────
+# ── Cascade extraction (project + global auto-learning) ──────────────────────
+
+def _try_extract_project(session_content: str, cwd: str) -> None:
+    """Extract project facts from a fresh session summary → update project layer if new info found.
+
+    Runs in a background daemon thread. Writes only when the LLM finds genuinely new
+    information (output != "UNCHANGED"). Safe to call concurrently; file write lock serialises.
+    """
+    try:
+        existing = load_project_memory(cwd) or "(empty)"
+        prompt = _EXTRACT_PROJECT_PROMPT.format(
+            max_chars=PROJECT_MAX_CHARS,
+            existing=existing,
+            session=session_content,
+        )
+        ns = f"_proj_{hashlib.md5(cwd.encode()).hexdigest()[:8]}"
+        result = _run_one_shot(prompt, ns=ns)
+        result = result.strip()
+        if result and result.upper() != "UNCHANGED":
+            save_project_memory(cwd, result)
+            _debug_log(f"[memory] project layer auto-updated from session cascade ({len(result)} chars)")
+    except Exception as e:
+        _debug_log(f"[memory] extract_project error for {cwd!r}: {e}")
+
+
+def _try_extract_global(session_content: str, chat_id: str) -> None:
+    """Extract user preferences from a fresh session summary → update global layer if new info found."""
+    try:
+        g_path = _global_memory_file(chat_id)
+        if g_path is None:
+            return  # no open_id (group chat) — skip global layer
+        existing = _load_md_body(g_path) or "(empty)"
+        prompt = _EXTRACT_GLOBAL_PROMPT.format(
+            max_chars=GLOBAL_MAX_CHARS,
+            existing=existing,
+            session=session_content,
+        )
+        ns = f"_glob_{chat_id[:8]}"
+        result = _run_one_shot(prompt, ns=ns)
+        result = result.strip()
+        if result and result.upper() != "UNCHANGED":
+            save_global_memory(result, chat_id=chat_id)
+            _debug_log(f"[memory] global layer auto-updated from session cascade ({len(result)} chars)")
+    except Exception as e:
+        _debug_log(f"[memory] extract_global error for {chat_id[:8]}: {e}")
+
+
+def _cascade_extract(session_content: str, chat_id: str) -> None:
+    """Launch background threads to extract project and global facts from a fresh session summary."""
+    try:
+        from larkhelm.chat_state import _get_cwd
+        cwd = _get_cwd(chat_id)
+    except Exception:
+        cwd = None
+
+    if cwd:
+        threading.Thread(
+            target=_try_extract_project,
+            args=(session_content, cwd),
+            daemon=True,
+            name=f"memext-proj-{chat_id[:8]}",
+        ).start()
+
+    threading.Thread(
+        target=_try_extract_global,
+        args=(session_content, chat_id),
+        daemon=True,
+        name=f"memext-glob-{chat_id[:8]}",
+    ).start()
+
+
+# ── Auto-update (session layer + cascade) ────────────────────────────────────
 
 def maybe_auto_update(chat_id: str, force: bool = False,
                       on_done: Callable[[bool, str | None, str | None], None] | None = None,
                       ) -> None:
     """Check if session memory needs updating and run in a background thread if so.
 
-    Only the session layer is auto-updated. Global and project layers are manually managed.
     Triggers when turn_count % AUTO_UPDATE_EVERY == 0 (or force=True).
+    After a successful session update, automatically cascades to extract new facts
+    into project and global memory layers (background, non-blocking).
+
     on_done: optional callback(success, content, error_code)
     """
     turn_count = _get_turn_count(chat_id)
@@ -437,11 +574,9 @@ def maybe_auto_update(chat_id: str, force: bool = False,
             if not logs:
                 _notify(False, None, "no_logs")
                 return
-            recent = logs[-40:]
-            # Exclude crew/shell model entries: they contain agent internals,
-            # not real conversation content, and would pollute the memory summary.
+            recent = logs[-50:]
             log_text = "\n".join(
-                f"[{r['ts']}] {r['role']}: {r['content'][:500]}"
+                f"[{r['ts']}] {r['role']}: {r['content'][:600]}"
                 for r in recent
                 if r["role"] in ("user", "assistant")
                 and r.get("model") not in ("crew", "shell")
@@ -465,14 +600,19 @@ def maybe_auto_update(chat_id: str, force: bool = False,
             gen_t.start()
             gen_t.join(timeout=MEMORY_GENERATION_TIMEOUT)
             if gen_t.is_alive():
-                _debug_log(f"[memory] generate_memory timed out ({MEMORY_GENERATION_TIMEOUT}s) "
-                           f"for {chat_id[:8]} — daemon thread still running")
+                _debug_log(f"[memory] generate_memory timed out ({MEMORY_GENERATION_TIMEOUT}s) for {chat_id[:8]}")
                 _notify(False, None, f"timed_out_{MEMORY_GENERATION_TIMEOUT}s")
                 return
             if err[0]:
                 raise err[0]
+
             save_memory(chat_id, result[0])
             _notify(True, result[0], None)
+
+            # Cascade: auto-extract project and global facts from the fresh session summary.
+            # Runs in separate daemon threads — does not block the caller or the on_done callback.
+            _cascade_extract(result[0], chat_id)
+
         except Exception as e:
             _debug_log(f"[memory] maybe_auto_update error {chat_id}: {e}")
             _notify(False, None, str(e))
