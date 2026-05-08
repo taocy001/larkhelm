@@ -530,8 +530,8 @@ def _wait_for_breakpoint(state: CrewState, agent_id: str) -> bool:
         state.breakpoint_agent_id = agent_id
     _crew_update_card(state)
 
-    # Wait for user decision; poll to support /cancel interruption; max 10 minutes
-    bp_deadline = time.time() + min(_cfg.RESPONSE_TIMEOUT * 2, 600)
+    # Wait for user decision; poll to support /cancel interruption; max 60 minutes
+    bp_deadline = time.time() + min(_cfg.RESPONSE_TIMEOUT * 2, 3600)
     while time.time() < bp_deadline:
         if state.cancel_ev.is_set():
             _debug_log(f"[Crew] breakpoint wait interrupted by /cancel")

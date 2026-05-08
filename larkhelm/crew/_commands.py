@@ -3,6 +3,7 @@ larkhelm · Crew public command functions and Manager planning
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -17,6 +18,40 @@ from larkhelm.crew_types import (
     CREW_MAX_AGENTS,
 )
 from larkhelm.crew_card import _crew_update_card
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Workspace metadata helpers (stale-detection for /dev)
+# ═══════════════════════════════════════════════════════════════
+
+def _task_hash(requirement: str) -> str:
+    return hashlib.md5(requirement.encode()).hexdigest()[:16]
+
+
+def _read_workspace_meta(ws_path: Path) -> dict:
+    meta_file = ws_path / "workspace_meta.json"
+    if meta_file.exists():
+        try:
+            return json.loads(meta_file.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def _write_workspace_meta(ws_path: Path, task_hash: str, completed: bool = False) -> None:
+    ws_path.mkdir(parents=True, exist_ok=True)
+    (ws_path / "workspace_meta.json").write_text(
+        json.dumps({"task_hash": task_hash, "completed": completed})
+    )
+
+
+def _clear_workspace(ws_path: Path) -> None:
+    if ws_path.exists():
+        for f in ws_path.iterdir():
+            try:
+                f.unlink()
+            except Exception:
+                pass
 
 
 # Crew thread registry, used by wait_crews_done
@@ -576,13 +611,22 @@ def _run_dev_crew_inner(chat_id: str, requirement: str, user_msg_id: str,
     clear_recent_crew_context(chat_id)
 
     try:
-        # Detect whether design.md + tasks.json already exist in .crew_workspace/
-        # If so, skip pm/architect and start directly from implementer (continues from a prior /crew analysis)
-        ws_path    = Path(cwd) / ".crew_workspace"
-        has_design = (ws_path / "design.md").exists() and (ws_path / "tasks.json").exists()
-        # force_replan=True (standalone /dev --no-confirm) always runs full pipeline.
-        # no_confirm only controls whether to skip the PM breakpoint, not planning itself.
-        skip_planning = has_design and not force_replan
+        ws_path   = Path(cwd) / ".crew_workspace"
+        task_hash = _task_hash(requirement)
+        meta      = _read_workspace_meta(ws_path)
+
+        # Clear workspace when: task is different OR previous run completed successfully (APPROVED).
+        # Keep workspace when: same task and previous run was interrupted or rejected (resume-able).
+        if meta and (meta.get("task_hash") != task_hash or meta.get("completed")):
+            _clear_workspace(ws_path)
+            meta = {}
+
+        # force_replan=True (--no-confirm) always runs full pipeline.
+        has_design    = (ws_path / "design.md").exists() and (ws_path / "tasks.json").exists()
+        skip_planning = bool(meta) and has_design and not force_replan
+
+        if not meta:
+            _write_workspace_meta(ws_path, task_hash=task_hash, completed=False)
 
         plan = _make_dev_pipeline(requirement, cwd, no_confirm=no_confirm,
                                   skip_planning=skip_planning)
@@ -620,6 +664,13 @@ def _run_dev_crew_inner(chat_id: str, requirement: str, user_msg_id: str,
         # pm/arch/qa/reviewer ~20min each, impl/fixer ~6h each; estimated 2.5h covers the full pipeline
         total_timeout = _cfg.RESPONSE_TIMEOUT * 28
         _run_crew(state, total_timeout)
+
+        # Mark workspace completed only after APPROVED review so the next /dev for the same
+        # requirement starts fresh. On REJECTED or interrupted, completed=False is kept so
+        # that the next run can skip PM/architect and continue from where it left off.
+        review_file = ws_path / "review.md"
+        if review_file.exists() and review_file.read_text().strip().endswith("APPROVED"):
+            _write_workspace_meta(ws_path, task_hash=task_hash, completed=True)
 
     finally:
         with _active_crew_lock:
