@@ -24,7 +24,8 @@ def _spawn_claude_proc(chat_id, message, sid, cwd, cancel_ev=None, on_text=None,
                        on_tool=None, on_tool_result=None, allow_retry=False,
                        on_soft_timeout=None, on_start=None, images=None,
                        session_namespace=None, command=None,
-                       model=None, extra_args=None, session_key=None) -> str:
+                       model=None, extra_args=None, session_key=None,
+                       system_prompt=None) -> str:
     from larkhelm.runner_claude import ClaudeRunner
     return ClaudeRunner(
         chat_id, message, sid, cwd,
@@ -33,6 +34,7 @@ def _spawn_claude_proc(chat_id, message, sid, cwd, cancel_ev=None, on_text=None,
         on_soft_timeout=on_soft_timeout, on_start=on_start,
         images=images, session_namespace=session_namespace, command=command,
         model=model, extra_args=extra_args, session_key=session_key,
+        system_prompt=system_prompt,
     ).run()
 
 

@@ -34,6 +34,7 @@ def run_claude(
     images: list = None,
     session_namespace: str = None,
     allow_retry: bool = False,
+    system_prompt: str | None = None,
 ) -> str:
     return _spawn_claude_proc(
         chat_id=chat_id,
@@ -53,6 +54,7 @@ def run_claude(
         model=spec.model or None,
         extra_args=spec.extra_args or None,
         session_key=spec.id,
+        system_prompt=system_prompt,
     )
 
 

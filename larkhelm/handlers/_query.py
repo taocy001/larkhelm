@@ -133,10 +133,10 @@ def _run_backend_single(spec, chat_id: str, message: str, cwd: str, cancel_ev,
                           on_soft_timeout=on_soft_timeout, images=images)
     else:  # claude_cli (default)
         sid = _load_sid(chat_id, spec.id)
-        cli_msg = f"[System]\n{extra_system}\n\n[User Query]\n{message}" if (extra_system and not sid) else message
-        output = run_claude(spec, chat_id, cli_msg, sid, cwd, cancel_ev,
+        output = run_claude(spec, chat_id, message, sid, cwd, cancel_ev,
                             on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
-                            on_soft_timeout=on_soft_timeout, images=images, allow_retry=True)
+                            on_soft_timeout=on_soft_timeout, images=images, allow_retry=True,
+                            system_prompt=extra_system or None)
     return output
 
 

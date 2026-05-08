@@ -54,6 +54,7 @@ class ClaudeRunner(BaseProcessRunner):
         model: str | None = None,
         extra_args: list | None = None,
         session_key: str | None = None,
+        system_prompt: str | None = None,
     ) -> None:
         super().__init__(
             "claude", chat_id, message, sid, cwd,
@@ -65,12 +66,14 @@ class ClaudeRunner(BaseProcessRunner):
         self._model = model
         self._extra_args = list(extra_args) if extra_args else []
         self._session_key = session_key or "claude"
+        self._system_prompt = system_prompt or ""
         self._ctor_kwargs = dict(
             cancel_ev=cancel_ev, on_text=on_text, on_tool=on_tool,
             on_tool_result=on_tool_result, on_soft_timeout=on_soft_timeout,
             on_start=on_start, allow_retry=allow_retry, images=images,
             session_namespace=session_namespace, command=command,
             model=model, extra_args=extra_args, session_key=session_key,
+            system_prompt=system_prompt,
         )
 
     def build_args(self) -> list[str]:
@@ -78,6 +81,8 @@ class ClaudeRunner(BaseProcessRunner):
         args = [cmd, "--print", "--output-format", "stream-json", "--verbose"]
         if self._model:
             args += ["--model", self._model]
+        if self._system_prompt:
+            args += ["--system", self._system_prompt]
         if self.images:
             args += ["--input-format", "stream-json"]
 
