@@ -56,9 +56,14 @@ def log_entry(
 
 
 def _read_logs(chat_id: str) -> list[dict]:
-    """Stream-read records belonging to chat_id from all.jsonl to avoid loading the entire file at once."""
-    with _log_lock:
-        log_path = _cfg.LOG_DIR / "all.jsonl"
+    """Read records belonging to chat_id from all.jsonl.
+
+    The file is append-only; each JSON record is written on one line.  Reading
+    without holding _log_lock is safe: the worst case is we miss the very last
+    incomplete line (handled by the inner try/except).  Holding the lock for a
+    full file scan would stall log writes for the entire duration.
+    """
+    log_path = _cfg.LOG_DIR / "all.jsonl"
     result = []
     try:
         with log_path.open(encoding="utf-8") as f:

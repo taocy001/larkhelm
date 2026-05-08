@@ -100,7 +100,9 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
         except Exception:
             pass
         log_entry(chat_id, "reset", "reset:all", model="system")
-        send_card_reply(chat_id, msg_id, "♻️ 已重置", "所有 AI 会话均已清空（记忆已保留）。", color="green")
+        send_card_reply(chat_id, msg_id, "♻️ 已重置",
+                        "所有 AI 会话均已清空（三层记忆已保留）。\n\n"
+                        "如需同时清除会话记忆：`/memory clear session`", color="green")
     elif which == "claude":
         _clear_sid(chat_id, "claude")
         try:
@@ -109,7 +111,9 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
         except Exception:
             pass
         log_entry(chat_id, "reset", "reset:claude", model="system")
-        send_card_reply(chat_id, msg_id, "♻️ 已重置", "Claude 会话已清空。", color="green")
+        send_card_reply(chat_id, msg_id, "♻️ 已重置",
+                        "Claude 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
+                        color="green")
     elif which == "gemini":
         _clear_sid(chat_id, "gemini")
         try:
@@ -118,7 +122,9 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
         except Exception:
             pass
         log_entry(chat_id, "reset", "reset:gemini", model="system")
-        send_card_reply(chat_id, msg_id, "♻️ 已重置", "Gemini 会话已清空。", color="green")
+        send_card_reply(chat_id, msg_id, "♻️ 已重置",
+                        "Gemini 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
+                        color="green")
     elif which == "kimi":
         _clear_sid(chat_id, "kimi")
         try:
@@ -127,15 +133,17 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
         except Exception:
             pass
         log_entry(chat_id, "reset", "reset:kimi", model="system")
-        send_card_reply(chat_id, msg_id, "♻️ 已重置", "Kimi 会话已清空。", color="green")
+        send_card_reply(chat_id, msg_id, "♻️ 已重置",
+                        "Kimi 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
+                        color="green")
     elif which == "memory":
         try:
-            from larkhelm.memory import _memory_file
-            _memory_file(chat_id).unlink(missing_ok=True)
+            from larkhelm.memory import _session_memory_file
+            _session_memory_file(chat_id).unlink(missing_ok=True)
         except Exception:
             pass
         log_entry(chat_id, "reset", "reset:memory", model="system")
-        send_card_reply(chat_id, msg_id, "♻️ 已重置", "持久记忆已清除。", color="green")
+        send_card_reply(chat_id, msg_id, "♻️ 已重置", "会话记忆已清除（全局/项目记忆保留）。", color="green")
     elif which in ("perm", "permissions"):
         revoke_yolo(chat_id)
         send_card_reply(chat_id, msg_id, "🔐 权限已重置", "「允许所有」已取消，后续工具调用将重新弹出审批。", color="green")
@@ -311,7 +319,17 @@ def _cmd_help(chat_id: str, msg_id: str = None):
         "**/plan** — 多阶段编排，一条指令串行执行多个 dev/review/fix/test 步骤：\n"
         "　　**[dev]** 实现登录　**[review]** 安全审查　**[fix]** 修复问题　**[test]** 回归测试\n"
         "　　每步完成后等待确认，支持跳过或取消；也可 **/plan** <飞书文档URL> 从文档读取计划\n"
-        "**/btw** <问题> — 快问（不占主任务锁，回复到消息线程）"
+        "**/btw** <问题> — 快问（不占主任务锁，回复到消息线程）\n"
+        "\n"
+        "**🧠 记忆系统**\n"
+        "**/memory** — 查看三层记忆（全局/项目/会话）\n"
+        "**/memory set global <内容>** — 设置全局偏好（语言、习惯等）\n"
+        "　　示例：`/memory set global 回复用中文，代码注释用英文`\n"
+        "**/memory set project <内容>** — 设置项目记忆（技术栈、规范等）\n"
+        "　　示例：`/memory set project 使用 FastAPI + PostgreSQL，测试用 pytest`\n"
+        "**/memory update** — 立即生成会话摘要（会话记忆每 10 轮自动更新）\n"
+        "**/memory clear session|project|global|all** — 清除记忆\n"
+        "**/memory list** — 查看所有项目记忆文件"
     )
     buttons = [
         ("♻️ 重置会话", "/reset"),
@@ -920,20 +938,34 @@ def _cmd_btw(chat_id: str, question: str, user_msg_id: str):
                     if mid:
                         _patch_card_raw(mid, _make_card("💬", text.strip() or "> 正在思考...", color="grey"))
 
+                # Inject memory context (L2)
+                _btw_mem_ctx = ""
+                try:
+                    from larkhelm.memory import get_memory_context as _get_mem_ctx
+                    _btw_mem_ctx = _get_mem_ctx(chat_id, cwd=cwd)
+                except Exception:
+                    pass
+
                 _API_PROVIDERS = ("anthropic_api", "google_api", "openai_compat_api")
                 if _spec.provider == "claude_cli":
+                    _btw_msg = (f"[System]\n{_btw_mem_ctx}\n\n[User Query]\n{question}"
+                                if _btw_mem_ctx else question)
                     output = _bc_run_claude(
-                        spec=_spec, chat_id=chat_id, message=question, sid=sid, cwd=cwd,
+                        spec=_spec, chat_id=chat_id, message=_btw_msg, sid=sid, cwd=cwd,
                         cancel_ev=None, on_text=_on_text, allow_retry=True,
                     )
                 elif _spec.provider == "gemini_cli":
+                    _btw_msg = (f"[System]\n{_btw_mem_ctx}\n\n[User Query]\n{question}"
+                                if _btw_mem_ctx else question)
                     output = _bc_run_gemini(
-                        spec=_spec, chat_id=chat_id, message=question, sid=sid, cwd=cwd,
+                        spec=_spec, chat_id=chat_id, message=_btw_msg, sid=sid, cwd=cwd,
                         cancel_ev=None, on_text=_on_text,
                     )
                 elif _spec.provider == "kimi_cli":
+                    _btw_msg = (f"[System]\n{_btw_mem_ctx}\n\n[User Query]\n{question}"
+                                if _btw_mem_ctx else question)
                     output = _bc_run_kimi(
-                        spec=_spec, chat_id=chat_id, message=question, sid=sid, cwd=cwd,
+                        spec=_spec, chat_id=chat_id, message=_btw_msg, sid=sid, cwd=cwd,
                         cancel_ev=None, on_text=_on_text, allow_retry=True,
                     )
                 elif _spec.provider in _API_PROVIDERS:
@@ -941,7 +973,8 @@ def _cmd_btw(chat_id: str, question: str, user_msg_id: str):
                            "google_api": _bapi.run_google,
                            "openai_compat_api": _bapi.run_openai_compat}[_spec.provider]
                     output, _ = _fn(spec=_spec, chat_id=chat_id, message=question,
-                                    history=[], on_text=_on_text)
+                                    history=[], on_text=_on_text,
+                                    extra_system=_btw_mem_ctx if _btw_mem_ctx else "")
                 else:
                     raise RuntimeError(f"Unknown provider for /btw: {_spec.provider}")
 
@@ -976,34 +1009,185 @@ def _cmd_btw(chat_id: str, question: str, user_msg_id: str):
 # ═══════════════════════════════════════════════════
 
 def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None):
-    """/memory [update|clear] — show, force-update, or clear persistent memory."""
-    from larkhelm.memory import load_memory, save_memory, maybe_auto_update
-    sub = args.strip().lower()
+    """/memory — show/set/clear/update the three-tier memory system.
 
-    if sub == "clear":
+    /memory                        show all active layers
+    /memory set global <text>      overwrite global layer (≤500 chars)
+    /memory set project <text>     overwrite project layer for current cwd (≤1000 chars)
+    /memory clear [global|project|session]   clear one or all layers
+    /memory update                 force-regenerate session layer from logs
+    """
+    from larkhelm.memory import (
+        load_global_memory, save_global_memory,
+        load_project_memory, save_project_memory,
+        load_memory, save_memory, maybe_auto_update,
+        _global_memory_file, _project_memory_file, _session_memory_file,
+        _load_md_frontmatter, _load_md_body, _ensure_dir, MEMORY_HOME_DIR,
+        GLOBAL_MAX_CHARS, PROJECT_MAX_CHARS, AUTO_UPDATE_EVERY,
+    )
+    from larkhelm.chat_state import _get_cwd
+    cwd = _get_cwd(chat_id)
+    args = args.strip()
+    sub = args.lower()
+
+    # ── /memory set global <text> ────────────────────────────────────────────
+    if sub.startswith("set global ") or sub == "set global":
+        text = args[11:].strip()  # len("set global ") == 11
+        if not text:
+            send_card_reply(chat_id, msg_id, "⚠️ 用法",
+                            "`/memory set global <内容>` — 设置全局记忆（最多 500 字符）",
+                            color="orange")
+            return
+        if _global_memory_file(chat_id) is None:
+            send_card_reply(chat_id, msg_id, "⚠️ 全局记忆不可用",
+                            "当前会话无法识别发送者身份，全局记忆已跳过（群聊安全保护）。",
+                            color="orange")
+            return
+        save_global_memory(text, chat_id=chat_id)
+        send_card_reply(chat_id, msg_id, "✅ 全局记忆已更新",
+                        f"```\n{text[:200]}\n```", color="green")
+        return
+
+    # ── /memory set project <text> ───────────────────────────────────────────
+    if sub.startswith("set project ") or sub == "set project":
+        text = args[12:].strip()  # len("set project ") == 12
+        if not text:
+            send_card_reply(chat_id, msg_id, "⚠️ 用法",
+                            f"`/memory set project <内容>` — 设置当前项目记忆（cwd: `{cwd}`，最多 1000 字符）",
+                            color="orange")
+            return
+        save_project_memory(cwd, text)
+        send_card_reply(chat_id, msg_id, "✅ 项目记忆已更新",
+                        f"**目录**: `{cwd}`\n\n```\n{text[:200]}\n```", color="green")
+        return
+
+    # ── /memory clear <layer> ────────────────────────────────────────────────
+    if sub.startswith("clear"):
+        layer = args[5:].strip().lower()  # "all" | "global" | "project" | "session"
+        if not layer:
+            layer = "session"  # default: clear only session layer (safest)
+        deleted = []
         try:
-            from larkhelm.memory import _memory_file
-            _memory_file(chat_id).unlink(missing_ok=True)
-            send_card_reply(chat_id, msg_id, "🗑️ 记忆已清除", "已删除本 chat 的持久记忆。", color="green")
+            if layer in ("all", "session"):
+                _session_memory_file(chat_id).unlink(missing_ok=True)
+                deleted.append("会话")
+            if layer in ("all", "global"):
+                _gf = _global_memory_file(chat_id)
+                if _gf:
+                    _gf.unlink(missing_ok=True)
+                deleted.append("全局")
+            if layer in ("all", "project"):
+                _project_memory_file(cwd).unlink(missing_ok=True)
+                deleted.append("项目")
+            if not deleted:
+                send_card_reply(chat_id, msg_id, "⚠️ 未知层级",
+                                "可选: `global` · `project` · `session` · `all`",
+                                color="orange")
+                return
+            if layer == "session":
+                detail = "已清除会话记忆，全局和项目记忆已保留。"
+            else:
+                detail = f"已删除：{'、'.join(deleted)}记忆。"
+            send_card_reply(chat_id, msg_id, "🗑️ 已清除", detail, color="green")
         except Exception as e:
             send_card_reply(chat_id, msg_id, "❌ 清除失败", str(e)[:200], color="red")
         return
 
+    # ── /memory update ───────────────────────────────────────────────────────
     if sub == "update":
-        send_card_reply(chat_id, msg_id, "🔄 生成记忆中", "正在后台生成记忆摘要，完成后可 `/memory` 查看。", color="grey")
-        maybe_auto_update(chat_id, force=True)
+        update_mid = send_card_reply(chat_id, msg_id, "🔄 生成记忆中",
+                                     "正在后台生成会话摘要，预计 10~30 秒，请稍候…", color="grey")
+
+        _ERR_MSG_MAP = {
+            "no_logs":              "当前会话暂无对话记录，无法生成摘要。",
+            "no_conversation_logs": "当前会话暂无普通对话（只有系统/Shell 记录），无法生成摘要。",
+        }
+
+        def _on_update_done(success: bool, content, error):
+            if success and content:
+                preview = content[:200]
+                new_card = _make_card("✅ 会话记忆已更新",
+                                     f"```\n{preview}\n```", color="green")
+            else:
+                if error and error.startswith("timed_out_"):
+                    secs = error.replace("timed_out_", "").replace("s", "")
+                    err_msg = f"记忆生成超时（>{secs}s），请稍后重试。"
+                else:
+                    err_msg = _ERR_MSG_MAP.get(error or "", "记忆生成失败，请稍后重试。")
+                new_card = _make_card("❌ 记忆生成失败", err_msg, color="red")
+            if update_mid:
+                _patch_card_raw(update_mid, new_card)
+            else:
+                send_card_reply(chat_id, msg_id,
+                                "✅ 会话记忆已更新" if success else "❌ 记忆生成失败",
+                                f"```\n{content[:200]}\n```" if success else err_msg,
+                                color="green" if success else "red")
+
+        maybe_auto_update(chat_id, force=True, on_done=_on_update_done)
         return
 
-    # Show current memory
-    content = load_memory(chat_id)
-    if content:
-        send_card_reply(chat_id, msg_id, "🧠 持久记忆",
-                        content + "\n\n---\n`/memory update` 更新 · `/memory clear` 清除",
-                        color="blue", normalize=False)
+    # ── /memory list — show all project memory files ─────────────────────────
+    if sub == "list":
+        _ensure_dir()
+        project_files = sorted(MEMORY_HOME_DIR.glob("project_*.md"))
+        if not project_files:
+            send_card_reply(chat_id, msg_id, "📂 项目记忆", "_暂无项目记忆文件_", color="blue")
+            return
+        lines = []
+        for pf in project_files:
+            fm = _load_md_frontmatter(pf)
+            stored_cwd = fm.get("cwd", "?")
+            updated = (fm.get("updated_at", "?") or "?")[:10]
+            body = _load_md_body(pf) or ""
+            _stored_resolved = str(Path(stored_cwd).resolve()) if stored_cwd else ""
+            _cwd_resolved = str(Path(cwd).resolve()) if cwd else ""
+            mark = "📍" if _stored_resolved and _stored_resolved == _cwd_resolved else "📁"
+            lines.append(f"{mark} **{pf.stem}**\n`{stored_cwd}`  更新: {updated}  大小: {len(body)} 字符")
+        send_card_reply(chat_id, msg_id, f"📂 项目记忆（{len(project_files)} 个）",
+                        "\n\n---\n\n".join(lines), color="blue", normalize=False)
+        return
+
+    # ── /memory — show all layers ────────────────────────────────────────────
+    from larkhelm.chat_state import _get_turn_count as _gtc
+    _turn = _gtc(chat_id)
+
+    def _fm_meta(path) -> str:
+        if path is None:
+            return ""
+        fm = _load_md_frontmatter(path)
+        ts = (fm.get("updated_at") or "")[:16].replace("T", " ")
+        return f" _(更新: {ts})_" if ts else ""
+
+    g = load_global_memory(chat_id)
+    p = load_project_memory(cwd)
+    s = load_memory(chat_id)
+
+    _g_path = _global_memory_file(chat_id)
+    _p_path = _project_memory_file(cwd)
+    _s_path = _session_memory_file(chat_id)
+
+    sections: list[str] = []
+    if g:
+        sections.append(f"### 🌐 全局记忆{_fm_meta(_g_path)}\n{g}")
     else:
-        send_card_reply(chat_id, msg_id, "🧠 持久记忆",
-                        "_暂无记忆。每 20 轮对话自动生成，或发送 `/memory update` 立即生成。_",
-                        color="blue")
+        sections.append("### 🌐 全局记忆\n_（空）_ — `/memory set global <内容>` 设置")
+
+    if p:
+        sections.append(f"### 📁 项目记忆 (`{cwd}`){_fm_meta(_p_path)}\n{p}")
+    else:
+        sections.append(f"### 📁 项目记忆 (`{cwd}`)\n_（空）_ — `/memory set project <内容>` 设置")
+
+    if s:
+        _next_turn = _turn + (AUTO_UPDATE_EVERY - (_turn % AUTO_UPDATE_EVERY) if _turn % AUTO_UPDATE_EVERY else AUTO_UPDATE_EVERY)
+        sections.append(f"### 💬 会话记忆{_fm_meta(_s_path)} _(当前第 {_turn} 轮，第 {_next_turn} 轮时自动更新，可 `/memory update` 立即触发)_\n{s}")
+    else:
+        sections.append(f"### 💬 会话记忆 _(当前第 {_turn} 轮)_\n_（空）_ — 每 {AUTO_UPDATE_EVERY} 轮自动生成，或 `/memory update` 立即生成")
+
+    body = "\n\n---\n\n".join(sections)
+    body += ("\n\n---\n`/memory set global|project <内容>` 写入 · "
+             "`/memory clear session|project|global|all` 清除 · "
+             "`/memory update` 更新会话 · `/memory list` 查看项目记忆文件")
+    send_card_reply(chat_id, msg_id, "🧠 三层记忆系统", body, color="blue", normalize=False)
 
 
 # ═══════════════════════════════════════════════════

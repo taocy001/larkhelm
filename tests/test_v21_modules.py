@@ -169,7 +169,7 @@ class TestMemory(unittest.TestCase):
         save_memory(chat_id, content)
         msg = "What do you know?"
         enriched = inject_memory(chat_id, msg)
-        self.assertIn("[PERSISTENT MEMORY]", enriched)
+        self.assertIn("[SESSION MEMORY]", enriched)
         self.assertIn(content, enriched)
         self.assertIn(msg, enriched)
 

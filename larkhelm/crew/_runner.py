@@ -246,6 +246,17 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
         )
         full_prompt = _resume_prefix + full_prompt
 
+    # Resolve memory context for this agent (B1/B6):
+    # API backends receive it as extra_system; CLI backends get a [System] prefix.
+    # hermes orchestrators have their own context and don't need memory injection.
+    _crew_mem_ctx = ""
+    if not spec.model.startswith("hermes_"):
+        try:
+            from larkhelm.memory import get_project_memory_context
+            _crew_mem_ctx = get_project_memory_context(state.chat_id, cwd=str(cwd))
+        except Exception:
+            pass
+
     # Timeout control: start countdown only after acquiring the process slot (semaphore),
     # so waiting time is not counted toward the timeout.
     agent_cancel  = threading.Event()
@@ -293,9 +304,11 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
     try:
         if spec.model == "gemini":
             _on_start()   # Gemini has no semaphore callback; trigger directly
+            _gemini_msg = (f"[System]\n{_crew_mem_ctx}\n\n[User Query]\n{full_prompt}"
+                           if _crew_mem_ctx else full_prompt)
             output = query_gemini(
                 chat_id=crew_ns,
-                message=full_prompt,
+                message=_gemini_msg,
                 cwd=cwd,
                 cancel_ev=agent_cancel,
                 on_text=_on_text,
@@ -306,9 +319,11 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
             )
         elif spec.model == "kimi":
             _on_start()   # Kimi has no semaphore callback; trigger directly
+            _kimi_msg = (f"[System]\n{_crew_mem_ctx}\n\n[User Query]\n{full_prompt}"
+                         if _crew_mem_ctx else full_prompt)
             output = query_kimi(
                 chat_id=crew_ns,
-                message=full_prompt,
+                message=_kimi_msg,
                 cwd=cwd,
                 cancel_ev=agent_cancel,
                 on_text=_on_text,
@@ -338,13 +353,18 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
                        "google_api": _bapi.run_google,
                        "openai_compat_api": _bapi.run_openai_compat}[_spec.provider]
                 _on_start()
+                # API backends: pass memory as extra_system (proper system channel)
                 output, _ = _fn(spec=_spec, chat_id=crew_ns, message=full_prompt,
-                                history=[], cancel_ev=agent_cancel, on_text=_on_text)
+                                history=[], cancel_ev=agent_cancel, on_text=_on_text,
+                                extra_system=_crew_mem_ctx)
             else:
+                # CLI backend: prepend memory as [System] prefix
+                _claude_msg = (f"[System]\n{_crew_mem_ctx}\n\n[User Query]\n{full_prompt}"
+                               if _crew_mem_ctx else full_prompt)
                 output = _bc_run_claude(
                     spec=_spec,
                     chat_id=crew_ns,
-                    message=full_prompt,
+                    message=_claude_msg,
                     sid=sid,
                     cwd=cwd,
                     cancel_ev=agent_cancel,

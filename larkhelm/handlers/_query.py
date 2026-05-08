@@ -151,6 +151,7 @@ def _do_query_with_delegation(
     on_soft_timeout,
     images=None,
     hop: int = 0,
+    memory_ctx: str = "",
 ) -> str:
     """Execute query with delegation support (max 2 hops).
 
@@ -162,12 +163,16 @@ def _do_query_with_delegation(
     from larkhelm.orchestration import build_orchestrator_system_prompt, _detect_delegation
     from larkhelm.backend_registry import BACKEND_REGISTRY
 
-    if hop >= 2:
-        return _run_backend_single(orch_spec, chat_id, enriched_msg, cwd, cancel_ev,
-                                   on_text, on_tool, on_tool_result, on_soft_timeout, images)
-
-    # Build system prompt listing specialists
+    # Build system prompt listing specialists, combined with memory context
     system_prompt = build_orchestrator_system_prompt(BACKEND_REGISTRY)
+    combined_system = "\n\n".join(filter(None, [memory_ctx, system_prompt]))
+
+    if hop >= 2:
+        # Retain orchestrator system prompt so the model knows its role and doesn't
+        # re-emit DELEGATE: in the fallback path.
+        return _run_backend_single(orch_spec, chat_id, enriched_msg, cwd, cancel_ev,
+                                   on_text, on_tool, on_tool_result, on_soft_timeout, images,
+                                   extra_system=combined_system)
 
     # Phase 1: run orchestrator with buffered on_text to detect DELEGATE prefix
     BUFFER_THRESHOLD = 300
@@ -190,7 +195,7 @@ def _do_query_with_delegation(
 
     orch_output = _run_backend_single(orch_spec, chat_id, enriched_msg, cwd, cancel_ev,
                                       _buffered_on_text, on_tool, on_tool_result, on_soft_timeout,
-                                      images, extra_system=system_prompt)
+                                      images, extra_system=combined_system)
 
     # Final check on complete output (catches END_DELEGATE arriving late)
     delegation = _buf_state["delegation"] or _detect_delegation(orch_output)
@@ -210,9 +215,10 @@ def _do_query_with_delegation(
         on_text(f"> ⚠️ 专家 {backend_id} 不可用，正在直接回答...")
         # Pass fallback system prompt so orchestrator knows not to use DELEGATE format again
         from larkhelm.orchestration import _FALLBACK_SYSTEM
+        fallback_system = "\n\n".join(filter(None, [memory_ctx, _FALLBACK_SYSTEM]))
         return _run_backend_single(orch_spec, chat_id, enriched_msg, cwd, cancel_ev,
                                    on_text, on_tool, on_tool_result, on_soft_timeout, images,
-                                   extra_system=_FALLBACK_SYSTEM)
+                                   extra_system=fallback_system)
 
     on_tool(f"🔀 委托 {specialist_spec.display_name}", sub_query[:120], "delegation")
 
@@ -240,12 +246,12 @@ def _do_query_with_delegation(
     return _do_query_with_delegation(
         chat_id, synthesis_msg, orch_spec, worker_specs,
         cwd, cancel_ev, on_text, on_tool, on_tool_result, on_soft_timeout,
-        images=images, hop=hop + 1,
+        images=images, hop=hop + 1, memory_ctx=memory_ctx,
     )
 
 
 def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
-              images: list = None):
+              images: list = None, parent_id: str | None = None):
     trace_id = uuid.uuid4().hex[:12]
 
     chat_lock = _get_chat_lock(chat_id)
@@ -279,7 +285,6 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
     try:
         m_name = {"claude": "Claude", "gemini": "Gemini", "kimi": "Kimi"}.get(model, model.capitalize())
         cwd = _get_cwd(chat_id)
-        spec = None  # resolved by resolve_backend inside the try block below
         start = time.time()
 
         init_card = _make_card(f"⏳ {m_name} 连接中",
@@ -515,23 +520,47 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
         hb_thread.start()
 
         try:
-            # ── Memory injection + backend routing ──────────────────────────
-            try:
-                from larkhelm.memory import inject_memory, maybe_auto_update
-                enriched_message = inject_memory(chat_id, message)
-            except Exception as _mem_err:
-                _debug_log(f"[{trace_id}][DoQuery] memory inject error: {_mem_err}")
-                enriched_message = message
+            # ── Parent message injection (network call — here not in event thread) ──
+            if parent_id:
+                try:
+                    from larkhelm.lark_client import _fetch_parent_message_text
+                    parent_text = _fetch_parent_message_text(parent_id)
+                    if parent_text:
+                        message = (
+                            f"[用户回复了以下消息]\n\n{parent_text}\n\n---\n\n{message}"
+                        )
+                        _debug_log(f"[{trace_id}][DoQuery] injected parent context ({len(parent_text)} chars)")
+                    else:
+                        from larkhelm.crew import get_recent_crew_context
+                        crew_ctx = get_recent_crew_context(chat_id)
+                        if crew_ctx:
+                            message = (
+                                f"[以下是刚完成的 Crew 任务「{crew_ctx['title']}」的交付结论，"
+                                f"请结合它来回答我的问题]\n\n"
+                                f"{crew_ctx['summary']}\n\n---\n\n{message}"
+                            )
+                except Exception as _pe:
+                    _debug_log(f"[{trace_id}][DoQuery] parent fetch error: {_pe}")
 
-            has_doc_urls = bool(_extract_feishu_urls(enriched_message))
-
-            # Doc injection runs here (background thread) not in the SDK event callback,
-            # so a slow/hanging Feishu API call cannot block the event dispatch loop.
+            # ── Doc injection + memory context ───────────────────────────────
+            # Doc injection runs here (background thread, not SDK event callback) to avoid
+            # blocking the event dispatch loop. Applied to the original message so memory
+            # content cannot trigger redundant Feishu API reads.
+            has_doc_urls = bool(_extract_feishu_urls(message))
             if _cfg.DOC_AUTO_INJECT:
                 try:
-                    enriched_message = _inject_doc_context(enriched_message, chat_id)
+                    message = _inject_doc_context(message, chat_id)
                 except Exception as _doc_err:
                     _debug_log(f"[{trace_id}][DoQuery] doc inject error: {_doc_err}")
+
+            # Memory is passed as extra_system (proper system channel) rather than prepended
+            # to the user message, so the model receives clean user turn content.
+            memory_ctx = ""
+            try:
+                from larkhelm.memory import get_memory_context, maybe_auto_update
+                memory_ctx = get_memory_context(chat_id, cwd=cwd)
+            except Exception as _mem_err:
+                _debug_log(f"[{trace_id}][DoQuery] memory context error: {_mem_err}")
 
             from larkhelm.router import resolve_backend, LockedBackendUnavailableError
             from larkhelm.backend_registry import BACKEND_REGISTRY
@@ -541,7 +570,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
 
             # Resolve primary backend (respects Rule 0 locked_backend, vision, doc routing)
             try:
-                primary_spec = resolve_backend(chat_id, enriched_message, bool(images), has_doc_urls)
+                primary_spec = resolve_backend(chat_id, message, bool(images), has_doc_urls)
                 m_name = primary_spec.display_name
             except LockedBackendUnavailableError as _lbe:
                 # User explicitly locked this backend; show error card, do not silently re-route
@@ -570,20 +599,22 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
 
             successful_spec = None
             if not chain:
-                # Last resort: fall back to legacy routing
+                # Last resort: fall back to legacy routing (memory_ctx prepended for CLI backends)
+                _legacy_msg = (f"[System]\n{memory_ctx}\n\n[User Query]\n{message}"
+                               if memory_ctx else message)
                 if model == "gemini":
-                    output = query_gemini(chat_id, enriched_message, cwd, cancel_ev,
+                    output = query_gemini(chat_id, _legacy_msg, cwd, cancel_ev,
                                           on_tool=on_tool, on_text=on_text,
                                           on_tool_result=on_tool_result,
                                           on_soft_timeout=_on_soft_timeout)
                 elif model == "kimi":
-                    output = query_kimi(chat_id, enriched_message, cwd, cancel_ev,
+                    output = query_kimi(chat_id, _legacy_msg, cwd, cancel_ev,
                                         on_tool=on_tool, on_text=on_text,
                                         on_tool_result=on_tool_result,
                                         on_soft_timeout=_on_soft_timeout,
                                         images=images)
                 else:
-                    output = query_claude(chat_id, enriched_message, cwd, cancel_ev,
+                    output = query_claude(chat_id, _legacy_msg, cwd, cancel_ev,
                                           on_tool=on_tool, on_text=on_text,
                                           on_tool_result=on_tool_result,
                                           on_soft_timeout=_on_soft_timeout,
@@ -601,13 +632,14 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                         m_name = attempt_spec.display_name
                         if worker_specs:
                             output = _do_query_with_delegation(
-                                chat_id, enriched_message, attempt_spec, worker_specs,
+                                chat_id, message, attempt_spec, worker_specs,
                                 cwd, cancel_ev, on_text, on_tool, on_tool_result,
-                                _on_soft_timeout, images=images)
+                                _on_soft_timeout, images=images, memory_ctx=memory_ctx)
                         else:
                             output = _run_backend_single(
-                                attempt_spec, chat_id, enriched_message, cwd, cancel_ev,
-                                on_text, on_tool, on_tool_result, _on_soft_timeout, images)
+                                attempt_spec, chat_id, message, cwd, cancel_ev,
+                                on_text, on_tool, on_tool_result, _on_soft_timeout, images,
+                                extra_system=memory_ctx)
                         successful_spec = attempt_spec
                         break
                     except QueryCancelledError:
@@ -782,3 +814,12 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                     args=(chat_id, p_msg, p_model, p_user_msg_id),
                     daemon=True, name=f"query-{chat_id[:8]}"
                 ).start()
+        # Clean up image temp files created for this query.
+        if images:
+            import os as _os
+            for _img in images:
+                try:
+                    if _img and str(_img).startswith("/tmp/"):
+                        _os.unlink(_img)
+                except Exception:
+                    pass

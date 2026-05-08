@@ -368,10 +368,13 @@ def handle_message(data: P2ImMessageReceiveV1):
             _cmd_cli_native(chat_id, target_model, prompt, _mid)
             return
 
-        # Context injection: attempt in priority order
+        # Context injection: attempt in priority order.
+        # _fetch_parent_message_text is a Feishu API call; it is NOT done here
+        # (SDK event thread) to avoid blocking all event dispatch.  Instead,
+        # parent_id is passed to _do_query which runs in a background thread.
         parent_id = getattr(message, "parent_id", None)
 
-        # Priority 1: user replied to a crew task card → inject crew summary
+        # Priority 1: user replied to a crew task card → inject crew summary (local, no I/O)
         crew_ctx = None
         if parent_id:
             from larkhelm.crew import get_crew_card_context
@@ -386,33 +389,9 @@ def handle_message(data: P2ImMessageReceiveV1):
                 f"---\n\n"
                 f"{prompt}"
             )
-        elif parent_id:
-            # Priority 2: reply to any message (AI reply/user message/notification card) → fetch and inject original text
-            from larkhelm.lark_client import _fetch_parent_message_text
-            parent_text = _fetch_parent_message_text(parent_id)
-            if parent_text:
-                _debug_log(f"[MSG] injecting parent message context ({len(parent_text)} chars) → {chat_id[:12]}")
-                prompt = (
-                    f"[用户回复了以下消息]\n\n"
-                    f"{parent_text}\n\n"
-                    f"---\n\n"
-                    f"{prompt}"
-                )
-            else:
-                # Priority 3: parent fetch failed → fall back to sticky crew context
-                from larkhelm.crew import get_recent_crew_context
-                crew_ctx = get_recent_crew_context(chat_id)
-                if crew_ctx:
-                    _debug_log(f"[MSG] injecting sticky crew context '{crew_ctx['title'][:20]}' → {chat_id[:12]}")
-                    prompt = (
-                        f"[以下是刚完成的 Crew 任务「{crew_ctx['title']}」的交付结论，"
-                        f"请结合它来回答我的问题]\n\n"
-                        f"{crew_ctx['summary']}\n\n"
-                        f"---\n\n"
-                        f"{prompt}"
-                    )
-        else:
-            # Priority 3 (no parent): fall back to sticky crew context
+            parent_id = None  # already handled; no need to fetch parent in _do_query
+        elif not parent_id:
+            # No parent at all → try sticky crew context (local, no I/O)
             from larkhelm.crew import get_recent_crew_context
             crew_ctx = get_recent_crew_context(chat_id)
             if crew_ctx:
@@ -424,6 +403,7 @@ def handle_message(data: P2ImMessageReceiveV1):
                     f"---\n\n"
                     f"{prompt}"
                 )
+        # else: parent_id set and no crew card found → _do_query will fetch parent text in background
 
         # Workspace context: if .crew_workspace/ has relevant files, tell the AI so it
         # can read them naturally (enables "fix failed /dev" or "revise /plan" via chat).
@@ -446,14 +426,15 @@ def handle_message(data: P2ImMessageReceiveV1):
         log_entry(chat_id, "user", prompt, model=target_model)
         _reset_cancel(chat_id)
         user_msg_id = message.message_id
-        # Doc injection is done inside _do_query (background thread) to avoid blocking
-        # the SDK event dispatch loop on slow Feishu API calls.
+        # Doc injection and parent message fetch are done inside _do_query (background
+        # thread) to avoid blocking the SDK event dispatch loop on Feishu API calls.
         threading.Thread(
             target=_do_query,
             kwargs={
                 "chat_id": chat_id, "message": prompt, "model": target_model,
                 "user_msg_id": user_msg_id,
                 "images": _msg_images if _msg_images else None,
+                "parent_id": parent_id,
             },
             daemon=True,
             name=f"query-{chat_id[:8]}",

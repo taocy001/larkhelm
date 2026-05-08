@@ -255,9 +255,18 @@ def _auto_plan(requirement: str, chat_id: str,
                 "（若存在）和 .crew_workspace/design.md（若存在）了解背景后再制定计划。"
             )
 
+    # Inject memory context so the planner is aware of global/project preferences.
+    _mem_ctx = ""
+    try:
+        from larkhelm.memory import get_memory_context
+        _mem_ctx = get_memory_context(chat_id, cwd=cwd)
+    except Exception:
+        pass
+    _mem_prefix = f"\n\n[Background Context from Memory]\n{_mem_ctx}" if _mem_ctx else ""
+
     # Put user requirement BEFORE doc context so Claude knows the scope
     # constraint before reading the full document.
-    prompt = f"{_PLANNER_SYSTEM}\n\n用户需求：{requirement}{ctx_hint}"
+    prompt = f"{_PLANNER_SYSTEM}{_mem_prefix}\n\n用户需求：{requirement}{ctx_hint}"
 
     grant_yolo(ns)
     try:
