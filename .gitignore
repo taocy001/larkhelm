@@ -9,3 +9,9 @@ __pycache__/
 *.pyo
 .crew_workspace/
 analysis_report.md
+.data/
+config.json
+config_old*.json
+feishu_doc_url.txt
+phase*_raw.md
+phase*_analysis.md
