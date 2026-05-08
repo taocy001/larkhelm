@@ -20,6 +20,36 @@ _active_crew: dict[str, str]        = {}   # chat_id → crew_id
 _active_crew_states: dict[str, "CrewState"] = {}  # chat_id → CrewState
 _active_crew_lock = threading.Lock()
 
+# Subscribers waiting for crew to finish (protected by _active_crew_lock)
+_crew_done_subscribers: dict[str, list[threading.Event]] = {}  # chat_id → [Event]
+
+
+def is_crew_running(chat_id: str) -> bool:
+    with _active_crew_lock:
+        return chat_id in _active_crew
+
+
+def subscribe_crew_done(chat_id: str) -> threading.Event:
+    """Return an Event that fires when crew for chat_id finishes.
+
+    Race-safe: if crew already finished by the time this is called, returns a
+    pre-set event so the caller never blocks.  Must be called after _set_pending.
+    """
+    ev = threading.Event()
+    with _active_crew_lock:
+        if chat_id not in _active_crew:
+            ev.set()   # already done
+            return ev
+        _crew_done_subscribers.setdefault(chat_id, []).append(ev)
+    return ev
+
+
+def _signal_crew_done(chat_id: str) -> None:
+    """Called from crew finally blocks (inside _active_crew_lock held by caller)."""
+    subscribers = _crew_done_subscribers.pop(chat_id, [])
+    for ev in subscribers:
+        ev.set()
+
 # Phase 3.1: human-confirmation breakpoint registry
 _breakpoint_events:  dict[str, threading.Event] = {}  # crew_id → Event
 _breakpoint_results: dict[str, bool]            = {}  # crew_id → confirmed?

@@ -341,39 +341,39 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
                 on_text=_on_text,
             )
         else:
-            from larkhelm.backend_cli import run_claude as _bc_run_claude
+            from larkhelm.backend_cli import run_claude as _bc_run_claude, run_gemini as _bc_run_gemini, run_kimi as _bc_run_kimi
             from larkhelm.backend_registry import BACKEND_REGISTRY as _reg
             _spec = _reg.get_orchestrator()
             if _spec is None:
                 raise RuntimeError("No orchestrator backend available for crew agent")
             _API_PROVIDERS = ("anthropic_api", "google_api", "openai_compat_api")
+            _cli_msg = (f"[System]\n{_crew_mem_ctx}\n\n[User Query]\n{full_prompt}"
+                        if _crew_mem_ctx else full_prompt)
             if _spec.provider in _API_PROVIDERS:
                 import larkhelm.backend_api as _bapi
                 _fn = {"anthropic_api": _bapi.run_anthropic,
                        "google_api": _bapi.run_google,
                        "openai_compat_api": _bapi.run_openai_compat}[_spec.provider]
                 _on_start()
-                # API backends: pass memory as extra_system (proper system channel)
                 output, _ = _fn(spec=_spec, chat_id=crew_ns, message=full_prompt,
                                 history=[], cancel_ev=agent_cancel, on_text=_on_text,
                                 extra_system=_crew_mem_ctx)
+            elif _spec.provider == "gemini_cli":
+                _on_start()
+                output = _bc_run_gemini(spec=_spec, chat_id=crew_ns, message=_cli_msg,
+                                        sid=None, cwd=cwd, cancel_ev=agent_cancel,
+                                        on_text=_on_text, use_session=False)
+            elif _spec.provider == "kimi_cli":
+                _on_start()
+                output = _bc_run_kimi(spec=_spec, chat_id=crew_ns, message=_cli_msg,
+                                      sid=None, cwd=cwd, cancel_ev=agent_cancel,
+                                      on_text=_on_text)
             else:
-                # CLI backend: prepend memory as [System] prefix
-                _claude_msg = (f"[System]\n{_crew_mem_ctx}\n\n[User Query]\n{full_prompt}"
-                               if _crew_mem_ctx else full_prompt)
                 output = _bc_run_claude(
-                    spec=_spec,
-                    chat_id=crew_ns,
-                    message=_claude_msg,
-                    sid=sid,
-                    cwd=cwd,
-                    cancel_ev=agent_cancel,
-                    on_text=_on_text,
-                    on_tool=None,
-                    on_tool_result=None,
-                    allow_retry=False,
-                    on_start=_on_start,
-                    session_namespace=crew_ns,
+                    spec=_spec, chat_id=crew_ns, message=_cli_msg,
+                    sid=sid, cwd=cwd, cancel_ev=agent_cancel,
+                    on_text=_on_text, on_tool=None, on_tool_result=None,
+                    allow_retry=False, on_start=_on_start, session_namespace=crew_ns,
                 )
     except QueryCancelledError:
         if cancel_ev.is_set():
@@ -381,6 +381,7 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
         # Per-agent timeout only → FAILED (not CANCELLED)
         raise RuntimeError(f"Agent timed out (terminated after {_fmt_elapsed(spec.timeout)})")
     finally:
+        agent_cancel.set()  # always stop the timeout watcher thread, even on abnormal exit
         revoke_yolo(crew_ns)
 
     result = output.strip() or "（无输出）"
@@ -893,17 +894,20 @@ def _synthesize(state: CrewState) -> str:
                    "openai_compat_api": _bapi.run_openai_compat}[_synth_spec.provider]
             result, _ = _fn(spec=_synth_spec, chat_id=synth_ns, message=full_prompt,
                             history=[], cancel_ev=synth_cancel, on_text=None)
+        elif _synth_spec.provider == "gemini_cli":
+            from larkhelm.backend_cli import run_gemini as _bc_run_gemini
+            result = _bc_run_gemini(spec=_synth_spec, chat_id=synth_ns, message=full_prompt,
+                                    sid=None, cwd=cwd, cancel_ev=synth_cancel,
+                                    on_text=None, use_session=False)
+        elif _synth_spec.provider == "kimi_cli":
+            from larkhelm.backend_cli import run_kimi as _bc_run_kimi
+            result = _bc_run_kimi(spec=_synth_spec, chat_id=synth_ns, message=full_prompt,
+                                  sid=None, cwd=cwd, cancel_ev=synth_cancel, on_text=None)
         else:
             result = _bc_run_claude(
-                spec=_synth_spec,
-                chat_id=synth_ns,
-                message=full_prompt,
-                sid=None,
-                cwd=cwd,
-                cancel_ev=synth_cancel,
-                on_text=None,
-                allow_retry=False,
-                session_namespace=synth_ns,
+                spec=_synth_spec, chat_id=synth_ns, message=full_prompt,
+                sid=None, cwd=cwd, cancel_ev=synth_cancel,
+                on_text=None, allow_retry=False, session_namespace=synth_ns,
             )
     finally:
         synth_cancel.set()

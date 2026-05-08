@@ -310,6 +310,7 @@ def _run_dev_step(state: MultiPlanState, step: PlanStep, crew_id: str) -> bool:
             no_confirm=True,    # plan handles human-in-the-loop between steps
             crew_id=crew_id,
             force_replan=True,  # each [dev] step re-runs PM/Architect for its specific requirement
+            suppress_done_signal=True,  # plan signals done itself when all steps finish
         )
         return not state.cancel_ev.is_set()
     except Exception as e:
@@ -605,7 +606,11 @@ def _run_plan(state: MultiPlanState) -> None:
         _hb_stop.set()
         with _active_plans_lock:
             _active_plans.pop(state.plan_id, None)
-        _release_slot()
+        from larkhelm.crew._state import _signal_crew_done
+        with _active_crew_lock:
+            if _active_crew.get(state.chat_id, "").startswith("plan:"):
+                _active_crew.pop(state.chat_id, None)
+            _signal_crew_done(state.chat_id)
 
 
 # ── Entry point ──────────────────────────────────────────────────

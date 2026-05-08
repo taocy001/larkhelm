@@ -37,12 +37,34 @@ def resolve_backend(
     message: str,
     has_images: bool = False,
     has_doc_urls: bool = False,
+    force_backend_id: str | None = None,
 ) -> BackendSpec:
     """Route the query to the best available BackendSpec."""
     try:
         enable_cheap = getattr(_cfg, "config", {}).get("enable_cheap_routing", False)
     except Exception:
         enable_cheap = False
+
+    # Rule 0.5: per-message backend force (e.g. /c, /g, /k — override orchestrator routing)
+    if force_backend_id:
+        spec = BACKEND_REGISTRY.get(force_backend_id)
+        if spec is None:
+            # Provider fallback: legacy model names "claude"/"gemini"/"kimi" → provider lookup
+            _provider_map: dict[str, tuple[str, ...]] = {
+                "claude": ("claude_cli", "anthropic_api"),
+                "gemini": ("gemini_cli", "google_api"),
+                "kimi":   ("kimi_cli",),
+            }
+            _providers = _provider_map.get(force_backend_id, ())
+            spec = next(
+                (s for s in BACKEND_REGISTRY.all_enabled()
+                 if s.healthy and s.provider in _providers),
+                None
+            )
+        if spec and spec.enabled and spec.healthy:
+            _debug_log(f"[router] {chat_id}: force → {spec.id}")
+            return spec
+        _debug_log(f"[router] {chat_id}: force {force_backend_id!r} unavailable, falling through")
 
     # Rule 0: locked_backend in chat state → fast-fail if unhealthy, else return spec
     locked_state = _get_chat_state(chat_id)

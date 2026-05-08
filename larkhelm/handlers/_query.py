@@ -244,11 +244,55 @@ def _do_query_with_delegation(
 
 
 def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
-              images: list = None, parent_id: str | None = None):
+              images: list = None, parent_id: str | None = None,
+              force_backend_id: str | None = None):
     trace_id = uuid.uuid4().hex[:12]
 
     chat_lock = _get_chat_lock(chat_id)
     cancel_ev = _get_cancel_event(chat_id)
+
+    # Queue behind crew if one is running for this chat
+    try:
+        from larkhelm.crew._state import is_crew_running, subscribe_crew_done
+        if is_crew_running(chat_id):
+            existing_mid = _set_pending(chat_id, message, model, user_msg_id)
+            preview = message[:80].replace("\n", " ")
+            crew_queue_card = _make_card(
+                "⏳ Crew 运行中",
+                f"当前 Crew 任务完成后自动执行：\n\n> {preview}",
+                color="orange",
+                buttons=[("❌ 取消排队", f"cancel_queue:{chat_id}")]
+            )
+            if existing_mid:
+                _patch_card_raw(existing_mid, crew_queue_card)
+            else:
+                if user_msg_id:
+                    _mid = _reply_card_raw(user_msg_id, crew_queue_card, in_thread=False)
+                else:
+                    _mid = _send_card_raw(chat_id, crew_queue_card)
+                _update_pending_card_mid(chat_id, _mid)
+
+            # subscribe_crew_done is race-safe: if crew ended between is_crew_running
+            # and here, it returns a pre-set event so the watcher fires immediately.
+            _done_ev = subscribe_crew_done(chat_id)
+
+            def _after_crew(_ev=_done_ev, _cid=chat_id, _msg=message, _model=model, _uid=user_msg_id):
+                _ev.wait(timeout=4 * 3600)
+                pending = _pop_pending(_cid)
+                if pending:
+                    p_msg, p_model, p_user_msg_id, *_ = pending
+                    _reset_cancel(_cid)
+                    threading.Thread(
+                        target=_do_query,
+                        args=(_cid, p_msg, p_model, p_user_msg_id),
+                        daemon=True, name=f"query-{_cid[:8]}",
+                    ).start()
+
+            threading.Thread(target=_after_crew, daemon=True,
+                             name=f"crew-wait-{chat_id[:8]}").start()
+            return
+    except Exception as _crew_check_err:
+        _debug_log(f"[{trace_id}][DoQuery] crew check error: {_crew_check_err}")
 
     if not chat_lock.acquire(blocking=False):
         existing_mid = _set_pending(chat_id, message, model, user_msg_id)
@@ -286,7 +330,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             from larkhelm.router import resolve_backend as _early_resolve
             from larkhelm.backend_registry import BACKEND_REGISTRY as _early_reg
             _early_has_docs = bool(_extract_feishu_urls(message))
-            _early_spec = _early_resolve(chat_id, message, bool(images), _early_has_docs)
+            _early_spec = _early_resolve(chat_id, message, bool(images), _early_has_docs, force_backend_id)
             m_name = _early_spec.display_name
         except Exception:
             pass  # fall back to legacy m_name; full routing happens below
@@ -582,7 +626,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
 
             # Resolve primary backend (respects Rule 0 locked_backend, vision, doc routing)
             try:
-                primary_spec = resolve_backend(chat_id, message, bool(images), has_doc_urls)
+                primary_spec = resolve_backend(chat_id, message, bool(images), has_doc_urls, force_backend_id)
                 m_name = primary_spec.display_name
             except LockedBackendUnavailableError as _lbe:
                 # User explicitly locked this backend; show error card, do not silently re-route
@@ -608,6 +652,12 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                     chain = [primary_spec] + chain
                 elif chain and chain[0].id != primary_spec.id:
                     chain = [primary_spec] + [s for s in chain if s.id != primary_spec.id]
+
+            # When user explicitly forces a backend (/c, /g, /k), skip delegation entirely:
+            # run that single backend directly without orchestrator round-trip.
+            _force_direct = bool(force_backend_id and primary_spec is not None and primary_spec.healthy)
+            if _force_direct:
+                chain = [primary_spec]
 
             successful_spec = None
             if not chain:
@@ -636,7 +686,8 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                                           images=images)
             else:
                 # Failover loop: iterate orchestrator chain, mark unhealthy on exception
-                worker_specs = {
+                # No delegation when the user explicitly forced a specific backend.
+                worker_specs = {} if _force_direct else {
                     s.id: s for s in BACKEND_REGISTRY.all_enabled()
                     if s.healthy and s.role != "orchestrator"
                 }

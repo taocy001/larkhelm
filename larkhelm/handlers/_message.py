@@ -346,15 +346,19 @@ def handle_message(data: P2ImMessageReceiveV1):
         # ── Model dispatch ──
         target_model = _get_chat_model(chat_id)
         prompt = text
+        force_backend_id: str | None = None
         if text.startswith(("/g ", "/gemini ")):
             target_model = "gemini"
             prompt = text.split(" ", 1)[1].strip()
+            force_backend_id = "gemini"
         elif text.startswith(("/c ", "/claude ")):
             target_model = "claude"
             prompt = text.split(" ", 1)[1].strip()
+            force_backend_id = "claude"
         elif text.startswith(("/k ", "/kimi ")):
             target_model = "kimi"
             prompt = text.split(" ", 1)[1].strip()
+            force_backend_id = "kimi"
 
         # Vision routing: gemini CLI doesn't support image input; force to a vision-capable model
         if _msg_images and target_model not in ("claude", "kimi"):
@@ -435,6 +439,7 @@ def handle_message(data: P2ImMessageReceiveV1):
                 "user_msg_id": user_msg_id,
                 "images": _msg_images if _msg_images else None,
                 "parent_id": parent_id,
+                "force_backend_id": force_backend_id,
             },
             daemon=True,
             name=f"query-{chat_id[:8]}",
