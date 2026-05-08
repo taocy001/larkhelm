@@ -516,27 +516,41 @@ def _try_extract_global(session_content: str, chat_id: str) -> None:
 
 
 def _cascade_extract(session_content: str, chat_id: str) -> None:
-    """Launch background threads to extract project and global facts from a fresh session summary."""
+    """Launch background threads to extract project and global facts from a fresh session summary.
+
+    Each extraction thread is guarded by _EXTRACT_TIMEOUT so a slow LLM call cannot
+    leak daemon threads indefinitely.
+    """
     try:
         from larkhelm.chat_state import _get_cwd
         cwd = _get_cwd(chat_id)
     except Exception:
         cwd = None
 
-    if cwd:
-        threading.Thread(
-            target=_try_extract_project,
-            args=(session_content, cwd),
-            daemon=True,
-            name=f"memext-proj-{chat_id[:8]}",
-        ).start()
+    def _guarded(target, args, name):
+        t = threading.Thread(target=target, args=args, daemon=True, name=name)
+        t.start()
+        t.join(timeout=_EXTRACT_TIMEOUT)
+        if t.is_alive():
+            _debug_log(f"[memory] {name} extraction timed out ({_EXTRACT_TIMEOUT}s), daemon thread abandoned")
 
-    threading.Thread(
-        target=_try_extract_global,
-        args=(session_content, chat_id),
-        daemon=True,
-        name=f"memext-glob-{chat_id[:8]}",
-    ).start()
+    def _run_cascade():
+        threads = []
+        if cwd:
+            threads.append(threading.Thread(
+                target=_guarded,
+                args=(_try_extract_project, (session_content, cwd), f"memext-proj-{chat_id[:8]}"),
+                daemon=True,
+            ))
+        threads.append(threading.Thread(
+            target=_guarded,
+            args=(_try_extract_global, (session_content, chat_id), f"memext-glob-{chat_id[:8]}"),
+            daemon=True,
+        ))
+        for t in threads:
+            t.start()
+
+    threading.Thread(target=_run_cascade, daemon=True, name=f"memcascade-{chat_id[:8]}").start()
 
 
 # ── Auto-update (session layer + cascade) ────────────────────────────────────
