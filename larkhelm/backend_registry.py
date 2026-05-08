@@ -22,6 +22,7 @@ class BackendSpec:
     model: str = ""         # API backends: model name
     api_key: str = ""       # API backends: resolved key (no ${} placeholders)
     base_url: str = ""      # API backends: custom endpoint
+    instructions: str = ""  # extra system instructions injected for this backend when it acts as orchestrator
     healthy: bool = True
     enabled: bool = True
     last_error: str | None = None  # last health_check failure reason
@@ -94,6 +95,7 @@ class BackendRegistry:
                     model=s.get("model", ""),
                     api_key=resolved_api_key,
                     base_url=s.get("base_url", "") or extra.get("base_url", ""),
+                    instructions=s.get("instructions", ""),
                     healthy=True,
                     enabled=enabled,
                 )

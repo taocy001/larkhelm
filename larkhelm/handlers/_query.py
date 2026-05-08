@@ -167,7 +167,8 @@ def _do_query_with_delegation(
 
     # Build system prompt listing specialists, combined with memory context
     system_prompt = build_orchestrator_system_prompt(BACKEND_REGISTRY)
-    combined_system = "\n\n".join(filter(None, [memory_ctx, system_prompt]))
+    orch_instructions = getattr(orch_spec, "instructions", "")
+    combined_system = "\n\n".join(filter(None, [memory_ctx, system_prompt, orch_instructions]))
 
     if hop >= 2:
         # Retain orchestrator system prompt so the model knows its role and doesn't

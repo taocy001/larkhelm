@@ -120,24 +120,10 @@ class TestAiRunnerTokenStatsFails(unittest.TestCase):
     """REQ-05: token_stats failures must be logged, not silently swallowed."""
 
     def test_record_token_usage_failure_is_logged(self):
-        logged: list[str] = []
-
-        with patch("larkhelm.ai_runner._debug_log", side_effect=logged.append), \
-             patch("larkhelm.token_stats.record_token_usage",
-                   side_effect=OSError("disk full")):
-            from larkhelm.token_stats import record_token_usage
-            try:
-                record_token_usage("chat1", "claude", {
-                    "input_tokens": 10, "output_tokens": 5,
-                    "cache_read": 0, "cache_create": 0, "cost_usd": 0.001,
-                })
-            except OSError:
-                pass  # expected — the real code wraps this in try/except
-
-        # The real test: inside _spawn_claude_proc's except block, _debug_log is called.
-        # We verify the pattern by checking the source directly.
+        # Token stats are logged in runner_base._record_tokens (refactored from ai_runner).
+        # Verify the pattern by AST-scanning runner_base.py.
         import ast, pathlib
-        src = pathlib.Path("larkhelm/ai_runner.py").read_text()
+        src = pathlib.Path("larkhelm/runner_base.py").read_text()
         tree = ast.parse(src)
         debug_log_in_token_except = False
         for node in ast.walk(tree):
@@ -150,7 +136,7 @@ class TestAiRunnerTokenStatsFails(unittest.TestCase):
                             debug_log_in_token_except = True
                             break
         self.assertTrue(debug_log_in_token_except,
-                        "Expected _debug_log calls inside except handlers in ai_runner.py")
+                        "Expected _debug_log calls inside except handlers in runner_base.py")
 
 
 class TestLarkClientOwnerTransferFails(unittest.TestCase):
