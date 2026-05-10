@@ -59,6 +59,15 @@ class _RuntimeConfig:
     PERM_HOOK_SCRIPT: str
     PERM_SOCKET_PATH: str
     SOURCE_DIR:       Path
+    # ── Voice (M3.2) ──────────────────────────────────────
+    VOICE_ENABLED:           bool
+    VOICE_MODEL_SIZE:        str
+    VOICE_COMPUTE_TYPE:      str
+    VOICE_MAX_DURATION_MS:   int
+    VOICE_DEFAULT_LANG:      str
+    VOICE_MERGE_WINDOW_SEC:  int
+    VOICE_MAX_MERGE:         int
+    VOICE_KEEP_AUDIO:        bool
 
 # ── Runtime config (assigned by _init_runtime()) ────────────────────────
 CONFIG_PATH: Path
@@ -105,6 +114,16 @@ PERM_HOOK_SCRIPT: str
 PERM_SOCKET_PATH: str
 SOURCE_DIR: "Path"  # source repo root directory (auto-detected for editable installs)
 BACKEND_REGISTRY: "object"  # BackendRegistry singleton (set by _init_runtime)
+
+# Voice configuration (M3.2)
+VOICE_ENABLED:           bool
+VOICE_MODEL_SIZE:        str   # one of: tiny / base / small / medium / large-v3
+VOICE_COMPUTE_TYPE:      str   # faster-whisper compute_type, e.g. int8 / float16
+VOICE_MAX_DURATION_MS:   int
+VOICE_DEFAULT_LANG:      str   # one of: zh / en / auto
+VOICE_MERGE_WINDOW_SEC:  int   # 0 = disable merge
+VOICE_MAX_MERGE:         int
+VOICE_KEEP_AUDIO:        bool
 
 # ── Card UX parameters (module-level constants) ────────────────────────────────────
 TOOL_HISTORY_CAP   = 20      # max number of completed tool pairs kept in history
@@ -295,6 +314,8 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     global DOC_READ_MAX_CHARS, DEFAULT_DRIVE_FOLDER, DOC_WRITE_CONFIRM, DOC_WRITE_BACKEND
     global DEFAULT_WIKI_SPACE_ID, DEFAULT_WIKI_PARENT_TOKEN, DEFAULT_OWNER_OPEN_ID
     global BACKEND_REGISTRY
+    global VOICE_ENABLED, VOICE_MODEL_SIZE, VOICE_COMPUTE_TYPE, VOICE_MAX_DURATION_MS
+    global VOICE_DEFAULT_LANG, VOICE_MERGE_WINDOW_SEC, VOICE_MAX_MERGE, VOICE_KEEP_AUDIO
 
     _sys_cfg  = Path("/etc/larkhelm/config.json")
     _sys_data = Path("/var/lib/larkhelm")
@@ -411,6 +432,35 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     BACKEND_TRANSIENT_THRESHOLD  = _read_clamped("backend_transient_threshold",  3,     1)        # TRANSIENT failures within window → unhealthy
     BACKEND_PROBE_API_REAL_CALL  = bool(config.get("backend_probe_api_real_call", True))           # API probes hit the network (1-token call) vs key-presence only
 
+    # ── Voice config (M3.2) ────────────────────────────────────────────────
+    VOICE_ENABLED      = bool(config.get("voice_enabled", False))
+    VOICE_MODEL_SIZE   = str(config.get("voice_model_size",   "small") or "small")
+    VOICE_COMPUTE_TYPE = str(config.get("voice_compute_type", "int8")  or "int8")
+    VOICE_DEFAULT_LANG = str(config.get("voice_default_lang", "zh")    or "zh")
+    VOICE_KEEP_AUDIO   = bool(config.get("voice_keep_audio", False))
+
+    _VOICE_MODEL_WHITELIST = {"tiny", "base", "small", "medium", "large-v3"}
+    if VOICE_MODEL_SIZE not in _VOICE_MODEL_WHITELIST:
+        print(
+            f"⚠️  voice_model_size '{VOICE_MODEL_SIZE}' 无效"
+            f"（允许: tiny/base/small/medium/large-v3），已回退为 'small'",
+            file=sys.stderr,
+        )
+        VOICE_MODEL_SIZE = "small"
+
+    _VOICE_LANG_WHITELIST = {"zh", "en", "auto"}
+    if VOICE_DEFAULT_LANG not in _VOICE_LANG_WHITELIST:
+        print(
+            f"⚠️  voice_default_lang '{VOICE_DEFAULT_LANG}' 无效"
+            f"（允许: zh/en/auto），已回退为 'zh'",
+            file=sys.stderr,
+        )
+        VOICE_DEFAULT_LANG = "zh"
+
+    VOICE_MAX_DURATION_MS  = _read_clamped("voice_max_duration_ms",  180000, 1000)
+    VOICE_MERGE_WINDOW_SEC = _read_clamped("voice_merge_window_sec", 0,      0)
+    VOICE_MAX_MERGE        = _read_clamped("voice_max_merge",        5,      1)
+
     DOC_AUTO_INJECT      = config.get("doc_auto_inject",      True)
     DOC_INJECT_MAX_CHARS = int(config.get("doc_inject_max_chars", 2000))
     DOC_INJECT_MAX_DOCS  = int(config.get("doc_inject_max_docs",  2))
@@ -499,6 +549,10 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         DEFAULT_OWNER_OPEN_ID=DEFAULT_OWNER_OPEN_ID,
         PERM_HOOK_SCRIPT=PERM_HOOK_SCRIPT, PERM_SOCKET_PATH=PERM_SOCKET_PATH,
         SOURCE_DIR=SOURCE_DIR,
+        VOICE_ENABLED=VOICE_ENABLED, VOICE_MODEL_SIZE=VOICE_MODEL_SIZE,
+        VOICE_COMPUTE_TYPE=VOICE_COMPUTE_TYPE, VOICE_MAX_DURATION_MS=VOICE_MAX_DURATION_MS,
+        VOICE_DEFAULT_LANG=VOICE_DEFAULT_LANG, VOICE_MERGE_WINDOW_SEC=VOICE_MERGE_WINDOW_SEC,
+        VOICE_MAX_MERGE=VOICE_MAX_MERGE, VOICE_KEEP_AUDIO=VOICE_KEEP_AUDIO,
     )
 
 

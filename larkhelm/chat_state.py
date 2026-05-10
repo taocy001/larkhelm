@@ -1,4 +1,4 @@
-"""larkhelm · persistent chat state (cwd/model/crons), session IDs, btw message ID tracking, pending doc write"""
+"""larkhelm · persistent chat state (cwd/model/crons/voice_lang per-chat override), session IDs, btw message ID tracking, pending doc write"""
 from __future__ import annotations
 
 import json
@@ -17,6 +17,7 @@ __all__ = [
     "_get_cwd", "_set_cwd", "_get_chat_model", "_set_chat_model",
     "_get_turn_count", "_increment_turn_count",
     "_get_backend_id", "_set_backend_id",
+    "_get_voice_lang", "_set_voice_lang",
     "_register_btw_msg", "_is_btw_reply",
     "set_pending_doc_write", "pop_pending_doc_write",
 ]
@@ -137,6 +138,17 @@ def _get_backend_id(chat_id: str) -> str | None:
 
 def _set_backend_id(chat_id: str, backend_id: str) -> None:
     _set_chat_field(chat_id, "backend_id", backend_id)
+
+
+# ═══════════════════════════════════════════════════
+#  Voice language preference (per-chat override of VOICE_DEFAULT_LANG)
+# ═══════════════════════════════════════════════════
+def _get_voice_lang(chat_id: str) -> str:
+    return _get_chat_state(chat_id).get("voice_lang", _cfg.VOICE_DEFAULT_LANG)
+
+
+def _set_voice_lang(chat_id: str, lang: str) -> None:
+    _set_chat_field(chat_id, "voice_lang", lang)
 
 
 # ═══════════════════════════════════════════════════

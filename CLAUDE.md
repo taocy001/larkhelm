@@ -63,6 +63,14 @@ CLI --data-dir > LARKHELM_DATA_DIR env > /var/lib/larkhelm > ~/.local/share/lark
 | `allowed_chat_ids` | Whitelist of chat IDs (empty = all allowed) |
 | `gemini_idle_ttl` | Gemini process idle TTL in seconds (default: 1800) |
 | `timezone` | Cron task timezone (e.g. `"Asia/Shanghai"`) |
+| `voice_enabled` | M3.2 语音转文字总开关（默认 `false`；关闭时 bridge 行为完全不变） |
+| `voice_model_size` | faster-whisper 模型规格 `tiny`/`base`/`small`/`medium`/`large-v3`（默认 `"small"`） |
+| `voice_compute_type` | faster-whisper compute_type，例如 `int8` / `float16`（默认 `"int8"`） |
+| `voice_max_duration_ms` | 单条音频上限毫秒，floor `1000`（默认 `180000`） |
+| `voice_default_lang` | 全局默认转录语种 `zh` / `en` / `auto`（默认 `"zh"`） |
+| `voice_merge_window_sec` | 多条语音消息合并窗口秒数，floor `0`（`0` = 禁用合并；默认 `0`） |
+| `voice_max_merge` | 单次最多合并几条语音，floor `1`（默认 `5`） |
+| `voice_keep_audio` | 转录后是否保留原音频文件（默认 `false`，即转录完即删） |
 
 > **超时层级说明**：
 > - `response_timeout`（软超时）：AI 响应无更新超过此时长，释放主锁但后台继续运行，默认 300s
