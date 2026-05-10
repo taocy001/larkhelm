@@ -262,12 +262,11 @@ def run_full_probe(*, with_benchmark: bool = True) -> ProbeResult:
     result.mem_total_mb, result.mem_available_mb = probe_memory()
 
     if with_benchmark and result.ffmpeg_present:
-        # Pre-decide size for benchmark — will refine after
-        if result.cpu_has_avx2 and result.mem_available_mb >= _MIN_RAM_MB["medium"]:
-            test_size = "small"  # always benchmark with small (faster, accurate signal)
-        else:
-            test_size = "small"
-        ok, info = run_benchmark(test_size)
+        # Always benchmark with `small` regardless of the size we'll
+        # eventually recommend: small downloads in seconds (~244MB), gives
+        # a reliable RTF signal across the matrix, and lets `decide()`
+        # extrapolate up to medium for AVX2 boxes via static rules.
+        ok, info = run_benchmark("small")
         result.benchmark_ran = ok
         result.benchmark_load_sec = info["load_sec"]
         result.benchmark_infer_sec = info["infer_sec"]
@@ -300,10 +299,19 @@ def apply_to_config(result: ProbeResult, config_path: Path) -> dict:
     cfg = json.loads(config_path.read_text(encoding="utf-8"))
     written: dict[str, Any] = {
         "voice_enabled": result.viable,
-        "voice_engine": "faster_whisper",
         "voice_probe_done": True,
     }
-    if result.viable:
+    # Preserve user's explicit engine choice. If they previously hand-edited
+    # config to ``voice_engine="dashscope"`` and re-run probe, we must NOT
+    # silently flip them back to faster_whisper — that defeats the frugal
+    # opt-in story (probe is install-time, the user's later edits are
+    # the source of truth for engine preference).
+    existing_engine = cfg.get("voice_engine")
+    if not existing_engine:
+        # No previous choice → default to local engine on first probe.
+        written["voice_engine"] = "faster_whisper"
+    if result.viable and existing_engine != "dashscope":
+        # Don't pin a model size for the dashscope path; it's a no-op there.
         written["voice_model_size"] = result.recommended_size
     cfg.update(written)
 

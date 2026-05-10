@@ -92,9 +92,10 @@ def transcribe_via_dashscope(
     try:
         from dashscope.audio.asr import Recognition  # type: ignore[import-not-found]
     except ImportError as e:
+        _ver = getattr(dashscope, "__version__", "?")
         return _make_result(
             False, lang=lang,
-            error=f"dashscope_sdk_missing:Recognition not in {dashscope.__version__}: {e}",
+            error=f"dashscope_sdk_missing:Recognition not in {_ver}: {e}",
         )
 
     # SDK reads api_key from module-level attribute on each call. Setting
@@ -110,16 +111,20 @@ def transcribe_via_dashscope(
 
     t0 = time.monotonic()
     try:
-        # ``paraformer-realtime-v2`` accepts a local file path on SDK ≥ 1.20.
-        # ``callback=None`` switches to sync mode — return value carries
-        # the full transcript.
-        result = Recognition.call(
+        # Real DashScope SDK shape: Recognition is a class whose constructor
+        # takes the streaming params, and `.call(file=...)` is an INSTANCE
+        # method that runs the actual ASR. Calling Recognition.call(...) as
+        # a classmethod blows up with "missing 1 required positional argument:
+        # 'self'" against the real SDK (verified against dashscope 1.25.17).
+        # Pre-1.20 SDKs that exposed only a module-level helper are not
+        # supported — the optional-extras pin is `dashscope>=1.20.0`.
+        recognition = Recognition(
             model='paraformer-realtime-v2',
+            callback=None,             # sync mode — .call() returns the full transcript
             format=fmt,
             sample_rate=16000,
-            file=str(audio_p),
-            callback=None,
         )
+        result = recognition.call(file=str(audio_p))
     except Exception as e:
         return _make_result(
             False, lang=lang,

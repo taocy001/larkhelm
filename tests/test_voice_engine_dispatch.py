@@ -22,7 +22,6 @@ import larkhelm.config as _cfg
 # `from larkhelm.voice.transcribe import …` in voice/__init__.py shadows the
 # submodule with the function of the same name. Reach the submodule via
 # sys.modules so we can poke its module-level state from tests.
-import sys
 import larkhelm.voice.transcribe  # noqa: F401 — registers in sys.modules
 import larkhelm.voice._engine_dashscope as ds_mod
 t_mod = sys.modules["larkhelm.voice.transcribe"]
@@ -164,9 +163,16 @@ def test_dashscope_happy_path_with_mocked_sdk():
         status_code=200, output=fake_output, message=""
     )
 
-    fake_recognition = SimpleNamespace(
-        call=lambda **kw: fake_result,
-    )
+    # Real DashScope SDK: Recognition is a class. Constructor takes streaming
+    # params; .call(file=...) is the instance method that runs ASR. The mock
+    # mirrors that shape so the test catches Recognition.call() vs
+    # recognition.call() classmethod-vs-instance bugs.
+    class _FakeRecognition:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+        def call(self, *, file):
+            return fake_result
+    fake_recognition = _FakeRecognition
     fake_asr = SimpleNamespace(Recognition=fake_recognition)
     fake_audio = SimpleNamespace(asr=fake_asr)
     fake_dashscope = SimpleNamespace(
@@ -190,8 +196,10 @@ def test_dashscope_non_200_status():
     fake_result = SimpleNamespace(
         status_code=401, message="Invalid Authentication", output=None,
     )
-    fake_recognition = SimpleNamespace(call=lambda **kw: fake_result)
-    fake_asr = SimpleNamespace(Recognition=fake_recognition)
+    class _FakeRecognition:
+        def __init__(self, **kw): pass
+        def call(self, *, file): return fake_result
+    fake_asr = SimpleNamespace(Recognition=_FakeRecognition)
     fake_audio = SimpleNamespace(asr=fake_asr)
     fake_dashscope = SimpleNamespace(api_key="", audio=fake_audio, __version__="1.20.0")
 
@@ -210,8 +218,10 @@ def test_dashscope_empty_result_text():
     _cfg.VOICE_API_KEY = "sk-fake"
     fake_output = SimpleNamespace(sentence=[])
     fake_result = SimpleNamespace(status_code=200, output=fake_output)
-    fake_recognition = SimpleNamespace(call=lambda **kw: fake_result)
-    fake_asr = SimpleNamespace(Recognition=fake_recognition)
+    class _FakeRecognition:
+        def __init__(self, **kw): pass
+        def call(self, *, file): return fake_result
+    fake_asr = SimpleNamespace(Recognition=_FakeRecognition)
     fake_audio = SimpleNamespace(asr=fake_asr)
     fake_dashscope = SimpleNamespace(api_key="", audio=fake_audio, __version__="1.20.0")
 
@@ -228,11 +238,11 @@ def test_dashscope_empty_result_text():
 def test_dashscope_call_raises():
     _cfg.VOICE_API_KEY = "sk-fake"
 
-    def raising_call(**kw):
-        raise ConnectionError("network down")
-
-    fake_recognition = SimpleNamespace(call=raising_call)
-    fake_asr = SimpleNamespace(Recognition=fake_recognition)
+    class _FakeRecognition:
+        def __init__(self, **kw): pass
+        def call(self, *, file):
+            raise ConnectionError("network down")
+    fake_asr = SimpleNamespace(Recognition=_FakeRecognition)
     fake_audio = SimpleNamespace(asr=fake_asr)
     fake_dashscope = SimpleNamespace(api_key="", audio=fake_audio, __version__="1.20.0")
 

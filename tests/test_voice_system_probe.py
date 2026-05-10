@@ -222,6 +222,32 @@ def test_apply_to_config_writes_voice_fields(tmp_path):
     assert cfg["voice_model_size"] == "small"
 
 
+def test_apply_to_config_preserves_dashscope_engine_choice(tmp_path):
+    """Re-running probe must NOT silently flip a user's voice_engine="dashscope"
+    back to faster_whisper. Frugal-default invariant: probe is install-time
+    only, the user's later config edits are the source of truth for engine."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "APP_ID": "x", "APP_SECRET": "y",
+        "voice_engine": "dashscope",
+        "voice_api_key": "${DASHSCOPE_API_KEY}",
+    }, ensure_ascii=False, indent=2))
+
+    r = _result_with(avx=True, sse4=True, mem_avail=2000)
+    r.viable = True
+    r.recommended_size = "small"
+    sp.apply_to_config(r, cfg_path)
+
+    cfg = json.loads(cfg_path.read_text())
+    assert cfg["voice_engine"] == "dashscope"  # preserved
+    assert cfg.get("voice_api_key") == "${DASHSCOPE_API_KEY}"  # preserved
+    # voice_model_size NOT written when user is on dashscope (it'd be unused)
+    assert "voice_model_size" not in cfg
+    # voice_enabled and voice_probe_done still get written
+    assert cfg["voice_enabled"] is True
+    assert cfg["voice_probe_done"] is True
+
+
 def test_apply_to_config_unviable_omits_size(tmp_path):
     """Not viable → don't pin a size (user will hand-edit if going dashscope)."""
     cfg_path = tmp_path / "config.json"
