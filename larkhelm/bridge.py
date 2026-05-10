@@ -175,6 +175,10 @@ def main(config_path: str = None, data_dir: str = None) -> None:
     _start_cron_scheduler()
     _start_gc_thread()
 
+    from larkhelm.memory_watchdog import start_memory_watchdog
+    start_memory_watchdog(_cfg.MEMORY_LIMIT_MB)
+    _debug_log(f"[MemWatchdog] 内存限制: {_cfg.MEMORY_LIMIT_MB} MB (soft={int(_cfg.MEMORY_LIMIT_MB*0.8)} MB)")
+
     # On startup, resume any crew tasks that were interrupted last time
     from larkhelm.crew import resume_interrupted_crews
     resume_interrupted_crews()

@@ -84,13 +84,19 @@ def probe_ffmpeg() -> tuple[bool, str]:
 
 
 def probe_cpu_flags() -> dict[str, bool]:
-    """Read CPU flags from ``/proc/cpuinfo`` (Linux only).
+    """Read CPU flags; returns ``{"avx2": bool, "avx": bool, "sse4": bool, "fma": bool}``.
 
-    Returns ``{"avx2": bool, "avx": bool, "sse4": bool, "fma": bool}``.
-    On non-Linux or unreadable proc, returns all ``False`` (caller treats
-    as no acceleration available — conservative).
+    Linux: parsed from ``/proc/cpuinfo``.
+    Apple Silicon (arm64): all True — ARM NEON / AMX provide equivalent or
+    better SIMD throughput than x86 AVX2; CTranslate2 uses the ARM backend
+    automatically.
+    Other non-Linux: all False (conservative — benchmark decides viability).
     """
+    import platform
     out = {"avx2": False, "avx": False, "sse4": False, "fma": False}
+    if platform.machine() in ("arm64", "aarch64") and platform.system() == "Darwin":
+        # Apple Silicon: treat as fully capable; CTranslate2 picks ARM NEON path.
+        return {"avx2": True, "avx": True, "sse4": True, "fma": True}
     try:
         with open("/proc/cpuinfo", encoding="utf-8") as f:
             for line in f:
@@ -107,7 +113,11 @@ def probe_cpu_flags() -> dict[str, bool]:
 
 
 def probe_memory() -> tuple[int, int]:
-    """Read total + available RAM from ``/proc/meminfo``, return (total_mb, available_mb)."""
+    """Read total + available RAM; return (total_mb, available_mb).
+
+    Tries ``/proc/meminfo`` first (Linux), falls back to ``psutil`` (macOS /
+    other Unix), then returns ``(0, 0)`` if neither is available.
+    """
     total_kb = available_kb = 0
     try:
         with open("/proc/meminfo", encoding="utf-8") as f:
@@ -116,9 +126,18 @@ def probe_memory() -> tuple[int, int]:
                     total_kb = int(line.split()[1])
                 elif line.startswith("MemAvailable:"):
                     available_kb = int(line.split()[1])
+        if total_kb:
+            return total_kb // 1024, available_kb // 1024
     except (FileNotFoundError, PermissionError):
         pass
-    return total_kb // 1024, available_kb // 1024
+    # Fallback: psutil (works on macOS and most Unix)
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        return vm.total // (1024 * 1024), vm.available // (1024 * 1024)
+    except Exception:
+        pass
+    return 0, 0
 
 
 def synthesize_test_wav(out_path: Path, duration_sec: float = 1.0) -> bool:

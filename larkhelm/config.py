@@ -70,6 +70,7 @@ class _RuntimeConfig:
     VOICE_MERGE_WINDOW_SEC:  int
     VOICE_MAX_MERGE:         int
     VOICE_KEEP_AUDIO:        bool
+    MEMORY_LIMIT_MB:         int
 
 # ── Runtime config (assigned by _init_runtime()) ────────────────────────
 CONFIG_PATH: Path
@@ -128,6 +129,7 @@ VOICE_DEFAULT_LANG:      str   # one of: zh / en / auto
 VOICE_MERGE_WINDOW_SEC:  int   # 0 = disable merge
 VOICE_MAX_MERGE:         int
 VOICE_KEEP_AUDIO:        bool
+MEMORY_LIMIT_MB:         int   # RSS hard limit in MB; auto-detected on first run
 # Single source of truth for accepted voice languages — referenced by both
 # config validation (_init_runtime) and the /voice command handler.
 _VOICE_LANG_WHITELIST: "frozenset[str]" = frozenset({"zh", "en", "auto"})
@@ -324,6 +326,7 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     global VOICE_ENABLED, VOICE_ENGINE, VOICE_API_KEY
     global VOICE_MODEL_SIZE, VOICE_COMPUTE_TYPE, VOICE_MAX_DURATION_MS
     global VOICE_DEFAULT_LANG, VOICE_MERGE_WINDOW_SEC, VOICE_MAX_MERGE, VOICE_KEEP_AUDIO
+    global MEMORY_LIMIT_MB
 
     _sys_cfg  = Path("/etc/larkhelm/config.json")
     _sys_data = Path("/var/lib/larkhelm")
@@ -497,6 +500,25 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     VOICE_MERGE_WINDOW_SEC = _read_clamped("voice_merge_window_sec", 0,      0)
     VOICE_MAX_MERGE        = _read_clamped("voice_max_merge",        5,      1)
 
+    # ── Memory watchdog limit ─────────────────────────────────────────────────
+    # Priority: config.json["memory_limit_mb"] > auto-detected value.
+    # On first run (key absent) the auto-detected value is persisted to config.json
+    # so the user can inspect and tune it; subsequent starts honour that persisted value.
+    from larkhelm.memory_watchdog import detect_memory_limit_mb as _detect_mem
+    if "memory_limit_mb" in config:
+        MEMORY_LIMIT_MB = max(128, int(config["memory_limit_mb"]))
+    else:
+        MEMORY_LIMIT_MB = _detect_mem()
+        # Persist auto-detected value (first-run write-back)
+        try:
+            config["memory_limit_mb"] = MEMORY_LIMIT_MB
+            _tmp = CONFIG_PATH.with_suffix(".json.tmp")
+            _tmp.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(_tmp, CONFIG_PATH)
+            print(f"[config] memory_limit_mb 自动探测并写入: {MEMORY_LIMIT_MB} MB", file=sys.stderr)
+        except Exception as _e:
+            print(f"[config] memory_limit_mb 写回失败（不影响运行）: {_e}", file=sys.stderr)
+
     DOC_AUTO_INJECT      = config.get("doc_auto_inject",      True)
     DOC_INJECT_MAX_CHARS = int(config.get("doc_inject_max_chars", 2000))
     DOC_INJECT_MAX_DOCS  = int(config.get("doc_inject_max_docs",  2))
@@ -591,6 +613,7 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         VOICE_COMPUTE_TYPE=VOICE_COMPUTE_TYPE, VOICE_MAX_DURATION_MS=VOICE_MAX_DURATION_MS,
         VOICE_DEFAULT_LANG=VOICE_DEFAULT_LANG, VOICE_MERGE_WINDOW_SEC=VOICE_MERGE_WINDOW_SEC,
         VOICE_MAX_MERGE=VOICE_MAX_MERGE, VOICE_KEEP_AUDIO=VOICE_KEEP_AUDIO,
+        MEMORY_LIMIT_MB=MEMORY_LIMIT_MB,
     )
 
 

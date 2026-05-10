@@ -23,7 +23,7 @@ def _probe_gemini(spec) -> tuple[bool, str]:
     cmd = [spec.command or "gemini"]
     if spec.model:
         cmd += ["-m", spec.model]
-    cmd += ["--skip-trust", "-p", ".", "--output-format", "stream-json"]
+    cmd += ["-y", "-p", ".", "--output-format", "stream-json"]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=PROBE_TIMEOUT)
         for line in r.stdout.splitlines():
