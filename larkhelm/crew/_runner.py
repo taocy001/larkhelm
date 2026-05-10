@@ -302,6 +302,21 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
     # Crew agents automatically grant all permissions (user authorized via /crew command)
     grant_yolo(crew_ns)
     try:
+        # Honor BackendRegistry enabled flag for direct-dispatch model strings.
+        # Without this, planner-assigned ``model="gemini"`` would invoke the CLI
+        # even when ``config.json`` set the backend to ``enabled: false``,
+        # because the gemini/kimi/deepseek branches below skip BackendRegistry
+        # lookup. Hermes modes are orchestrator macros (not single backends),
+        # so they don't need this gate.
+        if spec.model in ("gemini", "kimi", "deepseek"):
+            from larkhelm.backend_registry import BACKEND_REGISTRY as _reg_check
+            _disp_spec = _reg_check.get(spec.model)
+            if _disp_spec is not None and not _disp_spec.enabled:
+                raise RuntimeError(
+                    f"backend {spec.model!r} is disabled in config "
+                    f"(set enabled=true in probe_models or use a different model)"
+                )
+
         if spec.model == "gemini":
             _on_start()   # Gemini has no semaphore callback; trigger directly
             _gemini_msg = (f"[System]\n{_crew_mem_ctx}\n\n[User Query]\n{full_prompt}"
@@ -324,6 +339,20 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
             output = query_kimi(
                 chat_id=crew_ns,
                 message=_kimi_msg,
+                cwd=cwd,
+                cancel_ev=agent_cancel,
+                on_text=_on_text,
+                use_session=False,
+                record_under=state.chat_id,
+            )
+        elif spec.model == "deepseek":
+            from larkhelm.ai_runner import query_deepseek
+            _on_start()   # DeepSeek has no semaphore callback; trigger directly
+            _ds_msg = (f"[System]\n{_crew_mem_ctx}\n\n[User Query]\n{full_prompt}"
+                       if _crew_mem_ctx else full_prompt)
+            output = query_deepseek(
+                chat_id=crew_ns,
+                message=_ds_msg,
                 cwd=cwd,
                 cancel_ev=agent_cancel,
                 on_text=_on_text,
