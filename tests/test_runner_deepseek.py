@@ -1,8 +1,12 @@
 """Unit tests for DeepSeekRunner — exercise the SSE parser, history persistence,
-backoff, and cancel/soft-timeout paths without touching the real DeepSeek API.
+backoff, cancel/soft-timeout paths, reasoning_content streaming, unknown-delta-key
+drift monitoring, and Session pool reuse — without touching the real DeepSeek API.
 
-The runner does HTTP via the ``requests`` package; we monkeypatch
-``requests.post`` so the tests are hermetic and fast.
+The runner does HTTP via the ``requests`` package using a lazily-initialized
+shared :class:`requests.Session` (see ``_get_session()``). Tests monkeypatch
+``requests.Session.post`` so they're hermetic and fast; because MagicMock is
+not a descriptor, the patch fires for every Session instance without
+prepending ``self`` to the call args.
 """
 from __future__ import annotations
 
@@ -118,7 +122,7 @@ class DeepSeekRunnerTest(unittest.TestCase):
         })
         fake_resp = _FakeStreamResponse(200, sse)
 
-        with mock.patch("requests.post", return_value=fake_resp) as m_post:
+        with mock.patch("requests.Session.post", return_value=fake_resp) as m_post:
             runner = DeepSeekRunner(
                 "chat-test", "Hi", sid=None, cwd="/tmp",
                 cancel_ev=threading.Event(), on_text=on_text,
@@ -146,7 +150,7 @@ class DeepSeekRunnerTest(unittest.TestCase):
 
     def test_system_prompt_prepended_to_messages(self):
         sse = _ds_sse(["ack"])
-        with mock.patch("requests.post", return_value=_FakeStreamResponse(200, sse)) as m_post:
+        with mock.patch("requests.Session.post", return_value=_FakeStreamResponse(200, sse)) as m_post:
             DeepSeekRunner(
                 "chat-test", "Hi", sid=None, cwd="/tmp",
                 system_prompt="You speak only French.",
@@ -157,11 +161,11 @@ class DeepSeekRunnerTest(unittest.TestCase):
 
     def test_history_replayed_into_next_request(self):
         # Round 1: seed history
-        with mock.patch("requests.post", return_value=_FakeStreamResponse(200, _ds_sse(["one"]))):
+        with mock.patch("requests.Session.post", return_value=_FakeStreamResponse(200, _ds_sse(["one"]))):
             DeepSeekRunner("chat-test", "first", sid=None, cwd="/tmp").run()
 
         # Round 2: previous turn must be replayed
-        with mock.patch("requests.post", return_value=_FakeStreamResponse(200, _ds_sse(["two"]))) as m_post:
+        with mock.patch("requests.Session.post", return_value=_FakeStreamResponse(200, _ds_sse(["two"]))) as m_post:
             DeepSeekRunner("chat-test", "second", sid=None, cwd="/tmp").run()
         sent_msgs = m_post.call_args.kwargs["json"]["messages"]
         roles_contents = [(m["role"], m["content"]) for m in sent_msgs]
@@ -177,7 +181,7 @@ class DeepSeekRunnerTest(unittest.TestCase):
             {"role": "user", "content": "older"},
             {"role": "assistant", "content": "older-reply"},
         ])
-        with mock.patch("requests.post", return_value=_FakeStreamResponse(200, _ds_sse(["ok"]))) as m_post:
+        with mock.patch("requests.Session.post", return_value=_FakeStreamResponse(200, _ds_sse(["ok"]))) as m_post:
             DeepSeekRunner(
                 "chat-test", "fresh", sid=None, cwd="/tmp", use_session=False,
             ).run()
@@ -194,7 +198,7 @@ class DeepSeekRunnerTest(unittest.TestCase):
             "prompt_tokens": 100, "completion_tokens": 50,
             "prompt_cache_hit_tokens": 10, "prompt_cache_miss_tokens": 90,
         })
-        with mock.patch("requests.post", return_value=_FakeStreamResponse(200, sse)), \
+        with mock.patch("requests.Session.post", return_value=_FakeStreamResponse(200, sse)), \
              mock.patch("larkhelm.token_stats.record_token_usage") as m_rec:
             DeepSeekRunner("chat-test", "Hi", sid=None, cwd="/tmp").run()
         self.assertEqual(m_rec.call_count, 1)
@@ -226,14 +230,14 @@ class DeepSeekRunnerTest(unittest.TestCase):
         ]
         # Patch backoff to zero so the test runs in milliseconds
         with mock.patch("larkhelm.runner_deepseek._REQUEST_BACKOFF", (0.0, 0.0, 0.0)), \
-             mock.patch("requests.post", side_effect=responses) as m_post:
+             mock.patch("requests.Session.post", side_effect=responses) as m_post:
             output = DeepSeekRunner("chat-test", "Hi", sid=None, cwd="/tmp").run()
         self.assertEqual(output, "ok")
         self.assertEqual(m_post.call_count, 2)
 
     def test_400_raises_immediately_without_retry(self):
         bad = _FakeStreamResponse(400, [], text="malformed prompt")
-        with mock.patch("requests.post", return_value=bad) as m_post:
+        with mock.patch("requests.Session.post", return_value=bad) as m_post:
             with self.assertRaises(RuntimeError) as cm:
                 DeepSeekRunner("chat-test", "Hi", sid=None, cwd="/tmp").run()
         self.assertIn("400", str(cm.exception))
@@ -261,7 +265,7 @@ class DeepSeekRunnerTest(unittest.TestCase):
 
         fake = _FakeStreamResponse(200, slow_lines)
         with mock.patch.object(_FakeStreamResponse, "iter_lines", cancelling_iter), \
-             mock.patch("requests.post", return_value=fake):
+             mock.patch("requests.Session.post", return_value=fake):
             with self.assertRaises(QueryCancelledError):
                 DeepSeekRunner(
                     "chat-test", "Hi", sid=None, cwd="/tmp", cancel_ev=cancel_ev,
@@ -290,6 +294,149 @@ class DeepSeekRunnerTest(unittest.TestCase):
         from larkhelm.chat_state import _save_sid
         _save_sid("chat-test", "{not valid json", "deepseek")
         self.assertEqual(_load_history("chat-test"), [])
+
+    # ------------------------------------------------------------------ P2-A additions
+
+    def test_reasoning_content_streamed_separately_from_content(self):
+        """deepseek-reasoner emits ``delta.reasoning_content`` for chain-of-thought.
+        It must surface to ``on_text`` with ``status="thinking"`` and NOT be
+        folded into ``_result_text`` (so history isn't polluted with CoT)."""
+        captured: list[tuple[str, str]] = []
+
+        def on_text(t, status="typing"):
+            captured.append((status, t))
+
+        # Hand-built SSE with both reasoning_content and content deltas.
+        lines = [
+            "data: " + json.dumps({"choices": [{"index": 0, "delta": {
+                "reasoning_content": "Let me think... "}}]}),
+            "",
+            "data: " + json.dumps({"choices": [{"index": 0, "delta": {
+                "reasoning_content": "the answer is 42."}}]}),
+            "",
+            "data: " + json.dumps({"choices": [{"index": 0, "delta": {
+                "content": "42"}}]}),
+            "",
+            "data: [DONE]",
+        ]
+        with mock.patch("requests.Session.post",
+                        return_value=_FakeStreamResponse(200, lines)):
+            runner = DeepSeekRunner(
+                "chat-test", "What's 6*7?", sid=None, cwd="/tmp",
+                on_text=on_text,
+            )
+            output = runner.run()
+
+        # Final answer = content only (reasoning excluded).
+        self.assertEqual(output, "42")
+
+        # Thinking deltas were surfaced via on_text(..., status="thinking").
+        thinking = [t for s, t in captured if s == "thinking"]
+        typing = [t for s, t in captured if s == "typing"]
+        self.assertEqual(thinking[-1], "Let me think... the answer is 42.")
+        self.assertEqual(typing[-1], "42")
+
+        # History persisted should be the assistant's CONTENT only — not the
+        # chain-of-thought (otherwise next round's prompt gets bloated with
+        # reasoning that shouldn't drive future generations).
+        hist = _load_history("chat-test")
+        self.assertEqual(hist[1]["role"], "assistant")
+        self.assertEqual(hist[1]["content"], "42")
+        self.assertNotIn("Let me think", hist[1]["content"])
+
+    def test_reasoning_only_response_does_not_persist_empty_assistant_turn(self):
+        """If the model emits ONLY reasoning_content (no final answer), we
+        must NOT write an empty assistant turn into history."""
+        lines = [
+            "data: " + json.dumps({"choices": [{"index": 0, "delta": {
+                "reasoning_content": "still thinking…"}}]}),
+            "",
+            "data: [DONE]",
+        ]
+        with mock.patch("requests.Session.post",
+                        return_value=_FakeStreamResponse(200, lines)):
+            DeepSeekRunner("chat-test", "Hi", sid=None, cwd="/tmp").run()
+        # No history written because _result_text.strip() is empty.
+        self.assertEqual(_load_history("chat-test"), [])
+
+    def test_unknown_delta_key_logs_once_per_chat(self):
+        """Future protocol drift: an unknown ``delta.xxx`` key should emit
+        exactly ONE [DeepSeek] unknown delta key debug line per (key, chat),
+        no matter how many chunks carry it. Catches drift early without
+        spamming the log."""
+        # Build SSE with the unknown key on FIVE chunks, then a real content chunk.
+        lines = []
+        for i in range(5):
+            lines.append("data: " + json.dumps({"choices": [{"index": 0, "delta": {
+                "future_field": f"chunk_{i}"}}]}))
+            lines.append("")
+        lines.append("data: " + json.dumps({"choices": [{"index": 0, "delta": {
+            "content": "ok"}}]}))
+        lines.append("")
+        lines.append("data: [DONE]")
+
+        with mock.patch("requests.Session.post",
+                        return_value=_FakeStreamResponse(200, lines)), \
+             mock.patch("larkhelm.runner_deepseek._debug_log") as m_log:
+            runner = DeepSeekRunner("chat-test", "Hi", sid=None, cwd="/tmp")
+            runner.run()
+
+        unknown_logs = [
+            c for c in m_log.call_args_list
+            if "unknown delta key 'future_field'" in str(c.args[0])
+        ]
+        self.assertEqual(len(unknown_logs), 1,
+                         f"expected exactly 1 unknown-key log, got {len(unknown_logs)}: "
+                         f"{unknown_logs}")
+        # And the runner's dedup set tracks it for the rest of the session.
+        self.assertIn("future_field", runner._seen_unknown_delta_keys)
+
+    def test_known_delta_keys_do_not_trigger_drift_warning(self):
+        """The whitelist must include role / content / reasoning_content /
+        tool_calls / function_call / refusal — none of these should log."""
+        lines = [
+            "data: " + json.dumps({"choices": [{"index": 0, "delta": {
+                "role": "assistant", "content": "hello"}}]}),
+            "",
+            "data: " + json.dumps({"choices": [{"index": 0, "delta": {
+                "reasoning_content": "thinking"}}]}),
+            "",
+            "data: [DONE]",
+        ]
+        with mock.patch("requests.Session.post",
+                        return_value=_FakeStreamResponse(200, lines)), \
+             mock.patch("larkhelm.runner_deepseek._debug_log") as m_log:
+            runner = DeepSeekRunner("chat-test", "Hi", sid=None, cwd="/tmp")
+            runner.run()
+        unknown_logs = [c for c in m_log.call_args_list
+                        if "unknown delta key" in str(c.args[0])]
+        self.assertEqual(unknown_logs, [], "no known key should log drift warning")
+        self.assertEqual(runner._seen_unknown_delta_keys, set())
+
+    def test_session_pool_reused_across_runs(self):
+        """``_get_session()`` returns the same Session instance across calls,
+        so TLS handshake / TCP connection get reused. Without this, every
+        DeepSeek call in a /dev pipeline pays 50–150ms handshake overhead."""
+        from larkhelm import runner_deepseek as rds
+        # Reset the module global so this test is order-independent.
+        with rds._session_lock:
+            rds._session = None
+        a = rds._get_session()
+        b = rds._get_session()
+        self.assertIs(a, b, "_get_session must memoize the session instance")
+
+    def test_session_post_is_what_runner_calls(self):
+        """Sanity guard for the test mocks: the runner must hit the Session's
+        post (not module-level ``requests.post``). Without this, future code
+        that bypasses the session would silently lose pooling AND every test
+        in this file would mis-mock."""
+        sse = _ds_sse(["ok"])
+        # Patch ONLY Session.post; if runner reverts to requests.post the
+        # test will see no call_args and fail.
+        with mock.patch("requests.Session.post",
+                        return_value=_FakeStreamResponse(200, sse)) as m_post:
+            DeepSeekRunner("chat-test", "Hi", sid=None, cwd="/tmp").run()
+        self.assertEqual(m_post.call_count, 1)
 
 
 if __name__ == "__main__":

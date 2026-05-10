@@ -127,7 +127,7 @@
       "capabilities": "Best for hard math, logic puzzles, and problems requiring extended step-by-step reasoning."
     },
     {
-      "_comment":     "DeepSeek via HTTP. Auto-registered when deepseek_api_key is non-empty; this explicit entry only matters if you want to pin a different model or set a custom base_url per backend.",
+      "_comment":     "DeepSeek via HTTP. Auto-registered when deepseek_api_key is non-empty; this explicit entry only matters if you want to pin a different model or set a custom base_url per backend. cost_per_1k_* + capability_scores + latency_tier let intent_router L2 cheap-tier auto-select DeepSeek when Gemini-flash is unavailable. NOTE: do NOT add 'tools' to tags — the HTTP runner does not implement function calling, and adding it would let rank_for_task pick DeepSeek for require_tools=True tasks.",
       "id":           "deepseek",
       "provider":     "deepseek_api",
       "display_name": "DeepSeek",
@@ -136,7 +136,12 @@
       "model":        "deepseek-chat",
       "api_key":      "${DEEPSEEK_API_KEY}",
       "base_url":     "https://api.deepseek.com",
-      "capabilities": "Cheap, fast Chinese-friendly chat model. Good for high-volume drafting and summarization where Claude/Gemini cost is wasteful."
+      "capabilities": "Cheap, fast Chinese-friendly chat model. Good for high-volume drafting and summarization where Claude/Gemini cost is wasteful.",
+      "cost_per_1k_input":  0.00014,
+      "cost_per_1k_output": 0.00220,
+      "_cost_comment":      "USD per 1K tokens (cache-miss rate; Apr-2026 list price). Update if DeepSeek changes pricing.",
+      "capability_scores":  {"chat": 0.85, "code": 0.80, "reasoning": 0.75, "long_context": 0.65},
+      "latency_tier":       "fast"
     }
   ]
 }

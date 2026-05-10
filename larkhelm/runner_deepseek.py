@@ -58,6 +58,44 @@ _REQUEST_BACKOFF = (1.0, 3.0, 6.0)   # exponential backoff on 429/503
 _HTTP_CONNECT_TIMEOUT = 30.0
 _HTTP_READ_TIMEOUT = None   # rely on watch thread / cancel_ev for stalled streams
 
+# SSE delta keys the parser knows how to handle. Anything outside this set
+# triggers a one-shot debug log per chat (see ``_consume_sse``) so future
+# protocol additions surface immediately instead of being silently dropped.
+# References: design.md §8 first risk row mentions ``reasoning_content`` /
+# protocol drift; current set covers OpenAI-compat + DeepSeek extensions.
+_KNOWN_DELTA_KEYS: frozenset[str] = frozenset({
+    "role", "content", "reasoning_content",
+    "tool_calls", "function_call",
+    "refusal",
+})
+
+# Lazy-initialized shared HTTP session for TLS/connection reuse. DeepSeek
+# /chat/completions endpoints get hit in tight bursts during /dev /crew
+# /plan pipelines (each agent step → 1 HTTP call); reusing the session
+# saves 50–150ms TLS handshake per call. requests.Session is thread-safe
+# at the adapter level for concurrent gets/posts, which matches our
+# threading model (each runner instance lives on its own thread, but they
+# all share this pool).
+_session = None  # type: ignore[var-annotated]
+_session_lock = threading.Lock()
+
+
+def _get_session():
+    """Return the shared :class:`requests.Session`, creating it on first call.
+
+    Importing ``requests`` lazily here keeps the module importable in
+    test environments that haven't installed it yet (``run()`` raises a
+    clear RuntimeError on the first actual request instead of an import-time
+    ModuleNotFoundError).
+    """
+    global _session
+    if _session is None:
+        with _session_lock:
+            if _session is None:
+                import requests
+                _session = requests.Session()
+    return _session
+
 
 def _load_history(chat_id: str) -> list[dict]:
     """Load DeepSeek conversation history from the standard .sid file.
@@ -148,6 +186,17 @@ class DeepSeekRunner:
         self._system_prompt = system_prompt or ""
 
         self._result_text: str = ""
+        # Chain-of-thought stream from ``deepseek-reasoner`` arrives on
+        # ``delta.reasoning_content``. Kept in a separate buffer (not folded
+        # into ``_result_text``) so it doesn't pollute the assistant turn
+        # written back to history, but IS surfaced to ``on_text(...,
+        # status="thinking")`` so live cards can render it (matches Kimi's
+        # "thinking" block treatment).
+        self._reasoning_text: str = ""
+        # Per-chat dedup for unknown ``delta`` keys: only debug-log once
+        # per (key, chat_id) so a noisy upstream protocol change can't
+        # spam DEBUG_LOG every chunk for an entire run.
+        self._seen_unknown_delta_keys: set[str] = set()
         self._completed = threading.Event()
         self._cancelled_flag = threading.Event()
         self._soft_timeout_flag = threading.Event()
@@ -306,6 +355,9 @@ class DeepSeekRunner:
             "messages": messages,
             "stream": True,
         }
+        # Use the shared Session so TLS handshake / TCP connection are reused
+        # across rapid back-to-back requests (e.g. /dev pipeline agent steps).
+        session = _get_session()
 
         last_err: Exception | None = None
         for attempt, delay in enumerate([0.0] + list(_REQUEST_BACKOFF)):
@@ -321,7 +373,7 @@ class DeepSeekRunner:
                     slept += 0.3
 
             try:
-                resp = requests.post(
+                resp = session.post(
                     url, headers=headers, json=body, stream=True,
                     timeout=(_HTTP_CONNECT_TIMEOUT, _HTTP_READ_TIMEOUT),
                 )
@@ -396,6 +448,8 @@ class DeepSeekRunner:
             choices = ev.get("choices") or []
             if choices:
                 delta = choices[0].get("delta") or {}
+
+                # ── content (final answer text) ──────────────────────────
                 chunk = delta.get("content") or ""
                 if chunk:
                     self._result_text += chunk
@@ -404,6 +458,36 @@ class DeepSeekRunner:
                             self.on_text(self._result_text, status="typing")
                         except Exception as e:
                             _debug_log(f"[DeepSeek] on_text callback failed: {e}")
+
+                # ── reasoning_content (deepseek-reasoner chain-of-thought) ──
+                # Live-stream the thinking buffer to the same on_text callback
+                # but with status="thinking" so card renderers can show it
+                # distinctly (mirrors Kimi's thinking-block treatment). The
+                # buffer is NOT folded into _result_text — only content goes
+                # into history, so the next round's prompt isn't polluted
+                # with chain-of-thought.
+                rchunk = delta.get("reasoning_content") or ""
+                if rchunk:
+                    self._reasoning_text += rchunk
+                    if self.on_text:
+                        try:
+                            self.on_text(self._reasoning_text, status="thinking")
+                        except Exception as e:
+                            _debug_log(f"[DeepSeek] on_text(thinking) callback failed: {e}")
+
+                # ── unknown delta keys → drift monitor ──────────────────
+                # First time we see a key outside _KNOWN_DELTA_KEYS for this
+                # runner instance, log once and remember. Catches new fields
+                # like a future delta.image / delta.audio_transcript before
+                # users notice missing output.
+                for k in delta.keys():
+                    if k in _KNOWN_DELTA_KEYS or k in self._seen_unknown_delta_keys:
+                        continue
+                    self._seen_unknown_delta_keys.add(k)
+                    _debug_log(
+                        f"[DeepSeek] unknown delta key {k!r} chat={self.chat_id[:12]} "
+                        f"(silently dropped; consider extending _KNOWN_DELTA_KEYS)"
+                    )
 
             # DeepSeek surfaces usage on the final chunk (after [DONE] in some
             # variants, on the last data event in others). Capture whenever present.
