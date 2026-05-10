@@ -2,7 +2,7 @@
 # deploy.sh — install updated source into the pipx venv and gracefully restart the service
 set -euo pipefail
 
-VENV_PYTHON="$HOME/.local/share/pipx/venvs/larkhelm/bin/python"
+VENV_PYTHON="$HOME/.local/pipx/venvs/larkhelm/bin/python"
 START_CMD="$HOME/.local/bin/larkhelm"
 CONFIG="--config $HOME/.config/larkhelm/config.json --data-dir $HOME/.local/share/larkhelm"
 LOG="$HOME/.local/share/larkhelm/logs/larkhelm.log"
