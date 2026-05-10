@@ -293,7 +293,13 @@ cat updated.md | larkhelm doc write "https://feishu.cn/docx/xxxx"
 | `/doc <sub>` | `_cmd_doc_*()` | cmd_doc.py | 读写飞书文档（read/write/append/list 等子命令） |
 | `/doc wiki <sub>` | `_cmd_doc_wiki_*()` | cmd_doc.py | 飞书 Wiki 操作（read/create/list 等） |
 | `/rename <名称>` | inline | handlers.py | 给当前会话命名 |
-| `/voice [status\|lang <zh\|en\|auto>]` | `_cmd_voice()` | commands.py | 查看 / 切换语音转写设置 |
+| `/voice [status\|lang <zh\|en\|auto>]` | `_cmd_voice()` | commands.py | 查看 / 切换语音转写设置（卡片显示当前 engine + 状态）|
+
+外部 CLI（不是飞书命令）：
+
+| CLI | 作用 |
+|---|---|
+| `larkhelm voice probe [--no-benchmark] [--no-write]` | 安装时一次性 probe：检 ffmpeg + CPU flags + RAM + 实测 RTF；自动写回 `config.json` 的 `voice_enabled` / `voice_engine` / `voice_model_size` |
 
 ## Key Features
 

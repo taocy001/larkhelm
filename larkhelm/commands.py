@@ -953,14 +953,40 @@ def _cmd_voice(chat_id: str, args: str = "", msg_id: str = None) -> None:
             loaded = False
         lang = _get_voice_lang(chat_id)
         enabled = "✅ 开启" if _cfg.VOICE_ENABLED else "⏸️ 关闭"
-        loaded_str = "✅ 已加载" if loaded else "⏸️ 未加载"
+        engine = (getattr(_cfg, "VOICE_ENGINE", "faster_whisper") or "faster_whisper")
+        api_key_set = bool(getattr(_cfg, "VOICE_API_KEY", ""))
+
+        # Engine-specific status hints — collapse model-loaded vs api-key
+        # status into one line so the card stays compact.
+        if engine == "dashscope":
+            # Probe SDK availability without importing transcribe (which would
+            # in turn import the dashscope adapter module).
+            try:
+                import importlib.util as _ilu
+                sdk_present = _ilu.find_spec("dashscope") is not None
+            except Exception:
+                sdk_present = False
+            sdk_str = "✅ SDK 已装" if sdk_present else "⏸️ SDK 未装（pipx runpip larkhelm install dashscope）"
+            key_str = "✅ 配置" if api_key_set else "⏸️ 未配置（设 $DASHSCOPE_API_KEY）"
+            engine_lines = (
+                f"**引擎：** `dashscope`（云 API）\n"
+                f"**API Key：** {key_str}\n"
+                f"**SDK 状态：** {sdk_str}\n"
+            )
+        else:
+            loaded_str = "✅ 已加载" if loaded else "⏸️ 未加载（首次语音消息懒加载）"
+            engine_lines = (
+                f"**引擎：** `faster_whisper`（本地）\n"
+                f"**模型：** `{_cfg.VOICE_MODEL_SIZE}` ({_cfg.VOICE_COMPUTE_TYPE})\n"
+                f"**模型状态：** {loaded_str}\n"
+            )
+
         body = (
             f"**总开关：** {enabled}\n"
-            f"**模型：** `{_cfg.VOICE_MODEL_SIZE}` ({_cfg.VOICE_COMPUTE_TYPE})\n"
+            f"{engine_lines}"
             f"**当前语种：** `{lang}`（默认 `{_cfg.VOICE_DEFAULT_LANG}`）\n"
             f"**音频上限：** {_cfg.VOICE_MAX_DURATION_MS // 1000}s\n"
-            f"**合并窗口：** {_cfg.VOICE_MERGE_WINDOW_SEC}s（cap {_cfg.VOICE_MAX_MERGE}）\n"
-            f"**模型状态：** {loaded_str}\n\n"
+            f"**合并窗口：** {_cfg.VOICE_MERGE_WINDOW_SEC}s（cap {_cfg.VOICE_MAX_MERGE}）\n\n"
             f"切换语种：`/voice lang zh|en|auto`"
         )
         send_card_reply(chat_id, msg_id, "🎤 Voice 状态", body, color="blue")

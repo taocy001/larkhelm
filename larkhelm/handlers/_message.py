@@ -276,13 +276,36 @@ def handle_message(data: P2ImMessageReceiveV1):
                 result = transcribe_file(audio_path, lang=lang)
                 text_out = (result.get("text") or "").strip()
                 if not result.get("ok") or not text_out:
+                    err_tag = result.get("error") or "空文本"
                     _debug_log(
                         f"[Voice] transcribe failed: ok={result.get('ok')} "
-                        f"error={result.get('error')}"
+                        f"error={err_tag}"
                     )
-                    update_card(placeholder_mid, "⚠️ 转写失败",
-                                f"未能从音频识别出文字（{result.get('error') or '空文本'}）。",
-                                color="orange")
+                    # Map known engine-specific error tags to actionable hints
+                    # so the user doesn't have to grep logs to recover.
+                    hint_map = {
+                        "dashscope_no_api_key":
+                            "DashScope 未配置：在 systemd drop-in 注入 "
+                            "`Environment=\"DASHSCOPE_API_KEY=sk-...\"` 后重启 bridge。",
+                        "dashscope_empty_result":
+                            "DashScope 返回空文本，可能是音频太短或口齿不清。",
+                    }
+                    user_hint = hint_map.get(err_tag, "")
+                    if not user_hint:
+                        if err_tag.startswith("dashscope_sdk_missing"):
+                            user_hint = ("DashScope SDK 未安装，在 SSH 跑："
+                                         "`pipx runpip larkhelm install dashscope`。")
+                        elif err_tag.startswith("dashscope_status_4"):
+                            user_hint = "DashScope 鉴权或参数错误，检查 API Key + 模型名。"
+                        elif err_tag.startswith("dashscope_call_failed"):
+                            user_hint = "DashScope 网络调用失败，检查网络或重试。"
+                        elif err_tag in ("disabled", "load_failed"):
+                            user_hint = ("本地模型加载失败，跑 `larkhelm voice probe` "
+                                         "诊断；或切到 dashscope 引擎。")
+                    body = f"未能从音频识别出文字（`{err_tag}`）。"
+                    if user_hint:
+                        body += f"\n\n{user_hint}"
+                    update_card(placeholder_mid, "⚠️ 转写失败", body, color="orange")
                     return
                 update_card(placeholder_mid, "✅ 转写完成", text_out, color="green")
                 target_model = _get_chat_model(chat_id)

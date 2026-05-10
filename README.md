@@ -133,22 +133,81 @@ cd larkhelm
 
 ### 启用语音功能
 
-LarkHelm 支持将飞书语音消息本地转写为文字（基于 [faster-whisper](https://github.com/SYSTRAN/faster-whisper)），转写结果作为普通查询发送给 AI。所有转写均在本机完成，不依赖任何付费 STT 服务。
+LarkHelm 支持将飞书语音消息转写为文字，转写结果作为普通查询发送给 AI。提供两个引擎，**根据机器实力选择**：
 
-#### 安装系统依赖
+* **`faster_whisper`**（默认，本地，免费）— 基于 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) 的 CTranslate2 推理。需要 CPU 有 AVX/AVX2 + 至少 1.5 GB 可用内存。无月费。
+* **`dashscope`**（云 API，opt-in，**付费**）— 阿里云 [Paraformer](https://www.aliyun.com/product/bailian) ASR。中文 CER ~2.8%，0.288 元/小时（百炼版）。无 ffmpeg 依赖、无模型下载。**用户必须显式开启**才会调用——absent opt-in，bridge 永远不会调用 DashScope，不会产生任何费用。
 
-faster-whisper 需要 ffmpeg 解码飞书下发的音频：
+#### 一键 probe：自动决定能不能跑本地
+
+装完 larkhelm 后第一件事跑一次 probe：
 
 ```bash
-sudo apt install ffmpeg          # Debian / Ubuntu
-brew install ffmpeg               # macOS
+larkhelm voice probe
 ```
+
+它会：
+1. 检查 `ffmpeg` 是否安装（apt-installed binary）。
+2. 读 `/proc/cpuinfo` 看是否有 AVX2 / AVX / SSE4。
+3. 读 `/proc/meminfo` 看可用内存。
+4. **真实跑一次 1 秒中文音频**测 RTF（实时因子；< 0.8 通过）。
+5. 自动写回 `config.json`：本地能跑 → `voice_enabled=true` + `voice_engine="faster_whisper"` + 推荐档位；本地跑不动 → `voice_enabled=false` 不动，并打印 DashScope opt-in 路径。
+
+跳过实测（仅 CPU/RAM 静态判断）：
+
+```bash
+larkhelm voice probe --no-benchmark
+```
+
+只看不写：
+
+```bash
+larkhelm voice probe --no-write
+```
+
+#### 路径 A：本地 faster-whisper（probe 通过的机器）
+
+probe 已经写好 config，剩下只需：
+
+```bash
+sudo apt install ffmpeg          # Debian / Ubuntu (probe 会提示是否缺)
+sudo systemctl restart larkhelm
+```
+
+> **境内服务器**：在 systemd drop-in 写 `Environment="HF_ENDPOINT=https://hf-mirror.com"` 加速首次模型下载（small 约 460 MB 缓存到 `~/.cache/huggingface/`）。
+
+#### 路径 B：DashScope（probe 不通过 / 想要更高准确率）
+
+```bash
+# 1. 装 DashScope SDK（不在主依赖里）
+pipx runpip larkhelm install dashscope
+
+# 2. 在阿里云开通百炼 / DashScope，拿 API Key（实名认证后免备案）
+# 3. systemd drop-in 注入 API Key（不要进 git）
+sudo tee /etc/systemd/system/larkhelm.service.d/voice-env.conf <<'EOF'
+[Service]
+Environment="DASHSCOPE_API_KEY=sk-..."
+EOF
+sudo systemctl daemon-reload
+
+# 4. 编辑 ~/.config/larkhelm/config.json：
+#    "voice_enabled":  true,
+#    "voice_engine":   "dashscope",
+#    "voice_api_key":  "${DASHSCOPE_API_KEY}"
+
+# 5. 重启
+sudo systemctl restart larkhelm
+```
+
+如果 `voice_enabled=true` 但 `voice_api_key` 解析为空，bridge 启动时会打 stderr warn 并临时关 voice（不 crash），不会偷偷烧账单。
 
 #### 配置字段
 
 | 字段 | 默认值 | 说明 |
 |---|---|---|
 | `voice_enabled` | `false` | 语音转写总开关；关闭时 bridge 行为完全不变 |
+| `voice_engine` | `"faster_whisper"` | 引擎：`faster_whisper`（本地） / `dashscope`（云） |
+| `voice_api_key` | `""` | 仅 dashscope 用；支持 `${DASHSCOPE_API_KEY}` 占位符 |
 | `voice_model_size` | `"small"` | faster-whisper 模型规格：`tiny` / `base` / `small` / `medium` / `large-v3` |
 | `voice_compute_type` | `"int8"` | 推理精度：`int8` / `float16` 等 |
 | `voice_max_duration_ms` | `180000` | 单条音频最长毫秒数（最低 `1000`） |
@@ -157,41 +216,27 @@ brew install ffmpeg               # macOS
 | `voice_max_merge` | `5` | 单次最多合并几条语音（最低 `1`） |
 | `voice_keep_audio` | `false` | 转写后是否保留原始音频文件 |
 
-#### 启用步骤
+#### 模型规格选型（仅 faster-whisper）
 
-1. 安装 ffmpeg（见上方命令）。
-2. 在 `config.json` 中追加 `"voice_enabled": true`，按需调整其他 `voice_*` 字段。
-3. 重启服务以加载新配置：
-
-   ```bash
-   sudo systemctl restart larkhelm                      # Linux 系统服务
-   systemctl --user restart larkhelm                    # Linux 用户态服务
-   launchctl kickstart -k gui/$UID/com.larkhelm.bridge  # macOS
-   ```
-
-> **境内服务器建议**：在 systemd drop-in（`Environment="HF_ENDPOINT=https://hf-mirror.com"`）或 shell 启动脚本中设置 HuggingFace 镜像，避免首次模型下载超时；设置后再执行重启。
-
-首次启动时 faster-whisper 会从 HuggingFace 拉取所选规格的模型（`small` + `int8` 约 460 MB），冷启动耗时数十秒到数分钟，请耐心等待；模型缓存在 `~/.cache/huggingface/`，后续重启不再重复下载。
-
-#### 模型规格选型
-
-| 规格 | 体积 | 推荐场景 |
-|---|---|---|
-| `tiny` | 约 75 MB | 资源极受限的设备，准确率较低 |
-| `base` | 约 140 MB | 轻量场景，速度优先 |
-| `small` | 约 460 MB | ✓ 默认推荐，准确率与速度的平衡 |
-| `medium` | 约 1.5 GB | 高准确率，需要较多内存 |
-| `large-v3` | 约 2.9 GB | 最高准确率，建议配合 GPU |
+| 规格 | 体积 | 内存峰值（int8） | 推荐场景 |
+|---|---|---|---|
+| `tiny` | 约 75 MB | ~500 MB | 资源极受限设备，准确率较低 |
+| `base` | 约 140 MB | ~800 MB | 轻量场景，速度优先 |
+| `small` | 约 460 MB | ~1.5 GB | ✓ 默认推荐，平衡 |
+| `medium` | 约 1.5 GB | ~2.5 GB | 高准确率，需较多内存 + AVX2 |
+| `large-v3` | 约 2.9 GB | ~4 GB | 最高准确率，建议配合 GPU |
 
 #### 切换转写语种
 
 ```text
-/voice status            # 查看当前语种
+/voice status            # 查看当前引擎 + 语种 + 模型/SDK 状态
 /voice lang en           # 切换到英文转写
 /voice lang auto         # 自动检测
 ```
 
-> 出于成本考虑，飞书原生语音卡（依赖飞书计费 STT 服务）已在本项目中全路径封禁，所有语音转写均通过本地 faster-whisper 完成。
+`/voice status` 会根据当前 `voice_engine` 显示对应的状态（faster-whisper：模型已加载/未加载；dashscope：API Key 已配置 + SDK 已装）。
+
+> 出于隐私与成本考虑，**飞书原生语音卡的转文字结果不通过事件下发**，所以即使你看到飞书 App 显示了客户端转写，bridge 也无法获取它。本项目仅通过用户显式选择的引擎完成转写。
 
 ### 聊天命令
 
