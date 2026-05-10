@@ -15,3 +15,6 @@ config_old*.json
 feishu_doc_url.txt
 phase*_raw.md
 phase*_analysis.md
+
+# 历史可行性分析文档（Phase 5 已落地，存档不入库）
+agent_auto_dispatch_analysis.md
