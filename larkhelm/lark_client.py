@@ -597,16 +597,112 @@ class FeishuDocClient:
             raise DocWriteNotSupportedError(
                 f"不支持写入类型 {ref.doc_type!r}，仅支持 docx")
         doc_id = ref.token
-        blocks = self._md_to_blocks(content)
-        if not blocks:
+        # Use the descendant API so markdown tables become native Feishu tables
+        # (instead of opaque code blocks). Falls back to legacy children API
+        # only if the document has no content to append.
+        children_ids, descendants = self._md_to_descendants(content)
+        if not descendants:
             return True
-        # Note: SDK client.request(raw) double-serialises bytes bodies (causes error 9499).
-        # Use direct HTTP requests to work around this.
-        self._append_blocks_http(doc_id, blocks)
+        self._append_descendants_http(doc_id, children_ids, descendants)
         return True
 
+    def _append_descendants_http(
+        self, doc_id: str, children_ids: list, descendants: list,
+    ) -> None:
+        """Append a (possibly nested) block tree via the descendant API.
+
+        Endpoint: ``POST /docx/v1/documents/:doc_id/blocks/:block_id/descendant``
+        (singular ``descendant``, NOT ``descendants``). Body shape:
+
+        ::
+
+            {
+              "children_id": [<top-level temp ids in insertion order>],
+              "index": -1,
+              "descendants": [
+                {"block_id": ..., "block_type": ..., ...},   # parent first
+                {"block_id": ..., "block_type": ..., ...},   # then children
+                ...
+              ]
+            }
+
+        Feishu replaces our temp UUIDs with real server-side block IDs and
+        echoes them in the response (we discard those — fire-and-forget).
+
+        Batching: Feishu caps a single descendant call at 1500 blocks per
+        request; we split conservatively at 1000 to leave headroom for any
+        future schema bloat. Each batch carries its own slice of
+        ``children_id`` so the order at insertion is stable.
+        """
+        token = self._get_tenant_token()
+        url = (
+            f"https://open.feishu.cn/open-apis/docx/v1/documents/{doc_id}"
+            f"/blocks/{doc_id}/descendant"
+        )
+        # Group descendants by which top-level child they belong to so each
+        # batch keeps parent and its descendants together. Walk children_ids
+        # in order, gather the transitive set per top-level id.
+        # Build adjacency: block_id → block dict (for fast lookup)
+        by_id: dict = {b["block_id"]: b for b in descendants}
+
+        def _collect(top_id: str) -> list:
+            """BFS over ``children`` to gather a top-level block plus its
+            entire subtree, preserving descendants[] order: parent emitted
+            first, then immediate children, then grandchildren, …"""
+            out: list = []
+            queue = [top_id]
+            seen: set = set()
+            while queue:
+                bid = queue.pop(0)
+                if bid in seen:
+                    continue
+                seen.add(bid)
+                blk = by_id.get(bid)
+                if blk is None:
+                    continue
+                out.append(blk)
+                queue.extend(blk.get("children", []))
+            return out
+
+        # Now batch top-level subtrees up to ~1000 blocks per request.
+        BATCH_BLOCK_LIMIT = 1000
+        batch_top: list = []
+        batch_desc: list = []
+        for top_id in children_ids:
+            subtree = _collect(top_id)
+            if batch_desc and len(batch_desc) + len(subtree) > BATCH_BLOCK_LIMIT:
+                self._post_descendant(url, token, batch_top, batch_desc)
+                batch_top, batch_desc = [], []
+            batch_top.append(top_id)
+            batch_desc.extend(subtree)
+        if batch_desc:
+            self._post_descendant(url, token, batch_top, batch_desc)
+
+    def _post_descendant(
+        self, url: str, token: str, children_id: list, descendants: list,
+    ) -> None:
+        body = _json_mod.dumps(
+            {"children_id": children_id, "index": -1, "descendants": descendants},
+            ensure_ascii=False,
+        ).encode()
+        req = _urllib_req.Request(url, data=body, headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type":  "application/json; charset=utf-8",
+        })
+        try:
+            with _urllib_req.urlopen(req, timeout=60) as resp:
+                data = _json_mod.loads(resp.read())
+                if data.get("code", 0) != 0:
+                    raise DocAPIError(data["code"], data.get("msg", ""))
+        except DocAPIError:
+            raise
+        except Exception as e:
+            raise DocAPIError(0, f"HTTP descendant 失败: {e}")
+
     def _append_blocks_http(self, doc_id: str, blocks: list) -> None:
-        """Append blocks to the end of a document via direct HTTP calls (batched, max 50 per batch)."""
+        """[LEGACY] Flat children-only append. Kept for backward compatibility
+        with callers that don't need nested table support. New code should
+        prefer ``_append_descendants_http``."""
         token = self._get_tenant_token()
         url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{doc_id}/blocks/{doc_id}/children"
         batch_size = 50
@@ -671,11 +767,11 @@ class FeishuDocClient:
             self._http_request("DELETE",
                 f"https://open.feishu.cn/open-apis/docx/v1/documents/{doc_id}/blocks/{doc_id}/children/batch_delete",
                 {"start_index": 0, "end_index": len(children)})
-        blocks = self._md_to_blocks(content)
-        if blocks:
-            self._http_request("POST",
-                f"https://open.feishu.cn/open-apis/docx/v1/documents/{doc_id}/blocks/{doc_id}/children",
-                {"children": blocks, "index": 0})
+        # Route through the descendant API so markdown tables render as native
+        # Feishu tables (block_type=31), not opaque code blocks.
+        children_ids, descendants = self._md_to_descendants(content)
+        if descendants:
+            self._append_descendants_http(doc_id, children_ids, descendants)
         return True
 
     def _http_request(self, method: str, url: str, body: dict) -> dict:
@@ -805,7 +901,12 @@ class FeishuDocClient:
     def _md_to_blocks(self, content: str) -> list:
         """Convert Markdown text to a list of Feishu docx Block JSON objects.
         Supports: paragraphs, H1-H3 headings, code blocks, unordered/ordered lists,
-        tables (rendered as code block), inline bold/italic/code/strikethrough.
+        tables (rendered as code block — legacy), inline bold/italic/code/strikethrough.
+
+        NOTE: This flat-block path is kept for backward compatibility (callers
+        that POST to ``/blocks/{block_id}/children``). It cannot represent
+        nested structures like native tables — use ``_md_to_descendants``
+        instead and POST to ``/blocks/{block_id}/descendant`` for tables.
         """
         blocks = []
         lines  = content.split("\n")
@@ -823,7 +924,7 @@ class FeishuDocClient:
                 blocks.append(self._make_code_block("\n".join(code_lines), lang))
                 i += 1
                 continue
-            # Markdown table — collect all consecutive | lines and render as code block
+            # Markdown table — legacy path renders as code block (flat API can't nest)
             if re.match(r'^\|', line):
                 table_lines = []
                 while i < len(lines) and re.match(r'^\|', lines[i]):
@@ -852,6 +953,134 @@ class FeishuDocClient:
                 blocks.append(self._make_paragraph_block(line))
             i += 1
         return blocks
+
+    def _md_to_descendants(self, content: str) -> tuple[list, list]:
+        """Convert Markdown to ``(children_ids, descendants)`` for the
+        ``POST /docx/v1/documents/:doc_id/blocks/:block_id/descendant`` API.
+
+        Same coverage as ``_md_to_blocks`` PLUS native table support:
+        markdown tables become real Feishu table blocks (block_type=31)
+        with table_cell children (block_type=32), each cell containing
+        a paragraph block. Replaces the legacy "render table as code block"
+        path that the user reported as ugly.
+
+        Each emitted block carries a ``block_id`` (UUID hex) that Feishu's
+        descendant endpoint uses to link parent ↔ child.
+        """
+        import uuid as _uuid
+        children_ids: list[str] = []
+        descendants: list[dict] = []
+
+        def _emit_top(blk: dict) -> str:
+            """Append a top-level block, return its temp id."""
+            bid = _uuid.uuid4().hex
+            blk["block_id"] = bid
+            descendants.append(blk)
+            children_ids.append(bid)
+            return bid
+
+        lines = content.split("\n")
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+
+            # Fenced code block
+            if line.startswith("```"):
+                lang = line[3:].strip()
+                code_lines: list[str] = []
+                i += 1
+                while i < len(lines) and not lines[i].startswith("```"):
+                    code_lines.append(lines[i])
+                    i += 1
+                _emit_top(self._make_code_block("\n".join(code_lines), lang))
+                i += 1
+                continue
+
+            # Markdown table — emit native Feishu table block
+            if re.match(r'^\|', line):
+                table_rows: list[str] = []
+                while i < len(lines) and re.match(r'^\|', lines[i]):
+                    table_rows.append(lines[i])
+                    i += 1
+                # Filter out separator rows (`|---|---|` etc.) which carry no content
+                parsed: list[list[str]] = []
+                for row in table_rows:
+                    if re.match(r'^\|\s*[-:|\s]+\s*\|?\s*$', row):
+                        continue
+                    cells = [c.strip() for c in row.strip().strip('|').split('|')]
+                    parsed.append(cells)
+                if not parsed:
+                    continue
+
+                n_rows = len(parsed)
+                n_cols = max(len(r) for r in parsed) if parsed else 1
+
+                # Build cell+text blocks first so we have IDs to wire up the table parent
+                cell_ids: list[str] = []
+                cell_blocks: list[dict] = []
+                text_blocks: list[dict] = []
+                for row in parsed:
+                    for c_idx in range(n_cols):
+                        cell_id = _uuid.uuid4().hex
+                        text_id = _uuid.uuid4().hex
+                        cell_text = row[c_idx] if c_idx < len(row) else ""
+                        # Paragraph block inside the cell carries the content
+                        text_blk = self._make_paragraph_block(cell_text)
+                        text_blk["block_id"] = text_id
+                        text_blocks.append(text_blk)
+                        # Cell block (block_type=32) wraps its text child
+                        cell_blocks.append({
+                            "block_id": cell_id,
+                            "block_type": 32,
+                            "table_cell": {},
+                            "children": [text_id],
+                        })
+                        cell_ids.append(cell_id)
+
+                # Table block (block_type=31). ``cells`` matches ``children`` order;
+                # both are the row-major flattened list of cell IDs.
+                table_id = _uuid.uuid4().hex
+                table_blk = {
+                    "block_id": table_id,
+                    "block_type": 31,
+                    "table": {
+                        "property": {
+                            "row_size": n_rows,
+                            "column_size": n_cols,
+                        },
+                        "cells": list(cell_ids),
+                    },
+                    "children": list(cell_ids),
+                }
+                # Order matters: parents BEFORE their referenced children in descendants
+                descendants.append(table_blk)
+                descendants.extend(cell_blocks)
+                descendants.extend(text_blocks)
+                children_ids.append(table_id)
+                continue
+
+            # Headings
+            if line.startswith("### "):
+                _emit_top(self._make_heading_block(line[4:], 3))
+            elif line.startswith("## "):
+                _emit_top(self._make_heading_block(line[3:], 2))
+            elif line.startswith("# "):
+                _emit_top(self._make_heading_block(line[2:], 1))
+            # Unordered list
+            elif re.match(r'^[*\-] ', line):
+                _emit_top(self._make_bullet_block(line[2:]))
+            # Ordered list
+            elif re.match(r'^\d+\. ', line):
+                _emit_top(self._make_ordered_block(re.sub(r'^\d+\. ', '', line)))
+            # Blank line or horizontal rule — skip
+            elif not line.strip() or re.match(r'^-{3,}$', line.strip()):
+                pass
+            # Plain paragraph
+            else:
+                _emit_top(self._make_paragraph_block(line))
+            i += 1
+
+        return children_ids, descendants
 
     def _make_paragraph_block(self, text: str) -> dict:
         return {"block_type": 2, "text": {
