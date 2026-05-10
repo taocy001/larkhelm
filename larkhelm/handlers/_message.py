@@ -6,6 +6,7 @@ Contains:
   - handle_reaction_created()  Handle emoji reaction events
 """
 import json
+import os
 import threading
 import traceback
 
@@ -14,17 +15,22 @@ from lark_oapi.api.im.v1 import P2ImMessageReceiveV1, P2ImMessageReactionCreated
 import larkhelm.config as _cfg
 from larkhelm.log import _debug_log, log_entry
 from larkhelm.dedup import _is_duplicate
-from larkhelm.chat_state import _get_chat_model, _get_cwd, _is_btw_reply, _register_btw_msg, _set_chat_field
+from larkhelm.chat_state import (
+    _get_chat_model, _get_cwd, _is_btw_reply, _register_btw_msg, _set_chat_field,
+    _get_voice_lang,
+)
 from larkhelm.concurrency import (
     _get_chat_lock, _trigger_cancel, _reset_cancel, _pop_pending,
     _get_cancel_event,
 )
 from larkhelm.lark_client import (
-    send_card, send_card_reply, _download_image,
+    send_card, send_card_reply, _download_image, _download_message_file, update_card,
     REACTION_ACTIONS, _reply_index, _reply_index_lock,
 )
 from larkhelm.concurrency import is_shutting_down
 from larkhelm.handlers._query import _do_query
+from larkhelm.voice.transcribe import transcribe as transcribe_file
+from larkhelm.voice.merge import add_voice
 
 
 def _intent_router_active(chat_id: str) -> bool:
@@ -223,6 +229,101 @@ def handle_message(data: P2ImMessageReceiveV1):
             except Exception as e:
                 _debug_log(f"[Post] parse error: {e}")
                 return
+        elif message.message_type == "audio":
+            if not _cfg.VOICE_ENABLED:
+                return
+            try:
+                audio_meta = json.loads(message.content)
+                file_key = audio_meta.get("file_key", "")
+                duration_ms = int(audio_meta.get("duration", 0) or 0)
+            except Exception as e:
+                _debug_log(f"[Voice] content parse failed: {e}")
+                send_card_reply(chat_id, message.message_id, "⚠️ 音频解析失败",
+                                "无法解析音频元数据。", color="orange")
+                return
+            if not file_key:
+                _debug_log("[Voice] content missing file_key")
+                send_card_reply(chat_id, message.message_id, "⚠️ 音频解析失败",
+                                "音频消息缺少 file_key。", color="orange")
+                return
+            if duration_ms > _cfg.VOICE_MAX_DURATION_MS:
+                _debug_log(
+                    f"[Voice] rejected oversize duration={duration_ms}ms "
+                    f"(limit={_cfg.VOICE_MAX_DURATION_MS}ms)"
+                )
+                send_card_reply(
+                    chat_id, message.message_id, "⚠️ 音频过长",
+                    f"时长 {duration_ms / 1000:.1f}s，超过上限 "
+                    f"{_cfg.VOICE_MAX_DURATION_MS / 1000:.1f}s。",
+                    color="orange",
+                )
+                return
+            placeholder_mid = send_card_reply(
+                chat_id, message.message_id, "🎤 转写中…",
+                "正在识别语音…", color="grey",
+            )
+            audio_path = None
+            try:
+                audio_path = _download_message_file(
+                    file_key, chat_id, message.message_id, kind="file",
+                )
+                if not audio_path:
+                    _debug_log(f"[Voice] download failed file_key={file_key}")
+                    update_card(placeholder_mid, "❌ 下载失败",
+                                "无法下载音频文件，请稍后重试。", color="red")
+                    return
+                lang = _get_voice_lang(chat_id)
+                result = transcribe_file(audio_path, lang=lang)
+                text_out = (result.get("text") or "").strip()
+                if not result.get("ok") or not text_out:
+                    _debug_log(
+                        f"[Voice] transcribe failed: ok={result.get('ok')} "
+                        f"error={result.get('error')}"
+                    )
+                    update_card(placeholder_mid, "⚠️ 转写失败",
+                                f"未能从音频识别出文字（{result.get('error') or '空文本'}）。",
+                                color="orange")
+                    return
+                update_card(placeholder_mid, "✅ 转写完成", text_out, color="green")
+                target_model = _get_chat_model(chat_id)
+                parent_id = getattr(message, "parent_id", None)
+                _debug_log(
+                    f"[Voice] transcribed {len(text_out)}ch lang={lang} → "
+                    f"dispatch model={target_model}"
+                )
+                # Mirror the text path's pre-dispatch hygiene (line 595-596):
+                # log into the conversation .md so memory/auto-update sees the
+                # voice-originated turn, and clear any stale /cancel event so
+                # _do_query doesn't abort immediately on its first read.
+                log_entry(chat_id, "user", text_out, model=target_model)
+                _reset_cancel(chat_id)
+                if _cfg.VOICE_MERGE_WINDOW_SEC > 0:
+                    add_voice(
+                        chat_id, text_out, target_model,
+                        user_msg_id=message.message_id, parent_id=parent_id,
+                    )
+                else:
+                    # Off-thread the LLM call so the SDK event worker is not
+                    # held for the full query duration (matches text path
+                    # at line 600-611).
+                    threading.Thread(
+                        target=_do_query,
+                        kwargs={
+                            "chat_id": chat_id, "message": text_out,
+                            "model": target_model,
+                            "user_msg_id": message.message_id,
+                            "parent_id": parent_id,
+                        },
+                        daemon=True,
+                        name=f"voice-query-{chat_id[:8]}",
+                    ).start()
+            finally:
+                if (not _cfg.VOICE_KEEP_AUDIO) and audio_path:
+                    try:
+                        os.unlink(audio_path)
+                    except Exception as e:
+                        _debug_log(f"[Voice] cleanup unlink failed: {e}")
+            return
         else:
             return
 
@@ -236,7 +337,7 @@ def handle_message(data: P2ImMessageReceiveV1):
             _cmd_reset, _cmd_status, _cmd_help, _cmd_pickup, _cmd_history,
             _cmd_stats, _cmd_cron, _cmd_cd, _cmd_pwd, _cmd_ls, _cmd_run,
             _cmd_model, _cmd_lock, _cmd_cli_native, _cmd_btw, _cmd_upgrade, _cmd_memory,
-            _strip_at_mention,
+            _cmd_voice, _strip_at_mention,
         )
         from larkhelm.cmd_doc import _cmd_doc
 
@@ -345,6 +446,11 @@ def handle_message(data: P2ImMessageReceiveV1):
             parts = text.split(None, 1)
             arg = parts[1].strip() if len(parts) == 2 else ""
             _cmd_lock(chat_id, arg, _mid)
+            return
+        if tl == "/voice" or tl.startswith("/voice "):
+            parts = text.split(None, 1)
+            arg = parts[1].strip() if len(parts) == 2 else ""
+            _cmd_voice(chat_id, arg, _mid)
             return
         if tl.startswith("/rename "):
             import re as _re

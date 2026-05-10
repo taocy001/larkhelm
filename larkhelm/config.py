@@ -124,6 +124,9 @@ VOICE_DEFAULT_LANG:      str   # one of: zh / en / auto
 VOICE_MERGE_WINDOW_SEC:  int   # 0 = disable merge
 VOICE_MAX_MERGE:         int
 VOICE_KEEP_AUDIO:        bool
+# Single source of truth for accepted voice languages — referenced by both
+# config validation (_init_runtime) and the /voice command handler.
+_VOICE_LANG_WHITELIST: "frozenset[str]" = frozenset({"zh", "en", "auto"})
 
 # ── Card UX parameters (module-level constants) ────────────────────────────────────
 TOOL_HISTORY_CAP   = 20      # max number of completed tool pairs kept in history
@@ -448,7 +451,6 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         )
         VOICE_MODEL_SIZE = "small"
 
-    _VOICE_LANG_WHITELIST = {"zh", "en", "auto"}
     if VOICE_DEFAULT_LANG not in _VOICE_LANG_WHITELIST:
         print(
             f"⚠️  voice_default_lang '{VOICE_DEFAULT_LANG}' 无效"

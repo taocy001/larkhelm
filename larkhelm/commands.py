@@ -424,6 +424,7 @@ def _cmd_help(chat_id: str, msg_id: str = None):
         "**/upgrade** — 更新 larkhelm 到最新版本\n"
         "**/cron add** \"<expr>\" <查询>　**/cron list**　**/cron del** <id> — 定时任务\n"
         "**/doc** read · append · write · create · setfolder — 飞书文档操作\n"
+        "**/voice** [status | lang <zh|en|auto>] — 查看 / 切换语音转写设置\n"
         "\n"
         "**🤖 多 Agent 协作**\n"
         "**/crew** <需求> — 动态规划：Manager 自动分解任务，多 Agent 并行执行\n"
@@ -929,6 +930,57 @@ def _cmd_lock(chat_id: str, args: str = "", msg_id: str = None) -> None:
 def _cmd_model(chat_id: str, model_name: str = "", msg_id: str = None):
     """Alias for /lock: switches default backend for this chat."""
     _cmd_lock(chat_id, model_name, msg_id)
+
+
+def _cmd_voice(chat_id: str, args: str = "", msg_id: str = None) -> None:
+    """Handle /voice command.
+
+    /voice              → equivalent to /voice status
+    /voice status       → status card (voice_lang + global VOICE_* + is_model_loaded())
+    /voice lang <x>     → set voice_lang for this chat (whitelist: zh / en / auto)
+    其它                → usage card
+    Never raises; failures surface as user-visible cards.
+    """
+    from larkhelm.chat_state import _get_voice_lang, _set_voice_lang
+    args = (args or "").strip()
+
+    if args == "" or args == "status":
+        try:
+            from larkhelm.voice.transcribe import is_model_loaded
+            loaded = is_model_loaded()
+        except Exception as e:
+            _debug_log(f"[Voice] is_model_loaded probe failed: {e}")
+            loaded = False
+        lang = _get_voice_lang(chat_id)
+        enabled = "✅ 开启" if _cfg.VOICE_ENABLED else "⏸️ 关闭"
+        loaded_str = "✅ 已加载" if loaded else "⏸️ 未加载"
+        body = (
+            f"**总开关：** {enabled}\n"
+            f"**模型：** `{_cfg.VOICE_MODEL_SIZE}` ({_cfg.VOICE_COMPUTE_TYPE})\n"
+            f"**当前语种：** `{lang}`（默认 `{_cfg.VOICE_DEFAULT_LANG}`）\n"
+            f"**音频上限：** {_cfg.VOICE_MAX_DURATION_MS // 1000}s\n"
+            f"**合并窗口：** {_cfg.VOICE_MERGE_WINDOW_SEC}s（cap {_cfg.VOICE_MAX_MERGE}）\n"
+            f"**模型状态：** {loaded_str}\n\n"
+            f"切换语种：`/voice lang zh|en|auto`"
+        )
+        send_card_reply(chat_id, msg_id, "🎤 Voice 状态", body, color="blue")
+        return
+
+    if args.startswith("lang "):
+        lang_arg = args[5:].strip().lower()
+        if lang_arg in _cfg._VOICE_LANG_WHITELIST:
+            _set_voice_lang(chat_id, lang_arg)
+            send_card_reply(chat_id, msg_id, "✅ 语种已切换",
+                            f"voice_lang = `{lang_arg}`", color="green")
+        else:
+            send_card_reply(chat_id, msg_id, "❌ 语种无效",
+                            "可选值：`zh` / `en` / `auto`", color="red")
+        return
+
+    send_card_reply(chat_id, msg_id, "⚠️ 用法",
+                    "`/voice status` — 查看当前配置\n"
+                    "`/voice lang <zh|en|auto>` — 切换语种",
+                    color="orange")
 
 
 # Native command sets for Claude CLI / Gemini CLI / Kimi CLI

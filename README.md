@@ -36,6 +36,7 @@ LarkHelm 是一个运行在飞书（Lark）中的 AI 助手平台，可以使用
 | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | 可选，`gemini` 可在 PATH 中执行 |
 | [Kimi Code CLI](https://github.com/MoonshotAI/kimi-code) | 可选，`kimi` 可在 PATH 中执行 |
 | 飞书自建应用 | 需要 App ID 和 App Secret，开启消息接收权限 |
+| ffmpeg | 仅 `voice_enabled=true` 时需要；faster-whisper 用于解码音频 |
 
 ### 快速开始
 
@@ -129,6 +130,68 @@ cd larkhelm
 | `doc_write_confirm` | `/doc write` 覆写前要求确认 | `true` |
 | `mcp_config_file` | MCP 配置文件路径（可选） | — |
 | `timezone` | 定时任务时区 | `Asia/Shanghai` |
+
+### 启用语音功能
+
+LarkHelm 支持将飞书语音消息本地转写为文字（基于 [faster-whisper](https://github.com/SYSTRAN/faster-whisper)），转写结果作为普通查询发送给 AI。所有转写均在本机完成，不依赖任何付费 STT 服务。
+
+#### 安装系统依赖
+
+faster-whisper 需要 ffmpeg 解码飞书下发的音频：
+
+```bash
+sudo apt install ffmpeg          # Debian / Ubuntu
+brew install ffmpeg               # macOS
+```
+
+#### 配置字段
+
+| 字段 | 默认值 | 说明 |
+|---|---|---|
+| `voice_enabled` | `false` | 语音转写总开关；关闭时 bridge 行为完全不变 |
+| `voice_model_size` | `"small"` | faster-whisper 模型规格：`tiny` / `base` / `small` / `medium` / `large-v3` |
+| `voice_compute_type` | `"int8"` | 推理精度：`int8` / `float16` 等 |
+| `voice_max_duration_ms` | `180000` | 单条音频最长毫秒数（最低 `1000`） |
+| `voice_default_lang` | `"zh"` | 默认转写语种：`zh` / `en` / `auto` |
+| `voice_merge_window_sec` | `0` | 多条语音合并窗口秒数；`0` 表示不合并 |
+| `voice_max_merge` | `5` | 单次最多合并几条语音（最低 `1`） |
+| `voice_keep_audio` | `false` | 转写后是否保留原始音频文件 |
+
+#### 启用步骤
+
+1. 安装 ffmpeg（见上方命令）。
+2. 在 `config.json` 中追加 `"voice_enabled": true`，按需调整其他 `voice_*` 字段。
+3. 重启服务以加载新配置：
+
+   ```bash
+   sudo systemctl restart larkhelm                      # Linux 系统服务
+   systemctl --user restart larkhelm                    # Linux 用户态服务
+   launchctl kickstart -k gui/$UID/com.larkhelm.bridge  # macOS
+   ```
+
+> **境内服务器建议**：在 systemd drop-in（`Environment="HF_ENDPOINT=https://hf-mirror.com"`）或 shell 启动脚本中设置 HuggingFace 镜像，避免首次模型下载超时；设置后再执行重启。
+
+首次启动时 faster-whisper 会从 HuggingFace 拉取所选规格的模型（`small` + `int8` 约 460 MB），冷启动耗时数十秒到数分钟，请耐心等待；模型缓存在 `~/.cache/huggingface/`，后续重启不再重复下载。
+
+#### 模型规格选型
+
+| 规格 | 体积 | 推荐场景 |
+|---|---|---|
+| `tiny` | 约 75 MB | 资源极受限的设备，准确率较低 |
+| `base` | 约 140 MB | 轻量场景，速度优先 |
+| `small` | 约 460 MB | ✓ 默认推荐，准确率与速度的平衡 |
+| `medium` | 约 1.5 GB | 高准确率，需要较多内存 |
+| `large-v3` | 约 2.9 GB | 最高准确率，建议配合 GPU |
+
+#### 切换转写语种
+
+```text
+/voice status            # 查看当前语种
+/voice lang en           # 切换到英文转写
+/voice lang auto         # 自动检测
+```
+
+> 出于成本考虑，飞书原生语音卡（依赖飞书计费 STT 服务）已在本项目中全路径封禁，所有语音转写均通过本地 faster-whisper 完成。
 
 ### 聊天命令
 
@@ -274,6 +337,7 @@ LarkHelm is an AI assistant platform that runs inside Feishu (Lark), supporting 
 | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | Optional, `gemini` on PATH |
 | [Kimi Code CLI](https://github.com/MoonshotAI/kimi-code) | Optional, `kimi` on PATH |
 | Feishu custom app | App ID + App Secret, message permissions enabled |
+| ffmpeg | Required only when `voice_enabled=true`; used by faster-whisper for audio decoding |
 
 ### Quick Start
 
@@ -367,6 +431,66 @@ Config file location:
 | `doc_write_confirm` | Require confirmation before `/doc write` overwrites | `true` |
 | `mcp_config_file` | Path to MCP config file (optional) | — |
 | `timezone` | Timezone for cron tasks | `Asia/Shanghai` |
+
+### Enable Voice Transcription
+
+LarkHelm can transcribe Feishu voice messages locally with [faster-whisper](https://github.com/SYSTRAN/faster-whisper) and feed the transcript to the AI as a normal query. All transcription runs on the host; no paid STT service is involved.
+
+#### Install System Dependencies
+
+faster-whisper needs ffmpeg to decode the audio Feishu delivers:
+
+```bash
+sudo apt install ffmpeg          # Debian / Ubuntu
+brew install ffmpeg               # macOS
+```
+
+#### Configuration Fields
+
+| Field | Default | Description |
+|---|---|---|
+| `voice_enabled` | `false` | Master switch for voice transcription; bridge behavior is unchanged when off |
+| `voice_model_size` | `"small"` | faster-whisper model size: `tiny` / `base` / `small` / `medium` / `large-v3` |
+| `voice_compute_type` | `"int8"` | Compute type, e.g. `int8` / `float16` |
+| `voice_max_duration_ms` | `180000` | Max milliseconds per clip (floor `1000`) |
+| `voice_default_lang` | `"zh"` | Default transcription language: `zh` / `en` / `auto` |
+| `voice_merge_window_sec` | `0` | Merge window in seconds for consecutive clips; `0` disables merging |
+| `voice_max_merge` | `5` | Max clips merged in one transcription pass (floor `1`) |
+| `voice_keep_audio` | `false` | Keep the original audio file after transcription |
+
+#### Enable Steps
+
+1. Install ffmpeg (see above).
+2. Add `"voice_enabled": true` to `config.json` and tweak the other `voice_*` fields as needed.
+3. Restart the service to load the new configuration:
+
+   ```bash
+   sudo systemctl restart larkhelm                      # Linux system service
+   systemctl --user restart larkhelm                    # Linux user service
+   launchctl kickstart -k gui/$UID/com.larkhelm.bridge  # macOS
+   ```
+
+> **Mainland-China hosts**: set a HuggingFace mirror via a systemd drop-in (`Environment="HF_ENDPOINT=https://hf-mirror.com"`) or your shell startup script before the restart, otherwise the first model download will likely time out.
+
+On the first run, faster-whisper downloads the selected model from HuggingFace (`small` + `int8` ≈ 460 MB); the cold start can take tens of seconds to several minutes. Models are cached under `~/.cache/huggingface/` and reused on subsequent restarts.
+
+#### Model Size Selection
+
+| Size | Disk | Recommended Use |
+|---|---|---|
+| `tiny` | ~75 MB | Severely resource-constrained devices; lower accuracy |
+| `base` | ~140 MB | Lightweight workloads, speed-first |
+| `small` | ~460 MB | ✓ Default; balanced accuracy and speed |
+| `medium` | ~1.5 GB | High accuracy; needs more memory |
+| `large-v3` | ~2.9 GB | Highest accuracy; GPU recommended |
+
+#### Switch Transcription Language
+
+```text
+/voice status            # show the current language
+/voice lang en           # switch to English transcription
+/voice lang auto         # auto-detect
+```
 
 ### Chat Commands
 
