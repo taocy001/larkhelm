@@ -8,8 +8,10 @@ import os
 import time
 import threading
 import shutil
+from pathlib import Path
 
-sys.path.insert(0, '/path/to/larkhelm')
+# Auto-detect repo root: <repo>/scripts/test_dev_full_local.py → <repo>
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # 先 patch card_builder 避免 Python 3.9 union syntax 问题
 import larkhelm.card_builder as cb

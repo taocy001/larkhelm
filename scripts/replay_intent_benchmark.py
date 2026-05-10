@@ -10,15 +10,10 @@ current_file_abs_path = Path(__file__).resolve()
 # The project root is one parent up from the script
 project_root = current_file_abs_path.parent.parent
 
-# The directory containing the 'larkhelm' package is the project root itself for top-level import
-# If larkhelm is directly under project_root, then project_root should be on sys.path.
-# If larkhelm is directly under project_root/larkhelm, then project_root should be on sys.path.
-# Let's verify the actual directory structure again:
-# /path/to/larkhelm/larkhelm/ <-- package
-# /path/to/larkhelm/scripts/ <-- script
-
-# So, to import 'larkhelm.agent_hub', the path to be added to sys.path is '/path/to/larkhelm'.
-# project_root should be '/path/to/larkhelm'.
+# Layout:
+#   <repo>/larkhelm/   <-- package
+#   <repo>/scripts/    <-- this script
+# Add <repo> to sys.path so ``import larkhelm.agent_hub`` resolves.
 sys.path.insert(0, str(project_root))
 
 """AC-12: replay a sample workload and compare phase4 vs phase5 cost.

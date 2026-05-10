@@ -9,7 +9,8 @@ import time
 import threading
 from pathlib import Path
 
-sys.path.insert(0, '/path/to/larkhelm')
+# Auto-detect repo root: <repo>/scripts/test_dev_local.py → <repo>
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from larkhelm.config import _init_runtime
 from larkhelm.crew._pipeline import _make_dev_pipeline
