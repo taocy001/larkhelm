@@ -95,6 +95,23 @@ def cli():
     mcp_parser.add_argument("--config", metavar="PATH", help="path to config file")
     mcp_parser.add_argument("--data-dir", metavar="DIR", help="path to data directory")
 
+    # `larkhelm voice probe` — install-time capability check for local STT
+    voice_parser = sub.add_parser(
+        "voice",
+        help="voice (STT) related subcommands; run 'larkhelm voice probe' once after install",
+    )
+    voice_sub = voice_parser.add_subparsers(dest="voice_command")
+    p_probe = voice_sub.add_parser(
+        "probe",
+        help="probe system capability for local STT (faster-whisper) + write verdict to config.json",
+    )
+    p_probe.add_argument("--no-benchmark", action="store_true",
+                         help="skip the real-inference benchmark (CPU flags + RAM only)")
+    p_probe.add_argument("--no-write", action="store_true",
+                         help="don't write results to config.json; print report only")
+    p_probe.add_argument("--config", metavar="PATH",
+                         help="path to config.json (default: auto-detect)")
+
     args = parser.parse_args()
 
     if args.command == "version":
@@ -110,6 +127,20 @@ def cli():
     elif args.command == "mcp-server":
         from larkhelm.mcp_server import run as mcp_run
         mcp_run(config_path=args.config, data_dir=args.data_dir)
+    elif args.command == "voice":
+        if args.voice_command == "probe":
+            from larkhelm.voice.system_probe import cli_main as _probe_cli
+            argv: list[str] = []
+            if args.no_benchmark:
+                argv.append("--no-benchmark")
+            if args.no_write:
+                argv.append("--no-write")
+            if args.config:
+                argv += ["--config", args.config]
+            sys.exit(_probe_cli(argv))
+        else:
+            voice_parser.print_help()
+            sys.exit(0)
     else:
         # No subcommand given: show help and require the user to make an explicit choice
         parser.print_help()
