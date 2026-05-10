@@ -215,7 +215,7 @@ _MANAGER_PROMPT_TPL = """\
     {{
       "id": "agent_1",
       "role": "角色名称",
-      "model": "claude",
+      "model": "<必须从下方'可用模型清单'选取一个 id；不要照抄此处占位符>",
       "system": "该 agent 的角色定义和行为风格",
       "prompt": "具体任务描述，可用 {{agent_N_result}} 引用上游输出",
       "output_file": "该 agent 的主要输出文件名（相对于 .crew_workspace/），如无文件输出则留空字符串",
@@ -233,11 +233,15 @@ _MANAGER_PROMPT_TPL = """\
 2. id 格式：agent_1、agent_2……（从 1 开始）
 3. depends_on：列出必须先完成的 agent id，可以为空列表
 4. 依赖关系不能成环，无依赖的 agent 会并行执行
-5. model：可以是 "claude"、"gemini"、"kimi"，或 Hermes 编排模式 "hermes_race"、"hermes_split"、"hermes_review"
+5. model：**必须从下方"可用模型清单"中选取 id**，或选 Hermes 编排模式 "hermes_race" / "hermes_split" / "hermes_review"。**禁用的模型不会出现在清单里，绝对不要选**
 6. timeout：秒，范围 60 到 {max_timeout}
 7. prompt 中可使用 {{agent_N_result}} 引用上游 agent 的输出摘要
 8. system 字段：该 agent 的角色定义，指导其行为风格
 9. output_file：agent 的主要输出文件名（相对于 .crew_workspace/），下游 agent 应优先读取该文件而非依赖摘要传递
+
+## 可用模型清单（实时，来自 BackendRegistry）
+
+{available_models}
 
 ## Hermes 编排模式（高级并行策略）
 
@@ -253,7 +257,7 @@ _MANAGER_PROMPT_TPL = """\
 
 - **hermes_review**（评审模式）：需要实现→审查→测试的完整流水线
   - 适用：核心模块开发、安全关键代码、需要多轮验证
-  - 示例：{{"task": "实现支付模块", "agents": ["claude", "kimi", "gemini"]}}
+  - 示例：{{"task": "实现支付模块", "agents": ["claude", "kimi-thinking", "deepseek"]}}（具体 id 必须存在于"可用模型清单"中）
 
 使用编排模式时：
 - prompt 必须是 JSON 格式（包含 task/agents/context 等字段）
@@ -277,33 +281,32 @@ _MANAGER_PROMPT_TPL = """\
 
 这样分析结论自动流入实现阶段，无需人工转抄。
 
-## 模型选择指南
+## 模型选择指南（按 tag）
 
-根据任务特征选择合适的模型，尽量均衡分配，避免所有 agent 都用同一模型：
+清单里每个 backend 都带 tags，按需求性质从清单选：
 
-- **claude** 擅长：代码生成与修改（需调用 Write/Edit 工具）、需求分析、复杂多步推理、长上下文理解、设计决策
-- **gemini** 擅长：信息搜索与收集（WebSearch/WebFetch）、代码审查与静态分析（只读文件）、内容摘要与整合、并行独立调研子任务
-- **kimi** 擅长：大文件处理、长上下文理解、文档生成
-- **hermes_race** 擅长：紧急任务多 agent 竞争，取最快结果
-- **hermes_split** 擅长：全栈开发前后端并行
-- **hermes_review** 擅长：核心模块的完整实现→审查→测试流水线
+- 任务需调用工具（Write/Edit/Bash/WebFetch）→ 选有 **tools** tag 的
+- 任务涉及图像/视觉 → 选有 **vision** tag 的（清单里没有就跳过此类任务）
+- 简单/便宜/高频小任务（摘要、分类、格式化）→ 优先选 **cheap** + **fast** tag 的
+- 硬数学 / 长链推理 → 选名字带 **thinking** 的
+- 中文任务、长文档 → kimi 系列通常最稳
 
-## 自动模式选择规则
+**均衡分配原则**：避免所有 agent 都用同一个 backend。优先把**独立调研/分析任务**分给不同的 worker（如 deepseek/kimi），让 orchestrator 角色（claude）专注串联和综合。
 
-当需求包含以下关键词时，自动选择对应 Hermes 编排模式：
+**Hermes 编排模式**（与单 backend 平级的选项，model 字段写 hermes_race/split/review）：
+- **hermes_race**：紧急任务多 agent 竞争，取最快——清单里 ≥2 个 worker 时可用
+- **hermes_split**：全栈开发前后端并行——后端/前端独立子任务
+- **hermes_review**：核心模块的实现→审查→测试流水线——多轮验证场景
 
-- **hermes_race**（竞争模式）：需求含 "紧急"、"快速"、"尽快"、"临时"、"修复"、"bug"、"比选"、"对比"
-- **hermes_split**（分工模式）：需求含 "全栈"、"前后端"、"前端"、"后端"、"API"、"页面"、"UI"
-- **hermes_review**（评审模式）：需求含 "核心"、"关键"、"安全"、"支付"、"认证"、"审计"、"严格审查"
+## 自动 Hermes 触发规则
 
-如果需求不含以上关键词，使用传统单 agent 模式（claude/gemini）。
+需求含以下关键词时优先选对应 Hermes 模式而非单 agent：
 
-典型分配示例：
-- 写代码 → claude；审查代码 → gemini 或 hermes_review
-- 设计方案 → claude；调研竞品/文档 → gemini
-- 多个并行调研子任务 → 各自用 gemini；汇总整合 → claude
-- 分析设计（claude）→ 并行实现多模块（claude×N 或 hermes_split）→ 并行审查（gemini×N 或 hermes_review）→ 汇总（claude）
-- 紧急修复 → hermes_race（claude+kimi 竞争）
+- **hermes_race**：紧急 / 快速 / 尽快 / 临时 / 修复 / bug / 比选 / 对比
+- **hermes_split**：全栈 / 前后端 / 前端 / 后端 / API / 页面 / UI
+- **hermes_review**：核心 / 关键 / 安全 / 支付 / 认证 / 审计 / 严格审查
+
+不含以上关键词时，按"模型选择指南"从清单里挑 backend。
 
 ## 当前项目目录
 
@@ -315,11 +318,69 @@ _MANAGER_PROMPT_TPL = """\
 """
 
 
+def _build_available_models_section() -> str:
+    """Build the live ``available_models`` block injected into the Manager prompt.
+
+    Snapshots BackendRegistry, lists enabled+healthy backends with their tags
+    and a short description, and explicitly names disabled backends so the
+    planner doesn't pick them. Replaces the previous hardcoded "claude/
+    gemini/kimi" menu in ``_MANAGER_PROMPT_TPL`` — that menu didn't reflect
+    runtime config (gemini disabled) or new arrivals (deepseek), so the
+    planner kept assigning tasks to backends that the dispatch layer would
+    immediately reject.
+    """
+    from larkhelm.backend_registry import BACKEND_REGISTRY
+    all_specs = BACKEND_REGISTRY.snapshot()
+    enabled_healthy = [s for s in all_specs if s.enabled and s.healthy]
+    disabled = [s for s in all_specs if not s.enabled]
+    unhealthy = [s for s in all_specs if s.enabled and not s.healthy]
+
+    if not enabled_healthy:
+        return "(无可用 backend — 请检查 config.json + 运行时健康状态)"
+
+    lines = []
+    for s in sorted(enabled_healthy, key=lambda x: x.id):
+        tags = ", ".join(s.tags) if s.tags else "—"
+        desc = (s.description or s.capabilities or "").strip().split("\n")[0]
+        if len(desc) > 100:
+            desc = desc[:97] + "…"
+        if desc:
+            lines.append(f"- **{s.id}** [{tags}] — {desc}")
+        else:
+            lines.append(f"- **{s.id}** [{tags}]")
+
+    if disabled:
+        ids = ", ".join(sorted(s.id for s in disabled))
+        lines.append(f"\n⛔ **已禁用，不要选**：{ids}")
+    if unhealthy:
+        ids = ", ".join(sorted(f"{s.id} ({s.last_error or '?'})" for s in unhealthy))
+        lines.append(f"\n⚠️ **当前不健康，不要选**：{ids}")
+
+    return "\n".join(lines)
+
+
 def _crew_plan(chat_id: str, requirement: str, cwd: str,
                max_agents: int, cancel_ev: threading.Event) -> CrewPlan:
     """Call the Manager LLM (Claude tool_use) to generate a task plan. Returns None on failure."""
     import larkhelm.config as _cfg
     from larkhelm.crew._scheduler import _detect_cycle
+    from larkhelm.backend_registry import BACKEND_REGISTRY
+
+    # Bail out early if there are no enabled+healthy backends — Manager would
+    # otherwise emit a plan referencing nonexistent ids, which dispatch would
+    # then reject one-by-one. Better to fail fast at planning with a clear
+    # message than to consume an entire planning timeout for garbage output.
+    _enabled_healthy = [
+        s for s in BACKEND_REGISTRY.snapshot()
+        if s.enabled and s.healthy
+    ]
+    if not _enabled_healthy:
+        _debug_log(
+            "[Crew] Manager: no enabled+healthy backends in registry; "
+            "refusing to plan (check config.json probe_models or the "
+            "BackendRegistry health log)"
+        )
+        return None
 
     mgr_ns   = f"{chat_id}__crew_mgr_{uuid.uuid4().hex[:8]}"
     prompt   = _MANAGER_PROMPT_TPL.format(
@@ -327,6 +388,7 @@ def _crew_plan(chat_id: str, requirement: str, cwd: str,
         max_timeout=_cfg.HARD_TIMEOUT // 2,
         cwd=cwd,
         requirement=requirement,
+        available_models=_build_available_models_section(),
     )
 
     import os as _os
