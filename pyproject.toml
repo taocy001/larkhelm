@@ -34,6 +34,14 @@ api-backends = [
     "google-genai>=0.8",
     "openai>=1.30",
 ]
+voice-cloud = [
+    # DashScope (Aliyun) Paraformer ASR — opt-in cloud STT engine.
+    # Install only if you set voice_engine="dashscope" in config.json:
+    #   pipx install -e ".[voice-cloud]"
+    # Or, post-install:
+    #   pipx runpip larkhelm install dashscope
+    "dashscope>=1.20.0",
+]
 
 [tool.hatch.version]
 path = "larkhelm/__init__.py"

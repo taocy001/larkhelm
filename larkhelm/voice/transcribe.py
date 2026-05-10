@@ -157,36 +157,61 @@ def transcribe(
 ) -> TranscribeResult:
     """Transcribe an audio file to text. Blocking; never raises.
 
+    Engine dispatch (chosen by ``_cfg.VOICE_ENGINE``):
+
+    * ``"faster_whisper"`` (default) — local CTranslate2 inference via
+      the singleton WhisperModel, on the module's serial executor.
+    * ``"dashscope"`` (opt-in) — cloud Paraformer call via the
+      ``_engine_dashscope`` adapter; same executor, same blocking
+      semantics. Selected when user explicitly sets
+      ``voice_engine="dashscope"`` AND ``voice_api_key`` resolves
+      non-empty AND the ``dashscope`` SDK is installed (extra
+      ``[voice-cloud]``).
+
+    The dispatch happens **inside** the executor submission so both
+    engines share the ``max_workers=1`` serialization guarantee — a
+    chat firing rapid voice messages can't burst-call DashScope.
+
     Parameters
     ----------
     audio_path : str | Path
-        Path to a faster-whisper-readable audio file (ogg / wav / mp3 / ...).
     lang : str
-        ``"zh"`` / ``"en"`` / ``"auto"`` (auto = let whisper detect).
-        Other values are forwarded as-is; whitelisting lives in
-        ``_cfg`` validation, not here.
+        ``"zh"`` / ``"en"`` / ``"auto"``. Engine-specific handling:
+        faster-whisper maps ``"auto"`` → ``language=None``; DashScope
+        ignores per-call lang (Paraformer auto-detects Chinese/English).
     beam_size : int
-        Whisper beam size; default 1 for speed. Callers wanting accuracy
-        can bump to 5.
+        faster-whisper only; ignored by DashScope.
 
     Returns
     -------
     TranscribeResult
-        Dict with stable keys ``ok / text / duration / lang / error``.
-        On any failure ``ok`` is False and ``error`` carries a short tag:
-        ``"disabled"`` (already in DISABLED state),
-        ``"load_failed"`` (model load just failed this call),
-        ``"inference_failed:<msg>"`` (whisper raised mid-decode).
+        Failure tags carry an engine prefix to make logs unambiguous:
+        ``"disabled"``, ``"load_failed"``, ``"inference_failed:..."`` for
+        faster-whisper; ``"dashscope_no_api_key"``,
+        ``"dashscope_sdk_missing:..."``, ``"dashscope_call_failed:..."``,
+        ``"dashscope_status_<code>"``, ``"dashscope_empty_result"``,
+        ``"dashscope_result_parse_failed:..."`` for DashScope.
 
     Notes for callers
     -----------------
-    * Check ``_cfg.VOICE_ENABLED`` before calling — calling when the
-      feature is off still returns a valid result but wastes one
-      executor submission.
-    * The handlers layer is responsible for any external timeout —
-      this function does not wrap ``future.result(timeout=...)``.
+    * Check ``_cfg.VOICE_ENABLED`` before calling.
+    * The handlers layer owns external timeouts.
     """
-    if _LOAD_FAILED or not _cfg.VOICE_ENABLED:
+    if not _cfg.VOICE_ENABLED:
+        return TranscribeResult(
+            ok=False, text="", duration=0.0, lang=lang,
+            error="disabled",
+        )
+
+    engine = (getattr(_cfg, "VOICE_ENGINE", "faster_whisper") or "faster_whisper").lower()
+    if engine == "dashscope":
+        # DashScope path — synchronous HTTP call, no model load.
+        from larkhelm.voice._engine_dashscope import transcribe_via_dashscope
+        fut = _executor.submit(transcribe_via_dashscope, str(audio_path), lang=lang)
+        return fut.result()
+
+    # Default: faster-whisper local engine
+    if _LOAD_FAILED:
         return TranscribeResult(
             ok=False, text="", duration=0.0, lang=lang,
             error="disabled",
@@ -199,17 +224,28 @@ def transcribe(
 
 
 def is_ready() -> bool:
-    """True iff the feature is enabled and not in DISABLED state.
+    """True iff the voice feature is enabled and the chosen engine is usable.
 
-    Does not trigger a load. Cheap; safe to call from hot paths.
+    For ``faster_whisper``: must not be in the terminal DISABLED state.
+    For ``dashscope``: must have a non-empty API key (SDK presence is
+    checked lazily on first call — we don't want is_ready to import).
+
+    Does not trigger any load. Cheap; safe to call from hot paths.
     """
-    return bool(_cfg.VOICE_ENABLED) and not _LOAD_FAILED
+    if not _cfg.VOICE_ENABLED:
+        return False
+    engine = (getattr(_cfg, "VOICE_ENGINE", "faster_whisper") or "faster_whisper").lower()
+    if engine == "dashscope":
+        return bool(getattr(_cfg, "VOICE_API_KEY", ""))
+    # default faster_whisper
+    return not _LOAD_FAILED
 
 
 def is_model_loaded() -> bool:
-    """True iff the WhisperModel singleton has been instantiated.
+    """True iff a local WhisperModel has been instantiated.
 
-    Does not trigger a load. Useful for ``/status`` introspection.
+    Always False for the dashscope engine (no local model). Useful for
+    ``/voice status`` to distinguish "engine ready" from "model warmed up".
     """
     return _MODEL is not None
 

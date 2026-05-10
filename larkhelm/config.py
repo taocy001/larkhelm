@@ -61,6 +61,8 @@ class _RuntimeConfig:
     SOURCE_DIR:       Path
     # ── Voice (M3.2) ──────────────────────────────────────
     VOICE_ENABLED:           bool
+    VOICE_ENGINE:            str    # one of: faster_whisper / dashscope
+    VOICE_API_KEY:           str    # only used by dashscope engine
     VOICE_MODEL_SIZE:        str
     VOICE_COMPUTE_TYPE:      str
     VOICE_MAX_DURATION_MS:   int
@@ -117,8 +119,10 @@ BACKEND_REGISTRY: "object"  # BackendRegistry singleton (set by _init_runtime)
 
 # Voice configuration (M3.2)
 VOICE_ENABLED:           bool
-VOICE_MODEL_SIZE:        str   # one of: tiny / base / small / medium / large-v3
-VOICE_COMPUTE_TYPE:      str   # faster-whisper compute_type, e.g. int8 / float16
+VOICE_ENGINE:            str   # one of: faster_whisper (default, local) / dashscope (cloud, opt-in)
+VOICE_API_KEY:           str   # resolved from ${DASHSCOPE_API_KEY} env (only used when VOICE_ENGINE=dashscope)
+VOICE_MODEL_SIZE:        str   # faster-whisper only: tiny / base / small / medium / large-v3
+VOICE_COMPUTE_TYPE:      str   # faster-whisper only: int8 / float16
 VOICE_MAX_DURATION_MS:   int
 VOICE_DEFAULT_LANG:      str   # one of: zh / en / auto
 VOICE_MERGE_WINDOW_SEC:  int   # 0 = disable merge
@@ -317,7 +321,8 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     global DOC_READ_MAX_CHARS, DEFAULT_DRIVE_FOLDER, DOC_WRITE_CONFIRM, DOC_WRITE_BACKEND
     global DEFAULT_WIKI_SPACE_ID, DEFAULT_WIKI_PARENT_TOKEN, DEFAULT_OWNER_OPEN_ID
     global BACKEND_REGISTRY
-    global VOICE_ENABLED, VOICE_MODEL_SIZE, VOICE_COMPUTE_TYPE, VOICE_MAX_DURATION_MS
+    global VOICE_ENABLED, VOICE_ENGINE, VOICE_API_KEY
+    global VOICE_MODEL_SIZE, VOICE_COMPUTE_TYPE, VOICE_MAX_DURATION_MS
     global VOICE_DEFAULT_LANG, VOICE_MERGE_WINDOW_SEC, VOICE_MAX_MERGE, VOICE_KEEP_AUDIO
 
     _sys_cfg  = Path("/etc/larkhelm/config.json")
@@ -437,10 +442,39 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
 
     # ── Voice config (M3.2) ────────────────────────────────────────────────
     VOICE_ENABLED      = bool(config.get("voice_enabled", False))
+    VOICE_ENGINE       = str(config.get("voice_engine",       "faster_whisper") or "faster_whisper")
     VOICE_MODEL_SIZE   = str(config.get("voice_model_size",   "small") or "small")
     VOICE_COMPUTE_TYPE = str(config.get("voice_compute_type", "int8")  or "int8")
     VOICE_DEFAULT_LANG = str(config.get("voice_default_lang", "zh")    or "zh")
     VOICE_KEEP_AUDIO   = bool(config.get("voice_keep_audio", False))
+
+    # voice_api_key: ``${ENV_VAR}`` placeholder resolution mirrors DEEPSEEK_API_KEY.
+    # Only relevant when VOICE_ENGINE=="dashscope"; for faster-whisper this stays empty.
+    _raw_voice_key = config.get("voice_api_key", "") or ""
+    if _raw_voice_key.startswith("${") and _raw_voice_key.endswith("}"):
+        VOICE_API_KEY = os.environ.get(_raw_voice_key[2:-1], "")
+    else:
+        VOICE_API_KEY = _raw_voice_key or os.environ.get("DASHSCOPE_API_KEY", "")
+
+    _VOICE_ENGINE_WHITELIST = {"faster_whisper", "dashscope"}
+    if VOICE_ENGINE not in _VOICE_ENGINE_WHITELIST:
+        print(
+            f"⚠️  voice_engine '{VOICE_ENGINE}' 无效"
+            f"（允许: faster_whisper/dashscope），已回退为 'faster_whisper'",
+            file=sys.stderr,
+        )
+        VOICE_ENGINE = "faster_whisper"
+
+    # If user picked dashscope but didn't set an API key, warn and disable voice
+    # rather than crashing later mid-transcribe. Mirrors DeepSeek's "warn + degrade"
+    # pattern (line 365-370 above).
+    if VOICE_ENABLED and VOICE_ENGINE == "dashscope" and not VOICE_API_KEY:
+        print(
+            "⚠️  voice_engine='dashscope' 但 voice_api_key / $DASHSCOPE_API_KEY 未设置，"
+            "已临时关闭 voice_enabled。请配置 systemd drop-in 注入 DASHSCOPE_API_KEY。",
+            file=sys.stderr,
+        )
+        VOICE_ENABLED = False
 
     _VOICE_MODEL_WHITELIST = {"tiny", "base", "small", "medium", "large-v3"}
     if VOICE_MODEL_SIZE not in _VOICE_MODEL_WHITELIST:
@@ -551,7 +585,9 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         DEFAULT_OWNER_OPEN_ID=DEFAULT_OWNER_OPEN_ID,
         PERM_HOOK_SCRIPT=PERM_HOOK_SCRIPT, PERM_SOCKET_PATH=PERM_SOCKET_PATH,
         SOURCE_DIR=SOURCE_DIR,
-        VOICE_ENABLED=VOICE_ENABLED, VOICE_MODEL_SIZE=VOICE_MODEL_SIZE,
+        VOICE_ENABLED=VOICE_ENABLED, VOICE_ENGINE=VOICE_ENGINE,
+        VOICE_API_KEY=VOICE_API_KEY,
+        VOICE_MODEL_SIZE=VOICE_MODEL_SIZE,
         VOICE_COMPUTE_TYPE=VOICE_COMPUTE_TYPE, VOICE_MAX_DURATION_MS=VOICE_MAX_DURATION_MS,
         VOICE_DEFAULT_LANG=VOICE_DEFAULT_LANG, VOICE_MERGE_WINDOW_SEC=VOICE_MERGE_WINDOW_SEC,
         VOICE_MAX_MERGE=VOICE_MAX_MERGE, VOICE_KEEP_AUDIO=VOICE_KEEP_AUDIO,
