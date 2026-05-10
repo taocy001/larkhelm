@@ -45,6 +45,22 @@ class BackendSpec:
     cost_per_1k_output: float = 0.0
     latency_tier:       str = "medium"   # "instant" | "fast" | "medium" | "slow"
 
+    # ── Runtime health tracking (in-memory only, NOT persisted) ──────────────
+    # Real-call traffic and periodic probes both feed these; the unified
+    # health-tick loop in config._start_recover_thread reads them to decide
+    # whether to schedule a fresh probe (recover unhealthy / re-probe stale).
+    # Reset to defaults on bridge restart — startup probes will repopulate.
+    #
+    # Two clocks: wall-clock (`*_at`) for human display ("3 分钟前");
+    # monotonic (`*_mono`) for staleness math, so NTP correction or
+    # `date -s` jumps don't poison probe cadence. ``failure_window`` stores
+    # monotonic timestamps for the same reason.
+    last_used_at:     float = 0.0   # epoch of last record_call_success/failure (display)
+    last_probed_at:   float = 0.0   # epoch of last set_probe_result (display)
+    last_used_mono:   float = 0.0   # monotonic of last record_call_success/failure (decisions)
+    last_probed_mono: float = 0.0   # monotonic of last set_probe_result (decisions)
+    failure_window:   list[float] = dataclasses.field(default_factory=list)  # TRANSIENT failure monotonic timestamps
+
 
 def _resolve_env_vars(raw: str) -> str:
     """Expand ${ENV_VAR} placeholders using os.environ."""
@@ -314,7 +330,14 @@ class BackendRegistry:
         return result
 
     def recover_check(self) -> None:
-        """Re-probe only healthy=False backends; set healthy=True on success.
+        """[DEPRECATED] Re-probe only healthy=False backends.
+
+        Production health-tracking moved to the unified tick loop in
+        ``config._start_recover_thread`` (which uses real probes via
+        ``model_probe.probe_spec`` and tracks ``last_used_mono`` /
+        ``last_probed_mono`` to schedule recovery + idle re-validation).
+        This method is preserved only for legacy test fixtures
+        (``tests/test_phase4.py``). May be removed in a future cleanup.
 
         Does NOT reset healthy=True backends (avoids unnecessary overhead).
         Thread-safe. Exceptions per-spec are caught and logged.
@@ -369,17 +392,128 @@ class BackendRegistry:
                 _debug_log(f"[BackendRegistry] recover_check error for {spec.id}: {e}")
 
     def set_probe_result(self, spec_id: str, ok: bool, error: str = "") -> None:
-        """Update healthy/last_error for a spec after async probe completes. Thread-safe."""
+        """Update healthy/last_error/last_probed_at for a spec after a probe completes.
+
+        Called by both the startup probe (``model_probe.run_probes_async``) and
+        the unified health-tick loop in ``config._start_recover_thread``.
+        Thread-safe.
+
+        Note: does NOT clear ``failure_window``. A successful probe only proves
+        the backend's auth+connectivity work right now — it does not prove the
+        real workload pattern works. If we cleared on success we'd mask a
+        flapping backend (real call fails, probe succeeds, real call fails again
+        within seconds). Time-based pruning in record_call_failure is enough.
+        """
+        import time as _time
         with self._lock:
             spec = self._specs.get(spec_id)
             if spec is None:
                 return
             spec.healthy = ok
             spec.last_error = error if not ok else None
+            spec.last_probed_at = _time.time()
+            spec.last_probed_mono = _time.monotonic()
+
+    def record_call_success(self, spec_id: str) -> None:
+        """Real-traffic success: confirm healthy + bump last_used_at.
+
+        Call this from ``backend_cli.run_*`` and ``backend_api.run_*`` after a
+        normal return. Cheap (registry lock held briefly). Does NOT update
+        ``last_probed_at`` — successful traffic counts as "recently validated"
+        for the idle-stale check, but the probe-cadence accounting stays separate.
+
+        Note: does NOT clear ``failure_window``. We keep the window so a backend
+        flapping fail/success/fail/success within the window will still trip the
+        threshold. Old timestamps prune themselves out via the window cutoff
+        the next time record_call_failure runs.
+        """
+        import time as _time
+        with self._lock:
+            spec = self._specs.get(spec_id)
+            if spec is None:
+                return
+            spec.healthy = True
+            spec.last_error = None
+            spec.last_used_at = _time.time()
+            spec.last_used_mono = _time.monotonic()
+
+    def record_call_failure(
+        self,
+        spec_id: str,
+        err: str,
+        category: str | None = None,
+        transient_window_sec: float = 600.0,
+        transient_threshold: int = 3,
+    ) -> str:
+        """Real-traffic failure: classify the error and update health accordingly.
+
+        Returns the category string so callers can branch on it (e.g. for
+        retry logic).
+
+        * USER_CANCEL / TIMEOUT  → no change to health (still bumps last_used_at)
+        * AUTH / QUOTA / MODEL_NOT_FOUND → flip healthy=False immediately
+        * TRANSIENT → append to sliding window; flip only after ``transient_threshold``
+          hits within ``transient_window_sec`` seconds
+
+        ``category`` may be supplied by caller; otherwise classified from ``err``.
+        ``transient_window_sec`` / ``transient_threshold`` are passed in by the
+        caller (read from ``_cfg.BACKEND_TRANSIENT_*``) so the registry stays
+        decoupled from the config module — avoids a circular import.
+        """
+        import time as _time
+        from larkhelm.health_signals import classify_error, is_no_op, is_instant_unhealthy
+
+        if category is None:
+            category = classify_error(err)
+
+        with self._lock:
+            spec = self._specs.get(spec_id)
+            if spec is None:
+                return category
+            now_wall = _time.time()
+            now_mono = _time.monotonic()
+            spec.last_used_at = now_wall
+            spec.last_used_mono = now_mono
+
+            if is_no_op(category):
+                return category
+            if is_instant_unhealthy(category):
+                spec.healthy = False
+                spec.last_error = f"{category.lower()}: {str(err)[:200]}"
+                return category
+
+            # TRANSIENT — sliding window. Use monotonic clock so NTP correction
+            # or `date -s` jumps don't poison the cutoff math (a backwards
+            # wall-clock jump would make every old timestamp look "in window"
+            # and instantly trip the threshold).
+            spec.failure_window.append(now_mono)
+            cutoff = now_mono - max(transient_window_sec, 1.0)
+            spec.failure_window[:] = [t for t in spec.failure_window if t >= cutoff]
+            if len(spec.failure_window) >= max(transient_threshold, 1):
+                spec.healthy = False
+                spec.last_error = f"transient×{len(spec.failure_window)}: {str(err)[:200]}"
+            return category
 
     def all_enabled(self) -> list[BackendSpec]:
         with self._lock:
             return [s for s in self._specs.values() if s.enabled]
+
+    def snapshot(self, enabled_only: bool = False) -> list[BackendSpec]:
+        """Return a one-shot copy of registered specs taken under the lock.
+
+        Use this from external readers (e.g. ``/status``) instead of reaching
+        into ``_lock`` / ``_specs`` directly. The returned list is yours to
+        iterate freely; subsequent mutations to the registry do not affect it.
+        Each :class:`BackendSpec` itself is shared (same instance), so reading
+        per-spec mutable fields (``healthy``, ``last_error``, ``failure_window``)
+        without re-acquiring the lock is technically racy but acceptable for
+        UI purposes — values may be one tick stale.
+        """
+        with self._lock:
+            specs = list(self._specs.values())
+        if enabled_only:
+            specs = [s for s in specs if s.enabled]
+        return specs
 
     def rank_for_task(self, profile) -> list[BackendSpec]:
         """Rank healthy+enabled BackendSpecs for the given TaskProfile.

@@ -11,8 +11,42 @@ from __future__ import annotations
 import os
 from typing import Callable
 
-from larkhelm.backend_registry import BackendSpec
-from larkhelm.log import _debug_log
+from larkhelm.backend_registry import BackendSpec, BACKEND_REGISTRY
+from larkhelm.log import _debug_log, safe_log
+# Direct top-level import — symmetric with backend_cli._record_outcome (which
+# also imports QueryCancelledError at module level). The previous defensive
+# try/except ImportError was dead code: by the time _record_outcome runs, every
+# run_* function has already imported ai_runner at its own top so the module
+# is fully loaded.
+from larkhelm.ai_runner import QueryCancelledError
+
+
+def _record_outcome(spec_id: str, exc: Exception | None) -> None:
+    """Push call-outcome to BackendRegistry. Cancellation does NOT update health.
+
+    Mirrors ``backend_cli._record_outcome``; kept as a sibling helper so the
+    two dispatch families (CLI / API) stay parallel and either can be moved
+    to a shared module later without one waiting on the other.
+    """
+    try:
+        if exc is None:
+            BACKEND_REGISTRY.record_call_success(spec_id)
+            return
+        if isinstance(exc, QueryCancelledError):
+            return  # user-initiated, not a backend fault
+        try:
+            from larkhelm import config as _cfg
+            window = float(getattr(_cfg, "BACKEND_TRANSIENT_WINDOW_SEC", 600.0))
+            threshold = int(getattr(_cfg, "BACKEND_TRANSIENT_THRESHOLD", 3))
+        except Exception:
+            window, threshold = 600.0, 3
+        BACKEND_REGISTRY.record_call_failure(
+            spec_id, str(exc),
+            transient_window_sec=window,
+            transient_threshold=threshold,
+        )
+    except Exception:
+        safe_log(f"[BackendRegistry] _record_outcome failed for {spec_id}")
 
 
 def run_anthropic(
@@ -69,15 +103,18 @@ def run_anthropic(
                         _debug_log(f"[anthropic_api] on_text callback failed: {e}")
     except Exception as e:
         _debug_log(f"[anthropic_api] {spec.id} error: {e}")
+        _record_outcome(spec.id, e)
         raise
 
     if cancel_ev and cancel_ev.is_set():
+        # Cancel is user-initiated → don't update health
         raise QueryCancelledError("Query cancelled during anthropic_api streaming")
 
     updated_history = list(history) + [
         {"role": "user", "content": message},
         {"role": "assistant", "content": result_text},
     ]
+    _record_outcome(spec.id, None)
     return result_text.strip(), updated_history
 
 
@@ -137,6 +174,7 @@ def run_google(
                     _debug_log(f"[google_api] on_text callback failed: {e}")
     except Exception as e:
         _debug_log(f"[google_api] {spec.id} error: {e}")
+        _record_outcome(spec.id, e)
         raise
 
     if cancel_ev and cancel_ev.is_set():
@@ -146,6 +184,7 @@ def run_google(
         {"role": "user", "content": message},
         {"role": "assistant", "content": result_text},
     ]
+    _record_outcome(spec.id, None)
     return result_text.strip(), updated_history
 
 
@@ -199,6 +238,7 @@ def run_openai_compat(
                             _debug_log(f"[openai_compat_api] on_text callback failed: {e}")
     except Exception as e:
         _debug_log(f"[openai_compat_api] {spec.id} error: {e}")
+        _record_outcome(spec.id, e)
         raise
 
     if cancel_ev and cancel_ev.is_set():
@@ -208,4 +248,6 @@ def run_openai_compat(
         {"role": "user", "content": message},
         {"role": "assistant", "content": result_text},
     ]
+    # Record success last — matches placement in run_anthropic / run_google
+    _record_outcome(spec.id, None)
     return result_text.strip(), updated_history

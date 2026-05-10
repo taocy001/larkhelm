@@ -175,29 +175,108 @@ _recover_thread_started = False
 
 
 def _start_recover_thread() -> None:
-    """Start background daemon thread that calls BACKEND_REGISTRY.recover_check() every 300s.
+    """Start the unified backend health-tick daemon thread.
 
-    Guard against duplicate starts when _init_runtime() is called more than once
-    (e.g. during tests or if both bridge and MCP server share a process).
+    On every ``BACKEND_HEALTH_TICK_SEC`` tick (default 60s), walks each enabled
+    backend and decides whether to fire a fresh probe based on its current
+    health and last-activity timestamps:
+
+    * unhealthy → re-probe if ``last_probed_at`` was ≥ ``BACKEND_RECOVER_INTERVAL_SEC`` ago
+    * healthy   → re-probe if no real traffic for ≥ ``BACKEND_STALE_INTERVAL_SEC`` (idle re-validation)
+
+    This replaces the legacy 300s ``recover_check()`` loop with a single
+    decision point that respects ``last_used_at`` set by real traffic — a
+    backend actively in use will never trigger an idle probe.
+
+    Guard against duplicate starts when _init_runtime() is called more than
+    once (e.g. during tests or if both bridge and MCP server share a process).
     """
     global _recover_thread_started
     if _recover_thread_started:
         return
     _recover_thread_started = True
 
+    # Captured at thread start; used by _health_tick to skip specs whose
+    # startup probe hasn't completed yet (avoids first-tick double-probe race).
+    _startup_mono = [0.0]  # list-as-mutable-cell so closure can write
+    _STARTUP_GRACE_SEC = 120  # how long after start to defer "never probed" specs
+
+    def _health_tick():
+        import time as _time
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from larkhelm.model_probe import probe_spec
+        from larkhelm.log import _debug_log as _dlog
+        # Use monotonic for staleness decisions — wall-clock jumps (NTP, manual
+        # `date -s`) would otherwise poison the cadence (backwards jump → inf age
+        # → probe storm; forwards jump → tiny age → stale specs go un-probed).
+        now_mono = _time.monotonic()
+        in_grace = (now_mono - _startup_mono[0]) < _STARTUP_GRACE_SEC
+
+        # Phase 1 — decide which specs need probing (no I/O)
+        to_probe: list[tuple[object, str]] = []
+        for spec in BACKEND_REGISTRY.all_enabled():
+            try:
+                last_activity = max(spec.last_used_mono, spec.last_probed_mono, 0.0)
+                # First-tick storm guard: if a spec has NEVER been touched
+                # (probe still in flight from startup, or startup probe failed
+                # silently and never ran), defer for STARTUP_GRACE_SEC. After
+                # grace expires, a still-untouched spec gets probed normally.
+                if last_activity == 0.0 and in_grace:
+                    continue
+                age = (now_mono - last_activity) if last_activity > 0 else float("inf")
+                if not spec.healthy:
+                    if age >= BACKEND_RECOVER_INTERVAL_SEC:
+                        to_probe.append((spec, "retry"))
+                else:
+                    if age >= BACKEND_STALE_INTERVAL_SEC:
+                        to_probe.append((spec, "idle"))
+            except Exception as e:
+                _dlog(f"[BackendRegistry] tick decision error for {getattr(spec, 'id', '?')}: {e}")
+
+        if not to_probe:
+            return
+
+        # Phase 2 — run probes concurrently, mirroring run_probes_async pattern.
+        # Same MAX_WORKERS=4 so a 5-backend setup with 12s timeouts completes
+        # in ~24s worst case instead of the 60s sequential ceiling that would
+        # equal the tick interval and cause the loop to fall behind.
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="health-tick") as pool:
+            future_to_target = {pool.submit(probe_spec, s): (s, reason) for s, reason in to_probe}
+            for fut in as_completed(future_to_target):
+                spec, reason = future_to_target[fut]
+                try:
+                    ok, err = fut.result()
+                except Exception as e:
+                    ok, err = False, str(e)[:200]
+                try:
+                    BACKEND_REGISTRY.set_probe_result(spec.id, ok, err)
+                except Exception as e:
+                    _dlog(f"[BackendRegistry] tick set_probe_result failed for {spec.id}: {e}")
+                icon = "✓" if ok else "✗"
+                # Recompute reason post-hoc: a "retry" that succeeded is a "recover"
+                if reason == "retry" and ok:
+                    reason = "recover"
+                suffix = f" ({err})" if err else ""
+                _dlog(f"[BackendRegistry] tick {reason} {icon} {spec.id}{suffix}")
+
     def _recover_loop():
         import time as _time
+        # Mark startup time the moment the loop spins up, so the first tick
+        # ~60s later can compute the grace window correctly.
+        _startup_mono[0] = _time.monotonic()
         while True:
-            _time.sleep(300)
             try:
-                BACKEND_REGISTRY.recover_check()
+                _time.sleep(max(BACKEND_HEALTH_TICK_SEC, 1))
+            except Exception:
+                _time.sleep(60)
+            try:
+                _health_tick()
             except Exception as e:
-                # ``lazy_debug_log`` swallows any logger failure; this thread
-                # must never die because its only side effect is heartbeating.
+                # Daemon must never die — its absence creates silent staleness
                 from larkhelm.log import lazy_debug_log
-                lazy_debug_log(f"[BackendRegistry] recover_thread error: {e}")
+                lazy_debug_log(f"[BackendRegistry] health_tick loop error: {e}")
 
-    t = threading.Thread(target=_recover_loop, daemon=True, name="backend-recover")
+    t = threading.Thread(target=_recover_loop, daemon=True, name="backend-health-tick")
     t.start()
 
 
@@ -304,6 +383,33 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
             file=sys.stderr,
         )
         HARD_TIMEOUT = RESPONSE_TIMEOUT + 60
+
+    # ── Backend health-tracking knobs ──────────────────────────────────────
+    # All times in seconds. The unified health-tick loop in
+    # _start_recover_thread reads these to decide when to fire a probe.
+    global BACKEND_HEALTH_TICK_SEC, BACKEND_RECOVER_INTERVAL_SEC
+    global BACKEND_STALE_INTERVAL_SEC, BACKEND_TRANSIENT_WINDOW_SEC
+    global BACKEND_TRANSIENT_THRESHOLD, BACKEND_PROBE_API_REAL_CALL
+    # Sane floors to prevent footguns (e.g. setting stale_interval=1 → infinite
+    # paid API calls/sec). Floor < default by ≥1 order of magnitude so config
+    # tuning still works for legitimate testing.
+    def _read_clamped(key: str, default: int, floor: int, kind=int):
+        raw = kind(config.get(key, default))
+        if raw < floor:
+            print(
+                f"⚠️  config.{key}={raw} below floor {floor}; clamping to {floor} "
+                "(too low would cause excessive probe traffic / instability)",
+                file=sys.stderr,
+            )
+            return floor
+        return raw
+
+    BACKEND_HEALTH_TICK_SEC      = _read_clamped("backend_health_tick_sec",      60,    10)        # tick cadence
+    BACKEND_RECOVER_INTERVAL_SEC = _read_clamped("backend_recover_interval_sec", 300,   30)        # unhealthy → re-probe at most every N s
+    BACKEND_STALE_INTERVAL_SEC   = _read_clamped("backend_stale_interval_sec",   86400, 600)       # healthy + idle this long → idle re-probe (default 24h, floor 10min)
+    BACKEND_TRANSIENT_WINDOW_SEC = float(_read_clamped("backend_transient_window_sec", 600, 10, kind=float))  # sliding window
+    BACKEND_TRANSIENT_THRESHOLD  = _read_clamped("backend_transient_threshold",  3,     1)        # TRANSIENT failures within window → unhealthy
+    BACKEND_PROBE_API_REAL_CALL  = bool(config.get("backend_probe_api_real_call", True))           # API probes hit the network (1-token call) vs key-presence only
 
     DOC_AUTO_INJECT      = config.get("doc_auto_inject",      True)
     DOC_INJECT_MAX_CHARS = int(config.get("doc_inject_max_chars", 2000))

@@ -273,28 +273,76 @@ def _cmd_status(chat_id: str, msg_id: str = None):
             parts.append(f"{mdl} {m['input_tokens']+m['output_tokens']:,}tok{cost_str}")
         token_summary = "　　".join(parts)
 
-    # Backend registry summary
+    # Backend registry summary — includes disabled specs (with ⏸) so users
+    # can confirm "gemini is enabled=false in config" rather than assuming the
+    # backend was simply forgotten. Shows last-activity age (real call OR
+    # probe, whichever is more recent) and transient-failure pressure so the
+    # user can spot a flapping backend before it's flipped unhealthy.
     backend_summary = ""
     try:
+        import time as _time
         from larkhelm.backend_registry import BACKEND_REGISTRY
         from larkhelm.api_session import load_history as _load_hist
-        _API_PROVIDERS = ("anthropic_api", "google_api", "openai_compat_api")
+        _API_PROVIDERS = ("anthropic_api", "google_api", "openai_compat_api", "deepseek_api")
         _MAX_HIST = 40
-        all_specs = BACKEND_REGISTRY.all_enabled()
-        healthy_count = sum(1 for s in all_specs if s.healthy)
+        # Use the public snapshot() helper rather than reaching into ``_lock``
+        # directly — keeps callers decoupled from registry internals so
+        # future synchronization changes (e.g. moving to a fine-grained lock
+        # per spec) won't break this code path.
+        all_specs = BACKEND_REGISTRY.snapshot()
+
+        def _fmt_ago(ts: float, _now: float = None) -> str:
+            if not ts:
+                return "—"
+            now = _now if _now is not None else _time.time()
+            delta = max(0, int(now - ts))
+            if delta < 60:
+                return f"{delta}s前"
+            if delta < 3600:
+                return f"{delta // 60}m前"
+            if delta < 86400:
+                return f"{delta // 3600}h前"
+            return f"{delta // 86400}d前"
+
         if all_specs:
+            now = _time.time()
+            n_enabled = sum(1 for s in all_specs if s.enabled)
+            n_healthy = sum(1 for s in all_specs if s.enabled and s.healthy)
             spec_lines = []
-            for s in all_specs:
-                status = '✅' if s.healthy else '❌'
-                detail = ""
-                if not s.healthy and s.last_error:
-                    detail = f" _{s.last_error}_"
-                elif s.provider in _API_PROVIDERS:
+            # Enabled first (sorted by id), then disabled
+            enabled = sorted([s for s in all_specs if s.enabled], key=lambda x: x.id)
+            disabled = sorted([s for s in all_specs if not s.enabled], key=lambda x: x.id)
+            for s in enabled + disabled:
+                if not s.enabled:
+                    icon = "⏸"
+                elif s.healthy:
+                    icon = "✅"
+                else:
+                    icon = "❌"
+                # Activity: prefer last_used_at (real traffic), fallback to last_probed_at
+                last_used = getattr(s, "last_used_at", 0.0) or 0.0
+                last_probed = getattr(s, "last_probed_at", 0.0) or 0.0
+                if last_used >= last_probed:
+                    activity = f"用 {_fmt_ago(last_used, now)}" if last_used else (f"探 {_fmt_ago(last_probed, now)}" if last_probed else "—")
+                else:
+                    activity = f"探 {_fmt_ago(last_probed, now)}"
+                # Failure pressure (sliding window for TRANSIENT)
+                fw = getattr(s, "failure_window", []) or []
+                fail_str = f" ⚠️{len(fw)}失败" if fw else ""
+                # Error detail
+                err_str = ""
+                if not s.healthy and s.enabled and s.last_error:
+                    err_str = f" _{s.last_error[:80]}_"
+                elif s.enabled and s.provider in _API_PROVIDERS:
                     hist_len = len(_load_hist(s.provider, chat_id))
                     if hist_len:
-                        detail = f" `{hist_len}/{_MAX_HIST}msgs`"
-                spec_lines.append(f"  • **{s.id}** `{s.provider}` {status}{detail}")
-            backend_summary = f"**Backends** {healthy_count}/{len(all_specs)} healthy\n" + "\n".join(spec_lines)
+                        err_str = f" `{hist_len}/{_MAX_HIST}msgs`"
+                spec_lines.append(f"  • {icon} **{s.id}** `{activity}`{fail_str}{err_str}")
+            disabled_note = f" · {len(disabled)} disabled" if disabled else ""
+            backend_summary = (
+                f"**Backends** {n_healthy}/{n_enabled} healthy{disabled_note}\n"
+                + "\n".join(spec_lines)
+            )
     except Exception as e:
         _debug_log(f"[status] backend summary failed: {e}")
 
