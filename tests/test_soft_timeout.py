@@ -72,7 +72,7 @@ class TestSoftTimeout(unittest.TestCase):
                             cancel_ev=None, on_text=None, on_tool=None,
                             on_tool_result=None, on_soft_timeout=None,
                             on_start=None, images=None, session_namespace=None,
-                            allow_retry=False):
+                            allow_retry=False, system_prompt=None):
             # 1. Simulate some progress
             if on_text:
                 on_text("Starting...")

@@ -26,7 +26,7 @@ from larkhelm.lark_client import (
     _index_reply,
 )
 from larkhelm.card_builder import _make_card, _split_md, _fmt_elapsed
-from larkhelm.ai_runner import query_claude, query_gemini, query_kimi, QueryCancelledError
+from larkhelm.ai_runner import query_claude, query_gemini, query_kimi, query_deepseek, QueryCancelledError
 from larkhelm.chat_state import _get_cwd, _load_sid, _increment_turn_count
 
 # ── Card UX parameters (from config) ────────────────────────────────
@@ -99,7 +99,7 @@ def _run_backend_single(spec, chat_id: str, message: str, cwd: str, cancel_ev,
         (sid=None). Resumed sessions already carry the context from the first turn, so
         re-injecting every message would multiply context size by N turns.
     """
-    from larkhelm.backend_cli import run_claude, run_gemini, run_kimi
+    from larkhelm.backend_cli import run_claude, run_gemini, run_kimi, run_deepseek
     from larkhelm.backend_api import run_anthropic, run_google, run_openai_compat
     from larkhelm.api_session import load_history, save_history
 
@@ -131,6 +131,14 @@ def _run_backend_single(spec, chat_id: str, message: str, cwd: str, cancel_ev,
         output = run_kimi(spec, chat_id, cli_msg, sid, cwd, cancel_ev,
                           on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
                           on_soft_timeout=on_soft_timeout, images=images)
+    elif provider == "deepseek_api":
+        # DeepSeek is HTTP + stateless; system prompt is passed through the
+        # proper system channel by DeepSeekRunner (every call), so this path
+        # mirrors the API backends rather than the CLI new-session-only rule.
+        output = run_deepseek(spec, chat_id, message, sid=None, cwd=cwd,
+                              cancel_ev=cancel_ev, on_text=on_text, on_tool=on_tool,
+                              on_tool_result=on_tool_result, on_soft_timeout=on_soft_timeout,
+                              system_prompt=extra_system or None)
     else:  # claude_cli (default)
         sid = _load_sid(chat_id, spec.id)
         output = run_claude(spec, chat_id, message, sid, cwd, cancel_ev,
@@ -325,7 +333,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
 
         # Resolve backend early (pure registry lookup, no network) so the initial card
         # shows the correct model name instead of the legacy default_model value.
-        m_name = {"claude": "Claude", "gemini": "Gemini", "kimi": "Kimi"}.get(model, model.capitalize())
+        m_name = {"claude": "Claude", "gemini": "Gemini", "kimi": "Kimi", "deepseek": "DeepSeek"}.get(model, model.capitalize())
         try:
             from larkhelm.router import resolve_backend as _early_resolve
             from larkhelm.backend_registry import BACKEND_REGISTRY as _early_reg
@@ -663,8 +671,10 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             if not chain:
                 # Last resort: fall back to legacy routing.
                 # Same new-session-only rule: only prepend memory when no existing sid.
-                _legacy_sid = _load_sid(chat_id, "gemini" if model == "gemini" else
-                                        "kimi" if model == "kimi" else "claude")
+                _legacy_sid = _load_sid(chat_id,
+                    "gemini" if model == "gemini" else
+                    "kimi" if model == "kimi" else
+                    "deepseek" if model == "deepseek" else "claude")
                 _legacy_msg = (f"[System]\n{memory_ctx}\n\n[User Query]\n{message}"
                                if memory_ctx and not _legacy_sid else message)
                 if model == "gemini":
@@ -678,6 +688,11 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                                         on_tool_result=on_tool_result,
                                         on_soft_timeout=_on_soft_timeout,
                                         images=images)
+                elif model == "deepseek":
+                    output = query_deepseek(chat_id, _legacy_msg, cwd, cancel_ev,
+                                            on_tool=on_tool, on_text=on_text,
+                                            on_tool_result=on_tool_result,
+                                            on_soft_timeout=_on_soft_timeout)
                 else:
                     output = query_claude(chat_id, _legacy_msg, cwd, cancel_ev,
                                           on_tool=on_tool, on_text=on_text,

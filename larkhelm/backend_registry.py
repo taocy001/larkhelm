@@ -10,11 +10,20 @@ import threading
 from larkhelm.log import _debug_log
 
 
+# Assumed per-call usage when converting per-1k-token rates into a USD-per-call
+# estimate for `TaskProfile.cost_ceiling` filtering. Tunable here; not currently
+# user-configurable (single global heuristic is sufficient until we have per-task
+# usage telemetry).
+COST_CEILING_ASSUMED_IN_TOKENS  = 1000
+COST_CEILING_ASSUMED_OUT_TOKENS = 500
+
+
 @dataclasses.dataclass
 class BackendSpec:
     id: str
     provider: str           # "claude_cli" | "gemini_cli" | "kimi_cli"
                             # | "anthropic_api" | "google_api" | "openai_compat_api"
+                            # | "deepseek_api"
     display_name: str
     role: str               # "orchestrator" | "worker" | "cheap"
     tags: list[str]         # e.g. ["vision", "tools", "cheap", "fast"]
@@ -28,6 +37,13 @@ class BackendSpec:
     healthy: bool = True
     enabled: bool = True
     last_error: str | None = None  # last health_check failure reason
+    description: str = ""  # natural-language description for L2 intent classifier prompt
+    trigger_phrases: list[str] = dataclasses.field(default_factory=list)  # keyword triggers for L1 heuristic routing
+    intent_examples: list[str] = dataclasses.field(default_factory=list)  # few-shot anchor examples for L2 prompt
+    capability_scores: dict[str, float] = dataclasses.field(default_factory=dict)
+    cost_per_1k_input:  float = 0.0
+    cost_per_1k_output: float = 0.0
+    latency_tier:       str = "medium"   # "instant" | "fast" | "medium" | "slow"
 
 
 def _resolve_env_vars(raw: str) -> str:
@@ -35,6 +51,31 @@ def _resolve_env_vars(raw: str) -> str:
     def _replace(m: re.Match) -> str:
         return os.environ.get(m.group(1), m.group(0))
     return re.sub(r'\$\{([^}]+)\}', _replace, raw)
+
+
+def _normalize_str_list(value: object) -> list[str]:
+    """Normalize a config value into list[str].
+
+    Accepts:
+      - None / missing: returns [].
+      - list: keeps str elements only, strips each, drops empties.
+      - str: splits by '\n', then by ',' per segment; strips; drops empties.
+      - other types: returns [] (debug-logged, never raises).
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [v.strip() for v in value if isinstance(v, str) and v.strip()]
+    if isinstance(value, str):
+        out: list[str] = []
+        for line in value.split("\n"):
+            for seg in line.split(","):
+                token = seg.strip()
+                if token:
+                    out.append(token)
+        return out
+    _debug_log(f"[BackendRegistry] _normalize_str_list: invalid type {type(value).__name__}, falling back to []")
+    return []
 
 
 # Normalize PRD hyphen-style provider names to internal underscore names
@@ -45,6 +86,7 @@ _PROVIDER_ALIASES: dict[str, str] = {
     "claude-api":   "anthropic_api",
     "gemini-api":   "google_api",
     "openai-api":   "openai_compat_api",
+    "deepseek-api": "deepseek_api",
 }
 
 
@@ -91,6 +133,33 @@ class BackendRegistry:
                 if isinstance(extra_args, str):
                     extra_args = extra_args.split()
 
+                raw_description = s.get("description", "")
+                description = raw_description if isinstance(raw_description, str) else str(raw_description)
+                trigger_phrases = _normalize_str_list(s.get("trigger_phrases"))
+                intent_examples = _normalize_str_list(s.get("intent_examples"))
+
+                raw_caps = s.get("capability_scores", {})
+                capability_scores: dict[str, float] = {}
+                if isinstance(raw_caps, dict):
+                    for k, v in raw_caps.items():
+                        try:
+                            capability_scores[str(k)] = float(v)
+                        except (TypeError, ValueError):
+                            _debug_log(f"[BackendRegistry] {s.get('id', '?')}: invalid capability_score {k}={v!r}, skipping")
+
+                def _to_float(name: str, default: float = 0.0) -> float:
+                    val = s.get(name, default)
+                    try:
+                        return float(val)
+                    except (TypeError, ValueError):
+                        _debug_log(f"[BackendRegistry] {s.get('id', '?')}: invalid {name}={val!r}, falling back to {default}")
+                        return default
+
+                cost_per_1k_input  = _to_float("cost_per_1k_input")
+                cost_per_1k_output = _to_float("cost_per_1k_output")
+                raw_latency = s.get("latency_tier", "medium")
+                latency_tier = raw_latency if raw_latency in ("instant", "fast", "medium", "slow") else "medium"
+
                 spec = BackendSpec(
                     id=s["id"],
                     provider=provider,
@@ -106,6 +175,13 @@ class BackendRegistry:
                     extra_args=list(extra_args),
                     healthy=True,
                     enabled=enabled,
+                    description=description,
+                    trigger_phrases=trigger_phrases,
+                    intent_examples=intent_examples,
+                    capability_scores=capability_scores,
+                    cost_per_1k_input=cost_per_1k_input,
+                    cost_per_1k_output=cost_per_1k_output,
+                    latency_tier=latency_tier,
                 )
                 self._specs[spec.id] = spec
 
@@ -152,6 +228,18 @@ class BackendRegistry:
                         except ImportError:
                             spec.healthy = False
                             spec.last_error = "openai SDK not installed"
+                            _debug_log(f"[BackendRegistry] {spec.id}: {spec.last_error}")
+                            continue
+                        if not spec.api_key or "${" in spec.api_key:
+                            spec.healthy = False
+                            spec.last_error = "api_key missing or unresolved"
+                            _debug_log(f"[BackendRegistry] {spec.id}: {spec.last_error}")
+                    elif spec.provider == "deepseek_api":
+                        try:
+                            import requests  # noqa: F401
+                        except ImportError:
+                            spec.healthy = False
+                            spec.last_error = "requests package not installed"
                             _debug_log(f"[BackendRegistry] {spec.id}: {spec.last_error}")
                             continue
                         if not spec.api_key or "${" in spec.api_key:
@@ -261,6 +349,13 @@ class BackendRegistry:
                             recovered = True
                     except ImportError:
                         pass
+                elif spec.provider == "deepseek_api":
+                    try:
+                        import requests  # noqa: F401
+                        if spec.api_key and "${" not in spec.api_key:
+                            recovered = True
+                    except ImportError:
+                        pass
 
                 if recovered:
                     with self._lock:
@@ -285,6 +380,72 @@ class BackendRegistry:
     def all_enabled(self) -> list[BackendSpec]:
         with self._lock:
             return [s for s in self._specs.values() if s.enabled]
+
+    def rank_for_task(self, profile) -> list[BackendSpec]:
+        """Rank healthy+enabled BackendSpecs for the given TaskProfile.
+
+        Score = Σ profile.required_capabilities[k] * spec.capability_scores.get(k, 0.0).
+        Falls back to len(set(profile.required_capabilities) & set(spec.tags))
+        when no spec exposes capability_scores (preserves phase4 semantics
+        for legacy configs — see NFR-COMPAT-02).
+        Secondary sort: latency_tier preference, then cost_per_1k_output asc.
+
+        ``profile`` is duck-typed via ``getattr`` so we don't need to import
+        ``TaskProfile`` (which would create a circular dependency).
+        """
+        with self._lock:
+            candidates = [s for s in self._specs.values() if s.enabled and s.healthy]
+
+        required = dict(getattr(profile, "required_capabilities", {}) or {})
+        latency_pref = getattr(profile, "latency_pref", "medium")
+        require_tools = bool(getattr(profile, "require_tools", False))
+        require_vision = bool(getattr(profile, "require_vision", False))
+        cost_ceiling = getattr(profile, "cost_ceiling", None)
+
+        if require_tools:
+            candidates = [s for s in candidates if "tools" in s.tags]
+        if require_vision:
+            candidates = [s for s in candidates if "vision" in s.tags]
+        if cost_ceiling is not None:
+            # cost_ceiling is USD-per-call (see TaskProfile.cost_ceiling).
+            # Estimate per-call cost using the assumed usage in COST_CEILING_ASSUMED_*.
+            # Backends with zero per-1k rates (e.g., local/free) compute to 0 USD
+            # and pass naturally — no special bypass needed.
+            def _per_call_cost(spec: BackendSpec) -> float:
+                return (
+                    spec.cost_per_1k_input  * (COST_CEILING_ASSUMED_IN_TOKENS  / 1000.0)
+                    + spec.cost_per_1k_output * (COST_CEILING_ASSUMED_OUT_TOKENS / 1000.0)
+                )
+            candidates = [s for s in candidates if _per_call_cost(s) <= cost_ceiling]
+
+        any_caps = any(s.capability_scores for s in candidates)
+
+        def _score(spec: BackendSpec) -> float:
+            if any_caps:
+                return sum(
+                    float(weight) * spec.capability_scores.get(name, 0.0)
+                    for name, weight in required.items()
+                )
+            return float(len(set(required.keys()) & set(spec.tags)))
+
+        _LATENCY_RANK = {"instant": 0, "fast": 1, "medium": 2, "slow": 3}
+
+        def _latency_distance(spec: BackendSpec) -> int:
+            return abs(
+                _LATENCY_RANK.get(spec.latency_tier, 2)
+                - _LATENCY_RANK.get(latency_pref, 2)
+            )
+
+        def _sort_key(spec: BackendSpec):
+            return (
+                -_score(spec),
+                _latency_distance(spec),
+                spec.cost_per_1k_output,
+                spec.cost_per_1k_input,
+                spec.id,
+            )
+
+        return sorted(candidates, key=_sort_key)
 
 
 # Singleton — populated by config._init_runtime()

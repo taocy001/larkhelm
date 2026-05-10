@@ -255,7 +255,7 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
             from larkhelm.memory import get_project_memory_context
             _crew_mem_ctx = get_project_memory_context(state.chat_id, cwd=str(cwd))
         except Exception as e:
-            _debug_log(f"[crew] memory load failed: {e}")
+            _debug_log(f"[Crew] memory load failed: {e}")
 
     # Timeout control: start countdown only after acquiring the process slot (semaphore),
     # so waiting time is not counted toward the timeout.
@@ -391,7 +391,7 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
     try:
         result_file.write_text(result, encoding="utf-8")
     except Exception as e:
-        _debug_log(f"[crew] result file write failed: {e}")
+        _debug_log(f"[Crew] result file write failed: {e}")
 
     # For Hermes orchestrator agents, also write a formatted summary to a markdown file
     if spec.model.startswith("hermes_"):

@@ -165,6 +165,70 @@ Responses are sent as Feishu interactive cards (Markdown). Cards are updated in-
 
 Card format selection: has buttons → JSON 1.0 (supports action tags); no buttons → JSON 2.0 (richer rich text).
 
+### 6. Phase 5 智能编排层 (`larkhelm/agent_hub/`)
+
+Phase 5 引入意图识别 + Agent 分发层，与现有显式命令并存（不替换）。
+
+**包结构**：
+
+```
+larkhelm/agent_hub/
+├── intent_types.py    - IntentResult / TaskProfile / AgentDispatch / AgentContext / AgentResult
+├── agent_base.py      - AgentExecutor (ABC) + AgentRegistry 单例 AGENT_REGISTRY
+├── intent_router.py   - resolve_intent(): 显式命令 → L1 关键词 → L2 cheap LLM JSON
+├── model_selector.py  - resolve_backend_for_task() 调用 BackendRegistry.rank_for_task
+├── agent_dispatcher.py - AgentDispatcher.dispatch() 透明化卡片 + ACL + 审计
+├── intent_feedback.py - record_feedback / register_pending / resolve_pending（JSONL 0600）
+├── agent_audit.py     - write_audit / aggregate_daily（JSONL 0600）
+├── plugin_loader.py   - importlib.metadata.entry_points('larkhelm.agents') + config['agent_plugins']
+└── builtin/           - ChatAgent / DevAgent / CrewAgent / PlanAgent / DocAgent（薄壳调用现有命令）
+```
+
+**灰度开关**（`config.json`）：
+
+| 字段 | 默认值 | 含义 |
+|---|---|---|
+| `intent_router_enabled` | `false` | 总开关，关闭时 `_message.py` 完全不导入 `agent_hub` |
+| `intent_router_traffic` | `0.0` | 0.0–1.0 灰度比例，按 `chat_id` 哈希一致性分流 |
+| `intent_layer2_strategy` | `"llm"` | `llm` 或 `embedding`（P2 预留） |
+| `agent_plugins` | `[]` | 第三方 plugin 入口点字符串，如 `mypkg.module:my_agent` |
+| `agent_acl` | `{}` | `{agent_type: ["chat_id_glob", ...]}` |
+| `intent_feedback_path` / `intent_audit_path` | 空 | 默认 `DATA_DIR/intent_*.jsonl` |
+
+> **路径安全**：当显式设置 `intent_feedback_path` / `intent_audit_path` 时，
+> 强烈建议路径**位于 `DATA_DIR` 之内**（例如 `DATA_DIR/audit/intent.jsonl`）。
+> 这两份 JSONL 以 0600 权限写入，落到 `DATA_DIR` 之外可能：
+> 1. 不参与 `DATA_DIR` 的备份策略，丢失审计；
+> 2. 与运维的备份/分享脚本冲突，泄露用户原始 query。
+> 若 `DATA_DIR` 未设置（早期 bootstrap / 单文件调试），模块会回退到
+> `tempfile.gettempdir() / intent_*.jsonl`，避免文件意外落入当前工作目录。
+
+**第三方 Agent 接入**：
+
+```python
+# 子类化 AgentExecutor，实现 execute(intent, ctx) -> AgentResult
+from larkhelm.agent_hub import AgentExecutor, AgentResult, AgentContext, IntentResult
+
+class MyAgent(AgentExecutor):
+    agent_type = "translate"
+    description = "中英互译 Agent"
+
+    def execute(self, intent: IntentResult, ctx: AgentContext) -> AgentResult:
+        ...
+```
+
+通过 entry-point group `larkhelm.agents` 暴露：
+
+```toml
+# pyproject.toml
+[project.entry-points."larkhelm.agents"]
+translate = "mypkg.translate:MyAgent"
+```
+
+或在 `config.json` 中追加 `"agent_plugins": ["mypkg.translate:MyAgent"]`。
+
+**详细设计文档**：`.crew_workspace/design.md`（v1.0，2026-05-09）。
+
 ## 写入飞书文档（Claude Code CLI 集成）
 
 在此项目工作时，若需将内容写入飞书文档，**直接使用 `larkhelm doc` CLI**，无需编写任何脚本：
@@ -283,6 +347,29 @@ if tl.startswith("/new_cmd"):
 | 消息去重 | `larkhelm.dedup` |
 | Crew 数据类型 | `larkhelm.crew_types` |
 
+### 7. 记忆系统的两条触发路径
+
+`memory.maybe_auto_update(chat_id)` 是后台 LLM 摘要器，把最近对话浓缩成
+session memory，再级联抽取 project / global memory。它有**两条触发路径**：
+
+| 触发 | 何时 | 谁触发 | 频率 |
+|---|---|---|---|
+| 普通节奏 | 普通 `/chat` 查询完成后 | `handlers/_query.py:742` | 每 `AUTO_UPDATE_EVERY=10` 轮一次 |
+| 里程碑节奏 | `/dev` / `/crew` / `/plan` 完成时 | `record_milestone(chat_id, kind, summary)`（`memory.py`）| 每次完成 + 60s 防抖 |
+
+里程碑节奏修复了之前"用 `/dev` 干完一整天但 memory 一字未变"的问题：
+
+- `record_milestone` 写一条 `role="milestone"`、`model="milestone"` 的日志条目
+- `maybe_auto_update` 的过滤器接受 `role in {user, assistant, milestone}`、
+  排除 `model in {crew, shell}`，所以 milestone 条目能被 LLM 摘要看到，
+  普通 crew 子任务的喧嚣仍被屏蔽
+- 然后 `record_milestone` 强制调 `maybe_auto_update(force=True)`，由
+  `_get_update_lock(chat_id)` 防止并发风暴；`_MILESTONE_DEBOUNCE_SEC=60`
+  防止短时间多次开销
+
+新写后台任务（类似 `/dev` / `/crew`）务必在 finally 加 `record_milestone`，
+否则任务结果不会进入 memory。
+
 ## lark-oapi SDK — Available API Namespaces
 
 SDK install path: `~/.local/lib/python3.13/site-packages/lark_oapi/`
@@ -353,8 +440,47 @@ resp = client.sheets.v3.spreadsheet_sheet.query(
 **日志格式**（写入 `_cfg.DEBUG_LOG`）：
 
 ```
-[HH:MM:SS] [{module}] {operation} failed: {exception}
+[HH:MM:SS] [{Module}] {operation} failed: {exception}
 ```
+
+### 日志前缀规范
+
+**新代码**约定：`_debug_log` / `safe_log` / `lazy_debug_log` 的第一个参数必须以
+`[Module]` 开头，**模块名采用 PascalCase**（与 Python 类名一致），多词不加空格、
+不加下划线。子组件用空格分隔（例：`[Crew] Manager: ...`）。
+
+下表是当前已完成的小写 → PascalCase 迁移清单（其它模块下次顺手就改，不强制
+批量重写历史日志）：
+
+| ✅ 推荐 | ❌ 已迁移 | 说明 |
+|---|---|---|
+| `[Crew]` / `[Crew] Manager: …` | `[crew]` / `[Crew/Manager]` | 模块统一大写，子组件空格分隔 |
+| `[Checkpoint]` | `[checkpoint]` | |
+| `[Perm]` | `[perm]` | |
+| `[IntentRouter]` | `[intent_router]` | |
+| `[Plan]` | `[plan]` | |
+| `[Dev]` | `[dev]` | |
+| `[BackendRegistry]` | `[recover_thread]` | 用模块名而非线程名 |
+
+**例外**：第三方进程协议 / 外部 CLI 二进制名保留小写（与命令名对齐）：
+`[claude]` / `[gemini]` / `[kimi]` / `[upgrade]` 等。
+
+**未迁移的历史小写前缀**（如 `[memory]` / `[router]` / `[token_stats]` /
+`[lark_client]` / agent_hub 内部 `[agent_audit]` 等）属于知情遗留：新写日志
+请用 PascalCase，遇到时顺手重命名即可，不必专门起 PR 批量改写。
+
+**helper 选择**：
+
+| Helper | 何时用 | 实现位置 |
+|---|---|---|
+| `_debug_log(msg)` | 主路径诊断；调用方已确保 `larkhelm.log` 已加载 | `log.py:_debug_log` |
+| `safe_log(msg)` | 异常清理 / 永不抛路径；底层等价于 `_debug_log` 套 try-except | `log.py:safe_log` |
+| `lazy_debug_log(msg)` | bootstrap / 循环 import 边缘；模块本身可能尚未完成 import | `log.py:lazy_debug_log` |
+
+> `safe_log` 取代 R3 之前 `agent_hub/` 4 处本地 `_safe_log` 副本；
+> `lazy_debug_log` 取代 `config.py`、`agent_hub/agent_base.py.abort()`、
+> `agent_hub/intent_router.py` 中的"双层 try-import"模式。新代码避免再
+> 引入这两种模式的本地拷贝。
 
 **保留静默清单**（已确认无需改动）：
 

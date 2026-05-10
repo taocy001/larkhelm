@@ -22,6 +22,20 @@
   "default_wiki_parent_token": "",
   "default_owner_open_id":     "",
 
+  "_comment_deepseek": "DeepSeek HTTP backend. Leave deepseek_api_key empty (or set to ${DEEPSEEK_API_KEY}) to disable. When set, a 'deepseek' BackendSpec is auto-registered and /d /deepseek shortcuts become active.",
+  "deepseek_api_key":  "",
+  "deepseek_base_url": "https://api.deepseek.com",
+  "deepseek_model":    "deepseek-chat",
+
+  "_comment_intent_router": "Phase 5 intent router. Off by default. Set intent_router_enabled=true and intent_router_traffic between 0.0 and 1.0 to gradually roll out natural-language Agent dispatch.",
+  "intent_router_enabled":  false,
+  "intent_router_traffic":  0.0,
+  "intent_layer2_strategy": "llm",
+  "agent_plugins":          [],
+  "agent_acl":              {},
+  "intent_feedback_path":   "",
+  "intent_audit_path":      "",
+
   "_comment_probe_models": "Optional. If omitted, installed CLIs are auto-discovered from PATH (no model pinning or capabilities). Uncomment and customize to pin models and enable orchestrator routing hints.",
   "probe_models": [
     {
@@ -111,6 +125,18 @@
       "command":      "kimi",
       "extra_args":   ["--thinking"],
       "capabilities": "Best for hard math, logic puzzles, and problems requiring extended step-by-step reasoning."
+    },
+    {
+      "_comment":     "DeepSeek via HTTP. Auto-registered when deepseek_api_key is non-empty; this explicit entry only matters if you want to pin a different model or set a custom base_url per backend.",
+      "id":           "deepseek",
+      "provider":     "deepseek_api",
+      "display_name": "DeepSeek",
+      "role":         "worker",
+      "tags":         ["cheap", "fast"],
+      "model":        "deepseek-chat",
+      "api_key":      "${DEEPSEEK_API_KEY}",
+      "base_url":     "https://api.deepseek.com",
+      "capabilities": "Cheap, fast Chinese-friendly chat model. Good for high-volume drafting and summarization where Claude/Gemini cost is wasteful."
     }
   ]
 }

@@ -279,7 +279,7 @@ def _handle_perm_conn(conn):
             conn.sendall((json.dumps({"decision": "deny", "reason": str(e)}) + "\n").encode())
             conn.close()
         except Exception as _e:
-            _debug_log(f"[perm] socket write failed: {_e}")
+            _debug_log(f"[Perm] socket write failed: {_e}")
 
 
 def _start_perm_server():

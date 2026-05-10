@@ -3,6 +3,7 @@
 Provides:
   build_orchestrator_system_prompt(registry)  — generate specialist listing for system prompt
   _detect_delegation(buffer)                  — detect DELEGATE block in streaming buffer
+  _detect_agent_protocol(buffer)              — detect AGENT/BACKEND/MODE/TASK block (phase 5)
 """
 from __future__ import annotations
 
@@ -13,6 +14,8 @@ from larkhelm.backend_registry import BackendRegistry
 # Only alphanumeric, hyphens, and underscores are valid backend IDs (max 64 chars).
 # Rejects whitespace, path separators, injection characters, etc.
 _BACKEND_ID_RE = re.compile(r'^[a-zA-Z0-9_\-]{1,64}$')
+_AGENT_TYPE_RE = re.compile(r'^[a-zA-Z0-9_\-]{1,32}$')
+_MODE_RE       = re.compile(r'^[a-zA-Z0-9_\-]{1,32}$')
 
 # Max allowed sub_query length to prevent context explosion via malformed delegation
 _MAX_SUB_QUERY_LEN = 8000
@@ -88,3 +91,56 @@ def _detect_delegation(buffer: str) -> tuple[str, str] | None:
         sub_query = m.group(2).strip()[:_MAX_SUB_QUERY_LEN]
         return (backend_id, sub_query)
     return None
+
+
+_AGENT_PROTO_RE = re.compile(
+    r'AGENT\s+([a-zA-Z0-9_\-]{1,32})\s*\n'
+    r'BACKEND\s+([a-zA-Z0-9_\-]{1,64})\s*\n'
+    r'MODE\s+([a-zA-Z0-9_\-]{1,32})\s*\n'
+    r'TASK\s+(.*?)\nEND_AGENT',
+    re.DOTALL,
+)
+
+
+def _detect_agent_protocol(buffer: str):
+    """Detect the phase-5 AGENT/BACKEND/MODE/TASK block.
+
+    Format::
+
+        AGENT <agent_type>
+        BACKEND <backend_id>
+        MODE <mode>
+        TASK <task description spanning multiple lines>
+        END_AGENT
+
+    Returns an ``AgentDispatch`` instance if the block is well-formed and all
+    identifier fields pass their respective whitelists. Returns ``None`` for
+    incomplete or malformed blocks. ``AgentDispatch`` is imported lazily to
+    avoid import-time coupling between ``orchestration`` and ``agent_hub``.
+    """
+    m = _AGENT_PROTO_RE.search(buffer)
+    if not m:
+        return None
+    agent_type = m.group(1).strip()
+    backend_id = m.group(2).strip()
+    mode       = m.group(3).strip()
+    task       = m.group(4).strip()[:_MAX_SUB_QUERY_LEN]
+
+    # Defense-in-depth: even though _AGENT_PROTO_RE already restricts the
+    # character class for each field, we re-validate against the canonical
+    # field-level whitelists so that any future loosening of _AGENT_PROTO_RE
+    # (e.g. to accept extra whitespace) cannot regress the per-field guard
+    # and let an injected agent_type / backend_id / mode through.
+    if not _AGENT_TYPE_RE.match(agent_type):
+        return None
+    if not _BACKEND_ID_RE.match(backend_id):
+        return None
+    if not _MODE_RE.match(mode):
+        return None
+    if not task:
+        return None
+
+    from larkhelm.agent_hub.intent_types import AgentDispatch
+    return AgentDispatch(
+        agent_type=agent_type, backend_id=backend_id, mode=mode, task=task,
+    )

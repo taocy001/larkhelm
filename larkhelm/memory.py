@@ -21,6 +21,7 @@ Auto-learning flow:
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import threading
 from datetime import datetime
@@ -217,7 +218,7 @@ def _load_md_body(path: Path | None) -> str | None:
                 return text[end + 4:].strip() or None
         return text.strip() or None
     except Exception as e:
-        _debug_log(f"[memory] load error {path.name}: {e}")
+        _debug_log(f"[Memory] load error {path.name}: {e}")
         return None
 
 
@@ -240,12 +241,20 @@ def _load_md_frontmatter(path: Path | None) -> dict[str, str]:
                 k, _, v = line.partition(":")
                 result[k.strip()] = v.strip().strip('"')
     except Exception as e:
-        _debug_log(f"[memory] frontmatter parse error: {e}")
+        _debug_log(f"[Memory] frontmatter parse error: {e}")
     return result
 
 
 def _save_md(path: Path | None, content: str, max_chars: int, extra_fm: str = "") -> None:
-    """Atomically write a memory file with YAML frontmatter, protected by a per-file lock."""
+    """Atomically write a memory file with YAML frontmatter, protected by a per-file lock.
+
+    Permissions: the tmp file is chmod'd 0600 BEFORE the atomic replace so the
+    final file inherits user-only read/write regardless of process umask.
+    Aligns with ``agent_audit._append_jsonl`` / ``intent_feedback._append_jsonl``
+    which already enforce 0600 on JSONL audit files. Memory files contain
+    distilled chat content (which may include user secrets they typed in),
+    so 0644 default umask is unacceptable in shared environments.
+    """
     if path is None:
         return
     lock = _get_file_write_lock(path)
@@ -256,13 +265,20 @@ def _save_md(path: Path | None, content: str, max_chars: int, extra_fm: str = ""
             body = content[:max_chars]
             tmp = path.with_suffix(".md.tmp")
             tmp.write_text(fm + body, encoding="utf-8")
+            # Tighten perms BEFORE the rename so the final path is never
+            # observable with broader bits; if chmod fails (filesystem
+            # without unix perms, e.g. CIFS) we log and continue, not abort.
+            try:
+                os.chmod(tmp, 0o600)
+            except OSError as _e:
+                _debug_log(f"[Memory] chmod 0600 failed on {tmp.name}: {_e}")
             try:
                 tmp.replace(path)
             except OSError:
                 shutil.move(str(tmp), str(path))
-            _debug_log(f"[memory] saved {path.name} ({len(body)} chars)")
+            _debug_log(f"[Memory] saved {path.name} ({len(body)} chars)")
         except Exception as e:
-            _debug_log(f"[memory] save error {path.name}: {e}")
+            _debug_log(f"[Memory] save error {path.name}: {e}")
 
 
 # ── Public load/save API ──────────────────────────────────────────────────────
@@ -286,10 +302,10 @@ def load_project_memory(cwd: str) -> str | None:
         canonical = str(Path(cwd).resolve())
         stored_canonical = str(Path(stored_cwd).resolve())
         if stored_canonical != canonical:
-            _debug_log(f"[memory] cwd mismatch: stored={stored_cwd!r} vs requested={cwd!r}, skipping")
+            _debug_log(f"[Memory] cwd mismatch: stored={stored_cwd!r} vs requested={cwd!r}, skipping")
             return None
         if not Path(stored_canonical).exists():
-            _debug_log(f"[memory] project cwd gone, skipping: {stored_cwd}")
+            _debug_log(f"[Memory] project cwd gone, skipping: {stored_cwd}")
             return None
     return content
 
@@ -298,6 +314,135 @@ def save_project_memory(cwd: str, content: str) -> None:
     canonical = str(Path(cwd).resolve())
     _save_md(_project_memory_file(cwd), content, PROJECT_MAX_CHARS,
              f'cwd: "{canonical}"\n')
+
+
+# ── Project-memory garbage collection (user-explicit /memory gc) ────────────
+
+# Default age threshold for /memory gc: project files unmodified for 30+ days
+# are treated as stale candidates. Picked conservatively because deleting
+# memory is irreversible (no .trash/) — a one-month window comfortably covers
+# returning to a project after a vacation but flags genuinely abandoned ones.
+_GC_DEFAULT_DAYS = 30
+
+
+def gc_project_memory(threshold_days: int = _GC_DEFAULT_DAYS,
+                      apply: bool = False) -> dict:
+    """Identify (and optionally delete) stale ``project_*.md`` files.
+
+    A file is considered stale when ANY of:
+      * it has not been modified in ``threshold_days`` days, OR
+      * its frontmatter ``cwd`` no longer points to an existing directory
+        (project was moved/deleted; memory file is now orphaned).
+
+    The function NEVER touches ``session_*.md`` or ``global_*.md`` — those
+    have different lifecycle semantics (session = active conversation,
+    global = per-user singleton). Project memory is the only layer where
+    files accumulate over time on a developer's machine.
+
+    Parameters
+    ----------
+    threshold_days : int
+        Files unmodified for this many days qualify on age. Must be ≥ 1
+        (passing 0 would clear everything; we forbid that to avoid
+        catastrophic mistakes from typo'd commands).
+    apply : bool
+        ``False`` (default) → dry-run, just report. ``True`` → actually
+        unlink the files. Callers expose the dry-run path as the default
+        UX so users can review before destruction.
+
+    Returns
+    -------
+    dict with keys:
+      * ``threshold_days``: echoed back
+      * ``apply``: echoed back
+      * ``scanned``: total project_*.md count
+      * ``candidates``: list of dicts with
+            {name, path, cwd, age_days (None if unknown), reason, deleted}
+        where reason ∈ {"stale_age", "cwd_gone", "stale_age+cwd_gone"}
+        and ``deleted`` is True iff ``apply`` was True AND the unlink
+        actually succeeded.
+      * ``errors``: list of {path, err} for unlink failures (apply mode)
+
+    Failures during single-file scan are swallowed (logged) so one
+    unreadable file doesn't break the whole report.
+    """
+    if threshold_days < 1:
+        raise ValueError("threshold_days must be >= 1")
+
+    _ensure_dir()
+    now = datetime.now().timestamp()
+    cutoff = now - threshold_days * 86400
+
+    candidates: list[dict] = []
+    errors: list[dict] = []
+    scanned = 0
+    for path in MEMORY_HOME_DIR.glob("project_*.md"):
+        scanned += 1
+        try:
+            mtime = path.stat().st_mtime
+            age_days = max(0, int((now - mtime) / 86400))
+            stale_age = mtime < cutoff
+            cwd_gone = False
+            stored_cwd = ""
+            try:
+                fm = _load_md_frontmatter(path)
+                stored_cwd = fm.get("cwd", "") or ""
+                if stored_cwd:
+                    cwd_gone = not Path(stored_cwd).expanduser().exists()
+            except Exception as _e:
+                _debug_log(f"[Memory] gc frontmatter read failed for {path.name}: {_e}")
+            if not (stale_age or cwd_gone):
+                continue
+            reason_parts = []
+            if stale_age:
+                reason_parts.append("stale_age")
+            if cwd_gone:
+                reason_parts.append("cwd_gone")
+            entry = {
+                "name": path.name,
+                "path": str(path),
+                "cwd": stored_cwd,
+                "age_days": age_days,
+                "reason": "+".join(reason_parts),
+                "deleted": False,
+            }
+            if apply:
+                try:
+                    # Acquire the same per-file write lock that ``_save_md``
+                    # uses, so a concurrent cascade-extract write doesn't
+                    # race the unlink. Non-blocking to avoid hanging gc on
+                    # a stuck writer; we just skip and report.
+                    write_lock = _get_file_write_lock(path)
+                    if write_lock.acquire(blocking=False):
+                        try:
+                            path.unlink(missing_ok=True)
+                            entry["deleted"] = True
+                        finally:
+                            write_lock.release()
+                    else:
+                        errors.append({"path": str(path),
+                                       "err": "write lock busy, skipped"})
+                except Exception as _e:
+                    errors.append({"path": str(path), "err": str(_e)})
+                    _debug_log(f"[Memory] gc unlink failed for {path.name}: {_e}")
+            candidates.append(entry)
+        except Exception as _e:
+            errors.append({"path": str(path), "err": f"scan: {_e}"})
+            _debug_log(f"[Memory] gc scan failed for {path.name}: {_e}")
+
+    _debug_log(
+        f"[Memory] gc{'(apply)' if apply else '(dry-run)'} "
+        f"scanned={scanned} candidates={len(candidates)} "
+        f"deleted={sum(1 for c in candidates if c['deleted'])} "
+        f"errors={len(errors)} threshold_days={threshold_days}"
+    )
+    return {
+        "threshold_days": threshold_days,
+        "apply": apply,
+        "scanned": scanned,
+        "candidates": candidates,
+        "errors": errors,
+    }
 
 
 def load_memory(chat_id: str) -> str | None:
@@ -311,7 +456,7 @@ def load_memory(chat_id: str) -> str | None:
             try:
                 old.unlink(missing_ok=True)
             except Exception as e:
-                _debug_log(f"[memory] session file cleanup failed: {e}")
+                _debug_log(f"[Memory] session file cleanup failed: {e}")
     return content
 
 
@@ -353,7 +498,7 @@ def get_memory_context(chat_id: str, cwd: str | None = None) -> str:
         available = max(0, TOTAL_MEMORY_BUDGET - _TAG_OVERHEAD_PER_LAYER * len(parts))
         content_total = sum(len(c) for _, c, _ in parts)
         if content_total > 0:
-            _debug_log(f"[memory] budget trim: total={total} > {TOTAL_MEMORY_BUDGET}, available={available}")
+            _debug_log(f"[Memory] budget trim: total={total} > {TOTAL_MEMORY_BUDGET}, available={available}")
             for i, (open_tag, content, close_tag) in enumerate(parts):
                 budget_i = int(available * len(content) / content_total)
                 if len(content) > budget_i:
@@ -446,14 +591,70 @@ def _run_one_shot(prompt: str, ns: str) -> str:
             from larkhelm.chat_state import _clear_sid
             _clear_sid(ns, spec.id)
         except Exception as e:
-            _debug_log(f"[memory] clear_sid failed: {e}")
+            _debug_log(f"[Memory] clear_sid failed: {e}")
 
 
 # ── Session memory generation ─────────────────────────────────────────────────
 
+# Refusal/empty-output prefixes commonly emitted by LLMs when the input is
+# unsuitable (rate-limited, content-policy, hallucinated apology). Comparing
+# in lower-case + against the leading 80 chars catches variants like
+# "I cannot fulfill this request" / "As an AI language model, I…" /
+# "I'm sorry, but…". Anything matching is dropped — keeping the previous
+# memory is strictly better than overwriting with garbage.
+_USELESS_SUMMARY_PREFIXES: tuple[str, ...] = (
+    "i cannot",
+    "i can't",
+    "i'm sorry",
+    "i am sorry",
+    "i'm afraid",
+    "i'm unable",
+    "i am unable",
+    "unable to",
+    "my apologies",
+    "as an ai",
+    "as a language model",
+    "sorry, but",
+    "抱歉",
+    "很抱歉",
+    "对不起",
+    "我无法",
+    "作为一个ai",
+    "作为 ai",
+)
+_MIN_USEFUL_SUMMARY_CHARS = 50
+
+
+def _is_useful_summary(text: str | None) -> bool:
+    """Return True iff ``text`` looks like a real memory summary.
+
+    Rejects: ``None``, empty/whitespace, too short (< 50 chars after strip),
+    or output starting with a known refusal/apology prefix. Used by
+    ``generate_memory`` and ``_try_extract_*`` so an LLM hiccup never
+    overwrites a good memory file with garbage.
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    if len(stripped) < _MIN_USEFUL_SUMMARY_CHARS:
+        return False
+    head_lower = stripped[:80].lower()
+    for bad in _USELESS_SUMMARY_PREFIXES:
+        if head_lower.startswith(bad):
+            return False
+    return True
+
+
 def generate_memory(chat_id: str, recent_logs: str,
                     existing_memory: str | None = None) -> str:
-    """Generate a session memory summary. Returns Markdown (≤SESSION_MAX_CHARS)."""
+    """Generate a session memory summary. Returns Markdown (≤SESSION_MAX_CHARS).
+
+    Raises ``ValueError`` when the LLM output fails ``_is_useful_summary``
+    (empty / refusal prefix / too short). The caller (``maybe_auto_update``)
+    treats this as a soft failure and keeps the previous session memory
+    unchanged, preventing pollution of subsequent ``existing_memory``
+    inputs in a degenerative feedback loop.
+    """
     if existing_memory:
         existing_memory_section = (
             f"---EXISTING MEMORY (preserve important facts and update)---\n"
@@ -470,10 +671,17 @@ def generate_memory(chat_id: str, recent_logs: str,
     )
     try:
         result = _run_one_shot(prompt, ns=f"_mem_{chat_id}")
-        return result[:SESSION_MAX_CHARS]
     except Exception as e:
-        _debug_log(f"[memory] generate_memory error {chat_id}: {e}")
+        _debug_log(f"[Memory] generate_memory error {chat_id}: {e}")
         raise
+    if not _is_useful_summary(result):
+        head = (result or "").strip()[:80].replace("\n", " ")
+        _debug_log(
+            f"[Memory] rejected non-useful summary for {chat_id[:8]} "
+            f"(len={len(result or '')}, head={head!r}); keeping previous memory"
+        )
+        raise ValueError("non-useful summary output")
+    return result[:SESSION_MAX_CHARS]
 
 
 # ── Cascade extraction (project + global auto-learning) ──────────────────────
@@ -493,12 +701,16 @@ def _try_extract_project(session_content: str, cwd: str) -> None:
         )
         ns = f"_proj_{hashlib.md5(cwd.encode()).hexdigest()[:8]}"
         result = _run_one_shot(prompt, ns=ns)
-        result = result.strip()
-        if result and result.upper() != "UNCHANGED":
-            save_project_memory(cwd, result)
-            _debug_log(f"[memory] project layer auto-updated from session cascade ({len(result)} chars)")
+        result = (result or "").strip()
+        if not result or result.upper() == "UNCHANGED":
+            return
+        if not _is_useful_summary(result):
+            _debug_log(f"[Memory] project extract rejected non-useful output for {cwd!r}")
+            return
+        save_project_memory(cwd, result)
+        _debug_log(f"[Memory] project layer auto-updated from session cascade ({len(result)} chars)")
     except Exception as e:
-        _debug_log(f"[memory] extract_project error for {cwd!r}: {e}")
+        _debug_log(f"[Memory] extract_project error for {cwd!r}: {e}")
 
 
 def _try_extract_global(session_content: str, chat_id: str) -> None:
@@ -515,12 +727,16 @@ def _try_extract_global(session_content: str, chat_id: str) -> None:
         )
         ns = f"_glob_{chat_id[:8]}"
         result = _run_one_shot(prompt, ns=ns)
-        result = result.strip()
-        if result and result.upper() != "UNCHANGED":
-            save_global_memory(result, chat_id=chat_id)
-            _debug_log(f"[memory] global layer auto-updated from session cascade ({len(result)} chars)")
+        result = (result or "").strip()
+        if not result or result.upper() == "UNCHANGED":
+            return
+        if not _is_useful_summary(result):
+            _debug_log(f"[Memory] global extract rejected non-useful output for {chat_id[:8]}")
+            return
+        save_global_memory(result, chat_id=chat_id)
+        _debug_log(f"[Memory] global layer auto-updated from session cascade ({len(result)} chars)")
     except Exception as e:
-        _debug_log(f"[memory] extract_global error for {chat_id[:8]}: {e}")
+        _debug_log(f"[Memory] extract_global error for {chat_id[:8]}: {e}")
 
 
 def _cascade_extract(session_content: str, chat_id: str) -> None:
@@ -540,7 +756,7 @@ def _cascade_extract(session_content: str, chat_id: str) -> None:
         t.start()
         t.join(timeout=_EXTRACT_TIMEOUT)
         if t.is_alive():
-            _debug_log(f"[memory] {name} extraction timed out ({_EXTRACT_TIMEOUT}s), daemon thread abandoned")
+            _debug_log(f"[Memory] {name} extraction timed out ({_EXTRACT_TIMEOUT}s), daemon thread abandoned")
 
     def _run_cascade():
         threads = []
@@ -583,12 +799,12 @@ def maybe_auto_update(chat_id: str, force: bool = False,
             try:
                 on_done(success, content, error)
             except Exception as _cb_err:
-                _debug_log(f"[memory] on_done callback error: {_cb_err}")
+                _debug_log(f"[Memory] on_done callback error: {_cb_err}")
 
     def _run():
         lock = _get_update_lock(chat_id)
         if not lock.acquire(blocking=False):
-            _debug_log(f"[memory] update already in progress for {chat_id[:8]}, skipping")
+            _debug_log(f"[Memory] update already in progress for {chat_id[:8]}, skipping")
             _notify(False, None, "already_in_progress")
             return
         try:
@@ -597,10 +813,21 @@ def maybe_auto_update(chat_id: str, force: bool = False,
                 _notify(False, None, "no_logs")
                 return
             recent = logs[-50:]
+            # Whitelist roles that semantically describe "what happened in
+            # this session". The "milestone" role is added by
+            # ``record_milestone`` and represents the completion of a
+            # /dev /crew /plan task — without including it the LLM
+            # summarizer never sees those events even when the user
+            # invokes ``maybe_auto_update`` right after.
+            #
+            # ``model`` exclusion drops crew/dev/shell sub-task chatter
+            # (which is voluminous and not summary-worthy); milestone
+            # records use ``model="milestone"`` precisely so they pass
+            # this filter.
             log_text = "\n".join(
                 f"[{r['ts']}] {r['role']}: {r['content'][:600]}"
                 for r in recent
-                if r["role"] in ("user", "assistant")
+                if r["role"] in ("user", "assistant", "milestone")
                 and r.get("model") not in ("crew", "shell")
             )
             if not log_text.strip():
@@ -622,7 +849,7 @@ def maybe_auto_update(chat_id: str, force: bool = False,
             gen_t.start()
             gen_t.join(timeout=MEMORY_GENERATION_TIMEOUT)
             if gen_t.is_alive():
-                _debug_log(f"[memory] generate_memory timed out ({MEMORY_GENERATION_TIMEOUT}s) for {chat_id[:8]}")
+                _debug_log(f"[Memory] generate_memory timed out ({MEMORY_GENERATION_TIMEOUT}s) for {chat_id[:8]}")
                 _notify(False, None, f"timed_out_{MEMORY_GENERATION_TIMEOUT}s")
                 return
             if err[0]:
@@ -636,9 +863,72 @@ def maybe_auto_update(chat_id: str, force: bool = False,
             _cascade_extract(result[0], chat_id)
 
         except Exception as e:
-            _debug_log(f"[memory] maybe_auto_update error {chat_id}: {e}")
+            _debug_log(f"[Memory] maybe_auto_update error {chat_id}: {e}")
             _notify(False, None, str(e))
         finally:
             lock.release()
 
     threading.Thread(target=_run, daemon=True, name=f"memory-{chat_id[:8]}").start()
+
+
+# ── Milestone hook (post-/dev /crew /plan completion) ────────────────────────
+
+# Debounce: don't refresh memory more than once per chat per N seconds, even
+# if multiple milestones fire close together. Cheap-LLM cost is bounded and
+# the summarizer has nothing useful to say about deltas <60s apart anyway.
+_MILESTONE_DEBOUNCE_SEC = 60
+_last_milestone_ts: dict[str, float] = {}
+_milestone_meta = threading.Lock()
+
+
+def record_milestone(chat_id: str, kind: str, summary: str = "") -> None:
+    """Record a task milestone and (debounced) trigger a session memory refresh.
+
+    Called from the finally blocks of /dev (`_run_dev_crew_inner`),
+    /crew (`_run_generic_crew_inner`) and /plan (`_run_plan`).
+
+    Two responsibilities:
+
+    1. Append a ``role="milestone"`` entry to the conversation log so the
+       summarizer can include it the next time it runs (and so /history
+       readers can see what big tasks happened).
+    2. Force-trigger ``maybe_auto_update`` so the session memory captures
+       the milestone immediately, instead of waiting up to 10 chat turns
+       for the next ``_do_query`` to fire the regular auto-update.
+
+    Failures swallowed: this is opportunistic — never break the milestone
+    task itself.
+
+    Debounce: if another milestone fired within ``_MILESTONE_DEBOUNCE_SEC``
+    seconds, the memory regeneration is skipped (the log entry is still
+    written so the next regenerate sees both events). Prevents pile-up
+    when /plan runs many /dev steps back-to-back.
+    """
+    import time as _time
+    msg = f"[Milestone] {kind}"
+    if summary:
+        msg += f": {summary[:200]}"
+
+    # 1. Always log the milestone (cheap, helpful for /history and next regen).
+    try:
+        from larkhelm.log import log_entry
+        log_entry(chat_id, "milestone", msg, model="milestone")
+    except Exception as e:
+        _debug_log(f"[Memory] milestone log_entry failed: {e}")
+
+    # 2. Debounced force-refresh.
+    now = _time.time()
+    with _milestone_meta:
+        last = _last_milestone_ts.get(chat_id, 0.0)
+        if now - last < _MILESTONE_DEBOUNCE_SEC:
+            _debug_log(
+                f"[Memory] milestone {kind} debounced for {chat_id[:8]} "
+                f"(last update {now - last:.1f}s ago)"
+            )
+            return
+        _last_milestone_ts[chat_id] = now
+
+    try:
+        maybe_auto_update(chat_id, force=True)
+    except Exception as e:
+        _debug_log(f"[Memory] milestone trigger failed: {e}")

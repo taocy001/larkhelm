@@ -1,0 +1,51 @@
+{"text": "/dev 实现登录模块", "expected_agent_type": "dev", "expected_complexity": "complex"}
+{"text": "/crew 调研 React 状态管理", "expected_agent_type": "crew", "expected_complexity": "medium"}
+{"text": "/plan 多阶段开发后台", "expected_agent_type": "plan", "expected_complexity": "complex"}
+{"text": "/doc read https://x.feishu.cn/docx/abc", "expected_agent_type": "doc", "expected_complexity": "simple"}
+{"text": "帮我实现一个用户注册接口", "expected_agent_type": "dev", "expected_complexity": "medium"}
+{"text": "帮我写一个 Redis 缓存装饰器", "expected_agent_type": "dev", "expected_complexity": "medium"}
+{"text": "实现一个支持回退的状态机", "expected_agent_type": "dev", "expected_complexity": "complex"}
+{"text": "帮我写个 cron 表达式解析器", "expected_agent_type": "dev", "expected_complexity": "medium"}
+{"text": "写一个支持 OAuth2 的登录后端，并配 SQLite", "expected_agent_type": "dev", "expected_complexity": "complex"}
+{"text": "implement a queue with priority", "expected_agent_type": "dev", "expected_complexity": "complex"}
+{"text": "scaffold a FastAPI project with auth", "expected_agent_type": "dev", "expected_complexity": "complex"}
+{"text": "build me a flask blog with markdown rendering", "expected_agent_type": "dev", "expected_complexity": "complex"}
+{"text": "调研一下 Rust 中常用的异步运行时", "expected_agent_type": "crew", "expected_complexity": "medium"}
+{"text": "调研下分布式数据库一致性方案", "expected_agent_type": "crew", "expected_complexity": "complex"}
+{"text": "研究一下 K8s Operator 的几种实现方式", "expected_agent_type": "crew", "expected_complexity": "complex"}
+{"text": "策划一个用户增长方案", "expected_agent_type": "crew", "expected_complexity": "medium"}
+{"text": "research and summarize WebRTC SFU options", "expected_agent_type": "crew", "expected_complexity": "complex"}
+{"text": "brainstorm onboarding flow improvements", "expected_agent_type": "crew", "expected_complexity": "medium"}
+{"text": "分阶段实现登录、商品、购物车", "expected_agent_type": "plan", "expected_complexity": "complex"}
+{"text": "拆分计划：先做 MVP 再补充功能", "expected_agent_type": "plan", "expected_complexity": "complex"}
+{"text": "step by step refactor of the cache layer", "expected_agent_type": "plan", "expected_complexity": "complex"}
+{"text": "phased migration to PostgreSQL 16", "expected_agent_type": "plan", "expected_complexity": "complex"}
+{"text": "依次完成需求收集、设计、实现、测试", "expected_agent_type": "plan", "expected_complexity": "complex"}
+{"text": "把这段总结写到 https://feishu.cn/docx/abc", "expected_agent_type": "doc", "expected_complexity": "simple"}
+{"text": "整理成文档保存到飞书 wiki", "expected_agent_type": "doc", "expected_complexity": "simple"}
+{"text": "更新这份文档：https://feishu.cn/docx/x", "expected_agent_type": "doc", "expected_complexity": "simple"}
+{"text": "保存到 wiki：标题《周报》", "expected_agent_type": "doc", "expected_complexity": "simple"}
+{"text": "append to wiki space tech-design", "expected_agent_type": "doc", "expected_complexity": "simple"}
+{"text": "write to feishu doc 这个总结", "expected_agent_type": "doc", "expected_complexity": "simple"}
+{"text": "你好", "expected_agent_type": "chat", "expected_complexity": "simple"}
+{"text": "今天天气怎么样", "expected_agent_type": "chat", "expected_complexity": "simple"}
+{"text": "解释下 Python 的 GIL", "expected_agent_type": "chat", "expected_complexity": "medium"}
+{"text": "什么是 Raft 算法", "expected_agent_type": "chat", "expected_complexity": "medium"}
+{"text": "讲个笑话", "expected_agent_type": "chat", "expected_complexity": "simple"}
+{"text": "what time is it in Tokyo right now", "expected_agent_type": "chat", "expected_complexity": "simple"}
+{"text": "summarize this paragraph: hello world", "expected_agent_type": "chat", "expected_complexity": "simple"}
+{"text": "帮我看下这段代码做什么 def f(x): return x+1", "expected_agent_type": "chat", "expected_complexity": "simple"}
+{"text": "ls 当前目录下的所有 .py 文件", "expected_agent_type": "chat", "expected_complexity": "simple"}
+{"text": "git rebase 大概步骤", "expected_agent_type": "chat", "expected_complexity": "medium"}
+{"text": "Python 字典的时间复杂度", "expected_agent_type": "chat", "expected_complexity": "medium"}
+{"text": "vim 退出怎么按", "expected_agent_type": "chat", "expected_complexity": "simple"}
+{"text": "解释下并发与并行的区别", "expected_agent_type": "chat", "expected_complexity": "medium"}
+{"text": "/dev 用 Rust 写一个 web 框架", "expected_agent_type": "dev", "expected_complexity": "complex"}
+{"text": "/crew 调研开源 LLM 部署框架", "expected_agent_type": "crew", "expected_complexity": "complex"}
+{"text": "/plan 需求评审 设计 开发 测试 上线", "expected_agent_type": "plan", "expected_complexity": "complex"}
+{"text": "/doc append https://feishu.cn/docx/x 一些总结", "expected_agent_type": "doc", "expected_complexity": "simple"}
+{"text": "scaffold a Next.js 14 admin dashboard", "expected_agent_type": "dev", "expected_complexity": "complex"}
+{"text": "research and summarize Rust async runtimes", "expected_agent_type": "crew", "expected_complexity": "complex"}
+{"text": "phased plan to migrate logs to OpenSearch", "expected_agent_type": "plan", "expected_complexity": "complex"}
+{"text": "更新这份文档，把第 3 节改成新版", "expected_agent_type": "doc", "expected_complexity": "medium"}
+{"text": "写代码：实现一个 LRU cache", "expected_agent_type": "dev", "expected_complexity": "medium"}

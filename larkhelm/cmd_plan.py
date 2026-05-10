@@ -85,6 +85,10 @@ class MultiPlanState:
 _active_plans:      dict[str, MultiPlanState] = {}
 _active_plans_lock: threading.Lock            = threading.Lock()
 
+# Test hook: poll interval used by _wait_for_confirm_or_cancel. Tests override
+# this to a small value so chat-cancel propagation is observed quickly.
+_WAIT_POLL_INTERVAL: float = 1.0
+
 
 # ── Parser ───────────────────────────────────────────────────────
 
@@ -261,7 +265,7 @@ def _auto_plan(requirement: str, chat_id: str,
         from larkhelm.memory import get_memory_context
         _mem_ctx = get_memory_context(chat_id, cwd=cwd)
     except Exception as e:
-        _debug_log(f"[plan] memory load failed: {e}")
+        _debug_log(f"[Plan] memory load failed: {e}")
     _mem_prefix = f"\n\n[Background Context from Memory]\n{_mem_ctx}" if _mem_ctx else ""
 
     # Put user requirement BEFORE doc context so Claude knows the scope
@@ -413,16 +417,58 @@ def _run_single_agent_step(state: MultiPlanState, step: PlanStep) -> bool:
 
 # ── Confirmation wait ────────────────────────────────────────────
 
+def _wait_for_confirm_or_cancel(state: MultiPlanState, timeout: float = 86400.0) -> bool:
+    """Block until either a card button signals state._confirm_ev or a cancel
+    is observed. threading.Event lacks native multi-event wait, so we poll the
+    confirm event with a short timeout and re-check the cancel sources.
+
+    Cancel sources observed:
+      - state.cancel_ev: set by signal_plan('cancel') and propagated here
+      - chat-level cancel event (_get_cancel_event): set by /cancel command;
+        when this fires we mark the plan as cancelled by setting state.cancel_ev
+        and state._confirm_result so the rest of _run_plan exits cleanly.
+
+    Returns True when state._confirm_ev fired (button click or propagated cancel),
+    False on timeout.
+    """
+    from larkhelm.concurrency import _get_cancel_event
+    chat_cancel = _get_cancel_event(state.chat_id)
+
+    deadline = time.time() + timeout
+    poll = _WAIT_POLL_INTERVAL
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return False
+        if state._confirm_ev.wait(timeout=min(poll, remaining)):
+            return True
+        # Card-button cancel already propagated to state.cancel_ev — nothing
+        # extra to do, the wait above will have fired via signal_plan.
+        # /cancel command only sets the chat-level event; bridge it here.
+        if chat_cancel.is_set():
+            with state.lock:
+                state._confirm_result = "cancel"
+                state.cancel_ev.set()
+            state._confirm_ev.set()
+            return True
+        if state.cancel_ev.is_set():
+            return True
+
+
 def _wait_confirm(state: MultiPlanState) -> str:
     """Enter waiting phase, show confirm card, block until user acts.
-    Returns 'continue' | 'skip' | 'cancel'.
+    Returns 'continue' | 'skip' | 'cancel' | 'retry'.
+
+    Wakes up on either:
+      - User clicks a card button (signal_plan → _confirm_ev)
+      - User sends /cancel command (chat-level cancel event)
     """
     with state.lock:
         state.phase = "waiting"
         state._confirm_ev.clear()
-        state._confirm_result = "cancel"   # default on timeout
+        state._confirm_result = "cancel"   # default on timeout / cancel
     _update_plan_card(state)
-    state._confirm_ev.wait(timeout=86400)
+    _wait_for_confirm_or_cancel(state)
     with state.lock:
         return state._confirm_result
 
@@ -487,7 +533,7 @@ def _run_plan(state: MultiPlanState) -> None:
                     try:
                         evict_crew_agent_tokens(f"{state.chat_id}__crew_{crew_id}")
                     except Exception as e:
-                        _debug_log(f"[plan] token eviction failed: {e}")
+                        _debug_log(f"[Plan] token eviction failed: {e}")
             else:
                 _hold_slot()
                 try:
@@ -611,6 +657,15 @@ def _run_plan(state: MultiPlanState) -> None:
             if _active_crew.get(state.chat_id, "").startswith("plan:"):
                 _active_crew.pop(state.chat_id, None)
             _signal_crew_done(state.chat_id)
+        # Capture this /plan completion into session memory (debounced).
+        # ``record_milestone`` itself swallows failures, but we wrap once
+        # more so a memory module import error never propagates up here.
+        try:
+            from larkhelm.memory import record_milestone
+            record_milestone(state.chat_id, "plan",
+                             summary=f"{state.title} ({len(state.steps)} steps, phase={state.phase})")
+        except Exception as _e:
+            _debug_log(f"[Plan] milestone record failed: {_e}")
 
 
 # ── Entry point ──────────────────────────────────────────────────
@@ -624,6 +679,12 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None) -> None:
     """
     from larkhelm.lark_client import send_card, _reply_card_raw, _send_card_raw, _pin_task_card
     from larkhelm.crew._state import _active_crew, _active_crew_lock
+    from larkhelm.concurrency import _reset_cancel
+
+    # Clear any stale chat-level cancel signal from a previous task so the new
+    # plan doesn't get falsely woken up as cancelled during _wait_for_confirm_or_cancel.
+    # Mirrors the reset done by the normal-query dispatch path in handlers/_message.py.
+    _reset_cancel(chat_id)
 
     text = args_str.strip()
 
@@ -753,8 +814,10 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None) -> None:
             state._confirm_result = "cancel"
         _update_plan_card(state)
 
-        # Wait for user to click "开始执行" or "取消"
-        state._confirm_ev.wait(timeout=86400)
+        # Wait for user to click "开始执行" or "取消".
+        # Watches chat-level /cancel as well, so a typed /cancel can abort the plan
+        # before any step runs (without this, the wait would block forever).
+        _wait_for_confirm_or_cancel(state)
         with state.lock:
             action = state._confirm_result
 

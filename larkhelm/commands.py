@@ -48,6 +48,18 @@ _SENSITIVE_ENV_PREFIXES = frozenset({
 })
 
 
+# Model-rotation cycle for the "切换模型" button in /status and /help.
+# Single source of truth — historically duplicated literally across both
+# command bodies; kept module-level so future additions (e.g. a new
+# provider) need exactly one edit.
+_NEXT_MODEL_CYCLE = {
+    "claude":   "gemini",
+    "gemini":   "kimi",
+    "kimi":     "deepseek",
+    "deepseek": "claude",
+}
+
+
 def _run_shell(chat_id: str, cmd: str) -> tuple[str, str, int]:
     import os as _os
     cwd = _get_cwd(chat_id)
@@ -82,7 +94,7 @@ def _strip_at_mention(text: str) -> str:
 def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
     """Unified reset logic. which=None resets everything; otherwise 'claude'/'gemini'/'perm'."""
     # Trigger memory snapshot before clearing session (async, non-blocking)
-    if which in (None, "claude", "gemini", "kimi"):
+    if which in (None, "claude", "gemini", "kimi", "deepseek"):
         try:
             from larkhelm.memory import maybe_auto_update
             maybe_auto_update(chat_id, force=True)
@@ -95,6 +107,7 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
         _clear_sid(chat_id, "claude")
         _clear_sid(chat_id, "gemini")
         _clear_sid(chat_id, "kimi")
+        _clear_sid(chat_id, "deepseek")
         try:
             from larkhelm.api_session import clear_history as _clear_api_hist
             from larkhelm.backend_registry import BACKEND_REGISTRY as _REG
@@ -164,6 +177,12 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
             send_card_reply(chat_id, msg_id, "♻️ 已重置",
                             "Kimi 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
                             color="green")
+    elif which == "deepseek":
+        _clear_sid(chat_id, "deepseek")
+        log_entry(chat_id, "reset", "reset:deepseek", model="system")
+        send_card_reply(chat_id, msg_id, "♻️ 已重置",
+                        "DeepSeek 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
+                        color="green")
     elif which == "memory":
         try:
             from larkhelm.memory import _session_memory_file
@@ -192,12 +211,27 @@ def _cmd_status(chat_id: str, msg_id: str = None):
             return None
 
     s_k = _load_sid(chat_id, "kimi")
+    s_d = _load_sid(chat_id, "deepseek")
     cv, gv, kv = _ver(_cfg.CLAUDE_CMD), _ver(_cfg.GEMINI_CMD), _ver(_cfg.KIMI_CMD)
+    # DeepSeek is HTTP — "version" is just the configured model + base URL host
+    if getattr(_cfg, "DEEPSEEK_API_KEY", ""):
+        _ds_host = (_cfg.DEEPSEEK_BASE_URL or "").replace("https://", "").replace("http://", "").split("/", 1)[0]
+        dv = f"{_cfg.DEEPSEEK_MODEL} @ {_ds_host}" if _ds_host else _cfg.DEEPSEEK_MODEL
+    else:
+        dv = None
 
     def _cli_status(ver, sid, name):
         if not ver:
             return f"❌ {name} 不可用"
         if sid:
+            # DeepSeek's "sid" is JSON history; show length instead of opaque hash
+            if name == "DeepSeek":
+                try:
+                    import json as _json
+                    n_msgs = len(_json.loads(sid))
+                    return f"✅ {name}  会话 **{n_msgs} 条历史**"
+                except Exception:
+                    pass
             return f"✅ {name}  会话 **{sid[:12]}…**"
         return f"✅ {name}  暂无会话"
 
@@ -272,6 +306,7 @@ def _cmd_status(chat_id: str, msg_id: str = None):
         _cli_status(cv, s_c, "Claude"),
         _cli_status(gv, s_g, "Gemini"),
         _cli_status(kv, s_k, "Kimi"),
+        _cli_status(dv, s_d, "DeepSeek"),
         "",
         f"**权限模式** {perm_status}",
         *([ crew_info ] if crew_info else []),
@@ -281,21 +316,20 @@ def _cmd_status(chat_id: str, msg_id: str = None):
     ]
 
     tips = []
-    if not s_c and not s_g and not s_k:
+    if not s_c and not s_g and not s_k and not s_d:
         tips.append("💡 直接发消息开始第一次对话，会自动建立会话")
     else:
         tips.append("💡 **/pickup** — 获取在终端接力会话的命令")
         tips.append("💡 **/reset** — 清除会话，开始全新对话")
-    if model == "claude":
-        tips.append("💡 **/model gemini** — 切换默认模型为 Gemini")
-    elif model == "gemini":
-        tips.append("💡 **/model claude** — 切换默认模型为 Claude")
-    else:
-        tips.append("💡 **/model claude** — 切换默认模型为 Claude")
+    # Use the same rotation constant as the button below so the tip text and
+    # the action button always agree on what "next model" means. Previously
+    # the tip ladder hardcoded its own (different) cycle: e.g. for kimi the
+    # tip said "/model claude" while the button said "/model deepseek".
+    _next_for_tip = _NEXT_MODEL_CYCLE.get(model, "claude")
+    tips.append(f"💡 **/model {_next_for_tip}** — 切换默认模型为 {_next_for_tip.capitalize()}")
 
     lines += tips
-    _next_models = {"claude": "gemini", "gemini": "kimi", "kimi": "claude"}
-    other_model = _next_models.get(model, "claude")
+    other_model = _NEXT_MODEL_CYCLE.get(model, "claude")
     buttons = [
         ("♻️ 重置会话", "/reset"),
         ("🔗 接入终端", "/pickup"),
@@ -306,8 +340,7 @@ def _cmd_status(chat_id: str, msg_id: str = None):
 
 def _cmd_help(chat_id: str, msg_id: str = None):
     model = _get_chat_model(chat_id)
-    _next_models = {"claude": "gemini", "gemini": "kimi", "kimi": "claude"}
-    other = _next_models.get(model, "claude")
+    other = _NEXT_MODEL_CYCLE.get(model, "claude")
     body = (
         f"**当前模型:** {model}　　发消息直接提问，命令均以 `/` 开头\n"
         "\n"
@@ -325,9 +358,10 @@ def _cmd_help(chat_id: str, msg_id: str = None):
         "**/c** 或 **/claude** 消息 — 本条用 Claude\n"
         "**/g** 或 **/gemini** 消息 — 本条用 Gemini\n"
         "**/k** 或 **/kimi** 消息 — 本条用 Kimi\n"
+        "**/d** 或 **/deepseek** 消息 — 本条用 DeepSeek（HTTP API）\n"
         "\n"
         "**会话**\n"
-        "**/reset** claude · gemini · kimi — 单独重置会话\n"
+        "**/reset** claude · gemini · kimi · deepseek — 单独重置会话\n"
         "**/reset perm** — 重置权限审批　　**/reset memory** — 清除会话记忆（全局/项目保留）\n"
         "**/lock** — 列出所有可用 backend 及健康状态\n"
         "**/lock <id>** — 持久锁定到指定 backend（后续所有消息生效）　**/lock off** — 解锁\n"
@@ -359,7 +393,8 @@ def _cmd_help(chat_id: str, msg_id: str = None):
         "**/memory set project <内容>** — 手动覆盖当前项目记忆\n"
         "**/memory update** — 立即触发会话摘要生成（同时触发全局/项目提取）\n"
         "**/memory clear session|project|global|all** — 清除指定层记忆\n"
-        "**/memory list** — 查看所有项目记忆文件"
+        "**/memory list** — 查看所有项目记忆文件\n"
+        "**/memory gc [天数] [apply]** — 清理 N 天未更新的项目记忆（默认预演 30 天）"
     )
     buttons = [
         ("♻️ 重置会话", "/reset"),
@@ -375,6 +410,7 @@ def _cmd_pickup(chat_id: str, msg_id: str = None):
     s_c  = _load_sid(chat_id, "claude")
     s_g  = _load_sid(chat_id, "gemini")
     s_k  = _load_sid(chat_id, "kimi")
+    s_d  = _load_sid(chat_id, "deepseek")
     cwd  = _get_cwd(chat_id)
     lines = [f"**工作目录:** `{cwd}`\n"]
     if s_c:
@@ -389,6 +425,17 @@ def _cmd_pickup(chat_id: str, msg_id: str = None):
         lines.append(f"\n**Kimi 接力：**\n```bash\ncd {cwd}\nkimi --session {s_k}\n```")
     else:
         lines.append("\n**Kimi:** 无活跃会话")
+    # DeepSeek has no terminal CLI; show a one-liner curl scaffold using the persisted history file
+    if s_d:
+        from larkhelm.chat_state import _sid_file as _sf
+        sid_path = _sf(chat_id, "deepseek")
+        lines.append(
+            f"\n**DeepSeek 接力（HTTP）：**\n"
+            f"无官方 CLI；会话历史保存在 `{sid_path}`，可在脚本中 POST 到 "
+            f"`{_cfg.DEEPSEEK_BASE_URL}/chat/completions` 复用。"
+        )
+    else:
+        lines.append("\n**DeepSeek:** 无活跃会话")
     lines.append("\n> 在终端运行上面命令即可无缝接力")
     send_card_reply(chat_id, msg_id, "🔗 终端接力", "\n".join(lines), color="purple")
 
@@ -517,8 +564,42 @@ def _fmt_token_block(label: str, data: dict) -> str:
     return "\n".join(lines)
 
 
-def _cmd_stats(chat_id: str, msg_id: str = None):
+def _cmd_stats_intent(chat_id: str, msg_id: str = None, date: str | None = None):
+    """Render today's intent dispatcher aggregate (hit rate / latency / cost)."""
+    try:
+        from larkhelm.agent_hub.agent_audit import aggregate_daily
+    except Exception as e:
+        send_card_reply(chat_id, msg_id, "📊 Intent 统计",
+                        f"agent_hub 未启用或导入失败：{e}", color="orange")
+        return
+    agg = aggregate_daily(date)
+    if agg["total"] == 0:
+        send_card_reply(chat_id, msg_id, f"📊 Intent 统计 · {agg['date']}",
+                        "_当日没有 Agent 调度记录_", color="grey")
+        return
+    lines = [
+        f"**调度总数：** {agg['total']}",
+        f"**成功率：** {agg['success_rate'] * 100:.1f}%　·　"
+        f"平均耗时：{agg['avg_duration']:.2f}s　·　"
+        f"成本：${agg['total_cost']:.4f}",
+        "",
+        "**按 Agent：**",
+    ]
+    for atype, info in sorted(agg["per_agent"].items()):
+        lines.append(
+            f"- `{atype}`：{info['count']} 次（成功 {info['success']}，"
+            f"avg {info['avg_duration']:.2f}s）"
+        )
+    send_card_reply(chat_id, msg_id, f"📊 Intent 统计 · {agg['date']}",
+                    "\n".join(lines), color="turquoise")
+
+
+def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
     """Display today / this-month / all-time token stats plus conversation activity for the current chat."""
+    sub = (args or "").strip().lower()
+    if sub == "intent":
+        _cmd_stats_intent(chat_id, msg_id)
+        return
     now   = datetime.now()
     today = now.strftime("%Y-%m-%d")
     month = now.strftime("%Y-%m")
@@ -818,14 +899,30 @@ _GEMINI_SESSION_CMDS = {
 _KIMI_SESSION_CMDS = {
     "/clear", "/exit", "/quit", "/history", "/compact",
 }
+# DeepSeek has no CLI, but we recognize a small set so /d /clear gives a useful hint
+# rather than the generic "unknown command" reply.
+_DEEPSEEK_SESSION_CMDS = {
+    "/clear", "/reset", "/history", "/exit", "/quit",
+}
 
 
 def _cmd_cli_native(chat_id: str, model: str, cmd: str, msg_id: str = None):
     """Handle /c /<cmd>, /g /<cmd>, or /k /<cmd>: passthrough channel for AI CLI native commands."""
     cmd_lower = cmd.lower().strip()
-    m_name    = {"claude": "Claude", "gemini": "Gemini", "kimi": "Kimi"}.get(model, model.capitalize())
+    m_name    = {"claude": "Claude", "gemini": "Gemini", "kimi": "Kimi", "deepseek": "DeepSeek"}.get(model, model.capitalize())
 
     if cmd_lower in ("/help", "--help", "-h"):
+        if model == "deepseek":
+            body = (
+                "DeepSeek 走 HTTP API，没有官方 CLI 会话命令。\n\n"
+                "**桥接内置：**\n"
+                "`/reset deepseek` — 清空会话历史\n"
+                "`/status` — 查看当前 model / session 长度\n"
+                "\n"
+                "如需切回其他模型：`/model claude` 或 `/model gemini` 等。"
+            )
+            send_card_reply(chat_id, msg_id, f"📖 {m_name}", body, color="blue")
+            return
         if model == "kimi":
             body = (
                 "**会话管理**\n"
@@ -897,17 +994,19 @@ def _cmd_cli_native(chat_id: str, model: str, cmd: str, msg_id: str = None):
         send_card_reply(chat_id, msg_id, f"📖 {m_name} CLI 交互命令", body, color="blue")
         return
 
-    _all_cmds = {"claude": _CLAUDE_SESSION_CMDS, "gemini": _GEMINI_SESSION_CMDS, "kimi": _KIMI_SESSION_CMDS}
-    _pfx_map  = {"claude": "/c", "gemini": "/g", "kimi": "/k"}
+    _all_cmds = {"claude": _CLAUDE_SESSION_CMDS, "gemini": _GEMINI_SESSION_CMDS,
+                 "kimi": _KIMI_SESSION_CMDS, "deepseek": _DEEPSEEK_SESSION_CMDS}
+    _pfx_map  = {"claude": "/c", "gemini": "/g", "kimi": "/k", "deepseek": "/d"}
     my_cmds   = _all_cmds.get(model, set())
     my_pfx    = _pfx_map.get(model, "/c")
     # Collect all other models' commands for cross-model detection
     other_info: list[tuple[str, str, str]] = [
         (nm, pfx, cmds)
         for nm, (pfx, cmds) in {
-            "Claude": ("/c", _CLAUDE_SESSION_CMDS),
-            "Gemini": ("/g", _GEMINI_SESSION_CMDS),
-            "Kimi":   ("/k", _KIMI_SESSION_CMDS),
+            "Claude":   ("/c", _CLAUDE_SESSION_CMDS),
+            "Gemini":   ("/g", _GEMINI_SESSION_CMDS),
+            "Kimi":     ("/k", _KIMI_SESSION_CMDS),
+            "DeepSeek": ("/d", _DEEPSEEK_SESSION_CMDS),
         }.items()
         if nm.lower() != model
     ]
@@ -1018,6 +1117,13 @@ def _cmd_btw(chat_id: str, question: str, user_msg_id: str):
                         spec=_spec, chat_id=chat_id, message=_btw_msg, sid=sid, cwd=cwd,
                         cancel_ev=None, on_text=_on_text, allow_retry=True,
                     )
+                elif _spec.provider == "deepseek_api":
+                    from larkhelm.backend_cli import run_deepseek as _bc_run_deepseek
+                    output = _bc_run_deepseek(
+                        spec=_spec, chat_id=chat_id, message=question, sid=None, cwd=cwd,
+                        cancel_ev=None, on_text=_on_text,
+                        system_prompt=_btw_mem_ctx or None,
+                    )
                 elif _spec.provider in _API_PROVIDERS:
                     _fn = {"anthropic_api": _bapi.run_anthropic,
                            "google_api": _bapi.run_google,
@@ -1059,13 +1165,16 @@ def _cmd_btw(chat_id: str, question: str, user_msg_id: str):
 # ═══════════════════════════════════════════════════
 
 def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None):
-    """/memory — show/set/clear/update the three-tier memory system.
+    """/memory — show/set/clear/update/gc the three-tier memory system.
 
     /memory                        show all active layers
     /memory set global <text>      overwrite global layer (≤500 chars)
     /memory set project <text>     overwrite project layer for current cwd (≤1000 chars)
     /memory clear [global|project|session]   clear one or all layers
     /memory update                 force-regenerate session layer from logs
+    /memory list                   list every project_*.md file
+    /memory gc [days] [apply]      clean up stale project memory (dry-run by
+                                   default; ``days`` defaults to 30, must ≥ 1)
     """
     from larkhelm.memory import (
         load_global_memory, save_global_memory,
@@ -1176,6 +1285,101 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None):
         maybe_auto_update(chat_id, force=True, on_done=_on_update_done)
         return
 
+    # ── /memory gc [days] [apply] — clean up stale project memory ────────────
+    # Examples:
+    #   /memory gc            → dry-run with default 30-day threshold
+    #   /memory gc 60         → dry-run with 60-day threshold
+    #   /memory gc apply      → actually delete (default 30 days)
+    #   /memory gc 60 apply   → actually delete with 60-day threshold
+    if sub == "gc" or sub.startswith("gc ") or sub.startswith("gc\t"):
+        from larkhelm.memory import gc_project_memory, _GC_DEFAULT_DAYS
+        # Parse args: any int token = threshold_days; any "apply" token = apply mode.
+        # Robust to either order so users don't have to remember which goes first.
+        rest = args[2:].strip().split()
+        threshold_days = _GC_DEFAULT_DAYS
+        apply = False
+        bad_tokens: list[str] = []
+        for tok in rest:
+            tl = tok.lower()
+            if tl in ("apply", "--apply", "-y", "yes", "force"):
+                apply = True
+                continue
+            try:
+                threshold_days = int(tl)
+            except ValueError:
+                bad_tokens.append(tok)
+        if bad_tokens:
+            send_card_reply(chat_id, msg_id, "⚠️ 用法",
+                            f"无法识别参数：{' '.join(bad_tokens)}\n\n"
+                            f"`/memory gc [天数] [apply]` — 清理 N 天未更新的项目记忆\n"
+                            f"- `/memory gc` — 30 天 dry-run（默认，不删除）\n"
+                            f"- `/memory gc 60` — 60 天 dry-run\n"
+                            f"- `/memory gc apply` — 实际删除（30 天）\n"
+                            f"- `/memory gc 60 apply` — 实际删除（60 天）",
+                            color="orange")
+            return
+        if threshold_days < 1:
+            send_card_reply(chat_id, msg_id, "⚠️ 阈值过低",
+                            "天数必须 ≥ 1（防止误清空所有项目记忆）。", color="orange")
+            return
+
+        try:
+            report = gc_project_memory(threshold_days=threshold_days, apply=apply)
+        except Exception as e:
+            send_card_reply(chat_id, msg_id, "❌ GC 失败", str(e)[:300], color="red")
+            return
+
+        scanned = report["scanned"]
+        cands = report["candidates"]
+        errs = report["errors"]
+        if not cands:
+            send_card_reply(
+                chat_id, msg_id,
+                f"🧹 项目记忆 GC（>{threshold_days} 天）",
+                f"扫描 {scanned} 个文件，**无可清理项**。",
+                color="green",
+            )
+            return
+
+        # Build display: one row per candidate, capped to keep card readable.
+        _MAX_ROWS = 30
+        lines = []
+        for c in cands[:_MAX_ROWS]:
+            tag = "🗑️" if c["deleted"] else ("⚠️" if apply else "💤")
+            cwd_disp = c["cwd"] or "_(无 cwd 元数据)_"
+            age_disp = f"{c['age_days']}d" if c["age_days"] is not None else "?"
+            lines.append(
+                f"{tag} `{c['name']}` · 龄期 {age_disp} · 原因 `{c['reason']}`\n"
+                f"   `{cwd_disp}`"
+            )
+        if len(cands) > _MAX_ROWS:
+            lines.append(f"_… 另有 {len(cands) - _MAX_ROWS} 个候选未列出_")
+        if errs:
+            lines.append("\n**错误**：")
+            for e in errs[:5]:
+                lines.append(f"- `{Path(e['path']).name}` — {e['err'][:120]}")
+            if len(errs) > 5:
+                lines.append(f"_… 另有 {len(errs) - 5} 个错误_")
+
+        if apply:
+            n_deleted = sum(1 for c in cands if c["deleted"])
+            title = f"🧹 项目记忆 GC 已执行（>{threshold_days} 天）"
+            header = f"扫描 {scanned}，已删除 **{n_deleted}**，错误 {len(errs)}\n\n"
+            color = "green" if n_deleted and not errs else "orange"
+        else:
+            title = f"🧹 项目记忆 GC · 预演（>{threshold_days} 天）"
+            header = (
+                f"扫描 {scanned}，发现 **{len(cands)}** 个候选。\n"
+                f"_这是预演，未删除任何文件。要实际清理：_\n"
+                f"`/memory gc {threshold_days} apply`\n\n"
+            )
+            color = "blue"
+
+        send_card_reply(chat_id, msg_id, title,
+                        header + "\n\n".join(lines),
+                        color=color, normalize=False)
+        return
+
     # ── /memory list — show all project memory files ─────────────────────────
     if sub == "list":
         _ensure_dir()
@@ -1253,6 +1457,10 @@ def _dispatch_button_cmd(chat_id: str, cmd: str):
         _cmd_reset(chat_id, "claude")
     elif tl in ("reset gemini", "/reset gemini"):
         _cmd_reset(chat_id, "gemini")
+    elif tl in ("reset kimi", "/reset kimi"):
+        _cmd_reset(chat_id, "kimi")
+    elif tl in ("reset deepseek", "/reset deepseek"):
+        _cmd_reset(chat_id, "deepseek")
     elif tl in ("reset permissions", "/reset permissions", "reset perm", "/reset perm"):
         _cmd_reset(chat_id, "perm")
     elif tl in ("status", "/status"):

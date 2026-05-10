@@ -34,6 +34,9 @@ class _RuntimeConfig:
     CLAUDE_CMD:   str
     GEMINI_CMD:   str
     KIMI_CMD:     str
+    DEEPSEEK_API_KEY:  str
+    DEEPSEEK_BASE_URL: str
+    DEEPSEEK_MODEL:    str
     DEFAULT_MODEL:    str
     SKIP_PERMISSIONS: bool
     RESPONSE_TIMEOUT: int
@@ -70,6 +73,9 @@ APP_ID:           str
 APP_SECRET:       str
 CLAUDE_CMD:       str
 GEMINI_CMD:       str
+DEEPSEEK_API_KEY:  str
+DEEPSEEK_BASE_URL: str
+DEEPSEEK_MODEL:    str
 DEFAULT_MODEL:    str
 SKIP_PERMISSIONS: bool
 RESPONSE_TIMEOUT: int
@@ -123,15 +129,42 @@ def _auto_discover_cli() -> list[dict]:
     return [spec for spec in known if shutil.which(spec["command"])]
 
 
+def _auto_discover_http() -> list[dict]:
+    """Probe HTTP backends whose API keys are present in config or env.
+
+    Currently DeepSeek only. Mirrors ``_auto_discover_cli`` shape so callers can
+    treat both the same way.
+    """
+    out: list[dict] = []
+
+    raw_key = config.get("deepseek_api_key", "") or ""
+    if raw_key.startswith("${") and raw_key.endswith("}"):
+        ds_key = os.environ.get(raw_key[2:-1], "")
+    else:
+        ds_key = raw_key or os.environ.get("DEEPSEEK_API_KEY", "")
+    if ds_key:
+        out.append({
+            "id":           "deepseek",
+            "provider":     "deepseek_api",
+            "display_name": "DeepSeek",
+            "role":         "worker",
+            "tags":         ["cheap", "fast"],
+            "model":        config.get("deepseek_model", "deepseek-chat") or "deepseek-chat",
+            "api_key":      ds_key,
+            "base_url":     config.get("deepseek_base_url", "https://api.deepseek.com") or "https://api.deepseek.com",
+        })
+    return out
+
+
 def _migrate_legacy_backends(config: dict) -> list[dict]:
-    """Three-layer merge: config explicit > auto-discover > empty.
+    """Three-layer merge: config explicit > auto-discover (CLI + HTTP) > empty.
 
     Layer 1: config 'backends' (highest priority).
-    Layer 2: auto-discover CLIs in PATH supplement IDs not already in Layer 1.
+    Layer 2: auto-discover CLIs in PATH and HTTP keys in env supplement IDs not in Layer 1.
     Layer 3: if all empty, return [].
     """
     explicit: list[dict] = config.get("probe_models", config.get("backends", []))
-    auto_discovered = _auto_discover_cli()
+    auto_discovered = _auto_discover_cli() + _auto_discover_http()
 
     explicit_ids = {b["id"] for b in explicit}
     supplement = [b for b in auto_discovered if b["id"] not in explicit_ids]
@@ -159,8 +192,10 @@ def _start_recover_thread() -> None:
             try:
                 BACKEND_REGISTRY.recover_check()
             except Exception as e:
-                from larkhelm.log import _debug_log
-                _debug_log(f"[recover_thread] error: {e}")
+                # ``lazy_debug_log`` swallows any logger failure; this thread
+                # must never die because its only side effect is heartbeating.
+                from larkhelm.log import lazy_debug_log
+                lazy_debug_log(f"[BackendRegistry] recover_thread error: {e}")
 
     t = threading.Thread(target=_recover_loop, daemon=True, name="backend-recover")
     t.start()
@@ -172,7 +207,8 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     Priority: CLI argument > environment variable > system paths (/etc / /var) > XDG user paths
     """
     global CONFIG_PATH, DATA_DIR, SESSION_DIR, LOG_DIR, STATE_FILE, DEBUG_LOG
-    global config, APP_ID, APP_SECRET, CLAUDE_CMD, GEMINI_CMD, KIMI_CMD, DEFAULT_MODEL
+    global config, APP_ID, APP_SECRET, CLAUDE_CMD, GEMINI_CMD, KIMI_CMD
+    global DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, DEFAULT_MODEL
     global SKIP_PERMISSIONS, RESPONSE_TIMEOUT, HARD_TIMEOUT, MAX_CARD_LEN
     global ALLOWED_CHATS, GEMINI_IDLE_TTL, DEFAULT_CWD, CRON_TIMEZONE
     global PERM_HOOK_SCRIPT, PERM_SOCKET_PATH
@@ -229,10 +265,27 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     CLAUDE_CMD       = config.get("claude_command", "claude") or "claude"
     GEMINI_CMD       = config.get("gemini_command", "gemini") or "gemini"
     KIMI_CMD         = config.get("kimi_command",   "kimi")   or "kimi"
+
+    # DeepSeek HTTP backend (no CLI). API key falls back to env var so secrets
+    # don't have to live in config.json on shared hosts.
+    _raw_ds_key = config.get("deepseek_api_key", "") or ""
+    if _raw_ds_key.startswith("${") and _raw_ds_key.endswith("}"):
+        DEEPSEEK_API_KEY = os.environ.get(_raw_ds_key[2:-1], "")
+    else:
+        DEEPSEEK_API_KEY = _raw_ds_key or os.environ.get("DEEPSEEK_API_KEY", "")
+    DEEPSEEK_BASE_URL = config.get("deepseek_base_url", "https://api.deepseek.com") or "https://api.deepseek.com"
+    DEEPSEEK_MODEL    = config.get("deepseek_model",    "deepseek-chat")            or "deepseek-chat"
+
     DEFAULT_MODEL    = config.get("default_model", "claude")
-    if DEFAULT_MODEL not in ("claude", "gemini", "kimi"):
+    if DEFAULT_MODEL not in ("claude", "gemini", "kimi", "deepseek"):
         print(
-            f"⚠️  default_model 值 '{DEFAULT_MODEL}' 无效（允许: claude/gemini/kimi），已回退为 'claude'",
+            f"⚠️  default_model 值 '{DEFAULT_MODEL}' 无效（允许: claude/gemini/kimi/deepseek），已回退为 'claude'",
+            file=sys.stderr,
+        )
+        DEFAULT_MODEL = "claude"
+    if DEFAULT_MODEL == "deepseek" and not DEEPSEEK_API_KEY:
+        print(
+            "⚠️  default_model='deepseek' 但 deepseek_api_key 未配置，已回退为 'claude'",
             file=sys.stderr,
         )
         DEFAULT_MODEL = "claude"
@@ -270,6 +323,16 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     DEFAULT_WIKI_PARENT_TOKEN = config.get("default_wiki_parent_token", "")
     DEFAULT_OWNER_OPEN_ID     = config.get("default_owner_open_id",     "")
 
+    # Phase 5: intent router / agent_hub flags (all optional, default off so
+    # phase4 behavior is unchanged when these keys are missing).
+    config.setdefault("intent_router_enabled", False)
+    config.setdefault("intent_router_traffic", 0.0)
+    config.setdefault("intent_layer2_strategy", "llm")
+    config.setdefault("agent_plugins", [])
+    config.setdefault("agent_acl", {})
+    config.setdefault("intent_feedback_path", "")
+    config.setdefault("intent_audit_path", "")
+
     PERM_HOOK_SCRIPT  = str(Path(__file__).parent / "perm_hook.py")
     PERM_SOCKET_PATH  = str(DATA_DIR / "perm.sock")
 
@@ -296,13 +359,27 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
 
     _start_recover_thread()
 
+    # Phase 5: load third-party agent plugins. Built-in agents register
+    # themselves via ``larkhelm.agent_hub.builtin`` import side-effects.
+    try:
+        from larkhelm.agent_hub.plugin_loader import load_plugins
+        load_plugins(config)
+    except Exception as e:
+        # Plugin discovery runs during startup, when ``larkhelm.log`` may not
+        # be wired up yet — ``lazy_debug_log`` is the bootstrap-safe variant.
+        from larkhelm.log import lazy_debug_log
+        lazy_debug_log(f"[Config] agent plugin load failed: {e}")
+
     # Build the typed config object (for mypy etc.; module-level globals remain for backward compat)
     global _runtime
     _runtime = _RuntimeConfig(
         CONFIG_PATH=CONFIG_PATH, DATA_DIR=DATA_DIR, SESSION_DIR=SESSION_DIR,
         LOG_DIR=LOG_DIR, STATE_FILE=STATE_FILE, DEBUG_LOG=DEBUG_LOG,
         config=config, APP_ID=APP_ID, APP_SECRET=APP_SECRET,
-        CLAUDE_CMD=CLAUDE_CMD, GEMINI_CMD=GEMINI_CMD, KIMI_CMD=KIMI_CMD, DEFAULT_MODEL=DEFAULT_MODEL,
+        CLAUDE_CMD=CLAUDE_CMD, GEMINI_CMD=GEMINI_CMD, KIMI_CMD=KIMI_CMD,
+        DEEPSEEK_API_KEY=DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL=DEEPSEEK_BASE_URL,
+        DEEPSEEK_MODEL=DEEPSEEK_MODEL,
+        DEFAULT_MODEL=DEFAULT_MODEL,
         SKIP_PERMISSIONS=SKIP_PERMISSIONS, RESPONSE_TIMEOUT=RESPONSE_TIMEOUT,
         HARD_TIMEOUT=HARD_TIMEOUT, MAX_CARD_LEN=MAX_CARD_LEN,
         ALLOWED_CHATS=ALLOWED_CHATS, GEMINI_IDLE_TTL=GEMINI_IDLE_TTL,

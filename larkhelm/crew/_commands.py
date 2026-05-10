@@ -24,8 +24,79 @@ from larkhelm.crew_card import _crew_update_card
 #  Workspace metadata helpers (stale-detection for /dev)
 # ═══════════════════════════════════════════════════════════════
 
+# Workspace artifacts older than this are treated as stale and cleared on the
+# next /dev invocation, even if the task_hash still matches. The original
+# resume-on-interrupt semantics ("same hash + uncompleted → reuse design.md")
+# assumed users come back within minutes; after a day the artifacts are almost
+# certainly unrelated to whatever they're now asking, and feeding them silently
+# into the implementer caused cross-task contamination.
+_WORKSPACE_STALE_TTL = 24 * 3600  # 24h
+
+
 def _task_hash(requirement: str) -> str:
     return hashlib.md5(requirement.encode()).hexdigest()[:16]
+
+
+# ═══════════════════════════════════════════════════════════════
+#  /dev context injection (chat history + memory)
+# ═══════════════════════════════════════════════════════════════
+
+# Caps tuned conservatively: PM's prompt budget is mostly spent on the system
+# prompt (~1.5K tokens) and project file exploration; injecting up to ~6K
+# chars of context still leaves headroom. The chat tail is bigger because
+# planning discussions tend to be long; memory is short by construction.
+_DEV_CTX_CHAT_TURNS = 12
+_DEV_CTX_CHAT_CHARS = 4000
+_DEV_CTX_MEMORY_CHARS = 2000
+
+
+def _augment_requirement_with_context(requirement: str, chat_id: str, cwd: str) -> str:
+    """Prepend recent chat turns + memory snippets to ``requirement`` so PM
+    agent has the same context the user assumes when typing /dev.
+
+    Returns ``requirement`` unchanged when neither chat history nor memory is
+    available. Failures inside helper calls are swallowed via ``_debug_log``;
+    /dev must keep running even when context retrieval breaks.
+
+    The returned string is consumed only by ``_make_dev_pipeline`` (PM's
+    prompt template). It is NOT used as ``task_key`` for hashing — the
+    resume semantics still pin to the user-typed literal so re-running
+    ``/dev <same X>`` reliably picks the same workspace_meta.
+    """
+    chat_ctx = ""
+    try:
+        from larkhelm.log import _get_recent_turns
+        chat_ctx = _get_recent_turns(
+            chat_id,
+            max_turns=_DEV_CTX_CHAT_TURNS,
+            max_chars=_DEV_CTX_CHAT_CHARS,
+        )
+    except Exception as e:
+        _debug_log(f"[Dev] recent-turns load failed: {e}")
+
+    mem_ctx = ""
+    try:
+        from larkhelm.memory import get_memory_context
+        mem_ctx = get_memory_context(chat_id, cwd=cwd) or ""
+        if len(mem_ctx) > _DEV_CTX_MEMORY_CHARS:
+            mem_ctx = mem_ctx[: _DEV_CTX_MEMORY_CHARS] + "\n…(truncated)"
+    except Exception as e:
+        _debug_log(f"[Dev] memory load failed: {e}")
+
+    if not chat_ctx and not mem_ctx:
+        return requirement
+
+    sections = [requirement, "", "---", "",
+                "## 任务背景上下文（仅供 PM 阶段理解需求，不要照抄进 PRD）"]
+    if mem_ctx:
+        sections.append(f"\n### 长期记忆\n{mem_ctx}")
+    if chat_ctx:
+        sections.append(f"\n### 最近对话\n{chat_ctx}")
+    sections.append(
+        "\n> 注意：以上仅为背景，**真正要实现的需求是文首那段**。"
+        "若背景与需求冲突，以需求为准。"
+    )
+    return "\n".join(sections)
 
 
 def _read_workspace_meta(ws_path: Path) -> dict:
@@ -71,7 +142,7 @@ def _expand_doc_requirement(requirement: str) -> str:
         from larkhelm.lark_client import FeishuDocClient, parse_doc_url
         doc_client = FeishuDocClient()
     except Exception as e:
-        _debug_log(f"[dev] doc client init failed: {e}")
+        _debug_log(f"[Dev] doc client init failed: {e}")
         return requirement
 
     injections = []
@@ -84,7 +155,7 @@ def _expand_doc_requirement(requirement: str) -> str:
             label = result.title or url
             injections.append(f"[任务来源文档：《{label}》]\n{result.content}")
         except Exception as e:
-            _debug_log(f"[dev] failed to read doc {url}: {e}")
+            _debug_log(f"[Dev] failed to read doc {url}: {e}")
 
     if injections:
         return "\n\n".join(injections) + "\n\n---\n\n" + requirement
@@ -278,7 +349,7 @@ def _crew_plan(chat_id: str, requirement: str, cwd: str,
 
     # Acquire process semaphore so Manager counts against the global AI subprocess limit
     if not _ai_proc_sem.acquire(timeout=plan_timeout):
-        _debug_log("[Crew/Manager] timed out waiting for AI process slot")
+        _debug_log("[Crew] Manager: timed out waiting for AI process slot")
         return None
 
     try:
@@ -288,7 +359,7 @@ def _crew_plan(chat_id: str, requirement: str, cwd: str,
                 text=True, bufsize=1, cwd=cwd, env=env,
             )
         except FileNotFoundError:
-            _debug_log("[Crew/Manager] Claude CLI not found")
+            _debug_log("[Crew] Manager: Claude CLI not found")
             return None
 
         try:
@@ -304,14 +375,14 @@ def _crew_plan(chat_id: str, requirement: str, cwd: str,
                 if len(_stderr_buf) < 50:
                     _stderr_buf.append(ln.rstrip())
         threading.Thread(target=_drain_stderr, daemon=True).start()
-        _debug_log(f"[Crew/Manager] planning started pid={proc.pid} timeout={plan_timeout}s")
+        _debug_log(f"[Crew] Manager: planning started pid={proc.pid} timeout={plan_timeout}s")
 
         # Hard deadline enforced by a timer thread — guards against claude producing no output at all,
         # which would cause `for line in proc.stdout` to block indefinitely.
         def _hard_kill():
             proc.kill()
             stderr_preview = " | ".join(_stderr_buf[-3:]) if _stderr_buf else ""
-            _debug_log(f"[Crew/Manager] planning timed out (hard kill){'; stderr: ' + stderr_preview if stderr_preview else ''}")
+            _debug_log(f"[Crew] Manager: planning timed out (hard kill){'; stderr: ' + stderr_preview if stderr_preview else ''}")
         _timer = threading.Timer(plan_timeout, _hard_kill)
         _timer.daemon = True
         _timer.start()
@@ -366,14 +437,14 @@ def _crew_plan(chat_id: str, requirement: str, cwd: str,
         m = re.search(r"(\{[\s\S]*\"agents\"[\s\S]*\})", full_text)
     if not m:
         stderr_preview = " | ".join(_stderr_buf[-5:]) if _stderr_buf else ""
-        _debug_log(f"[Crew/Manager] no JSON plan found, output: {full_text[:200]!r}"
+        _debug_log(f"[Crew] Manager: no JSON plan found, output: {full_text[:200]!r}"
                    + (f", stderr: {stderr_preview}" if stderr_preview else ""))
         return None
 
     try:
         plan_input = json.loads(m.group(1))
     except json.JSONDecodeError as e:
-        _debug_log(f"[Crew/Manager] JSON parse failed: {e}")
+        _debug_log(f"[Crew] Manager: JSON parse failed: {e}")
         return None
 
     # Parse and validate
@@ -385,7 +456,7 @@ def _crew_plan(chat_id: str, requirement: str, cwd: str,
         # Dependency cycle detection
         cycle = _detect_cycle(raw_agents)
         if cycle:
-            _debug_log(f"[Crew/Manager] dependency cycle: {cycle}")
+            _debug_log(f"[Crew] Manager: dependency cycle: {cycle}")
             return None
 
         agents = [
@@ -406,7 +477,7 @@ def _crew_plan(chat_id: str, requirement: str, cwd: str,
             synthesis_prompt=plan_input.get("synthesis_prompt", ""),
         )
     except Exception as e:
-        _debug_log(f"[Crew/Manager] plan parse failed: {e}")
+        _debug_log(f"[Crew] Manager: plan parse failed: {e}")
         return None
 
 
@@ -522,7 +593,7 @@ def _run_generic_crew(chat_id: str, requirement: str,
             from larkhelm.token_stats import evict_crew_agent_tokens
             evict_crew_agent_tokens(f"{chat_id}__crew_{crew_id}")
         except Exception as e:
-            _debug_log(f"[crew] token eviction failed: {e}")
+            _debug_log(f"[Crew] token eviction failed: {e}")
 
 
 def _run_generic_crew_inner(chat_id: str, requirement: str,
@@ -609,6 +680,12 @@ def _run_generic_crew_inner(chat_id: str, requirement: str,
             _active_crew.pop(chat_id, None)
             _active_crew_states.pop(chat_id, None)
             _signal_crew_done(chat_id)
+        # Capture this /crew completion into session memory (debounced).
+        try:
+            from larkhelm.memory import record_milestone
+            record_milestone(chat_id, "crew", summary=requirement)
+        except Exception as _e:
+            _debug_log(f"[Crew] milestone record failed: {_e}")
 
 
 def _run_dev_crew(chat_id: str, requirement: str, user_msg_id: str,
@@ -629,7 +706,7 @@ def _run_dev_crew(chat_id: str, requirement: str, user_msg_id: str,
             from larkhelm.token_stats import evict_crew_agent_tokens
             evict_crew_agent_tokens(f"{chat_id}__crew_{crew_id}")
         except Exception as e:
-            _debug_log(f"[crew] token eviction failed: {e}")
+            _debug_log(f"[Crew] token eviction failed: {e}")
 
 
 def _run_dev_crew_inner(chat_id: str, requirement: str, user_msg_id: str,
@@ -671,9 +748,30 @@ def _run_dev_crew_inner(chat_id: str, requirement: str, user_msg_id: str,
         task_hash = _task_hash(task_key if task_key is not None else requirement)
         meta      = _read_workspace_meta(ws_path)
 
-        # Clear workspace when: task is different OR previous run completed successfully (APPROVED).
-        # Keep workspace when: same task and previous run was interrupted or rejected (resume-able).
-        if meta and (meta.get("task_hash") != task_hash or meta.get("completed")):
+        # Clear workspace when:
+        #   1. task_hash differs (different task entirely), OR
+        #   2. previous run completed successfully (APPROVED), OR
+        #   3. workspace_meta.json hasn't been touched in >24h (stale-TTL guard).
+        # Rationale for (3): the resume-on-interrupt semantics ("same hash + uncompleted
+        # → reuse design.md/tasks.json") was assuming the user comes back within minutes
+        # to hours. After 24h the workspace artifacts are usually unrelated to whatever
+        # the user is now asking, and silently feeding stale prd.md/design.md to the
+        # implementer caused real cross-task contamination (see /chat-planning bug).
+        meta_path = ws_path / "workspace_meta.json"
+        is_stale_age = False
+        if meta and meta_path.exists():
+            try:
+                age_sec = time.time() - meta_path.stat().st_mtime
+                is_stale_age = age_sec > _WORKSPACE_STALE_TTL
+            except OSError as _e:
+                _debug_log(f"[Dev] workspace_meta stat failed: {_e}")
+        if meta and (
+            meta.get("task_hash") != task_hash
+            or meta.get("completed")
+            or is_stale_age
+        ):
+            if is_stale_age:
+                _debug_log(f"[Dev] clearing stale workspace (age > {_WORKSPACE_STALE_TTL}s)")
             _clear_workspace(ws_path)
             meta = {}
 
@@ -684,7 +782,15 @@ def _run_dev_crew_inner(chat_id: str, requirement: str, user_msg_id: str,
         if not meta:
             _write_workspace_meta(ws_path, task_hash=task_hash, completed=False)
 
-        plan = _make_dev_pipeline(requirement, cwd, no_confirm=no_confirm,
+        # Build augmented requirement that includes recent chat turns + global/project
+        # memory so PM agent isn't context-blind. WITHOUT this, /dev only saw the
+        # literal command-line string, and references like "实现刚才讨论的方案" had no
+        # anchor — PM would either probe filesystem (and risk reading stale workspace
+        # artifacts) or hallucinate a task. ``task_key`` (used for hash above) deliberately
+        # stays the original literal so resume semantics stay stable.
+        augmented_requirement = _augment_requirement_with_context(requirement, chat_id, cwd)
+
+        plan = _make_dev_pipeline(augmented_requirement, cwd, no_confirm=no_confirm,
                                   skip_planning=skip_planning)
 
         if skip_planning:
@@ -734,6 +840,14 @@ def _run_dev_crew_inner(chat_id: str, requirement: str, user_msg_id: str,
             _active_crew_states.pop(chat_id, None)
             if not suppress_done_signal:
                 _signal_crew_done(chat_id)
+        # Capture this /dev completion into session memory immediately
+        # rather than waiting for the next ``maybe_auto_update`` triggered
+        # from a chat turn. Failures swallowed inside the helper.
+        try:
+            from larkhelm.memory import record_milestone
+            record_milestone(chat_id, "dev", summary=requirement)
+        except Exception as _e:
+            _debug_log(f"[Dev] milestone record failed: {_e}")
 
 
 def immediate_cancel_crew(chat_id: str) -> bool:

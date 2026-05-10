@@ -107,6 +107,7 @@ def _send_card_raw(chat_id: str, card_json: str, _fallback_text: str = None) -> 
     """Send a message using a pre-built card JSON; returns the message_id.
     _fallback_text: plain text to send as fallback if card delivery fails (None = no fallback).
     """
+    if client is None: return None
     try:
         resp = client.im.v1.message.create(
             CreateMessageRequestBuilder()
@@ -137,6 +138,7 @@ def _patch_card_raw(message_id: str, card_json: str) -> bool:
     """Update an existing message using a pre-built card JSON."""
     if not message_id:
         return False
+    if client is None: return False
     try:
         resp = client.im.v1.message.patch(
             PatchMessageRequestBuilder()
@@ -160,6 +162,7 @@ def _reply_card_raw(message_id: str, card_json: str, in_thread: bool = True) -> 
     """Reply to a specified message with a card; returns the new message_id.
     in_thread=True: reply inside a thread; in_thread=False: quote-reply in the main chat stream.
     """
+    if client is None: return None
     try:
         body = (ReplyMessageRequestBodyBuilder()
                 .msg_type("interactive")

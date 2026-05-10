@@ -16,6 +16,7 @@ from larkhelm.ai_runner import (
     _spawn_claude_proc,
     _spawn_kimi_proc,
     _spawn_gemini_proc,
+    _spawn_deepseek_proc,
 )
 
 
@@ -87,6 +88,52 @@ def run_gemini(
         model=spec.model or None,
         extra_args=spec.extra_args or None,
         session_key=spec.id,
+    )
+
+
+def run_deepseek(
+    spec: BackendSpec,
+    chat_id: str,
+    message: str,
+    sid: str,                     # accepted for parity; ignored (history file is canonical)
+    cwd: str,
+    cancel_ev: threading.Event = None,
+    on_text=None,
+    on_tool=None,
+    on_tool_result=None,
+    on_soft_timeout=None,
+    on_start=None,
+    images: list = None,
+    session_namespace: str = None,
+    allow_retry: bool = False,
+    use_session: bool = True,
+    record_under: str = None,
+    system_prompt: str | None = None,
+) -> str:
+    """Bridge BackendSpec → DeepSeekRunner. Despite the module name, this is
+    HTTP, not CLI; placed here to mirror the run_claude/run_kimi/run_gemini
+    contract and keep the dispatcher in ``_run_backend_single`` symmetric.
+    """
+    return _spawn_deepseek_proc(
+        chat_id=chat_id,
+        message=message,
+        sid=sid,
+        cwd=cwd,
+        cancel_ev=cancel_ev,
+        on_text=on_text,
+        on_tool=on_tool,
+        on_tool_result=on_tool_result,
+        on_soft_timeout=on_soft_timeout,
+        on_start=on_start,
+        images=images,
+        session_namespace=session_namespace,
+        use_session=use_session,
+        record_under=record_under,
+        model=spec.model or None,
+        api_key=spec.api_key or None,
+        base_url=spec.base_url or None,
+        session_key=spec.id,
+        system_prompt=system_prompt,
     )
 
 

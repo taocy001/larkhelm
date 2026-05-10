@@ -201,8 +201,19 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
             if spec.id not in ("pm", "architect")
         ]
 
+    # Take only the first line for the title. Two reasons:
+    #   1. When the caller (``_run_dev_crew_inner``) passes an
+    #      ``_augment_requirement_with_context`` output, the user's
+    #      literal sits on line 1 and the appended chat/memory
+    #      background starts on line 2 with a "\n\n---" separator. A
+    #      bare ``[:30]`` slice would leak "## 任务背景上下文…" into
+    #      the card title for any short user requirement.
+    #   2. Multi-line requirements (e.g. /dev with embedded prose) are
+    #      better titled by their first line than by an awkward
+    #      character-cut across a newline.
+    _title_line = requirement.split("\n", 1)[0].strip() or requirement[:30]
     return CrewPlan(
-        title=f"软件开发：{requirement[:30]}",
+        title=f"软件开发：{_title_line[:30]}",
         agents=agents,
         synthesis_prompt=(
             "请综合各阶段产出，输出一份简洁的交付报告，包含：\n"

@@ -148,6 +148,57 @@ def handle_card_action(event: P2CardActionTrigger) -> P2CardActionTriggerRespons
             resp.toast = toast
             return resp
 
+        # Phase 5: "switch to plain chat" button on the intent disclosure card
+        if cmd.startswith("force_chat:"):
+            feedback_id = cmd.split(":", 1)[1]
+            try:
+                from larkhelm.agent_hub import AgentDispatcher, IntentResult, record_feedback
+                from larkhelm.agent_hub.intent_feedback import resolve_pending
+            except Exception as e:
+                _debug_log(f"[CardAction] force_chat import failed: {e}")
+                return resp
+            pending = resolve_pending(feedback_id)
+            if pending is None:
+                toast = CallBackToast()
+                toast.type = "info"
+                toast.content = "ℹ️ 该意图已过期，请重新发送消息"
+                resp.toast = toast
+                return resp
+            try:
+                record_feedback(
+                    pending.intent, corrected="chat", chat_id=chat_id,
+                    feedback_id=feedback_id, text=pending.text,
+                )
+            except Exception as e:
+                _debug_log(f"[CardAction] record_feedback failed: {e}")
+            _trigger_cancel(chat_id)
+            override_intent = IntentResult(
+                agent_type="chat", layer="override",
+                is_explicit_command=True, raw_text=pending.text,
+            )
+
+            def _override_target():
+                try:
+                    AgentDispatcher().dispatch(override_intent, pending.ctx)
+                except Exception as _ex:
+                    _debug_log(f"[CardAction] force_chat dispatch failed: {_ex}")
+
+            threading.Thread(target=_override_target, daemon=True,
+                             name=f"force-chat-{chat_id[:8]}").start()
+            from lark_oapi.event.callback.model.p2_card_action_trigger import CallBackCard
+            cb_card = CallBackCard()
+            cb_card.type = "raw"
+            cb_card.data = _make_card_dict(
+                "💬 已切换为普通对话",
+                "已记录此次误判，下一次会更准。", color="grey",
+            )
+            resp.card = cb_card
+            toast = CallBackToast()
+            toast.type = "success"
+            toast.content = "💬 已切换"
+            resp.toast = toast
+            return resp
+
         # Crew pause button
         if cmd.startswith("crew_pause:"):
             crew_id = cmd.split(":", 1)[1]

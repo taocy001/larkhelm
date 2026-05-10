@@ -17,6 +17,7 @@ from larkhelm.dedup import _is_duplicate
 from larkhelm.chat_state import _get_chat_model, _get_cwd, _is_btw_reply, _register_btw_msg, _set_chat_field
 from larkhelm.concurrency import (
     _get_chat_lock, _trigger_cancel, _reset_cancel, _pop_pending,
+    _get_cancel_event,
 )
 from larkhelm.lark_client import (
     send_card, send_card_reply, _download_image,
@@ -24,6 +25,29 @@ from larkhelm.lark_client import (
 )
 from larkhelm.concurrency import is_shutting_down
 from larkhelm.handlers._query import _do_query
+
+
+def _intent_router_active(chat_id: str) -> bool:
+    """Return True iff the phase-5 intent router should run for this chat.
+
+    Two gates: ``intent_router_enabled`` flag + a deterministic chat_id hash
+    against ``intent_router_traffic`` ∈ [0, 1]. Same chat always takes the
+    same path so A/B comparison stays clean.
+    """
+    cfg = getattr(_cfg, "config", {}) or {}
+    if not cfg.get("intent_router_enabled", False):
+        return False
+    try:
+        traffic = float(cfg.get("intent_router_traffic", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if traffic <= 0.0:
+        return False
+    if traffic >= 1.0:
+        return True
+    import hashlib
+    h = hashlib.md5(chat_id.encode("utf-8")).hexdigest()
+    return (int(h, 16) / float(1 << 128)) < traffic
 
 
 def handle_reaction_created(data: P2ImMessageReactionCreatedV1):
@@ -224,6 +248,8 @@ def handle_message(data: P2ImMessageReceiveV1):
             _cmd_reset(chat_id, "gemini", _mid); return
         if tl == "/reset kimi":
             _cmd_reset(chat_id, "kimi", _mid); return
+        if tl == "/reset deepseek":
+            _cmd_reset(chat_id, "deepseek", _mid); return
         if tl in ("/reset permissions", "/reset perm"):
             _cmd_reset(chat_id, "perm", _mid); return
         if tl == "/reset memory":
@@ -242,6 +268,8 @@ def handle_message(data: P2ImMessageReceiveV1):
             _cmd_upgrade(chat_id, _mid); return
         if tl == "/stats":
             _cmd_stats(chat_id, _mid); return
+        if tl.startswith("/stats "):
+            _cmd_stats(chat_id, _mid, args=text[7:].strip()); return
         if tl == "/memory" or tl.startswith("/memory "):
             _cmd_memory(chat_id, text[7:].strip(), _mid); return
         if tl.startswith("/doc"):
@@ -255,7 +283,7 @@ def handle_message(data: P2ImMessageReceiveV1):
                     cmd_crew(*a)
                 except Exception as _e:
                     import traceback as _tb
-                    _debug_log(f"[crew] unhandled exception: {_e}\n{_tb.format_exc()}")
+                    _debug_log(f"[Crew] unhandled exception: {_e}\n{_tb.format_exc()}")
             threading.Thread(target=_crew_target, args=(chat_id, text[5:].strip(), message.message_id),
                              daemon=True, name=f"crew-{chat_id[:8]}").start()
             return
@@ -266,7 +294,7 @@ def handle_message(data: P2ImMessageReceiveV1):
                     cmd_dev(*a)
                 except Exception as _e:
                     import traceback as _tb
-                    _debug_log(f"[dev] unhandled exception: {_e}\n{_tb.format_exc()}")
+                    _debug_log(f"[Dev] unhandled exception: {_e}\n{_tb.format_exc()}")
             threading.Thread(target=_dev_target, args=(chat_id, text[5:].strip(), message.message_id),
                              daemon=True, name=f"dev-{chat_id[:8]}").start()
             return
@@ -277,7 +305,7 @@ def handle_message(data: P2ImMessageReceiveV1):
                     cmd_plan(*a)
                 except Exception as _e:
                     import traceback as _tb
-                    _debug_log(f"[plan] unhandled exception: {_e}\n{_tb.format_exc()}")
+                    _debug_log(f"[Plan] unhandled exception: {_e}\n{_tb.format_exc()}")
             threading.Thread(target=_plan_target, args=(chat_id, text[5:].strip(), message.message_id),
                              daemon=True, name=f"plan-{chat_id[:8]}").start()
             return
@@ -343,6 +371,48 @@ def handle_message(data: P2ImMessageReceiveV1):
             _cmd_btw(chat_id, text, message.message_id)
             return
 
+        # ── Phase 5: intent router (gated by flag + traffic %) ──
+        # Explicit slash commands above already returned early; only "free-form"
+        # text reaches this point. Keep all imports lazy so flag=false (or unset)
+        # means agent_hub is never imported (AC-10).
+        if not text.startswith("/") and _intent_router_active(chat_id):
+            try:
+                from larkhelm.agent_hub import (
+                    AgentContext, AgentDispatcher, resolve_intent,
+                )
+            except Exception as _ex:
+                _debug_log(f"[IntentRouter] import failed: {_ex}")
+            else:
+                try:
+                    has_doc_urls = ("feishu.cn/docx/" in text or "feishu.cn/wiki/" in text or "feishu.cn/sheets/" in text)
+                    intent = resolve_intent(
+                        text, _msg_images or None, has_doc_urls, chat_id,
+                    )
+                except Exception as _ex:
+                    _debug_log(f"[IntentRouter] resolve_intent failed: {_ex}")
+                    intent = None
+                if intent is not None and intent.agent_type != "chat":
+                    # Mirror the legacy path's _reset_cancel: a stale chat-level
+                    # cancel from the previous /cancel must be cleared, otherwise
+                    # cmd_dev / cmd_crew / _do_query inside the dispatched Agent
+                    # see is_set()=True and abort immediately. PlanAgent self-resets,
+                    # the other three do not.
+                    _reset_cancel(chat_id)
+                    cancel_ev = _get_cancel_event(chat_id)
+                    cwd       = _get_cwd(chat_id)
+                    parent_id = getattr(message, "parent_id", None)
+                    ctx = AgentContext(
+                        chat_id=chat_id, user_msg_id=message.message_id,
+                        text=text, images=_msg_images or None,
+                        parent_id=parent_id, cancel_ev=cancel_ev, cwd=cwd,
+                    )
+                    threading.Thread(
+                        target=AgentDispatcher().dispatch,
+                        args=(intent, ctx), daemon=True,
+                        name=f"agent-{intent.agent_type}-{chat_id[:8]}",
+                    ).start()
+                    return
+
         # ── Model dispatch ──
         target_model = _get_chat_model(chat_id)
         prompt = text
@@ -359,8 +429,13 @@ def handle_message(data: P2ImMessageReceiveV1):
             target_model = "kimi"
             prompt = text.split(" ", 1)[1].strip()
             force_backend_id = "kimi"
+        elif text.startswith(("/d ", "/deepseek ")):
+            target_model = "deepseek"
+            prompt = text.split(" ", 1)[1].strip()
+            force_backend_id = "deepseek"
 
-        # Vision routing: gemini CLI doesn't support image input; force to a vision-capable model
+        # Vision routing: gemini CLI and DeepSeek HTTP don't support image input;
+        # force a vision-capable model.
         if _msg_images and target_model not in ("claude", "kimi"):
             target_model = "claude"
 

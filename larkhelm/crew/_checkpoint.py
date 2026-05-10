@@ -77,7 +77,7 @@ def _clear_checkpoint(chat_id: str):
     try:
         path.unlink(missing_ok=True)
     except Exception as e:
-        _debug_log(f"[checkpoint] delete failed: {e}")
+        _debug_log(f"[Checkpoint] delete failed: {e}")
 
 
 def _load_checkpoint(chat_id: str) -> "dict":
@@ -191,7 +191,7 @@ def resume_interrupted_crews():
             try:
                 Path(cp_path).unlink()
             except Exception as e:
-                _debug_log(f"[checkpoint] cleanup failed: {e}")
+                _debug_log(f"[Checkpoint] cleanup failed: {e}")
             continue
 
         chat_id = data.get("chat_id", "")
@@ -216,7 +216,7 @@ def resume_interrupted_crews():
                     color="blue",
                 ))
             except Exception as e:
-                _debug_log(f"[checkpoint] resume card failed: {e}")
+                _debug_log(f"[Checkpoint] resume card failed: {e}")
 
             with _active_crew_lock:
                 _active_crew[state.chat_id]        = state.crew_id
