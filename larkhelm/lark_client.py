@@ -6,7 +6,7 @@ import urllib.request as _urllib_req
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 import lark_oapi as lark
 from lark_oapi import BaseRequest, HttpMethod, AccessTokenType
 from lark_oapi.api.im.v1 import (
@@ -324,38 +324,92 @@ def delete_reaction(message_id: str, reaction_id: str):
 
 
 # ═══════════════════════════════════════════════════
-#  Image download
+#  Message resource download (image / file)
 # ═══════════════════════════════════════════════════
 
-def _download_image(image_key: str, chat_id: str, message_id: str) -> str:
-    """Download a message image from Feishu, save to SESSION_DIR/chat_id/imgs/, return local path or None."""
+# (subdir, ext_suffix, sdk_type, log_prefix) per supported kind
+_KIND_SPEC: dict[str, tuple[str, str, str, str]] = {
+    "image": ("imgs", ".jpg", "image", "[Image]"),
+    "file": ("files", "", "file", "[File]"),
+}
+
+
+def _download_message_file(
+    file_key: str,
+    chat_id: str,
+    msg_id: str,
+    kind: Literal["image", "file"] = "image",
+) -> Optional[str]:
+    """Download a Feishu message resource (image or file) and cache it locally.
+
+    Parameters
+    ----------
+    file_key : str
+        Resource key carried by the Feishu message event. For images this is
+        ``image_key``; for audio / generic file attachments it is the
+        ``file_key`` field on the message body.
+    chat_id : str
+        Feishu chat id; used to namespace the on-disk cache directory.
+    msg_id : str
+        Feishu message id; passed through to the SDK
+        ``message_resource.get`` call (Feishu uses it for permission validation).
+    kind : Literal["image", "file"], default ``"image"``
+        Selects subdirectory under ``SESSION_DIR/{chat_id}/`` (``imgs`` vs
+        ``files``), appended extension (``.jpg`` for image, none for file),
+        SDK ``type(...)`` argument, and log prefix.
+
+    Returns
+    -------
+    Optional[str]
+        Absolute local path of the cached resource on success; ``None`` on
+        any failure (SDK error, IO error, unknown ``kind``). Failures are
+        logged via ``_debug_log`` — this function never raises.
+
+    Notes
+    -----
+    * Cache hits skip the SDK call entirely.
+    * Filename is sanitized via ``re.sub(r"[^a-zA-Z0-9_\\-.]", "_", file_key)``;
+      same rule as the legacy ``_download_image``.
+    * Caller is responsible for any extension-sniffing on top of the
+      returned path (e.g. ``.opus`` / ``.mp3`` for audio).
+    """
+    spec = _KIND_SPEC.get(kind)
+    if spec is None:
+        _debug_log(f"[Download] unknown kind={kind!r} for file_key={file_key}")
+        return None
+    subdir, ext_suffix, sdk_type, log_prefix = spec
     try:
-        imgs_dir = _cfg.SESSION_DIR / chat_id / "imgs"
-        imgs_dir.mkdir(parents=True, exist_ok=True)
-        safe_key = re.sub(r"[^a-zA-Z0-9_\-.]", "_", image_key)
-        out_path = imgs_dir / f"{safe_key}.jpg"
+        base_dir = _cfg.SESSION_DIR / chat_id / subdir
+        base_dir.mkdir(parents=True, exist_ok=True)
+        safe_key = re.sub(r"[^a-zA-Z0-9_\-.]", "_", file_key)
+        out_path = base_dir / f"{safe_key}{ext_suffix}"
         if out_path.exists():
             return str(out_path)
         resp = client.im.v1.message_resource.get(
             GetMessageResourceRequestBuilder()
-            .message_id(message_id)
-            .file_key(image_key)
-            .type("image")
+            .message_id(msg_id)
+            .file_key(file_key)
+            .type(sdk_type)
             .build()
         )
         if not resp.success():
-            _debug_log(f"[Image] 下载失败 image_key={image_key} code={resp.code}: {resp.msg}")
+            _debug_log(f"{log_prefix} 下载失败 file_key={file_key} code={resp.code}: {resp.msg}")
             return None
         file_data = resp.file
         if hasattr(file_data, "read"):
             file_data = file_data.read()
         with open(out_path, "wb") as f:
             f.write(file_data)
-        _debug_log(f"[Image] 下载成功 -> {out_path}")
+        _debug_log(f"{log_prefix} 下载成功 -> {out_path}")
         return str(out_path)
     except Exception as e:
-        _debug_log(f"[Image] 下载异常: {e}")
+        _debug_log(f"{log_prefix} 下载异常: {e}")
         return None
+
+
+# 保留：caller (handlers/_message.py) 与测试 mock 路径依赖此符号
+def _download_image(image_key: str, chat_id: str, message_id: str) -> Optional[str]:
+    return _download_message_file(image_key, chat_id, message_id, kind="image")
 
 
 # ═══════════════════════════════════════════════════
