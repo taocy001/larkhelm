@@ -101,20 +101,34 @@ class TestSoftTimeout(unittest.TestCase):
         found_card_with_cancel = False
         found_card_without_cancel_after_soft_timeout = False
         
+        def _has_cancel_button(card: dict) -> bool:
+            """Walk JSON 2.0 ``body.elements`` (post-migration) for a button
+            whose callback cmd starts with ``cancel:``. Buttons may be either
+            bare ``tag:"button"`` elements (1-button rows) or nested inside
+            a ``column_set`` → ``column`` (multi-button rows)."""
+            buttons: list = []
+            elements = (card.get("body") or {}).get("elements", [])
+            for el in elements:
+                if el.get("tag") == "button":
+                    buttons.append(el)
+                elif el.get("tag") == "column_set":
+                    for col in el.get("columns", []):
+                        for child in col.get("elements", []):
+                            if child.get("tag") == "button":
+                                buttons.append(child)
+            for btn in buttons:
+                for behavior in btn.get("behaviors", []):
+                    cmd = (behavior.get("value") or {}).get("cmd", "")
+                    if "cancel:" in cmd:
+                        return True
+            return False
+
         in_background_seen = False
         for card in captured_cards:
             # Check title to see if it's "后台" (indicates _in_background was True)
             title = card.get("header", {}).get("title", {}).get("content", "")
-            has_cancel = False
-            # Look for cancel button in elements
-            elements = card.get("elements", [])
-            for el in elements:
-                if el.get("tag") == "action":
-                    actions = el.get("actions", [])
-                    for act in actions:
-                        if "cancel:" in act.get("value", {}).get("cmd", ""):
-                            has_cancel = True
-            
+            has_cancel = _has_cancel_button(card)
+
             if "后台" in title:
                 in_background_seen = True
                 if not has_cancel:

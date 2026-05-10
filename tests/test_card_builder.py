@@ -208,45 +208,105 @@ class TestMakeCard(unittest.TestCase):
         # Truncation notice should be present
         self.assertIn("截断", text)
 
-    # ── JSON 1.0 (with buttons) ──────────────────────────────────
+    # ── JSON 2.0 buttons (post-migration; was JSON 1.0 prior to commit) ─────
 
-    def test_with_buttons_returns_json10(self):
+    def _buttons_in(self, card: dict) -> list[dict]:
+        """Walk card['body']['elements'] and return every ``tag:"button"``
+        encountered, including those nested inside a ``column_set`` /
+        ``column``. Provides a single helper used by every button test so
+        a future schema layout change touches one place."""
+        buttons: list[dict] = []
+        for el in card["body"]["elements"]:
+            if el.get("tag") == "button":
+                buttons.append(el)
+            elif el.get("tag") == "column_set":
+                for col in el.get("columns", []):
+                    for child in col.get("elements", []):
+                        if child.get("tag") == "button":
+                            buttons.append(child)
+        return buttons
+
+    def test_with_buttons_uses_json20_schema(self):
+        """Post-migration: button cards have ``schema:"2.0"`` and route
+        buttons through ``body.elements`` (not the legacy 1.0 top-level
+        ``elements`` + ``tag:"action"`` container)."""
         card = json.loads(_make_card("T", "B", buttons=[("OK", "/ok")]))
-        self.assertNotIn("schema", card)   # JSON 1.0 has no schema field
-        self.assertIn("elements", card)
+        self.assertEqual(card.get("schema"), "2.0")
+        self.assertIn("body", card)
+        self.assertNotIn("actions", json.dumps(card),
+                         "no JSON 1.0 'actions' container should remain")
+
+    def test_single_button_is_bare_element(self):
+        """One button → bare ``tag:"button"`` directly in ``body.elements``,
+        NOT wrapped in a column_set (avoids gratuitous nesting)."""
+        card = json.loads(_make_card("T", "B", buttons=[("OK", "/ok")]))
+        last = card["body"]["elements"][-1]
+        self.assertEqual(last["tag"], "button")
+        self.assertEqual(last["text"]["content"], "OK")
+        self.assertEqual(last["text"]["tag"], "plain_text")
+
+    def test_multi_buttons_wrapped_in_column_set(self):
+        """≥2 buttons → ``column_set`` with one ``width:"auto"`` column per
+        button. Necessary because JSON 2.0 has no native multi-button row
+        container; column_set is the canonical layout per Feishu docs."""
+        card = json.loads(_make_card("T", "B",
+                                     buttons=[("✅ 允许", "/a"), ("❌ 拒绝", "/d")]))
+        last = card["body"]["elements"][-1]
+        self.assertEqual(last["tag"], "column_set")
+        self.assertEqual(len(last["columns"]), 2)
+        for col in last["columns"]:
+            self.assertEqual(col["tag"], "column")
+            self.assertEqual(col["width"], "auto")
+            self.assertEqual(len(col["elements"]), 1)
+            self.assertEqual(col["elements"][0]["tag"], "button")
 
     def test_buttons_rendered_correctly(self):
-        card = json.loads(_make_card("T", "B", buttons=[("✅ 允许", "/allow"), ("❌ 拒绝", "/deny")]))
-        action_el = next(e for e in card["elements"] if e.get("tag") == "action")
-        actions = action_el["actions"]
-        self.assertEqual(len(actions), 2)
-        labels = [a["text"]["content"] for a in actions]
+        card = json.loads(_make_card("T", "B",
+                                     buttons=[("✅ 允许", "/allow"), ("❌ 拒绝", "/deny")]))
+        buttons = self._buttons_in(card)
+        self.assertEqual(len(buttons), 2)
+        labels = [b["text"]["content"] for b in buttons]
         self.assertIn("✅ 允许", labels)
         self.assertIn("❌ 拒绝", labels)
 
     def test_button_types_primary_danger(self):
-        card = json.loads(_make_card("T", "B", buttons=[("✅ 允许", "/a"), ("❌ 取消", "/c")]))
-        action_el = next(e for e in card["elements"] if e.get("tag") == "action")
-        types = {a["text"]["content"]: a["type"] for a in action_el["actions"]}
+        card = json.loads(_make_card("T", "B",
+                                     buttons=[("✅ 允许", "/a"), ("❌ 取消", "/c")]))
+        types = {b["text"]["content"]: b["type"] for b in self._buttons_in(card)}
         self.assertEqual(types["✅ 允许"], "primary")
         self.assertEqual(types["❌ 取消"], "danger")
 
-    def test_button_cmd_value(self):
+    def test_button_cmd_routed_via_callback_behavior(self):
+        """JSON 2.0 puts the cmd payload inside ``behaviors[0].value``,
+        not directly on the button element. ``handlers/_card_action.py``
+        receives it via ``CallBackAction.value`` regardless of schema."""
         card = json.loads(_make_card("T", "B", buttons=[("Go", "/go_cmd")]))
-        action_el = next(e for e in card["elements"] if e.get("tag") == "action")
-        self.assertEqual(action_el["actions"][0]["value"]["cmd"], "/go_cmd")
+        btn = self._buttons_in(card)[0]
+        self.assertEqual(btn["behaviors"][0]["type"], "callback")
+        self.assertEqual(btn["behaviors"][0]["value"]["cmd"], "/go_cmd")
 
-    def test_note_in_json10_card(self):
-        card = json.loads(_make_card("T", "B", buttons=[("X", "/x")], note="my note"))
-        note_el = next((e for e in card["elements"] if e.get("tag") == "note"), None)
-        self.assertIsNotNone(note_el)
-        self.assertIn("my note", json.dumps(note_el))
+    def test_note_appears_in_button_card(self):
+        card = json.loads(_make_card("T", "B",
+                                     buttons=[("X", "/x")], note="my note"))
+        # Note merges into a markdown element OR appends as its own.
+        # Just assert the literal text shows up in the body.
+        body_text = json.dumps(card["body"]["elements"], ensure_ascii=False)
+        self.assertIn("my note", body_text)
 
     def test_wide_screen_mode_enabled(self):
         for buttons in [None, [("X", "/x")]]:
             with self.subTest(buttons=buttons):
                 card = json.loads(_make_card("T", "B", buttons=buttons))
                 self.assertTrue(card["config"]["wide_screen_mode"])
+
+    def test_plain_text_label_not_lark_md(self):
+        """JSON 2.0 button labels MUST use ``plain_text``; ``lark_md`` is
+        a JSON 1.0 construct and adding it back would re-introduce the
+        font/markdown-subset inconsistencies that prompted this migration."""
+        card = json.loads(_make_card("T", "B",
+                                     buttons=[("**bold label**", "/x")]))
+        btn = self._buttons_in(card)[0]
+        self.assertEqual(btn["text"]["tag"], "plain_text")
 
     def test_returns_valid_json_string(self):
         # Should not raise; must return a parseable JSON string

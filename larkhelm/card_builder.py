@@ -14,9 +14,14 @@ body parameter accepts str or list[str].
   list[str] — each element becomes an independent markdown block (useful when content
                has multiple sections that should not be merged, e.g. perm cards)
 
-Schema: JSON 2.0 by default; JSON 1.0 when buttons are present (required for action/callback support).
-  Buttons — cards with buttons use JSON 1.0 format (_make_card_json10_dict); cards without buttons
-            use JSON 2.0 format with button elements via column_set / behaviors/callback.
+Schema: JSON 2.0 unconditionally. Cards with buttons use JSON 2.0's native
+        button element (``tag:"button"``) wrapped in a ``column_set`` for
+        multi-button rows; the callback ``behaviors`` carry the same
+        ``value:{"cmd":...}`` payload that ``handlers/_card_action.py``
+        already parses, so the migration is transparent to the dispatcher.
+  Buttons — single button → bare element in body.elements; multiple buttons →
+            column_set with width:"auto" columns. Color via ``type``
+            (primary/danger/default).
   Tables  — markdown pipe tables auto-converted to Feishu native table elements.
 """
 import json
@@ -184,48 +189,70 @@ def _split_md(text: str) -> list[str]:
     return chunks or [text]
 
 
-# ── JSON 1.0 builder (used when buttons are present) ─────────────────────────
+# ── JSON 2.0 button block builder ────────────────────────────────────────────
+# Replaces the old JSON 1.0 ``{"tag":"action","actions":[...]}`` container.
+#
+# Why we migrated (commit history):
+#   1. Visual bug: JSON 1.0's ``{"tag":"div","text":{"tag":"lark_md",...}}``
+#      body element renders at a different default font size than JSON 2.0's
+#      ``{"tag":"markdown",...}``. Streaming card (with cancel button) →
+#      buttons → JSON 1.0 → big font; final card (no buttons) → JSON 2.0 →
+#      normal font. Same content read at two sizes was the visible defect.
+#   2. Markdown subset gap: ``lark_md`` doesn't render bullet lists, fenced
+#      code blocks, or block quotes — they pass through as raw text.
+#      The ``markdown`` element renders all three correctly.
+#   3. Schema cleanup: maintaining two schema branches in the builder was
+#      load-bearing complexity for no benefit once 2.0 supports buttons.
+#
+# JSON 2.0 button schema (per Feishu official docs):
+#   - Single button: bare ``{"tag":"button", "text":{...}, "type":..., "behaviors":[...]}``
+#     directly inside ``body.elements[]``.
+#   - Multiple buttons in one row: wrap in ``column_set`` with ``width:"auto"``
+#     columns (one button per column).
+#   - Label uses ``plain_text`` (not ``lark_md`` — JSON 2.0 buttons don't
+#     accept lark_md formatting in labels).
+#   - Callback: ``"behaviors":[{"type":"callback","value":{"cmd":...}}]``.
+#     The ``value`` dict surfaces unchanged on ``CallBackAction.value`` —
+#     ``handlers/_card_action.py:27`` ``(action.value or {}).get("cmd",...)``
+#     parses both schemas identically.
 
-def _make_card_json10_dict(
-    title: str,
-    body: "str | list[str]",
-    color: str,
-    note: str,
-    buttons: list,
-    subtitle: str,
-    normalize: bool,
-) -> dict:
-    """Build a JSON 1.0 Feishu card (required format for action/button callbacks)."""
-    elements: list = []
-    sections: list[str] = [body] if isinstance(body, str) else list(body)
-    for sec in sections:
-        if sec:
-            content = _normalize_newlines(sec.strip()) if normalize else sec.strip()
-            if content:
-                elements.append({"tag": "div", "text": {"tag": "lark_md", "content": content}})
 
-    actions = [
-        {
-            "tag": "button",
-            "text": {"tag": "lark_md", "content": label},
-            "type": _btn_type(label),
-            "value": {"cmd": cmd},
-        }
-        for label, cmd in buttons
-    ]
-    elements.append({"tag": "action", "actions": actions})
+def _make_button_element(label: str, cmd: str) -> dict:
+    """Build one JSON 2.0 button element with a callback ``cmd`` payload.
 
-    if note:
-        elements.append({"tag": "note", "elements": [{"tag": "lark_md", "content": note}]})
-
-    header: dict = {"template": color, "title": {"tag": "lark_md", "content": title}}
-    if subtitle:
-        header["subtitle"] = {"tag": "lark_md", "content": subtitle}
-
+    Color (``type``) is auto-derived from ``label`` via ``_btn_type``
+    (primary for OK/继续/✅; danger for cancel/取消/❌; default otherwise).
+    The ``cmd`` lands in ``CallBackAction.value`` unchanged on the bot
+    side — see ``handlers/_card_action.py:27``.
+    """
     return {
-        "config": {"wide_screen_mode": True},
-        "header": header,
-        "elements": elements,
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": label},
+        "type": _btn_type(label),
+        "behaviors": [{"type": "callback", "value": {"cmd": cmd}}],
+    }
+
+
+def _make_buttons_block(buttons: "list[tuple[str, str]]") -> dict:
+    """Return a single button element OR a ``column_set`` wrapping multiple.
+
+    JSON 2.0 doesn't support a multi-button "action row" container; the
+    canonical pattern is to use ``column_set`` with ``width:"auto"`` columns
+    so buttons sit side-by-side without consuming the full row width each.
+    """
+    if len(buttons) == 1:
+        return _make_button_element(*buttons[0])
+    return {
+        "tag": "column_set",
+        "horizontal_spacing": "small",
+        "columns": [
+            {
+                "tag": "column",
+                "width": "auto",
+                "elements": [_make_button_element(label, cmd)],
+            }
+            for (label, cmd) in buttons
+        ],
     }
 
 
@@ -256,10 +283,6 @@ def _make_card_dict(
                    tools_* are ignored and the list is used as-is. For complex cards
                    (e.g. crew_card.py terminal phase) that build their own element tree.
     """
-    # Cards with buttons use JSON 1.0 format (required for action/callback support)
-    if buttons and raw_elements is None:
-        return _make_card_json10_dict(title, body, color, note, buttons, subtitle, normalize)
-
     # Fast path: caller supplies pre-built elements (e.g. crew_card terminal phase)
     if raw_elements is not None:
         header: dict = {"template": color, "title": {"tag": "plain_text", "content": title}}
@@ -324,6 +347,13 @@ def _make_card_dict(
             body_elements[-1]["content"] += "\n\n" + note_md
         else:
             body_elements.append({"tag": "markdown", "content": note_md})
+
+    # ── Buttons (JSON 2.0 callback style) ──────────────────────────────
+    # Single button → bare element; multiple → column_set wrapper. The
+    # callback ``value`` dict surfaces unchanged on the card-action event,
+    # so ``handlers/_card_action.py:27`` doesn't need to change.
+    if buttons:
+        body_elements.append(_make_buttons_block(buttons))
 
     # ── Header ───────────────────────────────────────────────────────────
     header: dict = {"template": color, "title": {"tag": "plain_text", "content": title}}
