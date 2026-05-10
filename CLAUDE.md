@@ -163,7 +163,16 @@ Data files (under `DATA_DIR`):
 
 Responses are sent as Feishu interactive cards (Markdown). Cards are updated in-place during streaming. When content exceeds `max_card_len`, it is split across multiple cards via `_split_md()`.
 
-Card format selection: has buttons → JSON 1.0 (supports action tags); no buttons → JSON 2.0 (richer rich text).
+Card schema: **JSON 2.0 unconditionally** (post-commit `4b7c68e`). Buttons land
+as native `{"tag":"button", ...}` elements in `body.elements[]`; multi-button
+rows wrap in `column_set` with `width:"auto"` columns. Callback payload sits
+in `behaviors:[{"type":"callback","value":{"cmd":...}}]` — `_card_action.py:27`
+parses ``CallBackAction.value`` schema-agnostically. The legacy `_make_card_json10_dict`
+path (which used `{"tag":"div","text":{"tag":"lark_md",...}}` for body and
+`{"tag":"action","actions":[...]}` for buttons) was deleted because Feishu's
+`lark_md` element rendered body markdown at a different default font size
+than the JSON 2.0 `markdown` element AND silently dropped bullet lists,
+fenced code blocks, and block quotes.
 
 ### 6. Phase 5 智能编排层 (`larkhelm/agent_hub/`)
 
