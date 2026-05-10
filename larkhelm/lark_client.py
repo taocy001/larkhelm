@@ -1,7 +1,6 @@
 """larkhelm · Feishu client wrapper (client, send_card, update_card, reply_card, and other Feishu API wrappers)."""
 import json as _json_mod
 import re
-import sys
 import threading
 import urllib.request as _urllib_req
 from collections import OrderedDict
@@ -23,7 +22,7 @@ from lark_oapi.api.im.v1.model.reply_message_request_body import (ReplyMessageRe
 from lark_oapi.api.docx.v1 import (CreateDocumentRequest, CreateDocumentRequestBody)
 import larkhelm.config as _cfg
 from larkhelm.card_builder import _make_card, _split_md
-from larkhelm.log import _debug_log
+from larkhelm.log import _debug_log, warn
 
 # ── Global client (assigned by main()) ─────────────────────────────
 client: lark.Client = None  # type: ignore[assignment]  # assigned by main() before use
@@ -40,6 +39,12 @@ def _fetch_bot_open_id() -> None:
         req.token_types = {AccessTokenType.TENANT}
         req.body = None
         resp = client.request(req)
+        # Each branch was previously a double-write: print() to stderr for
+        # operator visibility + _debug_log for the file. Phase 5 logging
+        # cleanup consolidates both into a single warn() call — the new
+        # WARN level write goes to DEBUG_LOG with a <WARN> tag so log
+        # shippers / operators can filter without losing the file trail,
+        # and there's no longer redundant text on two streams.
         if resp.raw:
             data = _json_mod.loads(resp.raw.content)
             bot_open_id = data.get("bot", {}).get("open_id", "")
@@ -47,14 +52,11 @@ def _fetch_bot_open_id() -> None:
                 BOT_OPEN_ID = bot_open_id
                 _debug_log(f"[Bot] 获取 open_id={bot_open_id}")
             else:
-                print(f"[larkhelm] ⚠️  BOT_OPEN_ID fetch failed — group @mention filter disabled: {data}", file=sys.stderr)
-                _debug_log(f"[Bot] 未能获取 open_id，响应: {data}")
+                warn(f"[Bot] BOT_OPEN_ID fetch failed — group @mention filter disabled: {data}")
         else:
-            print(f"[larkhelm] ⚠️  BOT_OPEN_ID fetch failed (code={resp.code}) — group @mention filter disabled", file=sys.stderr)
-            _debug_log(f"[Bot] 获取 open_id 失败 code={resp.code} msg={resp.msg}")
+            warn(f"[Bot] BOT_OPEN_ID fetch failed (code={resp.code} msg={resp.msg}) — group @mention filter disabled")
     except Exception as e:
-        print(f"[larkhelm] ⚠️  BOT_OPEN_ID fetch exception — group @mention filter disabled: {e}", file=sys.stderr)
-        _debug_log(f"[Bot] 获取 open_id 异常: {e}")
+        warn(f"[Bot] BOT_OPEN_ID fetch exception — group @mention filter disabled: {e}")
 
 
 # ── Pin: track the currently pinned message_id per chat ─────────────

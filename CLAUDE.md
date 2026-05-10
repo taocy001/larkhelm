@@ -471,16 +471,40 @@ resp = client.sheets.v3.spreadsheet_sheet.query(
 
 **helper 选择**：
 
-| Helper | 何时用 | 实现位置 |
-|---|---|---|
-| `_debug_log(msg)` | 主路径诊断；调用方已确保 `larkhelm.log` 已加载 | `log.py:_debug_log` |
-| `safe_log(msg)` | 异常清理 / 永不抛路径；底层等价于 `_debug_log` 套 try-except | `log.py:safe_log` |
-| `lazy_debug_log(msg)` | bootstrap / 循环 import 边缘；模块本身可能尚未完成 import | `log.py:lazy_debug_log` |
+| Helper | 级别 | 何时用 | 实现位置 |
+|---|---|---|---|
+| `_debug_log(msg)` | DEBUG | 主路径诊断；调用方已确保 `larkhelm.log` 已加载 | `log.py:_debug_log` |
+| `safe_log(msg)` | DEBUG | 异常清理 / 永不抛路径；底层等价于 `_debug_log` 套 try-except | `log.py:safe_log` |
+| `lazy_debug_log(msg)` | DEBUG | bootstrap / 循环 import 边缘；模块本身可能尚未完成 import | `log.py:lazy_debug_log` |
+| `info(msg)` | INFO | 阶段性进展、状态变更（"backend X 已注册"） | `log.py:info` |
+| `warn(msg)` | WARN | 降级行为、credential 拉取失败、操作员需要看到的告警 | `log.py:warn` |
+| `error(msg)` | ERROR | 用户可见任务被打断的失败（便于与工单关联） | `log.py:error` |
 
 > `safe_log` 取代 R3 之前 `agent_hub/` 4 处本地 `_safe_log` 副本；
 > `lazy_debug_log` 取代 `config.py`、`agent_hub/agent_base.py.abort()`、
 > `agent_hub/intent_router.py` 中的"双层 try-import"模式。新代码避免再
 > 引入这两种模式的本地拷贝。
+
+### `LARKHELM_LOG_LEVEL` 环境变量过滤
+
+支持通过 `LARKHELM_LOG_LEVEL=DEBUG|INFO|WARN|ERROR` 环境变量在启动时
+过滤诊断写入。默认 `DEBUG`（保留原始 verbose 行为，所有 250+ 现存
+`_debug_log` 调用照旧落盘）。生产环境想降噪：
+
+```bash
+export LARKHELM_LOG_LEVEL=WARN
+python3 -m larkhelm start
+```
+
+实施细节：
+
+- 读取时机：模块 import 时一次性解析（运行中改环境变量**不**生效，
+  避免日志过滤中途翻转造成的诊断盲区）。
+- 输出格式：DEBUG 级别保持 `[HH:MM:SS] [Module] msg` **不变**（grep
+  兼容）；INFO/WARN/ERROR 加显式标签 `[HH:MM:SS] <LEVEL> [Module] msg`。
+- 未知值（如 `VERBOSE`）回退到 DEBUG 并向 stderr 写一行警告，避免拼写
+  错误意外静音整个 bridge。
+- `safe_log` / `lazy_debug_log` 也走 gate（与 `_debug_log` 一致）。
 
 **保留静默清单**（已确认无需改动）：
 

@@ -1,7 +1,9 @@
 """larkhelm · structured log writing (Markdown + JSONL) and debug logging"""
 from __future__ import annotations
 
+import enum
 import json
+import os
 import sys
 import threading
 from datetime import datetime
@@ -13,8 +15,77 @@ from larkhelm.concurrency import _jsonl_lock as _log_lock  # shared with token_s
 __all__ = [
     "_log_lock", "log_entry", "_read_logs", "_get_recent_turns",
     "_debug_log", "safe_log", "lazy_debug_log",
+    "info", "warn", "error",
+    "Level", "current_log_level",
     "rotate_jsonl_if_needed", "rotate_debug_log_if_needed",
 ]
+
+
+# ── Level filter (LARKHELM_LOG_LEVEL env var) ─────────────────────────────
+#
+# Phase 4 of the logging unification (see CLAUDE.md "日志前缀规范"):
+# every diagnostic write goes through ``_log_at(level, msg)``; ``_debug_log``
+# is now equivalent to ``_log_at(Level.DEBUG, msg)`` so an operator setting
+# ``LARKHELM_LOG_LEVEL=WARN`` can silence the ~250 existing DEBUG-level call
+# sites in production without touching code. Default ``DEBUG`` preserves
+# the full pre-Phase-4 verbosity for existing deployments.
+#
+# Why not just rip out _debug_log? 250+ call sites, each with its own
+# ``[Module]`` prefix already encoding meaning; rewriting them as
+# ``info/warn/error`` would be ~250 mechanical edits with high regression
+# surface. Keeping ``_debug_log`` as the DEBUG entry-point + adding new
+# typed helpers for new code is the minimum-disruption path.
+
+
+class Level(str, enum.Enum):
+    DEBUG = "DEBUG"
+    INFO = "INFO"
+    WARN = "WARN"
+    ERROR = "ERROR"
+
+
+_LEVEL_ORDER: dict[Level, int] = {
+    Level.DEBUG: 0,
+    Level.INFO: 1,
+    Level.WARN: 2,
+    Level.ERROR: 3,
+}
+
+
+def _resolve_level_from_env() -> Level:
+    """Read ``LARKHELM_LOG_LEVEL`` once at import time. Unknown values fall
+    back to DEBUG (with a stderr warning) so a typo doesn't accidentally
+    silence the entire bridge. Read once on import — operators changing
+    the env mid-process do NOT see live updates; that's intentional, the
+    log filter should not flip mid-run."""
+    raw = (os.environ.get("LARKHELM_LOG_LEVEL") or "").strip().upper()
+    if not raw:
+        return Level.DEBUG
+    try:
+        return Level(raw)
+    except ValueError:
+        # Don't go through _debug_log itself — it depends on this resolution.
+        try:
+            print(
+                f"[Log] LARKHELM_LOG_LEVEL={raw!r} not in "
+                "{DEBUG, INFO, WARN, ERROR}, falling back to DEBUG",
+                file=sys.stderr,
+            )
+        except Exception:
+            pass
+        return Level.DEBUG
+
+
+_min_level: Level = _resolve_level_from_env()
+
+
+def current_log_level() -> Level:
+    """Public read-only accessor for tests / /status reporting."""
+    return _min_level
+
+
+def _level_enabled(level: Level) -> bool:
+    return _LEVEL_ORDER[level] >= _LEVEL_ORDER[_min_level]
 
 _MAX_JSONL_BYTES = 100 * 1024 * 1024  # 100 MB
 _jsonl_write_count = 0
@@ -204,9 +275,28 @@ def _get_recent_turns(chat_id: str, max_turns: int = 6, max_chars: int = 2000) -
     return result
 
 
-def _debug_log(msg: str) -> None:
+def _log_at(level: Level, msg: str) -> None:
+    """Single write path used by ``_debug_log`` (DEBUG level) and the
+    typed ``info`` / ``warn`` / ``error`` helpers.
+
+    Format:
+      * DEBUG: ``[HH:MM:SS] {msg}\\n`` — unchanged from pre-Phase-4 to
+        preserve grep compatibility for the ~250 existing DEBUG callers.
+      * INFO/WARN/ERROR: ``[HH:MM:SS] <LEVEL> {msg}\\n`` — explicit tag
+        so operators (and ``scripts/memory_observation_report.py``) can
+        filter by severity.
+
+    Honors ``LARKHELM_LOG_LEVEL``: writes below ``_min_level`` are dropped
+    silently.
+    """
+    if not _level_enabled(level):
+        return
     global _debug_write_count
-    line = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n"
+    ts = datetime.now().strftime('%H:%M:%S')
+    if level is Level.DEBUG:
+        line = f"[{ts}] {msg}\n"
+    else:
+        line = f"[{ts}] <{level.value}> {msg}\n"
     should_rotate = False
     with _log_lock:
         try:
@@ -230,6 +320,36 @@ def _debug_log(msg: str) -> None:
     # rotation event, which would deadlock if we still held _log_lock.
     if should_rotate:
         rotate_debug_log_if_needed()
+
+
+def _debug_log(msg: str) -> None:
+    """DEBUG-level diagnostic write. Equivalent to ``_log_at(Level.DEBUG, msg)``.
+
+    Kept as a separate name (instead of inlining the call sites) because
+    ~250 existing callers reference it; the gate behavior is identical
+    when ``LARKHELM_LOG_LEVEL=DEBUG`` (the default).
+    """
+    _log_at(Level.DEBUG, msg)
+
+
+def info(msg: str) -> None:
+    """INFO-level diagnostic write. Format: ``[HH:MM:SS] <INFO> {msg}``."""
+    _log_at(Level.INFO, msg)
+
+
+def warn(msg: str) -> None:
+    """WARN-level diagnostic write. Use for degraded-behavior notices that
+    a operator-on-call would want to see (e.g. credential fetch failed,
+    falling back to defaults). Replaces the legacy "print to stderr +
+    _debug_log" double-write idiom in ``lark_client.py``.
+    """
+    _log_at(Level.WARN, msg)
+
+
+def error(msg: str) -> None:
+    """ERROR-level diagnostic write. Use for failures that interrupt
+    a user-visible task (so the operator can correlate with a ticket)."""
+    _log_at(Level.ERROR, msg)
 
 
 def safe_log(msg: str) -> None:
