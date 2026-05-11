@@ -4,6 +4,7 @@ larkhelm · command implementations
 Contains all _cmd_* functions, _dispatch_button_cmd(), and helper utilities.
 """
 import json
+import os
 import re
 import subprocess
 import threading
@@ -30,6 +31,7 @@ from larkhelm.lark_client import (
     react_to_message, delete_reaction,
     EMOJI_PROCESSING, EMOJI_DONE, EMOJI_ERROR,
     send_permission_guide,
+    upload_file_to_feishu, send_file_message, download_file_by_key,
 )
 from larkhelm.card_builder import _make_card, _fmt_elapsed
 
@@ -437,6 +439,9 @@ def _cmd_help(chat_id: str, msg_id: str = None):
         "\n"
         "**🧠 记忆系统（自动学习，无需手工维护）**\n"
         "**/memory** — 查看三层记忆（全局/项目/会话）当前内容\n"
+        "**/memory status** — 查看记忆数据摘要（chat 数、日志大小等）\n"
+        "**/memory export** — 导出当前 chat 的持久化数据为 zip 文件\n"
+        "**/memory import [file_key]** — 从 zip 文件导入记忆数据\n"
         "全局/项目记忆每 10 轮自动从对话中提取并更新；以下命令用于手工覆盖：\n"
         "**/memory set global <内容>** — 手动覆盖全局偏好\n"
         "**/memory set project <内容>** — 手动覆盖当前项目记忆\n"
@@ -1291,7 +1296,7 @@ def _cmd_btw(chat_id: str, question: str, user_msg_id: str):
 # ═══════════════════════════════════════════════════
 
 def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None):
-    """/memory — show/set/clear/update/gc the three-tier memory system.
+    """/memory — show/set/clear/update/gc/export/import/status the three-tier memory system.
 
     /memory                        show all active layers
     /memory set global <text>      overwrite global layer (≤500 chars)
@@ -1301,6 +1306,9 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None):
     /memory list                   list every project_*.md file
     /memory gc [days] [apply]      clean up stale project memory (dry-run by
                                    default; ``days`` defaults to 30, must ≥ 1)
+    /memory export                 export current chat persistent data as a zip file
+    /memory import [file_key]      import from a zip file (reply with file or pass file_key)
+    /memory status                 show summary of persistent state sizes
     """
     from larkhelm.memory import (
         load_global_memory, save_global_memory,
@@ -1310,10 +1318,119 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None):
         _load_md_frontmatter, _load_md_body, _ensure_dir, MEMORY_HOME_DIR,
         GLOBAL_MAX_CHARS, PROJECT_MAX_CHARS, AUTO_UPDATE_EVERY,
     )
-    from larkhelm.chat_state import _get_cwd
+    from larkhelm.chat_state import _get_cwd, _set_chat_field, _get_chat_state
     cwd = _get_cwd(chat_id)
     args = args.strip()
     sub = args.lower()
+
+    # ── /memory export ───────────────────────────────────────────────────────
+    if sub == "export":
+        mid = send_card_reply(chat_id, msg_id, "📦 导出中", "正在打包记忆数据…", color="grey")
+        try:
+            from larkhelm.memory_io import export_memory
+            zip_path = export_memory(chat_ids=[chat_id])
+            file_key = upload_file_to_feishu(zip_path, file_type="stream")
+            if file_key:
+                send_file_message(chat_id, file_key, msg_id=msg_id)
+                # Clean up the temporary export zip after successful upload
+                try:
+                    zip_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                if mid:
+                    _patch_card_raw(mid, _make_card("✅ 导出完成",
+                                                     f"文件已发送（{zip_path.name}）。",
+                                                     color="green"))
+            else:
+                if mid:
+                    _patch_card_raw(mid, _make_card("❌ 上传失败",
+                                                     "文件生成成功但上传到飞书失败，请查看日志。",
+                                                     color="red"))
+        except Exception as e:
+            _debug_log(f"[memory export] failed: {e}")
+            send_card_reply(chat_id, msg_id, "❌ 导出失败", str(e)[:300], color="red")
+        return
+
+    # ── /memory import ───────────────────────────────────────────────────────
+    if sub.startswith("import"):
+        rest = args[6:].strip()  # len("import") == 6
+        if rest:
+            # Direct import by file_key
+            file_key = rest
+            mid = send_card_reply(chat_id, msg_id, "📥 导入中", "正在下载并导入记忆数据…", color="grey")
+            try:
+                import tempfile
+                from larkhelm.memory_io import import_memory
+                _fd, _tmp = tempfile.mkstemp(suffix=".zip", prefix=f"larkhelm_import_{chat_id[:8]}_")
+                os.close(_fd)
+                tmp_path = Path(_tmp)
+                ok = download_file_by_key(file_key, tmp_path)
+                if not ok:
+                    if mid:
+                        _patch_card_raw(mid, _make_card("❌ 下载失败",
+                                                         "无法通过 file_key 下载文件，请确认 key 正确。",
+                                                         color="red"))
+                    return
+                report = import_memory(tmp_path)
+                n_written = len(report["written"])
+                n_skipped = len(report["skipped"])
+                lines = [f"**导入成功：** {n_written} 个文件"]
+                if n_skipped:
+                    lines.append(f"**跳过：** {n_skipped} 个文件")
+                if report.get("warnings"):
+                    lines.append(f"**警告：** {'；'.join(report['warnings'])}")
+                color = "green" if not n_skipped else "orange"
+                body = "\n\n".join(lines)
+                if mid:
+                    _patch_card_raw(mid, _make_card("✅ 导入完成", body, color=color))
+                else:
+                    send_card_reply(chat_id, msg_id, "✅ 导入完成", body, color=color)
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            except Exception as e:
+                _debug_log(f"[memory import] failed: {e}")
+                if mid:
+                    _patch_card_raw(mid, _make_card("❌ 导入失败", str(e)[:300], color="red"))
+                else:
+                    send_card_reply(chat_id, msg_id, "❌ 导入失败", str(e)[:300], color="red")
+            return
+        else:
+            # Prompt user to reply with a file or pass file_key
+            # Store timestamp so the pending flag auto-expires after 10 minutes
+            import time as _time
+            _set_chat_field(chat_id, "pending_memory_import", _time.time())
+            send_card_reply(chat_id, msg_id, "📥 等待导入",
+                            "请直接回复发送 zip 文件，或发送：\n\n"
+                            "`/memory import <file_key>`\n\n"
+                            "_提示：file_key 可在文件消息的原始内容中获取。_",
+                            color="blue")
+            return
+
+    # ── /memory status ───────────────────────────────────────────────────────
+    if sub == "status":
+        try:
+            from larkhelm.memory_io import get_memory_status
+            st = get_memory_status(chat_id)
+            lines = [
+                f"**Chat 数量：** {st['n_chats']}",
+                f"**Session ID 数：** {st['n_sessions']}",
+                f"**日志总大小：** {st['log_size'] // 1024} KB",
+                f"**数据总大小：** {st['data_size'] // 1024} KB",
+                f"**记忆文件数：** {st['memory_files']}（{st['memory_size'] // 1024} KB）",
+            ]
+            if st['chats']:
+                lines.append("\n**各 Chat 摘要：**")
+                for c in st['chats'][:10]:
+                    lines.append(f"• `{c['chat_id']}` · {c['model']} · {c['turn_count']} 轮")
+                if len(st['chats']) > 10:
+                    lines.append(f"_… 共 {len(st['chats'])} 个 chat_")
+            send_card_reply(chat_id, msg_id, "📊 记忆状态", "\n".join(lines), color="blue")
+        except Exception as e:
+            _debug_log(f"[memory status] failed: {e}")
+            send_card_reply(chat_id, msg_id, "❌ 查询失败", str(e)[:300], color="red")
+        return
 
     # ── /memory set global <text> ────────────────────────────────────────────
     if sub.startswith("set global ") or sub == "set global":
