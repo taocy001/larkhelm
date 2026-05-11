@@ -3,8 +3,6 @@ import threading
 
 from larkhelm.runner_base import (
     QueryCancelledError,
-    MAX_AI_PROCS,
-    _ai_proc_sem,
     _active_proc_count,
     _MAX_STDERR_LINES,
     active_proc_count,
@@ -12,6 +10,8 @@ from larkhelm.runner_base import (
     _inc_active,
     _dec_active,
     _truncate_tool_result,
+    get_ai_sem,
+    get_max_ai_procs,
 )
 from larkhelm.runner_claude import _build_stream_json_input
 from larkhelm.runner_kimi import _build_kimi_stream_input
@@ -19,6 +19,23 @@ from larkhelm.runner_deepseek import DeepSeekRunner
 
 import larkhelm.config as _cfg
 from larkhelm.chat_state import _load_sid
+
+
+# Back-compat shim. Older tests / external callers do
+# ``from larkhelm.ai_runner import _ai_proc_sem`` or
+# ``from larkhelm.ai_runner import MAX_AI_PROCS``. The straight ``from X import``
+# pattern is exactly the P0 bug we're fixing (a stale binding survives
+# ``_init_ai_sem`` rebuilding the live sem). To keep those imports working
+# *and* always reflect the current sem / cap, expose them via a module-level
+# ``__getattr__``. Internal larkhelm code MUST use ``get_ai_sem()`` /
+# ``get_max_ai_procs()``; the shim is for tests that haven't been migrated
+# and for any out-of-tree consumers.
+def __getattr__(name):
+    if name == "_ai_proc_sem":
+        return get_ai_sem()
+    if name == "MAX_AI_PROCS":
+        return get_max_ai_procs()
+    raise AttributeError(f"module 'larkhelm.ai_runner' has no attribute {name!r}")
 
 
 def _spawn_claude_proc(chat_id, message, sid, cwd, cancel_ev=None, on_text=None,

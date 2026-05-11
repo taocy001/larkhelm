@@ -44,6 +44,8 @@ class _RuntimeConfig:
     MAX_CARD_LEN:     int
     ALLOWED_CHATS:    set
     GEMINI_IDLE_TTL:  int
+    MAX_AI_PROCS_CONFIG: "int | None"
+    MAX_AI_PROCS:        int
     DEFAULT_CWD:      str
     CRON_TIMEZONE:    str
     DOC_AUTO_INJECT:        bool
@@ -100,6 +102,15 @@ HARD_TIMEOUT:     int
 MAX_CARD_LEN:     int
 ALLOWED_CHATS:    set
 GEMINI_IDLE_TTL:  int
+# Concurrent AI subprocess cap. ``MAX_AI_PROCS_CONFIG`` reflects the *raw*
+# operator preference: a positive int means "honour this", ``None`` means
+# "auto-detect from cgroup / RAM". ``MAX_AI_PROCS`` (set after
+# ``runner_base._init_ai_sem()`` resolves the value) holds the *effective*
+# cap used by the running bridge. New code should read the effective value
+# via ``runner_base.get_max_ai_procs()`` — these globals are kept for
+# back-compat and observability (e.g. /status output).
+MAX_AI_PROCS_CONFIG: "int | None"
+MAX_AI_PROCS:        int
 DEFAULT_CWD:      str
 CRON_TIMEZONE:    str
 
@@ -330,6 +341,7 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     global DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, DEFAULT_MODEL
     global SKIP_PERMISSIONS, RESPONSE_TIMEOUT, HARD_TIMEOUT, MAX_CARD_LEN
     global ALLOWED_CHATS, GEMINI_IDLE_TTL, DEFAULT_CWD, CRON_TIMEZONE
+    global MAX_AI_PROCS_CONFIG, MAX_AI_PROCS
     global PERM_HOOK_SCRIPT, PERM_SOCKET_PATH
     global DOC_AUTO_INJECT, DOC_INJECT_MAX_CHARS, DOC_INJECT_MAX_DOCS
     global DOC_READ_MAX_CHARS, DEFAULT_DRIVE_FOLDER, DOC_WRITE_CONFIRM, DOC_WRITE_BACKEND
@@ -418,6 +430,42 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     MAX_CARD_LEN     = int(config.get("max_card_len", 3000))
     ALLOWED_CHATS    = set(config.get("allowed_chat_ids", []))
     GEMINI_IDLE_TTL  = int(config.get("gemini_idle_ttl", 1800))
+
+    # max_ai_procs: positive int → honour; "auto" / None / 0 / non-int → probe.
+    # The probe (runner_base._compute_max_procs) walks cgroup MemoryMax →
+    # physical RAM and computes a memory-budget-safe value so 4-GB hosts
+    # under tight cgroup quotas don't OOM (the bug round-3 of OOM defense
+    # is fixing). See runner_base for the formula and HARD_CEILING.
+    _raw_max_procs = config.get("max_ai_procs")
+    if _raw_max_procs is None or (isinstance(_raw_max_procs, str) and _raw_max_procs.lower() == "auto"):
+        MAX_AI_PROCS_CONFIG = None
+    elif (isinstance(_raw_max_procs, int)
+          and not isinstance(_raw_max_procs, bool)
+          and _raw_max_procs > 0):
+        # bool ⊆ int in Python — must reject ``True``/``False`` here
+        # explicitly, otherwise ``max_ai_procs: true`` becomes a silent
+        # cap=1 and the user gets no warning that their config is wrong.
+        MAX_AI_PROCS_CONFIG = _raw_max_procs
+    else:
+        print(
+            f"⚠️  max_ai_procs={_raw_max_procs!r} 无效（允许：正整数 / \"auto\" / 缺省），已回退为 auto-detect",
+            file=sys.stderr,
+        )
+        MAX_AI_PROCS_CONFIG = None
+    # Trigger sem rebuild now that MAX_AI_PROCS_CONFIG is set; runner_base
+    # logs the effective value via larkhelm.log.info. The mirror global
+    # MAX_AI_PROCS is populated by _init_ai_sem in runner_base; we read it
+    # back here so /status and the _RuntimeConfig snapshot see the same value.
+    try:
+        from larkhelm.runner_base import _init_ai_sem as _rb_init_ai_sem, get_max_ai_procs as _rb_get_max
+        _rb_init_ai_sem()
+        MAX_AI_PROCS = _rb_get_max()
+    except Exception as _e:
+        # Bootstrap-safe fallback: if runner_base import fails for any reason
+        # (test mocks, missing deps), don't crash the whole bridge — fall back
+        # to the legacy default of 2 so concurrency is at least bounded.
+        print(f"[config] _init_ai_sem failed (defaulting MAX_AI_PROCS=2): {_e}", file=sys.stderr)
+        MAX_AI_PROCS = 2
     DEFAULT_CWD      = config.get("default_cwd", str(Path.home() / "code"))
     CRON_TIMEZONE    = config.get("timezone", "Asia/Shanghai")
     if HARD_TIMEOUT <= RESPONSE_TIMEOUT:
@@ -624,6 +672,7 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         SKIP_PERMISSIONS=SKIP_PERMISSIONS, RESPONSE_TIMEOUT=RESPONSE_TIMEOUT,
         HARD_TIMEOUT=HARD_TIMEOUT, MAX_CARD_LEN=MAX_CARD_LEN,
         ALLOWED_CHATS=ALLOWED_CHATS, GEMINI_IDLE_TTL=GEMINI_IDLE_TTL,
+        MAX_AI_PROCS_CONFIG=MAX_AI_PROCS_CONFIG, MAX_AI_PROCS=MAX_AI_PROCS,
         DEFAULT_CWD=DEFAULT_CWD, CRON_TIMEZONE=CRON_TIMEZONE,
         DOC_AUTO_INJECT=DOC_AUTO_INJECT, DOC_INJECT_MAX_CHARS=DOC_INJECT_MAX_CHARS,
         DOC_INJECT_MAX_DOCS=DOC_INJECT_MAX_DOCS, DOC_READ_MAX_CHARS=DOC_READ_MAX_CHARS,

@@ -62,6 +62,7 @@ CLI --data-dir > LARKHELM_DATA_DIR env > /var/lib/larkhelm > ~/.local/share/lark
 | `max_card_len` | Feishu card char limit (default: 3000) |
 | `allowed_chat_ids` | Whitelist of chat IDs (empty = all allowed) |
 | `gemini_idle_ttl` | Gemini process idle TTL in seconds (default: 1800) |
+| `max_ai_procs` | 并发 AI 子进程上限：正整数 / `"auto"` / 缺省（默认 `"auto"`，根据 cgroup MemoryMax 或物理 RAM 探测，公式见 `runner_base._compute_max_procs`） |
 | `timezone` | Cron task timezone (e.g. `"Asia/Shanghai"`) |
 | `voice_enabled` | M3.2 语音转文字总开关（默认 `false`；关闭时 bridge 行为完全不变） |
 | `voice_model_size` | faster-whisper 模型规格 `tiny`/`base`/`small`/`medium`/`large-v3`（默认 `"small"`） |

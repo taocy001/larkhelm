@@ -392,7 +392,11 @@ def _crew_plan(chat_id: str, requirement: str, cwd: str,
     )
 
     import os as _os
-    from larkhelm.ai_runner import _ai_proc_sem
+    # Use get_ai_sem() at the point of acquisition rather than a
+    # ``from ... import _ai_proc_sem`` binding — the latter freezes the sem
+    # instance at import time and survives ``_init_ai_sem`` rebuilds, which
+    # is the P0 bug fixed by the round-3 OOM defense refactor.
+    from larkhelm.runner_base import get_ai_sem
 
     args = [
         _cfg.CLAUDE_CMD, "--print", "--output-format", "stream-json", "--verbose",
@@ -409,8 +413,12 @@ def _crew_plan(chat_id: str, requirement: str, cwd: str,
 
     plan_timeout = min(_cfg.RESPONSE_TIMEOUT, 120)
 
-    # Acquire process semaphore so Manager counts against the global AI subprocess limit
-    if not _ai_proc_sem.acquire(timeout=plan_timeout):
+    # Acquire process semaphore so Manager counts against the global AI
+    # subprocess limit. Capture the exact sem instance so the matching
+    # release in the finally clause hits the same object even if
+    # _init_ai_sem rebuilds the global mid-flight.
+    _crew_sem = get_ai_sem()
+    if not _crew_sem.acquire(timeout=plan_timeout):
         _debug_log("[Crew] Manager: timed out waiting for AI process slot")
         return None
 
@@ -488,7 +496,7 @@ def _crew_plan(chat_id: str, requirement: str, cwd: str,
             proc.wait()  # always reap zombie regardless of kill outcome
 
     finally:
-        _ai_proc_sem.release()
+        _crew_sem.release()
 
     full_text = "\n".join(text_buf)
 

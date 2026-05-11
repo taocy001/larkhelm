@@ -19,10 +19,242 @@ class QueryCancelledError(Exception):
     """Raised when a query or crew agent is cancelled by the user or cancel_ev."""
 
 
-MAX_AI_PROCS = 3
-_ai_proc_sem = threading.Semaphore(MAX_AI_PROCS)
+# ── AI subprocess concurrency cap ─────────────────────────────────────────────
+#
+# The cap is *dynamic*: ``_init_ai_sem`` reads ``_cfg.MAX_AI_PROCS_CONFIG`` and
+# either honours an explicit positive integer or runs ``_compute_max_procs`` to
+# derive a memory-budget-aware value (cgroup MemoryMax → physical RAM fallback).
+#
+# Anti-staleness contract: code MUST acquire the semaphore via ``get_ai_sem()``
+# at the *point of use*, not import-time. Pre-fix bug — ``from runner_base
+# import _ai_proc_sem`` copied a binding into the importing module that
+# survived ``_init_ai_sem`` re-creating the underlying object, so a chat
+# could end up holding a slot in a sem with capacity-3 even after the
+# runtime cap had been re-tightened to 2 by config or auto-detect. The fix
+# is enforced by replacing every ``from ... import _ai_proc_sem`` consumer
+# with ``get_ai_sem()`` calls, see ``ai_runner.py`` / ``runner_deepseek.py``
+# / ``crew/_commands.py``.
+
+MAX_AI_PROCS_DEFAULT = 2          # fallback when probing fails
+# HARD_CEILING justification: WORKER_RSS_MB_DEFAULT (800) × 8 ≈ 6.4 GB peak AI
+# RSS — already past the comfortable budget on commodity 8-GB hosts even
+# without the bridge baseline. Beyond 8, the bottleneck shifts from memory
+# to the Feishu card-update rate (one card per chat per ~0.3 s) and the
+# per-chat lock contention; more parallel CLIs would just spend their time
+# stalled on card edits. Treat as a "no host should ever exceed this"
+# safety rail rather than a tunable.
+HARD_CEILING = 8
+WORKER_RSS_MB_DEFAULT = 800       # typical claude/kimi RSS during tool-burst (conservative)
+BRIDGE_BASELINE_MB = 400          # python + lark_oapi + watchdog steady-state RSS
+SAFETY_MARGIN_MB = 400            # extra buffer for cron / cleanup / transient spikes
+
+_MAX_AI_PROCS = MAX_AI_PROCS_DEFAULT
+_ai_proc_sem = threading.Semaphore(_MAX_AI_PROCS)
+# Guards the ``_ai_proc_sem`` swap inside ``_init_ai_sem``. In practice
+# ``_init_ai_sem`` only runs once at boot (called from ``config._init_runtime``)
+# so contention is impossible — this lock is paranoia against a future caller
+# that decides to re-probe at runtime. The hot read path (``get_ai_sem``)
+# does NOT take this lock and relies on Python's atomic attribute load.
+_ai_sem_lock = threading.Lock()
+
+# Back-compat alias — some legacy code reads ``MAX_AI_PROCS`` directly. Kept
+# as a *mirror* of ``_MAX_AI_PROCS``; assigned by ``_init_ai_sem`` and then
+# treated as read-only. New code MUST use ``get_max_ai_procs()`` instead.
+MAX_AI_PROCS = _MAX_AI_PROCS
+
 _active_proc_count = 0
 _active_proc_count_lock = threading.Lock()
+
+
+def _detect_cgroup_memory_max() -> int | None:
+    """Detect cgroup v2 ``memory.max`` for the *current* process.
+
+    Walks ``/proc/self/cgroup`` to find the process's actual cgroup path,
+    then probes ``/sys/fs/cgroup<path>/memory.max`` from the leaf up to
+    root — returning the first concrete byte limit. The sentinel ``"max"``
+    (= no limit) at a given level causes the walk to continue upward.
+
+    Pre-fix bug: this function hard-coded
+    ``/sys/fs/cgroup/memory.max`` (the *root* cgroup). On systemd-managed
+    hosts the root file does not exist; the bridge runs under
+    ``/system.slice/larkhelm.service``, whose ``memory.max`` lives at
+    ``/sys/fs/cgroup/system.slice/larkhelm.service/memory.max``. The
+    pre-fix function therefore always returned ``None`` and the prod-host
+    2.8 GB cgroup limit was invisible to ``_compute_max_procs``.
+
+    Returns the byte limit, or ``None`` for cgroup v1 hosts, unreadable
+    filesystem, or genuine no-limit chains.
+    """
+    try:
+        # Step 1 — resolve our cgroup path from /proc/self/cgroup.
+        # v2 unified format: '0::<path>\n' (single line, hier_id=0, empty subsys).
+        # v1 format: '<hier_id>:<subsys>:<path>\n' (multi-line, hier_id != 0).
+        cgroup_path: str | None = None
+        with open("/proc/self/cgroup", "r") as f:
+            for line in f:
+                parts = line.rstrip("\n").split(":", 2)
+                if len(parts) == 3 and parts[0] == "0" and parts[1] == "":
+                    cgroup_path = parts[2]
+                    break
+        if cgroup_path is None:
+            return None  # cgroup v1 host, or unrecognised format
+
+        # Step 2 — generate candidate ``memory.max`` paths from leaf → root.
+        # cgroup_path = '/system.slice/larkhelm.service' →
+        #   /sys/fs/cgroup/system.slice/larkhelm.service/memory.max
+        #   /sys/fs/cgroup/system.slice/memory.max
+        #   /sys/fs/cgroup/memory.max
+        rel = cgroup_path.strip("/")
+        segs = rel.split("/") if rel else []
+        candidates: list[str] = []
+        for i in range(len(segs), -1, -1):
+            sub = "/".join(segs[:i])
+            candidates.append(
+                "/sys/fs/cgroup" + ("/" + sub if sub else "") + "/memory.max"
+            )
+
+        # Step 3 — return the first concrete numeric limit; skip ``"max"``
+        # sentinels and unreadable files, falling through to the next level.
+        for cand in candidates:
+            try:
+                with open(cand, "r") as f:
+                    val = f.read().strip()
+            except (FileNotFoundError, PermissionError, OSError):
+                continue
+            if not val or val == "max":
+                continue  # no limit at this level → walk upward
+            try:
+                return int(val)
+            except ValueError:
+                continue
+
+        return None  # entire chain is unlimited or unreadable
+    except Exception:
+        return None
+
+
+def _detect_physical_ram_mb() -> int:
+    """Read ``MemTotal`` from /proc/meminfo; returns MB, or 4096 on failure.
+
+    The conservative 4 GB fallback matches typical 4-GB VPS where the OOM
+    incidents originated — guessing high would silently re-introduce the OOM.
+    """
+    try:
+        with open("/proc/meminfo", "r") as f:
+            first = f.readline()
+    except OSError:
+        return 4096
+    # Format: "MemTotal:       16321448 kB"
+    parts = first.split()
+    if len(parts) < 2:
+        return 4096
+    try:
+        return int(parts[1]) // 1024
+    except ValueError:
+        return 4096
+
+
+def _compute_max_procs(worker_rss_mb: int = WORKER_RSS_MB_DEFAULT) -> tuple[int, str]:
+    """Derive a memory-safe ``MAX_AI_PROCS`` value from the host's memory budget.
+
+    Decision tree:
+      1. ``cgroup memory.max`` → use as budget if present and finite.
+      2. Otherwise → physical RAM (``MemTotal`` from /proc/meminfo).
+      3. ``budget_available = budget - BRIDGE_BASELINE_MB - SAFETY_MARGIN_MB``.
+      4. ``n = floor(budget_available / worker_rss_mb)``.
+      5. Clamp to ``[1, HARD_CEILING]``.
+
+    Returns ``(n, reason)`` where ``reason`` is a single human-readable line
+    suitable for logging at INFO level.
+    """
+    cgroup_bytes = _detect_cgroup_memory_max()
+    if cgroup_bytes is not None:
+        available_mb = cgroup_bytes // (1024 * 1024)
+        source = f"cgroup_max={available_mb / 1024:.1f}G"
+    else:
+        available_mb = _detect_physical_ram_mb()
+        source = f"physical_ram={available_mb / 1024:.1f}G"
+
+    budget_mb = available_mb - BRIDGE_BASELINE_MB - SAFETY_MARGIN_MB
+    if budget_mb <= 0:
+        # Tiny host (≤ 800 MB free after baselines) — floor to 1 anyway, but
+        # surface that in the reason so operators investigate.
+        reason = (f"{source}, budget={budget_mb}M (≤0!), worker_rss={worker_rss_mb}M "
+                  f"→ floored to 1")
+        return 1, reason
+
+    n = budget_mb // worker_rss_mb
+    n = max(1, min(HARD_CEILING, n))
+    reason = (f"{source}, budget={budget_mb / 1024:.1f}G, "
+              f"worker_rss={worker_rss_mb / 1024:.1f}G → {n}")
+    return int(n), reason
+
+
+def _init_ai_sem() -> None:
+    """Resolve the effective concurrency cap and rebuild ``_ai_proc_sem``.
+
+    Reads ``_cfg.MAX_AI_PROCS_CONFIG`` (set by ``config._init_runtime``).
+    Values:
+
+      * positive int → honoured verbatim (operator override)
+      * ``None`` / 0 / negative / non-int → auto-detect via ``_compute_max_procs``
+
+    Idempotent: if the resolved value already matches ``_MAX_AI_PROCS`` no
+    new semaphore is constructed (avoids orphaning in-flight ``acquire``
+    callers — though the caller protocol via ``get_ai_sem()`` makes that
+    safe regardless).
+    """
+    global _MAX_AI_PROCS, _ai_proc_sem, MAX_AI_PROCS
+
+    raw = getattr(_cfg, "MAX_AI_PROCS_CONFIG", None)
+    # NB: ``bool`` is a subclass of ``int`` in Python, so ``max_ai_procs: true``
+    # in JSON would otherwise be silently coerced to 1. We reject bools so the
+    # user sees the warning path in ``config._init_runtime`` instead of a
+    # mysterious cap of 1.
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+        n, reason = raw, "config override"
+    else:
+        n, reason = _compute_max_procs()
+
+    with _ai_sem_lock:
+        if n == _MAX_AI_PROCS:
+            # Update mirror just in case it drifted (paranoia; shouldn't happen)
+            MAX_AI_PROCS = _MAX_AI_PROCS
+            try:
+                from larkhelm.log import info as _info
+                _info(f"[Runner] MAX_AI_PROCS={_MAX_AI_PROCS} ({reason}) — unchanged")
+            except Exception:
+                pass
+            return
+        _MAX_AI_PROCS = n
+        _ai_proc_sem = threading.Semaphore(n)
+        MAX_AI_PROCS = n   # mirror — read-only after this point
+
+    try:
+        from larkhelm.log import info as _info
+        _info(f"[Runner] MAX_AI_PROCS={n} ({reason})")
+    except Exception:
+        # Bootstrap path — log module may not be wired up yet.
+        try:
+            print(f"[Runner] MAX_AI_PROCS={n} ({reason})", file=sys.stderr)
+        except Exception:
+            pass
+
+
+def get_ai_sem() -> threading.Semaphore:
+    """Return the *current* AI process semaphore.
+
+    All call sites that need to acquire/release the AI semaphore MUST go
+    through this getter rather than ``from runner_base import _ai_proc_sem``
+    so that ``_init_ai_sem`` rebuilds are visible everywhere — see the
+    P0 staleness note at the top of this module.
+    """
+    return _ai_proc_sem
+
+
+def get_max_ai_procs() -> int:
+    """Return the current concurrency cap (replaces direct ``MAX_AI_PROCS`` reads)."""
+    return _MAX_AI_PROCS
 
 
 def active_proc_count() -> int:
@@ -31,11 +263,24 @@ def active_proc_count() -> int:
         return _active_proc_count
 
 
-def _acquire_ai_sem(cancel_ev: threading.Event = None) -> None:
-    """Acquire AI process semaphore. Raises QueryCancelledError if cancel_ev fires first."""
-    while not _ai_proc_sem.acquire(timeout=1.0):
+def _acquire_ai_sem(cancel_ev: threading.Event = None) -> threading.Semaphore:
+    """Acquire the current AI process semaphore.
+
+    Returns the *exact* semaphore instance that was acquired, so callers can
+    release the same object even if ``_init_ai_sem`` rebuilds the live sem
+    concurrently (idempotent in practice — rebuilds only happen at boot —
+    but explicit symmetry beats relying on that invariant).
+
+    Raises ``QueryCancelledError`` if ``cancel_ev`` fires before a slot opens.
+    """
+    sem = get_ai_sem()
+    while not sem.acquire(timeout=1.0):
         if cancel_ev and cancel_ev.is_set():
             raise QueryCancelledError("cancelled while waiting for AI process slot")
+        # Re-read in case _init_ai_sem swapped the global mid-wait (boot race).
+        # In steady state this is the same object as before.
+        sem = get_ai_sem()
+    return sem
 
 
 def _inc_active() -> None:
@@ -342,7 +587,7 @@ class BaseProcessRunner(abc.ABC):
         if stdin_content is not None:
             popen_kw["stdin"] = subprocess.PIPE
 
-        _acquire_ai_sem(self.cancel_ev)
+        sem_acquired = _acquire_ai_sem(self.cancel_ev)
         sem_held = True
         active_inc = False
         try:
@@ -406,7 +651,11 @@ class BaseProcessRunner(abc.ABC):
                     except Exception:
                         pass
             if sem_held:
-                _ai_proc_sem.release()
+                # Release the *same* sem instance we acquired — not whatever
+                # get_ai_sem() returns now. _init_ai_sem() can swap the live
+                # sem (only at startup, but be defensive); releasing the new
+                # one would inflate its capacity by 1 and leak the old slot.
+                sem_acquired.release()
             if active_inc:
                 _dec_active()
             self._cleanup_tmp()

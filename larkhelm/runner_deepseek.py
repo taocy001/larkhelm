@@ -45,9 +45,9 @@ from larkhelm.chat_state import _load_sid, _save_sid
 from larkhelm.runner_base import (
     QueryCancelledError,
     _acquire_ai_sem,
-    _ai_proc_sem,
     _inc_active,
     _dec_active,
+    get_ai_sem,
 )
 
 
@@ -306,7 +306,7 @@ class DeepSeekRunner:
             f"ns={self._ns} use_session={self.use_session}"
         )
 
-        _acquire_ai_sem(self.cancel_ev)
+        sem_acquired = _acquire_ai_sem(self.cancel_ev)
         sem_held = True
         active_inc = False
         try:
@@ -348,7 +348,9 @@ class DeepSeekRunner:
             # since the watcher is daemon-only and exits within one tick.
             self._completed.set()
             if sem_held:
-                _ai_proc_sem.release()
+                # Release the *exact* sem instance we acquired (P0 fix —
+                # see runner_base.get_ai_sem docstring).
+                sem_acquired.release()
             if active_inc:
                 _dec_active()
 
