@@ -56,6 +56,11 @@ class _RuntimeConfig:
     DEFAULT_WIKI_SPACE_ID:     str
     DEFAULT_WIKI_PARENT_TOKEN: str
     DEFAULT_OWNER_OPEN_ID:     str
+    # OAuth user_access_token (allows creating Feishu docs as the user directly,
+    # avoiding the "transfer ownership" notification chain — see oauth_user.py)
+    USER_TOKEN_PATH:    Path
+    OAUTH_REDIRECT_PORT: int
+    LOGGED_IN_OPEN_ID:   str
     PERM_HOOK_SCRIPT: str
     PERM_SOCKET_PATH: str
     SOURCE_DIR:       Path
@@ -111,6 +116,13 @@ DOC_WRITE_BACKEND:      str   # "auto" | "feishu" | "local"
 DEFAULT_WIKI_SPACE_ID:     str
 DEFAULT_WIKI_PARENT_TOKEN: str
 DEFAULT_OWNER_OPEN_ID:     str
+
+# OAuth user_access_token (see oauth_user.py)
+# When LOGGED_IN_OPEN_ID is set and matches the requested owner, doc-create
+# requests use a user_access_token and skip the transfer_owner notification.
+USER_TOKEN_PATH:    "Path"
+OAUTH_REDIRECT_PORT: int   # 0 = OS-assigned, used only for `larkhelm user-login` loopback
+LOGGED_IN_OPEN_ID:   str   # open_id of the user who completed `larkhelm user-login`
 
 # Permission approval socket path (derived from PID; fixed once _init_runtime sets it)
 PERM_HOOK_SCRIPT: str
@@ -547,6 +559,21 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     config.setdefault("intent_feedback_path", "")
     config.setdefault("intent_audit_path", "")
 
+    # ── OAuth user_access_token (see oauth_user.py) ──────────────────────
+    # The token file is loaded lazily by oauth_user.get_user_token(); this
+    # block only reads the cached ``open_id`` to populate LOGGED_IN_OPEN_ID
+    # so callers (lark_client.create_doc) can branch without I/O.
+    global USER_TOKEN_PATH, OAUTH_REDIRECT_PORT, LOGGED_IN_OPEN_ID
+    USER_TOKEN_PATH     = DATA_DIR / "user_token.json"
+    OAUTH_REDIRECT_PORT = int(config.get("oauth_redirect_port", 0))
+    LOGGED_IN_OPEN_ID   = ""
+    try:
+        if USER_TOKEN_PATH.exists():
+            _td = json.loads(USER_TOKEN_PATH.read_text())
+            LOGGED_IN_OPEN_ID = (_td.get("open_id") or "").strip()
+    except Exception as _e:
+        print(f"[config] user_token load failed (ignored): {_e}", file=sys.stderr)
+
     PERM_HOOK_SCRIPT  = str(Path(__file__).parent / "perm_hook.py")
     PERM_SOCKET_PATH  = str(DATA_DIR / "perm.sock")
 
@@ -605,6 +632,9 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         DEFAULT_WIKI_SPACE_ID=DEFAULT_WIKI_SPACE_ID,
         DEFAULT_WIKI_PARENT_TOKEN=DEFAULT_WIKI_PARENT_TOKEN,
         DEFAULT_OWNER_OPEN_ID=DEFAULT_OWNER_OPEN_ID,
+        USER_TOKEN_PATH=USER_TOKEN_PATH,
+        OAUTH_REDIRECT_PORT=OAUTH_REDIRECT_PORT,
+        LOGGED_IN_OPEN_ID=LOGGED_IN_OPEN_ID,
         PERM_HOOK_SCRIPT=PERM_HOOK_SCRIPT, PERM_SOCKET_PATH=PERM_SOCKET_PATH,
         SOURCE_DIR=SOURCE_DIR,
         VOICE_ENABLED=VOICE_ENABLED, VOICE_ENGINE=VOICE_ENGINE,
