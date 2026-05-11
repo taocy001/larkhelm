@@ -246,6 +246,117 @@ class OAuthUserTests(unittest.TestCase):
         # Scope is space-joined; argparse-urlencoded as ``+``.
         self.assertIn("scope=docx", url)
 
+    # ── _validate_callback (#23 — covers all 4 exit branches) ───────────
+
+    def test_validate_callback_success_returns_none(self):
+        self.assertIsNone(
+            ou._validate_callback("ok-code", "S", "", "S"))
+
+    def test_validate_callback_error_param_returns_4(self):
+        verdict = ou._validate_callback("", "S", "access_denied", "S")
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict[0], 4)
+        self.assertIn("access_denied", verdict[1])
+
+    def test_validate_callback_state_mismatch_returns_5(self):
+        verdict = ou._validate_callback("ok-code", "OTHER", "", "EXPECTED")
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict[0], 5)
+        self.assertIn("CSRF", verdict[1])
+
+    def test_validate_callback_missing_code_returns_6(self):
+        verdict = ou._validate_callback("", "S", "", "S")
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict[0], 6)
+
+    def test_validate_callback_state_mismatch_takes_priority_over_missing_code(self):
+        """If state is wrong, abort before looking at code — strict CSRF semantics."""
+        verdict = ou._validate_callback("", "OTHER", "", "EXPECTED")
+        self.assertEqual(verdict[0], 5)
+
+    def test_validate_callback_err_param_takes_priority(self):
+        """Error reported by Feishu wins over any other anomaly."""
+        verdict = ou._validate_callback("", "OTHER", "user_cancelled", "EXPECTED")
+        self.assertEqual(verdict[0], 4)
+
+    # ── _exchange_code (#23 — mock both HTTP layers) ────────────────────
+
+    def test_exchange_code_success_returns_normalized_dict(self):
+        fake_response = {
+            "code": 0,
+            "data": {
+                "access_token":       "u-fresh-XXX",
+                "token_type":         "Bearer",
+                "refresh_token":      "ur-fresh-YYY",
+                "expires_in":         7200,
+                "refresh_expires_in": 2_592_000,
+                "open_id":            "ou_exchange_test",
+                "scope":              "docx:document",
+            }
+        }
+        with patch.object(ou, "_get_app_access_token", return_value="app-fake"), \
+             patch.object(ou, "_http_post_json", return_value=fake_response):
+            out = ou._exchange_code("AUTHCODE", "http://127.0.0.1:1/callback")
+        self.assertEqual(out["access_token"], "u-fresh-XXX")
+        self.assertEqual(out["open_id"], "ou_exchange_test")
+        self.assertGreater(out["expires_at"], int(time.time()) + 7000)
+
+    def test_exchange_code_raises_when_feishu_returns_error_code(self):
+        with patch.object(ou, "_get_app_access_token", return_value="app-fake"), \
+             patch.object(ou, "_http_post_json",
+                          return_value={"code": 99999, "msg": "bad code"}):
+            with self.assertRaises(RuntimeError) as ctx:
+                ou._exchange_code("BADCODE", "http://127.0.0.1:1/callback")
+        # Error message must be sanitized — must NOT include the response dict
+        # repr (which on a non-error path could carry a refresh_token).
+        self.assertIn("99999", str(ctx.exception))
+        self.assertNotIn("'refresh_token'", str(ctx.exception))
+
+    # ── _safe_resp_summary (#3 — token redaction) ───────────────────────
+
+    def test_safe_resp_summary_drops_token_fields(self):
+        resp = {
+            "code": 0,
+            "msg":  "success",
+            "data": {"access_token": "u-LEAK", "refresh_token": "ur-LEAK"},
+        }
+        summary = ou._safe_resp_summary(resp)
+        self.assertIn("code=0", summary)
+        self.assertIn("success", summary)
+        self.assertNotIn("u-LEAK",  summary)
+        self.assertNotIn("ur-LEAK", summary)
+
+    def test_safe_resp_summary_handles_non_dict(self):
+        self.assertIn("non-dict", ou._safe_resp_summary("a string"))  # type: ignore[arg-type]
+
+    # ── mtime cache invalidation (#10) ──────────────────────────────────
+
+    def test_load_token_picks_up_external_rewrite(self):
+        """Another process overwrites the file → fast-path must re-read it."""
+        _write_token_file(self.token_path, access_token="u-OLD")
+        first = ou._load_token()
+        self.assertEqual(first["access_token"], "u-OLD")
+        # Simulate an external rewrite. ``time.sleep`` isn't required because we
+        # explicitly stamp a future mtime.
+        new_data = dict(first)
+        new_data["access_token"] = "u-NEW"
+        self.token_path.write_text(json.dumps(new_data, indent=2))
+        future = time.time() + 10
+        os.utime(self.token_path, (future, future))
+        second = ou._load_token()
+        self.assertEqual(second["access_token"], "u-NEW",
+                         "mtime change must invalidate cache")
+
+    def test_load_token_returns_cached_when_file_deleted_mid_flight(self):
+        """If the file vanishes between two reads, the in-process cache is
+        retained so concurrent threads mid-refresh aren't suddenly logged out
+        on a transient FS hiccup."""
+        _write_token_file(self.token_path)
+        first = ou._load_token()
+        self.token_path.unlink()
+        second = ou._load_token()
+        self.assertIs(first, second)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -88,49 +88,94 @@ _token_lock = threading.Lock()      # serializes refresh + save
 _token_cache: Optional[dict] = None  # in-process cache; None == not loaded
 
 
+_token_cache_mtime: float = 0.0  # mtime of the file when _token_cache was last filled
+
+
 def _load_token() -> Optional[dict]:
-    """Read and cache the token file. Returns ``None`` on any failure."""
-    global _token_cache
-    if _token_cache is not None:
-        return _token_cache
+    """Read and cache the token file. Returns ``None`` on any failure.
+
+    Cache invalidation: the on-disk mtime is checked on every call so that
+    out-of-band changes (``larkhelm user-logout`` from a separate process,
+    file rotated or rewritten) take effect within one read. The cache stays
+    when the file no longer exists, but ``is_token_valid`` / ``get_user_token``
+    re-check expiry and refresh-token validity, so a deleted file naturally
+    leads the caller to fall back.
+    """
+    global _token_cache, _token_cache_mtime
     path = _cfg.USER_TOKEN_PATH
     try:
-        if not path.exists():
-            return None
-        data = json.loads(path.read_text(encoding="utf-8"))
-        # Minimum shape check — anything else means a corrupted file, which
-        # we treat as "no token" so the caller falls back to tenant path.
-        if not isinstance(data, dict) or "access_token" not in data:
-            return None
-        _token_cache = data
-        return data
+        if path.exists():
+            cur_mtime = path.stat().st_mtime
+            if _token_cache is not None and cur_mtime == _token_cache_mtime:
+                return _token_cache
+            data = json.loads(path.read_text(encoding="utf-8"))
+            # Minimum shape check — anything else means a corrupted file, which
+            # we treat as "no token" so the caller falls back to tenant path.
+            if not isinstance(data, dict) or "access_token" not in data:
+                return None
+            _token_cache = data
+            _token_cache_mtime = cur_mtime
+            return data
+        # File missing on disk — keep last cached copy so concurrent threads
+        # mid-refresh don't get jerked around; but if cache also empty, no token.
+        return _token_cache
     except Exception as e:
-        print(f"[oauth_user] load token failed (ignored): {e}", file=sys.stderr)
+        # Never log the file contents — only the exception type/message.
+        print(f"[oauth_user] load token failed (ignored): {type(e).__name__}: {e}",
+              file=sys.stderr)
         return None
 
 
 def _save_token(data: dict) -> None:
-    """Atomically persist the token file with 0600 permissions."""
-    global _token_cache
+    """Atomically persist the token file with 0600 permissions.
+
+    Uses ``os.open(O_CREAT|O_EXCL|O_WRONLY, 0o600)`` for the temp file so the
+    file is **created** with 0600 — not chmod'd after the fact. Without this,
+    ``tmp.write_text`` would honour the process umask (usually 0o022 → 0o644)
+    and the tmp file would be world-readable for the few milliseconds before
+    the explicit ``chmod``. On a shared host with another local user this is
+    a real exposure window (file path is predictable: ``user_token.json.tmp``).
+
+    On a successful replace, the destination inherits the tmp file's mode
+    (rename doesn't change permissions), so the on-disk token is 0600 from
+    the very first stat. On failure the partial tmp file is cleaned up.
+    """
+    global _token_cache, _token_cache_mtime
     path = _cfg.USER_TOKEN_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
-    # Write + chmod the tmp file *before* the rename, so the destination never
-    # exists in a world-readable state — even briefly. ``os.replace`` is atomic.
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                   encoding="utf-8")
+    # If a previous failed write left a stale tmp behind, O_EXCL would fail;
+    # remove it first. The risk of stale tmp is contained to the same UID's
+    # files in our DATA_DIR, so unlinking is safe.
     try:
-        os.chmod(tmp, 0o600)
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    fd = os.open(str(tmp), flags, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception:
-        pass  # Best-effort on non-POSIX; the data is already secret-grade.
+        # Don't leave a half-written tmp file around to confuse the next write.
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+        raise
     os.replace(tmp, path)
     _token_cache = data
+    try:
+        _token_cache_mtime = path.stat().st_mtime
+    except Exception:
+        _token_cache_mtime = 0.0
 
 
 def _clear_cache() -> None:
     """Forget the in-process token cache. Used after logout / refresh failures."""
-    global _token_cache
+    global _token_cache, _token_cache_mtime
     _token_cache = None
+    _token_cache_mtime = 0.0
 
 
 # ── HTTP helpers ────────────────────────────────────────────────────────────
@@ -147,13 +192,24 @@ def _http_post_json(url: str, body: dict, *, headers: Optional[dict] = None,
         return json.loads(resp.read())
 
 
+def _safe_resp_summary(resp: dict) -> str:
+    """Render a Feishu response for human eyes without leaking token fields.
+
+    Used in error paths that may surface to stderr / log. Keeps the protocol
+    fields needed for debugging (``code`` / ``msg``) and drops anything else.
+    """
+    if not isinstance(resp, dict):
+        return f"<non-dict response: {type(resp).__name__}>"
+    return f"code={resp.get('code', '?')} msg={resp.get('msg', '?')!r}"
+
+
 def _get_app_access_token() -> str:
     """Fetch an ``app_access_token``. Required by the OAuth exchange endpoints."""
     resp = _http_post_json(APP_TOKEN_URL,
                            {"app_id": _cfg.APP_ID, "app_secret": _cfg.APP_SECRET})
     tok = resp.get("app_access_token", "")
     if not tok:
-        raise RuntimeError(f"app_access_token fetch failed: {resp}")
+        raise RuntimeError(f"app_access_token fetch failed: {_safe_resp_summary(resp)}")
     return tok
 
 
@@ -176,7 +232,7 @@ def _exchange_code(code: str, redirect_uri: str) -> dict:
         headers={"Authorization": f"Bearer {app_tok}"},
     )
     if resp.get("code", 0) != 0:
-        raise RuntimeError(f"access_token exchange failed: {resp}")
+        raise RuntimeError(f"access_token exchange failed: {_safe_resp_summary(resp)}")
     return _normalize_token_response(resp)
 
 
@@ -189,7 +245,7 @@ def _refresh_token_call(refresh_token: str) -> dict:
         headers={"Authorization": f"Bearer {app_tok}"},
     )
     if resp.get("code", 0) != 0:
-        raise RuntimeError(f"refresh_token call failed: {resp}")
+        raise RuntimeError(f"refresh_token call failed: {_safe_resp_summary(resp)}")
     return _normalize_token_response(resp)
 
 
@@ -336,6 +392,7 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 — http.server convention
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path != _CALLBACK_PATH:
+            # Browsers fetch /favicon.ico aggressively; 404 silently.
             self.send_response(404)
             self.end_headers()
             return
@@ -343,6 +400,17 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
         code = (params.get("code") or [""])[0]
         state = (params.get("state") or [""])[0]
         err = (params.get("error") or [""])[0]
+        # Defense in depth: if a bare ``/callback`` request lands here without
+        # either ``code`` or ``error``, refuse to satisfy the waiting queue.
+        # Any local process could otherwise ``curl http://127.0.0.1:<port>/callback``
+        # and force ``cli_login`` to exit with "missing code" — a trivial
+        # local DoS of the interactive login flow.
+        if not code and not err:
+            self.send_response(400)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"<h2>Bad request: missing code or error.</h2>")
+            return
         # Acknowledge to the user's browser before signaling the main thread,
         # otherwise the browser sees a connection reset when the server tears
         # down (the main thread shuts the server down on signal).
@@ -351,8 +419,6 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         if err:
             html = f"<h2>Authorization failed: {err}</h2><p>You can close this window.</p>"
-        elif not code:
-            html = "<h2>Missing code parameter.</h2><p>You can close this window.</p>"
         else:
             html = ("<h2>Authorization complete.</h2>"
                     "<p>You can close this window and return to the terminal.</p>")
@@ -361,6 +427,29 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
             self.server.result_queue.put((code, state, err))  # type: ignore[attr-defined]
         except Exception:
             pass
+
+
+def _validate_callback(code: str, recv_state: str, err: str,
+                       expected_state: str) -> Optional[tuple[int, str]]:
+    """Validate the parameters returned by the OAuth callback.
+
+    Returns ``None`` when the callback is valid (caller proceeds to exchange
+    ``code`` for a token), or ``(exit_code, message)`` describing why the
+    flow should abort. Extracted from ``_run_loopback_login`` so the 4
+    error branches can be unit-tested without spinning up an HTTP server.
+
+    Exit codes match ``_run_loopback_login``'s return contract:
+      * 4 — user denied authorization or Feishu reported an error
+      * 5 — state parameter does not match (CSRF / replay)
+      * 6 — code is missing despite no explicit error
+    """
+    if err:
+        return (4, f"授权被拒绝: {err}")
+    if recv_state != expected_state:
+        return (5, "state 不匹配，疑似 CSRF，拒绝")
+    if not code:
+        return (6, "回调无 code")
+    return None
 
 
 def _pick_port() -> int:
@@ -409,15 +498,11 @@ def _run_loopback_login() -> int:
         except queue.Empty:
             print("[user-login] 超时（5 min），登录取消。", file=sys.stderr)
             return 3
-        if err:
-            print(f"[user-login] 授权被拒绝: {err}", file=sys.stderr)
-            return 4
-        if recv_state != state:
-            print("[user-login] state 不匹配，疑似 CSRF，拒绝。", file=sys.stderr)
-            return 5
-        if not code:
-            print("[user-login] 回调无 code。", file=sys.stderr)
-            return 6
+        verdict = _validate_callback(code, recv_state, err, state)
+        if verdict is not None:
+            exit_code, msg = verdict
+            print(f"[user-login] {msg}", file=sys.stderr)
+            return exit_code
     finally:
         server.shutdown()
         server.server_close()
@@ -425,11 +510,18 @@ def _run_loopback_login() -> int:
     try:
         token_data = _exchange_code(code, redirect_uri)
     except Exception as e:
-        print(f"[user-login] code → token 失败: {e}", file=sys.stderr)
+        # ``_exchange_code`` already strips token fields out of its error msg
+        # via ``_safe_resp_summary``, but be defensive and bound length too.
+        print(f"[user-login] code → token 失败: {type(e).__name__}: {str(e)[:200]}",
+              file=sys.stderr)
         return 7
 
     if not token_data.get("access_token"):
-        print(f"[user-login] 飞书返回无 access_token: {token_data}", file=sys.stderr)
+        # Don't dump ``token_data`` verbatim — it may carry refresh_token /
+        # open_id we don't want in operator logs even on the failure path.
+        present_fields = sorted(token_data.keys())
+        print(f"[user-login] 飞书返回缺 access_token (fields={present_fields})",
+              file=sys.stderr)
         return 8
     _save_token(token_data)
     print(f"\n✅ 已登录 open_id={token_data.get('open_id', '?')}", file=sys.stderr)
