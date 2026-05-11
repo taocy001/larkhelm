@@ -882,7 +882,8 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             elapsed = _fmt_elapsed(time.time() - start)
             log_entry(chat_id, "error", str(e), model=model, trace_id=trace_id)
             reply_card(chat_id, mid, f"⏰ 强制终止 ({elapsed})",
-                       f"任务执行超过 {_cfg.HARD_TIMEOUT // 60} 分钟，进程已被强制终止。\n\n可重新发送继续。",
+                       f"AI 子进程已停止输出超过 {_cfg.HARD_TIMEOUT // 60} 分钟（疑似卡死），进程已被强制终止。\n\n"
+                       "可重新发送继续。如有正常运行的长任务被误杀，请增大 `hard_timeout` 配置。",
                        color="red")
             if user_msg_id and _eyes_reaction_id[0]:
                 delete_reaction(user_msg_id, _eyes_reaction_id[0])

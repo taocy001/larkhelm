@@ -200,6 +200,12 @@ class DeepSeekRunner:
         self._completed = threading.Event()
         self._cancelled_flag = threading.Event()
         self._soft_timeout_flag = threading.Event()
+        # Idle-timeout tracking — see ``BaseProcessRunner.__init__`` for
+        # rationale. ``_consume_sse`` calls ``_touch_activity`` on every
+        # SSE line so a slow but steadily-streaming DeepSeek response
+        # never trips HARD_TIMEOUT, only a fully-stalled one does.
+        self._last_activity_ts: float = time.time()
+        self._activity_lock = threading.Lock()
 
     @property
     def _ns(self) -> str:
@@ -228,29 +234,41 @@ class DeepSeekRunner:
             except Exception as e:
                 _debug_log(f"[DeepSeek] token_stats update failed: {e}")
 
-    def _watch(self) -> None:
-        """Soft/hard timeout watcher. Mirrors BaseProcessRunner._watch().
+    def _touch_activity(self) -> None:
+        """Liveness signal — called from ``_consume_sse`` per SSE line."""
+        with self._activity_lock:
+            self._last_activity_ts = time.time()
 
-        Soft timeout: fires ``on_soft_timeout`` so the outer ``_do_query``
-        releases the chat lock; the HTTP request keeps running in background.
-        Hard timeout: sets ``_cancelled_flag`` so the streaming loop bails on
-        its next iteration. Cancel event: same flag.
+    def _watch(self) -> None:
+        """Idle-clock watcher (mirrors ``BaseProcessRunner._watch``).
+
+        Idle is measured from the last SSE line received, so a long but
+        actively-streaming DeepSeek response (reasoner CoT on a hard
+        problem, large output) never trips the hard timeout — only a
+        request that has truly stopped sending bytes does.
         """
-        hard_deadline = time.time() + _cfg.HARD_TIMEOUT
-        soft_deadline = time.time() + _cfg.RESPONSE_TIMEOUT
         soft_fired = False
-        while time.time() < hard_deadline:
+        while True:
             if self._completed.is_set():
                 return
             if self.cancel_ev and self.cancel_ev.is_set():
                 _debug_log("[DeepSeek] user cancelled")
                 self._cancelled_flag.set()
                 return
-            if not soft_fired and time.time() >= soft_deadline:
+            with self._activity_lock:
+                idle = time.time() - self._last_activity_ts
+            if idle >= _cfg.HARD_TIMEOUT:
+                _debug_log(
+                    f"[DeepSeek] hard idle timeout ({idle:.0f}s ≥ "
+                    f"{_cfg.HARD_TIMEOUT}s without output), forcing cancel"
+                )
+                self._cancelled_flag.set()
+                return
+            if not soft_fired and idle >= _cfg.RESPONSE_TIMEOUT:
                 soft_fired = True
                 _debug_log(
-                    f"[DeepSeek] soft timeout ({_cfg.RESPONSE_TIMEOUT}s), "
-                    "releasing lock but keeping request running"
+                    f"[DeepSeek] soft idle timeout ({idle:.0f}s ≥ "
+                    f"{_cfg.RESPONSE_TIMEOUT}s), releasing lock but keeping request running"
                 )
                 self._soft_timeout_flag.set()
                 if self.on_soft_timeout:
@@ -259,8 +277,6 @@ class DeepSeekRunner:
                     except Exception as e:
                         _debug_log(f"[DeepSeek] on_soft_timeout callback failed: {e}")
             time.sleep(0.3)
-        _debug_log(f"[DeepSeek] hard timeout ({_cfg.HARD_TIMEOUT}s), forcing cancel")
-        self._cancelled_flag.set()
 
     def _build_messages(self) -> list[dict]:
         """Compose the ``messages`` array from system prompt + history + new user turn."""
@@ -422,6 +438,10 @@ class DeepSeekRunner:
         """
         usage_seen: dict | None = None
         for raw_line in resp.iter_lines(decode_unicode=True):
+            # Liveness signal regardless of whether the line is data /
+            # comment / keep-alive — same reasoning as runner_base: the
+            # watcher only needs to know bytes are still arriving.
+            self._touch_activity()
             if self._cancelled_flag.is_set() or (self.cancel_ev and self.cancel_ev.is_set()):
                 self._cancelled_flag.set()
                 try:

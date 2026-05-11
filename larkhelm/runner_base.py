@@ -116,6 +116,15 @@ class BaseProcessRunner(abc.ABC):
         self._cancelled_flag = threading.Event()
         self._soft_timeout_flag = threading.Event()
         self._ctor_kwargs: dict = {}  # populated by subclass for _clone()
+        # Idle-timeout tracking: ``_watch`` compares ``time.time() -
+        # _last_activity_ts`` against RESPONSE_TIMEOUT / HARD_TIMEOUT, so a
+        # task that keeps producing output (genuine 6-hour /dev pipeline,
+        # long video gen, etc.) never trips the hard timeout. Only a truly
+        # wedged subprocess (no stdout / stderr for the full window) is
+        # killed. Pre-fix bug: the deadline was wall-clock-absolute, so
+        # every 6-hour run died regardless of liveness.
+        self._last_activity_ts: float = time.time()
+        self._activity_lock = threading.Lock()
 
     @property
     def _ns(self) -> str:
@@ -130,7 +139,12 @@ class BaseProcessRunner(abc.ABC):
         pass
 
     def _on_kill_signal(self) -> None:
-        raise TimeoutError(f"{self.backend_name} force-killed (>{_cfg.HARD_TIMEOUT}s)")
+        # Reached when the OS reports SIGKILL (-9) AND no output was
+        # produced — the watcher fired the kill due to inactivity. Use
+        # "idle" wording so log readers don't think wall-clock elapsed.
+        raise TimeoutError(
+            f"{self.backend_name} force-killed (no output for ≥{_cfg.HARD_TIMEOUT}s)"
+        )
 
     def _handle_non_json_stdout(self, line: str) -> None:
         pass
@@ -150,9 +164,23 @@ class BaseProcessRunner(abc.ABC):
         sid = kw.pop("sid", self.sid)
         return type(self)(self.chat_id, self.message, sid, self.cwd, **kw)
 
+    def _touch_activity(self) -> None:
+        """Record a liveness signal — called from stdout / stderr drain loops.
+
+        ``_watch`` resets its idle clock from this timestamp so a chatty
+        subprocess never approaches the hard timeout.
+        """
+        with self._activity_lock:
+            self._last_activity_ts = time.time()
+
     def _drain_stderr(self) -> None:
         try:
             for line in self._proc.stderr:
+                # Any stderr byte is a liveness signal — even a "retry" /
+                # "waiting on rate limit" log line proves the subprocess
+                # hasn't wedged. Touching here BEFORE we discard empty
+                # lines avoids a wedge that emits only whitespace.
+                self._touch_activity()
                 stripped = line.rstrip()
                 if stripped:
                     if len(self._stderr_buf) < _MAX_STDERR_LINES:
@@ -162,10 +190,23 @@ class BaseProcessRunner(abc.ABC):
             pass
 
     def _watch(self) -> None:
-        hard_deadline = time.time() + _cfg.HARD_TIMEOUT
-        soft_deadline = time.time() + _cfg.RESPONSE_TIMEOUT
+        """Idle-clock watcher. Timeout fires only when there's been no
+        stdout / stderr / cancel poll for the configured window.
+
+        Why idle, not wall-clock: a genuine long-running task (crew
+        pipeline, /dev across many edits, 1-hour video transcode) emits
+        progress continuously; the wall-clock version killed it the
+        moment the elapsed window hit HARD_TIMEOUT regardless of
+        liveness. The idle version kills a *wedged* subprocess — one
+        that has stopped producing output entirely.
+
+        ``RESPONSE_TIMEOUT`` (soft) and ``HARD_TIMEOUT`` (hard) keep
+        their original semantics: soft → release the chat lock so the
+        user can continue talking, hard → kill the process. Only the
+        time origin changes (from start-time to last-activity).
+        """
         soft_fired = False
-        while time.time() < hard_deadline:
+        while True:
             if self._completed.is_set():
                 return
             if self.cancel_ev and self.cancel_ev.is_set():
@@ -176,11 +217,23 @@ class BaseProcessRunner(abc.ABC):
                 except Exception:
                     pass
                 return
-            if not soft_fired and time.time() >= soft_deadline:
+            with self._activity_lock:
+                idle = time.time() - self._last_activity_ts
+            if idle >= _cfg.HARD_TIMEOUT:
+                _debug_log(
+                    f"[{self.backend_name}] hard idle timeout ({idle:.0f}s "
+                    f"≥ {_cfg.HARD_TIMEOUT}s without output), force killing process"
+                )
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
+                return
+            if not soft_fired and idle >= _cfg.RESPONSE_TIMEOUT:
                 soft_fired = True
                 _debug_log(
-                    f"[{self.backend_name}] soft timeout ({_cfg.RESPONSE_TIMEOUT}s), "
-                    "releasing lock but keeping process running"
+                    f"[{self.backend_name}] soft idle timeout ({idle:.0f}s "
+                    f"≥ {_cfg.RESPONSE_TIMEOUT}s), releasing lock but keeping process running"
                 )
                 self._soft_timeout_flag.set()
                 if self.on_soft_timeout:
@@ -188,12 +241,10 @@ class BaseProcessRunner(abc.ABC):
                         self.on_soft_timeout()
                     except Exception as e:
                         _debug_log(f"[{self.backend_name}] on_soft_timeout callback failed: {e}")
+            # If the subprocess starts producing again after a soft fire,
+            # don't re-arm soft — releasing the lock twice would confuse
+            # the outer ``_do_query`` flow. Hard still applies.
             time.sleep(0.3)
-        _debug_log(f"[{self.backend_name}] hard timeout ({_cfg.HARD_TIMEOUT}s), force killing process")
-        try:
-            self._proc.kill()
-        except Exception:
-            pass
 
     def _record_tokens(self, model: str, usage: dict, cost: float) -> None:
         if self.record_under:
@@ -290,6 +341,11 @@ class BaseProcessRunner(abc.ABC):
                     _debug_log(f"[{self.backend_name}] on_text init callback failed: {e}")
 
             for line in self._proc.stdout:
+                # Liveness signal BEFORE the strip-and-skip path so even
+                # blank / non-JSON lines (e.g. status comments from some
+                # CLI variants) count — the only thing the watcher cares
+                # about is whether the pipe is still emitting.
+                self._touch_activity()
                 line = line.strip()
                 if not line:
                     continue
