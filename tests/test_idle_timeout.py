@@ -164,6 +164,67 @@ class IdleWatchTests(unittest.TestCase):
         r._proc.kill.assert_called()
 
 
+class OnKillSignalDistinguishesOOMTests(unittest.TestCase):
+    """``_on_kill_signal`` must distinguish self-kill (idle timeout) from
+    external SIGKILL (cgroup OOM).
+
+    Pre-fix bug: both paths raised TimeoutError("...force-killed (>21600s)"),
+    so a cgroup OOM 5 minutes into a task showed the user a misleading
+    "执行超过 360 分钟" card. The fix sets ``_watch_killed=True`` from inside
+    ``_watch`` immediately before its own ``self._proc.kill()``, then
+    ``_on_kill_signal`` checks the flag.
+    """
+
+    def test_watch_initiated_kill_raises_timeout_error(self):
+        r = _make_base_runner()
+        r._watch_killed = True   # simulate "watch killed me"
+        with self.assertRaises(TimeoutError) as ctx:
+            r._on_kill_signal()
+        self.assertIn("no output", str(ctx.exception))
+
+    def test_external_sigkill_raises_runtime_error_not_timeout(self):
+        """OOM-kill case: rc=-9 but _watch_killed is False → RuntimeError."""
+        r = _make_base_runner()
+        self.assertFalse(r._watch_killed)
+        with self.assertRaises(RuntimeError) as ctx:
+            r._on_kill_signal()
+        # Must NOT be TimeoutError (so _query.py's TimeoutError except
+        # doesn't fire, avoiding the "执行超过 360 分钟" misleading card)
+        self.assertNotIsInstance(ctx.exception, TimeoutError)
+        msg = str(ctx.exception)
+        self.assertIn("killed by OS", msg)
+        self.assertIn("OOM", msg)
+        # Must hint at the actual remediation
+        self.assertIn("cgroup", msg.lower())
+
+    def test_watch_flags_kill_before_proc_kill(self):
+        """The flag must be set BEFORE self._proc.kill() so that even if
+        the kill is asynchronous and run() observes rc=-9 immediately,
+        _on_kill_signal sees the True flag."""
+        r = _make_base_runner()
+        with r._activity_lock:
+            r._last_activity_ts = time.time() - (_cfg.HARD_TIMEOUT + 1)
+        # Record when _watch_killed flips True relative to proc.kill().
+        kill_observations: list[bool] = []
+        original_kill = r._proc.kill
+        def _record_then_kill(*a, **kw):
+            kill_observations.append(r._watch_killed)
+            return original_kill(*a, **kw)
+        r._proc.kill = _record_then_kill
+
+        watcher = threading.Thread(target=r._watch, daemon=True)
+        watcher.start()
+        for _ in range(20):
+            if kill_observations:
+                break
+            time.sleep(0.1)
+        watcher.join(timeout=2)
+        self.assertEqual(len(kill_observations), 1)
+        self.assertTrue(kill_observations[0],
+            "_watch_killed must be True BEFORE proc.kill() so subsequent "
+            "_on_kill_signal observes the self-kill case")
+
+
 class RunStdoutLoopTouchesActivityTests(unittest.TestCase):
     """``run()`` main stdout loop must call ``_touch_activity`` per line."""
 

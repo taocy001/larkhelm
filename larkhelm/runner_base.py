@@ -125,6 +125,17 @@ class BaseProcessRunner(abc.ABC):
         # every 6-hour run died regardless of liveness.
         self._last_activity_ts: float = time.time()
         self._activity_lock = threading.Lock()
+        # ``_watch_killed`` is set by ``_watch`` immediately before it calls
+        # ``self._proc.kill()`` on its own initiative (idle hard timeout or
+        # cancel_ev). ``_on_kill_signal`` reads this flag to distinguish:
+        #   * True  → we killed it → ``TimeoutError`` (idle exceeded)
+        #   * False → external SIGKILL (almost always cgroup OOM-killer
+        #             targeting the node-based claude CLI whose total_vm
+        #             routinely exceeds 20+ GB even with NODE_OPTIONS) →
+        #             ``RuntimeError`` with "killed by OS" wording so the
+        #             user sees the real cause instead of a misleading
+        #             "执行超过 360 分钟" card.
+        self._watch_killed: bool = False
 
     @property
     def _ns(self) -> str:
@@ -139,11 +150,34 @@ class BaseProcessRunner(abc.ABC):
         pass
 
     def _on_kill_signal(self) -> None:
-        # Reached when the OS reports SIGKILL (-9) AND no output was
-        # produced — the watcher fired the kill due to inactivity. Use
-        # "idle" wording so log readers don't think wall-clock elapsed.
-        raise TimeoutError(
-            f"{self.backend_name} force-killed (no output for ≥{_cfg.HARD_TIMEOUT}s)"
+        # Reached when the OS reports SIGKILL (-9). Two completely different
+        # causes funnel through this signal:
+        #
+        #   A. ``_watch`` killed the subprocess intentionally (idle timeout
+        #      exceeded, or cancel_ev raised). ``self._watch_killed`` is
+        #      set just before that ``self._proc.kill()`` call. The user
+        #      should see a timeout-shaped error.
+        #
+        #   B. The OS / cgroup OOM-killer killed it. cgroup MemoryMax on
+        #      the larkhelm.service is typically 2.8G, and the node-based
+        #      claude CLI's *virtual* memory routinely exceeds 20 GB even
+        #      with NODE_OPTIONS=--max-old-space-size=384 (V8 only caps
+        #      the old-gen heap, not buffer pools / mmap / JIT cache). The
+        #      kernel selects the largest task in the cgroup — almost
+        #      always the CLI subprocess, not the python bridge — as the
+        #      OOM victim. Pre-fix bug: this path raised TimeoutError too,
+        #      so the user saw "执行超过 360 分钟" cards for what was
+        #      actually an OOM kill 5 minutes into the task.
+        if self._watch_killed:
+            raise TimeoutError(
+                f"{self.backend_name} force-killed (no output for ≥{_cfg.HARD_TIMEOUT}s)"
+            )
+        raise RuntimeError(
+            f"{self.backend_name} killed by OS (rc=-9, likely cgroup OOM). "
+            "Check `systemctl status larkhelm` and dmesg for "
+            "'task=claude ... oom-kill'. Probable causes: node CLI virtual "
+            "memory exceeded cgroup MemoryMax (default 2.8G), large file/"
+            "image attachments expanding tool buffers, or runaway tool output."
         )
 
     def _handle_non_json_stdout(self, line: str) -> None:
@@ -212,6 +246,7 @@ class BaseProcessRunner(abc.ABC):
             if self.cancel_ev and self.cancel_ev.is_set():
                 _debug_log(f"[{self.backend_name}] user cancelled")
                 self._cancelled_flag.set()
+                self._watch_killed = True  # see _on_kill_signal — flags this as self-kill
                 try:
                     self._proc.kill()
                 except Exception:
@@ -224,6 +259,7 @@ class BaseProcessRunner(abc.ABC):
                     f"[{self.backend_name}] hard idle timeout ({idle:.0f}s "
                     f"≥ {_cfg.HARD_TIMEOUT}s without output), force killing process"
                 )
+                self._watch_killed = True  # see _on_kill_signal — flags this as self-kill
                 try:
                     self._proc.kill()
                 except Exception:

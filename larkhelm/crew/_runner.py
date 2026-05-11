@@ -263,6 +263,19 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
     _slot_ready   = threading.Event()   # fired when the semaphore slot is acquired
 
     def _timeout_watcher():
+        """Forward crew-level cancellation; emit a soft-timeout log line.
+
+        **No hard kill** — that responsibility belongs to
+        ``BaseProcessRunner._watch`` which now measures **idle** time. The
+        previous version of this watcher set ``hard_deadline = time.time()
+        + max(spec.timeout * 2, HARD_TIMEOUT)`` and unconditionally fired
+        ``agent_cancel`` at the wall-clock mark — meaning a long but
+        actively-streaming agent (multi-hour /dev pipeline producing
+        continuous output) got cancelled at the same instant a wedged
+        agent did. The idle-clock fix in ``runner_base`` only takes
+        effect if this outer wall-clock kill doesn't preempt it first.
+        Forwarding cancel_ev + logging soft is the only remaining job.
+        """
         # Phase 1: wait for process slot while monitoring crew-level cancellation
         while not _slot_ready.is_set():
             if cancel_ev.is_set():
@@ -270,19 +283,24 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
                 return
             time.sleep(0.3)
         # Phase 2: process has started; begin counting spec.timeout from now
-        # Use a longer grace period: soft timeout releases the semaphore but keeps process running
         soft_deadline = time.time() + spec.timeout
-        hard_deadline = time.time() + max(spec.timeout * 2, _cfg.HARD_TIMEOUT)
         soft_fired = False
-        while time.time() < hard_deadline:
+        while True:
             if cancel_ev.is_set():
                 agent_cancel.set()
                 return
+            # Stop polling once the inner runner has signalled completion —
+            # otherwise this thread spins until process exit (harmless but
+            # wasteful) and may delay agent cleanup.
+            if agent_cancel.is_set():
+                return
             if not soft_fired and time.time() >= soft_deadline:
                 soft_fired = True
-                _debug_log(f"[Crew] {agent_id} soft timeout ({spec.timeout}s), releasing lock but keeping process running")
+                _debug_log(
+                    f"[Crew] {agent_id} soft timeout ({spec.timeout}s), "
+                    "BaseProcessRunner idle-clock continues to gate hard kill"
+                )
             time.sleep(0.3)
-        agent_cancel.set()
 
     threading.Thread(target=_timeout_watcher, daemon=True).start()
 
