@@ -1,272 +1,549 @@
 # CLAUDE.md
 
-Guidance for Claude Code (claude.ai/code) when working inside this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> User-facing docs (install / config fields / command table / voice setup) live in `README.md`. **This file is not a duplicate** — it captures internal architecture, conventions, and gotchas that an AI dev agent or new maintainer needs to ship a correct change.
+## Project Overview
 
----
+**LarkHelm** is a Python integration layer that bridges Feishu (Lark) messenger with Claude and Gemini AI CLIs. It maintains a WebSocket connection to Feishu and dispatches user messages to AI processes, streaming responses back as interactive Feishu cards.
 
-## Module layout
+## Running the Bridge
+
+```bash
+# 推荐通过 install.sh 安装（依赖通过 pyproject.toml 统一管理）
+# 参见 README.md 快速开始
+
+# 开发模式手动安装
+pipx install -e .
+# 或不使用 pipx：
+pip install -e .
+
+# Run
+python3 -m larkhelm start
+python3 -m larkhelm start --config /path/to/config.json --data-dir /path/to/data
+```
+
+## Testing
+
+No formal test framework. Manual testing via:
+
+```bash
+# 检查包能否正常导入
+python3 -c "import larkhelm.bridge; print('OK')"
+
+# 直接以模块方式启动（--help 查看参数）
+python3 -m larkhelm --help
+```
+
+## Configuration
+
+Config file is auto-detected in this priority order:
+
+```
+CLI --config > LARKHELM_CONFIG env > /etc/larkhelm/config.json > ~/.config/larkhelm/config.json
+```
+
+Data directory priority:
+
+```
+CLI --data-dir > LARKHELM_DATA_DIR env > /var/lib/larkhelm > ~/.local/share/larkhelm
+```
+
+### Config fields
+
+| Field | Purpose |
+|---|---|
+| `APP_ID`, `APP_SECRET` | Feishu app credentials (required) |
+| `claude_command`, `gemini_command` | CLI binary paths (default: `"claude"`, `"gemini"`) |
+| `default_model` | `"claude"` or `"gemini"` |
+| `default_cwd` | Initial working directory for AI subprocess |
+| `skip_permissions` | Auto-confirm Claude permission prompts |
+| `response_timeout` | Soft timeout seconds per query (default: 300) |
+| `hard_timeout` | Hard timeout seconds per query (default: 21600，即 6 小时) |
+| `max_card_len` | Feishu card char limit (default: 3000) |
+| `allowed_chat_ids` | Whitelist of chat IDs (empty = all allowed) |
+| `gemini_idle_ttl` | Gemini process idle TTL in seconds (default: 1800) |
+| `timezone` | Cron task timezone (e.g. `"Asia/Shanghai"`) |
+| `voice_enabled` | M3.2 语音转文字总开关（默认 `false`；关闭时 bridge 行为完全不变） |
+| `voice_model_size` | faster-whisper 模型规格 `tiny`/`base`/`small`/`medium`/`large-v3`（默认 `"small"`） |
+| `voice_compute_type` | faster-whisper compute_type，例如 `int8` / `float16`（默认 `"int8"`） |
+| `voice_max_duration_ms` | 单条音频上限毫秒，floor `1000`（默认 `180000`） |
+| `voice_default_lang` | 全局默认转录语种 `zh` / `en` / `auto`（默认 `"zh"`） |
+| `voice_merge_window_sec` | 多条语音消息合并窗口秒数，floor `0`（`0` = 禁用合并；默认 `0`） |
+| `voice_max_merge` | 单次最多合并几条语音，floor `1`（默认 `5`） |
+| `voice_keep_audio` | 转录后是否保留原音频文件（默认 `false`，即转录完即删） |
+
+> **超时层级说明**：
+> - `response_timeout`（软超时）：AI 响应无更新超过此时长，释放主锁但后台继续运行，默认 300s
+> - `hard_timeout`（硬超时）：强制终止子进程，默认 21600s
+> - Shell 命令（`/run`）：固定 30s 硬超时，不受上述配置影响
+
+## Architecture
+
+Project is structured as the `larkhelm/` package:
 
 ```
 larkhelm/
-├── bridge.py            WebSocket event registration + main entry
-├── config.py            runtime config + memory limits + dataclass mirror
-├── memory_watchdog.py   per-process RSS watchdog (gc soft / SIGTERM hard, 60s debounce)
-├── handlers/            Feishu event dispatch
-│   ├── _message.py      message routing, /command dispatch, audio branch
-│   ├── _query.py        AI query lifecycle: streaming cards, soft/hard timeout, cancel
-│   └── _card_action.py  button-callback dispatch
-├── commands.py          /run, /cd, /status, /model, /voice etc
-├── cmd_doc.py           /doc + /doc wiki families
-├── cmd_plan.py          /plan multi-step planner
-├── chat_state.py        per-chat persistent state (cwd / model / voice_lang / crons)
-├── concurrency.py       per-chat locks + cancel events (LRU 500 / 1000)
-├── dedup.py             event/message dedup (LRU 500)
-├── log.py               .md + all.jsonl conversation logs + DEBUG_LOG rotation
-├── token_stats.py       token usage accounting (LRU 5000)
-├── lark_client.py       Feishu API wrappers; native-table descendant API
-├── card_builder.py      JSON 2.0 card construction + markdown split
-├── ai_runner.py         thin shim re-exporting runners
-├── runner_base.py       BaseProcessRunner: semaphore / watch / retry template
-├── runner_claude.py     Claude CLI subprocess (--print stream-json)
-├── runner_gemini.py     Gemini CLI subprocess
-├── runner_kimi.py       Kimi CLI subprocess
-├── runner_deepseek.py   DeepSeek HTTP (requests, openai-compat shape)
-├── backend_registry.py  BackendSpec + capability scoring + health tracking
-├── backend_api.py       anthropic / google_genai / openai_compat wrappers
-├── backend_cli.py       dispatch wrapper around runner_*
-├── health_signals.py    AUTH / QUOTA / TRANSIENT classifier
-├── model_probe.py       startup health probes (CLI + API)
-├── voice/               M3.2 STT subpackage
-│   ├── transcribe.py    engine dispatcher; faster-whisper singleton
-│   ├── _engine_dashscope.py  DashScope Paraformer opt-in adapter
-│   ├── merge.py         30s window merge buffer (Timer + OrderedDict)
-│   └── system_probe.py  `larkhelm voice probe` CLI implementation
-├── crew/                multi-agent orchestration
-│   ├── _commands.py     /crew planner + manager prompt (dynamic backend menu)
-│   ├── _runner.py       agent execution + DAG scheduling
-│   ├── _pipeline.py     /dev fixed pipeline (pm → architect → impl → qa → reviewer)
-│   ├── _checkpoint.py   checkpoint persistence + resume
-│   ├── _scheduler.py    crew cron scheduler
-│   └── _state.py        global crew state
-├── crew_types.py        AgentSpec / AgentState / CrewState / CrewPhase
-├── crew_card.py         crew card rendering + heartbeat
-├── agent_hub/           Phase 5 intent router + agent dispatch (gated off)
-│   ├── intent_router.py     resolve_intent: explicit cmd → L1 keyword → L2 LLM JSON
-│   ├── agent_dispatcher.py  ACL + audit + transparent card
-│   ├── agent_base.py        AgentExecutor (ABC) + AGENT_REGISTRY singleton
-│   ├── model_selector.py    BackendRegistry.rank_for_task() integration
-│   ├── plugin_loader.py     entry-points('larkhelm.agents') + config['agent_plugins']
-│   └── builtin/             ChatAgent / DevAgent / CrewAgent / PlanAgent / DocAgent
-├── perm.py              permission approval socket + YOLO grants
-├── perm_hook.py         permission hook for Claude subprocess
-├── mcp_server.py        MCP stdio server (`larkhelm mcp-server`)
-└── __main__.py          CLI entry: start / doc / mcp-server / voice
+├── bridge.py           (147 行)  - 主程序入口、WebSocket 事件监听与注册
+├── config.py           (242 行)  - 运行时配置加载、路径初始化
+├── handlers/                    - 飞书事件处理器子包
+│   ├── __init__.py     (24 行)   - re-export
+│   ├── _message.py     (393 行)  - 消息接收、路由、表情处理
+│   ├── _query.py       (461 行)  - AI 查询流程（流式卡片更新、超时、取消）
+│   └── _card_action.py (186 行)  - 卡片按钮回调分发
+├── commands.py         (893 行)  - 命令实现（/run, /cd, /ls 等核心命令）
+├── cmd_doc.py          (441 行)  - /doc 和 /doc wiki 子命令族
+├── chat_state.py       (165 行)  - Per-chat 状态持久化（cwd/model/crons）
+├── concurrency.py      (135 行)  - 并发原语（per-chat 锁、取消事件、信号量）
+├── dedup.py            (34 行)   - 消息去重（OrderedDict 缓存）
+├── log.py              (89 行)   - 对话日志读写（.md + all.jsonl）
+├── token_stats.py      (146 行)  - Token 使用量统计与持久化
+├── lark_client.py      (1021 行) - 飞书 API 调用封装、卡片操作、权限引导卡片
+├── card_builder.py     (166 行)  - 卡片 JSON 构建、Markdown 分割
+├── ai_runner.py        (112 行)  - thin shim，re-export runner_base/runner_claude 等公共接口
+├── runner_base.py      (358 行)  - BaseProcessRunner 抽象基类（信号量、watch、retry 模板方法）
+├── runner_claude.py    (225 行)  - ClaudeRunner 子类（MCP config、设置文件临时文件管理）
+├── runner_kimi.py      (155 行)  - KimiRunner 子类
+├── runner_gemini.py    (120 行)  - GeminiRunner 子类
+├── crew/                        - 多 Agent 协作子包
+│   ├── __init__.py     (118 行)  - re-export
+│   ├── _commands.py    (686 行)  - /crew 和 /dev 入口命令
+│   ├── _runner.py      (911 行)  - Agent 执行与 DAG 调度
+│   ├── _state.py       (121 行)  - 全局 crew 状态变量
+│   ├── _checkpoint.py  (260 行)  - Checkpoint 持久化与恢复
+│   ├── _pipeline.py    (194 行)  - /dev 固定流水线定义
+│   └── _scheduler.py   (137 行)  - Cron 调度器
+├── crew_types.py       (120+ 行) - Crew 数据类型（AgentSpec/AgentState/CrewState/CrewPhase 等）
+├── crew_card.py        (267 行)  - Crew 飞书卡片构建与心跳推送
+├── perm.py             (298 行)  - 权限审批系统
+├── perm_hook.py        (74 行)   - 权限审批 hook
+└── __main__.py         (42 行)   - 命令行入口
 ```
 
----
+### 1. Event Handler (`handlers/`)
 
-## Architecture invariants
+`lark_oapi` SDK holds a persistent WebSocket to Feishu. `handle_message()` deduplicates events (via `OrderedDict`) and routes to commands or `_do_query()`.
 
-### Event flow
+Two dispatch points, both using if/elif chains:
+- **Main message routing**: `handlers/_message.py` (inside `handle_message`)
+- **Card button callbacks**: `handlers/_card_action.py` + `commands.py` (`_dispatch_button_cmd`)
 
-```
-WebSocket → handle_message → dedup → /command branch  OR  threading.Thread(_do_query)
-                                                              ↓
-                                                       orchestration.py:
-                                                         DELEGATE <backend> | AGENT <type>
-                                                              ↓
-                                                       backend_cli.run_*  /  backend_api.run_*
-                                                              ↓
-                                                       stream events → on_text / on_tool callbacks
-                                                              ↓
-                                                       lark_client streams card updates
-```
+### 2. AI Query Engine (`ai_runner.py`)
 
-* **Per-chat lock** serializes queries; **cancel event** is per-chat too — `/cancel` triggers it
-* **Card schema** is **JSON 2.0 unconditional** (post-commit `4b7c68e`). Buttons go directly into `body.elements[]` (no `action` container); multi-button rows wrap in `column_set width:"auto"` columns. `_card_action.py:27` parses `CallBackAction.value` schema-agnostically.
-* **Streaming**: cards update in-place; split via `_split_md()` when content exceeds `max_card_len`.
+- **Claude**: Spawns `claude --print --output-format stream-json --verbose` as a subprocess per query. Session IDs are passed via `--resume` for conversation continuity. On crash, clears session and retries once.
+- **Gemini**: Spawns `gemini -y --output-format stream-json` per query, session via `--resume`.
+- **Kimi**: Spawns `kimi --print --output-format stream-json --input-format stream-json` per query, session via `--session`.
 
-### AI runner contract
+All three support cancellation via threading events and stream structured JSON events (`tool_use`, `text`, `result`) back to callbacks. A global semaphore (`MAX_AI_PROCS=3`) limits concurrent subprocess count.
 
-Every backend (CLI or HTTP) goes through `backend_cli.run_*` or `backend_api.run_*` which:
-1. Acquires `MAX_AI_PROCS=3` semaphore (`runner_base.py`)
-2. Spawns subprocess / makes HTTP call
-3. Streams `tool_use` / `text` / `result` events to callbacks
-4. Calls `BACKEND_REGISTRY.record_call_success/failure(spec_id, ...)` on completion (real-traffic health feedback)
-5. Releases semaphore in `finally`
+### 3. State & Session Persistence (`chat_state.py` / `concurrency.py`)
 
-`record_call_failure` classifies the error via `health_signals.classify_error()` and either flips `healthy=False` instantly (AUTH/QUOTA/MODEL_NOT_FOUND) or appends to a sliding window (TRANSIENT, threshold 3 within 600s).
+> `state.py` 现为向后兼容的 re-export 层，实际逻辑已拆分到以下子模块：
+> - `chat_state.py`：Per-chat 状态字典（cwd/model/crons）的读写与持久化
+> - `concurrency.py`：Per-chat 锁（`_get_chat_lock`）与取消事件管理
+> - `dedup.py`：消息事件去重缓存
+> - `log.py`：对话日志读写
+> - `token_stats.py`：Token 用量累计与查询
 
-### State persistence (under `DATA_DIR`)
-
-```
-.feishu_sessions/{chat_id}.sid         Claude session IDs
-.feishu_sessions/gemini_{chat_id}.sid  Gemini session IDs
-.feishu_state.json                     per-chat {cwd, model, voice_lang, crons, …}
-.feishu_logs/{chat_id}/{YYYY-MM-DD}.md markdown conversation log
-.feishu_logs/all.jsonl                 global event log (auto-rotated at _MAX_JSONL_BYTES)
+Persisted state structure per chat:
+```python
+{
+    "cwd":   "/home/user/code",
+    "model": "claude",
+    "name":  "项目名称",       # optional label
+    "crons": [{"id": "uuid", "expr": "0 9 * * *", "query": "...", "model": "claude"}]
+}
 ```
 
-`chat_state.py` is the canonical writer; `state.py` is now a thin back-compat re-export shim.
+Data files (under `DATA_DIR`):
+- `.feishu_sessions/{chat_id}.sid` — Claude session IDs per chat
+- `.feishu_sessions/gemini_{chat_id}.sid` — Gemini session IDs per chat
+- `.feishu_state.json` — Per-chat working directory and model preference
+- `.feishu_logs/{chat_id}/{YYYY-MM-DD}.md` — Markdown conversation logs
+- `.feishu_logs/all.jsonl` — Global event log
 
-### Phase 5 agent_hub (gated off by default)
+### 4. Concurrency Model
 
-`intent_router_enabled=false` keeps `_message.py` from even importing `agent_hub`. When opened, dispatch becomes Intent → Agent → Backend (three layers):
+- Per-chat lock serializes queries (no overlapping requests per chat)
+- Per-chat cancellation event allows `/cancel` to interrupt in-flight queries
+- Separate locks for: global state, logging, event deduplication, Gemini process pool
 
-* `intent_router.resolve_intent()` — explicit `/cmd` → L1 keyword → L2 cheap-LLM JSON
-* `AgentDispatcher.dispatch()` — ACL check (`agent_acl` config) + audit (JSONL 0600) + transparent decision card
-* `model_selector.resolve_backend_for_task()` — calls `BackendRegistry.rank_for_task(TaskProfile)` for capability scoring
+### 5. Card Rendering (`lark_client.py` + `card_builder.py`)
 
-Plugin agents register via entry-points `larkhelm.agents` or config `agent_plugins`. Detailed design lives in `.crew_workspace/design.md` (R1+R2+R3 APPROVED).
+Responses are sent as Feishu interactive cards (Markdown). Cards are updated in-place during streaming. When content exceeds `max_card_len`, it is split across multiple cards via `_split_md()`.
 
-> **`intent_feedback_path` / `intent_audit_path`**: keep under `DATA_DIR` (e.g. `DATA_DIR/audit/intent.jsonl`). Files are 0600 but landing them outside `DATA_DIR` breaks backup hygiene and leaks raw user queries via misconfigured share scripts. Module falls back to `tempfile.gettempdir()/intent_*.jsonl` when `DATA_DIR` is unset (early bootstrap).
+Card schema: **JSON 2.0 unconditionally** (post-commit `4b7c68e`). Buttons land
+as native `{"tag":"button", ...}` elements in `body.elements[]`; multi-button
+rows wrap in `column_set` with `width:"auto"` columns. Callback payload sits
+in `behaviors:[{"type":"callback","value":{"cmd":...}}]` — `_card_action.py:27`
+parses ``CallBackAction.value`` schema-agnostically. The legacy `_make_card_json10_dict`
+path (which used `{"tag":"div","text":{"tag":"lark_md",...}}` for body and
+`{"tag":"action","actions":[...]}` for buttons) was deleted because Feishu's
+`lark_md` element rendered body markdown at a different default font size
+than the JSON 2.0 `markdown` element AND silently dropped bullet lists,
+fenced code blocks, and block quotes.
 
----
+### 6. Phase 5 智能编排层 (`larkhelm/agent_hub/`)
 
-## Conventions enforced across new code
+Phase 5 引入意图识别 + Agent 分发层，与现有显式命令并存（不替换）。
 
-### Import discipline (which module owns what)
+**包结构**：
 
-| Need | Import from |
-|---|---|
-| Per-chat state | `larkhelm.chat_state` (`_get_chat_state` / `_set_chat_field`) |
-| Per-chat lock / cancel event | `larkhelm.concurrency` (`_get_chat_lock` / `_get_cancel_event`) |
-| Conversation logging | `larkhelm.log` (`log_entry`) |
-| Debug diagnostics | `larkhelm.log` (`_debug_log` / `safe_log` / `lazy_debug_log`) |
-| Token accounting | `larkhelm.token_stats` |
-| Message dedup | `larkhelm.dedup` |
-| Crew dataclasses | `larkhelm.crew_types` |
+```
+larkhelm/agent_hub/
+├── intent_types.py    - IntentResult / TaskProfile / AgentDispatch / AgentContext / AgentResult
+├── agent_base.py      - AgentExecutor (ABC) + AgentRegistry 单例 AGENT_REGISTRY
+├── intent_router.py   - resolve_intent(): 显式命令 → L1 关键词 → L2 cheap LLM JSON
+├── model_selector.py  - resolve_backend_for_task() 调用 BackendRegistry.rank_for_task
+├── agent_dispatcher.py - AgentDispatcher.dispatch() 透明化卡片 + ACL + 审计
+├── intent_feedback.py - record_feedback / register_pending / resolve_pending（JSONL 0600）
+├── agent_audit.py     - write_audit / aggregate_daily（JSONL 0600）
+├── plugin_loader.py   - importlib.metadata.entry_points('larkhelm.agents') + config['agent_plugins']
+└── builtin/           - ChatAgent / DevAgent / CrewAgent / PlanAgent / DocAgent（薄壳调用现有命令）
+```
 
-Don't reach into module privates across this boundary; if a helper is missing, add it to the owning module.
+**灰度开关**（`config.json`）：
 
-### Exception handling — three buckets
-
-| Severity | Pattern | Example |
+| 字段 | 默认值 | 含义 |
 |---|---|---|
-| **High** (silent business failure) | `_debug_log` + user-visible ⚠️ card | `/reset` API history clear failed |
-| **Mid** (auxiliary op) | `_debug_log`, do not interrupt main flow | token stat update, callback errors, memory load |
-| **Low** (acceptable silent) | `except Exception: pass` allowed | `proc.kill()`, stderr drain, scratch I/O |
+| `intent_router_enabled` | `false` | 总开关，关闭时 `_message.py` 完全不导入 `agent_hub` |
+| `intent_router_traffic` | `0.0` | 0.0–1.0 灰度比例，按 `chat_id` 哈希一致性分流 |
+| `intent_layer2_strategy` | `"llm"` | `llm` 或 `embedding`（P2 预留） |
+| `agent_plugins` | `[]` | 第三方 plugin 入口点字符串，如 `mypkg.module:my_agent` |
+| `agent_acl` | `{}` | `{agent_type: ["chat_id_glob", ...]}` |
+| `intent_feedback_path` / `intent_audit_path` | 空 | 默认 `DATA_DIR/intent_*.jsonl` |
 
-Don't introduce a new `except Exception: pass` without classifying it. Format: `[HH:MM:SS] [{Module}] {operation} failed: {exception}` written to `_cfg.DEBUG_LOG`.
+> **路径安全**：当显式设置 `intent_feedback_path` / `intent_audit_path` 时，
+> 强烈建议路径**位于 `DATA_DIR` 之内**（例如 `DATA_DIR/audit/intent.jsonl`）。
+> 这两份 JSONL 以 0600 权限写入，落到 `DATA_DIR` 之外可能：
+> 1. 不参与 `DATA_DIR` 的备份策略，丢失审计；
+> 2. 与运维的备份/分享脚本冲突，泄露用户原始 query。
+> 若 `DATA_DIR` 未设置（早期 bootstrap / 单文件调试），模块会回退到
+> `tempfile.gettempdir() / intent_*.jsonl`，避免文件意外落入当前工作目录。
 
-### Log prefix — PascalCase `[Module]`
+**第三方 Agent 接入**：
 
-New code: first arg to `_debug_log` / `safe_log` / `lazy_debug_log` / `info` / `warn` / `error` starts with `[Module]`. Module name PascalCase (matches Python class style), no spaces, no underscores. Sub-components space-separated (e.g. `[Crew] Manager: …`).
+```python
+# 子类化 AgentExecutor，实现 execute(intent, ctx) -> AgentResult
+from larkhelm.agent_hub import AgentExecutor, AgentResult, AgentContext, IntentResult
 
-Exceptions kept lower-case (third-party process names): `[claude]` / `[gemini]` / `[kimi]` / `[upgrade]`.
+class MyAgent(AgentExecutor):
+    agent_type = "translate"
+    description = "中英互译 Agent"
 
-Some historical lower-case prefixes (`[memory]`, `[router]`, `[token_stats]`, `[lark_client]`, `[agent_audit]`) remain — rename on touch; don't batch-rewrite.
+    def execute(self, intent: IntentResult, ctx: AgentContext) -> AgentResult:
+        ...
+```
 
-### Helper choice
+通过 entry-point group `larkhelm.agents` 暴露：
 
-| Helper | Level | When |
-|---|---|---|
-| `_debug_log(msg)` | DEBUG | Main-path diagnostics; caller has `larkhelm.log` loaded |
-| `safe_log(msg)` | DEBUG | Exception cleanup / never-throw path (`_debug_log` in try) |
-| `lazy_debug_log(msg)` | DEBUG | Bootstrap / circular-import edge; module may not be fully imported |
-| `info(msg)` | INFO | Phase progression, state change ("backend X registered") |
-| `warn(msg)` | WARN | Degraded behavior, credential fetch failure, operator-visible |
-| `error(msg)` | ERROR | User-visible task interrupted (helps ticket correlation) |
+```toml
+# pyproject.toml
+[project.entry-points."larkhelm.agents"]
+translate = "mypkg.translate:MyAgent"
+```
 
-Don't keep local copies of these — `safe_log` superseded 4 local `_safe_log` copies in `agent_hub/`; `lazy_debug_log` replaced the double-try-import pattern in `config.py` / `agent_base.abort()` / `intent_router`.
+或在 `config.json` 中追加 `"agent_plugins": ["mypkg.translate:MyAgent"]`。
 
-### Log gate
+**详细设计文档**：`.crew_workspace/design.md`（v1.0，2026-05-09）。
 
-`LARKHELM_LOG_LEVEL=DEBUG|INFO|WARN|ERROR` env (default DEBUG) is parsed **once at import time** — runtime changes don't take effect (deliberate, prevents mid-flight visibility flip). Output:
-* DEBUG keeps `[HH:MM:SS] [Module] msg` format (grep-compatible)
-* INFO/WARN/ERROR add explicit level: `[HH:MM:SS] <LEVEL> [Module] msg`
-* Unknown values fall back to DEBUG with a stderr warning (never silent-mute)
+## 写入飞书文档（Claude Code CLI 集成）
 
-### Documented "acceptable silent" exceptions
-
-These existing `except: pass` sites are *intentional* and have been audited:
-
-| Site | Reason |
-|---|---|
-| `runner_base.py` `proc.kill()` (×3) | OS-level, process already exited is expected |
-| `runner_base.py` `_drain_stderr` thread | Display-only, no side effects on failure |
-| `runner_base.py` `_cleanup_tmp` unlink | Temp file already gone is expected |
-| `log.py` `_debug_log` inner two `pass` | Logging infra — recursive failure is meaningless |
-| `log.py:105` JSONL row parse skip | Design intent: tolerate corrupted lines |
-| `memory.py` `_global_memory_file` chat_state access | Explicit fallback returns None |
-| `crew/_runner.py` git diff | Non-git repo is expected |
-| `mcp_server.py` config inner parse | Line-level fault tolerance |
-
----
-
-## Adding a feature (recipes)
-
-### New `/command`
-
-1. **Implement** `_cmd_x(chat_id, args="", msg_id=None)` in `commands.py` — call `send_card_reply(...)` for output, never raise.
-2. **Import** in `handlers/_message.py` (around the existing imports near line 38).
-3. **Route** in the sync command block in `_message.py` (before the `else: return`) — `if tl.startswith("/x"): _cmd_x(...); return`.
-4. **State R/W**: use `from larkhelm.chat_state import _get_chat_state, _set_chat_field`. Lock with `_get_chat_lock(chat_id)` if mutating shared state.
-5. **Help text**: update `_cmd_help()` in `commands.py`.
-6. (Optional) **Button callback**: add a case in `_card_action.py` or the `_dispatch_button_cmd` chain in `commands.py`.
-
-### New extension point
-
-| Extension | File | Notes |
-|---|---|---|
-| Register a Feishu event | `bridge.py:86-91` | `.register_p2_xxx_yyy(handler)` |
-| New Feishu API call | `lark_client.py` | Follow existing builder pattern; use the descendant API for nested blocks (tables) |
-| Card layout tweak | `card_builder.py` | Modify `_make_card_dict` — always JSON 2.0 |
-| New per-chat state field | `chat_state.py` | Add to `_chat_state_store` schema; bump field default in `_init_runtime` |
-| New permission rule | `perm.py` | Add check before `grant_yolo` / regular approval flow |
-| New backend (CLI or API) | `backend_registry.py` + `runner_*.py` | Register a `BackendSpec`; implement `run_*` that respects the `MAX_AI_PROCS` semaphore + records call outcome |
-
-### New background task that should refresh memory
-
-`memory.maybe_auto_update(chat_id)` has **two trigger paths**:
-
-| Trigger | When | Frequency |
-|---|---|---|
-| Normal cadence | After `_do_query` completes | every `AUTO_UPDATE_EVERY=10` turns |
-| Milestone cadence | `/dev` / `/crew` / `/plan` finish | each completion + 60s debounce |
-
-If you add a long-running background task that resembles `/dev` / `/crew`, **call `record_milestone(chat_id, kind, summary)` in its `finally`** — without it, the task's outcome never reaches session memory.
-
-`record_milestone` writes a `role="milestone"` log entry, then calls `maybe_auto_update(force=True)` guarded by `_get_update_lock(chat_id)`. The auto-update filter accepts `role in {user, assistant, milestone}` and skips `model in {crew, shell}`, so the milestone surfaces but the sub-task chatter stays muted.
-
----
-
-## Feishu document writes (Claude Code workflow)
-
-When asked to write content to a Feishu doc **inside this repo**, use the `larkhelm doc` CLI — don't write a standalone Python script.
+在此项目工作时，若需将内容写入飞书文档，**直接使用 `larkhelm doc` CLI**，无需编写任何脚本：
 
 ```bash
-cat report.md | larkhelm doc create "Title"          # → prints new doc URL
-cat more.md   | larkhelm doc append "<doc-url>"
-cat fresh.md  | larkhelm doc write  "<doc-url>"       # overwrites
+# 创建新文档（stdin 传入内容），输出文档 URL
+cat report.md | larkhelm doc create "文档标题"
+
+# 追加内容到已有文档
+cat more.md | larkhelm doc append "https://feishu.cn/docx/xxxx"
+
+# 覆盖写入
+cat updated.md | larkhelm doc write "https://feishu.cn/docx/xxxx"
 ```
 
-Owner defaults to `~/.config/larkhelm/config.json:default_owner_open_id`. **Don't** create `upload_to_feishu.py` or similar — the CLI replaces all such helpers and supports native Feishu tables via `lark_client._md_to_descendants()`.
+- Owner 由 `~/.config/larkhelm/config.json` 中的 `default_owner_open_id` 控制，创建后自动转移
+- 无需初始化 larkhelm 服务，CLI 独立运行
+- **不要**为此目的编写独立的 Python 脚本或使用 `upload_to_feishu.py`
 
----
+## User-Facing Commands
 
-## lark-oapi SDK cheat-sheet
+所有命令均以 `/` 开头。
 
-Path: `~/.local/lib/python3.13/site-packages/lark_oapi/`.
+| Command | Function | File | Action |
+|---|---|---|---|
+| `/c`, `/claude <prompt>` | `_cmd_cli_native()` | commands.py:517 | Force Claude |
+| `/g`, `/gemini <prompt>` | `_cmd_cli_native()` | commands.py:517 | Force Gemini |
+| `/model claude\|gemini` | `_cmd_model()` | commands.py:490 | Switch default model for this chat |
+| `/reset [claude\|gemini\|perm]` | `_cmd_reset()` | commands.py:61 | Clear session(s) / permissions |
+| `/status` | `_cmd_status()` | commands.py:78 | Show versions, session IDs, runtime info |
+| `/help` | `_cmd_help()` | commands.py:173 | Show help |
+| `/cancel` | inline | handlers.py | Interrupt current query |
+| `/run <cmd>` | `_cmd_run()` | commands.py:471 | Execute shell command (30s timeout) |
+| `/cd <path>` | `_cmd_cd()` | commands.py:432 | Change working directory |
+| `/pwd` | `_cmd_pwd()` | commands.py:447 | Show current working directory |
+| `/ls [path]` | `_cmd_ls()` | commands.py:451 | List files (max 60 entries) |
+| `/pickup` | `_cmd_pickup()` | commands.py:221 | Print commands to resume sessions in terminal |
+| `/history [all]` | `_cmd_history()` | commands.py:238 | Last 10 conversation summaries |
+| `/stats` | `_cmd_stats()` | commands.py:298 | Token usage statistics |
+| `/upgrade` | `_cmd_upgrade()` | commands.py | 更新 larkhelm 到最新版本 |
+| `/cron` | `_cmd_cron()` | commands.py:350 | Manage scheduled tasks |
+| `/btw <prompt>` | `_cmd_btw()` | commands.py:608 | Quick side question (bypasses main lock) |
+| `/crew <task>` | `cmd_crew()` | crew.py | Multi-agent collaborative planning |
+| `/dev <task>` | `cmd_dev()` | crew.py | Software engineering pipeline |
+| `/doc <sub>` | `_cmd_doc_*()` | cmd_doc.py | 读写飞书文档（read/write/append/list 等子命令） |
+| `/doc wiki <sub>` | `_cmd_doc_wiki_*()` | cmd_doc.py | 飞书 Wiki 操作（read/create/list 等） |
+| `/rename <名称>` | inline | handlers.py | 给当前会话命名 |
+| `/voice [status\|lang <zh\|en\|auto>]` | `_cmd_voice()` | commands.py | 查看 / 切换语音转写设置（卡片显示当前 engine + 状态）|
+| `/memory export` | `_cmd_memory()` | commands.py | 导出当前 chat 的所有持久化数据为 zip 文件，机器人回复文件消息 |
+| `/memory import [file_key]` | `_cmd_memory()` | commands.py | 从 zip 导入记忆数据；无参时等待用户回复 zip 文件 |
+| `/memory status` | `_cmd_memory()` | commands.py | 查看持久化层摘要（chat 数、日志大小、记忆文件数等）|
+
+外部 CLI（不是飞书命令）：
+
+| CLI | 作用 |
+|---|---|
+| `larkhelm voice probe [--no-benchmark] [--no-write]` | 安装时一次性 probe：检 ffmpeg + CPU flags + RAM + 实测 RTF；自动写回 `config.json` 的 `voice_enabled` / `voice_engine` / `voice_model_size` |
+| `larkhelm memory export [output.zip] [--chat-ids ID…] [--data-dir DIR] [--include-debug-log]` | 导出持久化数据到 zip 文件（无需 bridge 在线） |
+| `larkhelm memory import <archive.zip> [--replace] [--dry-run] [--data-dir DIR]` | 从 zip 恢复数据；默认合并（state.json merge + JSONL 去重）；`--replace` 覆盖写入 |
+
+## Key Features
+
+### 飞书文档自动注入（Auto Doc Context Injection）
+
+当用户消息中包含飞书文档/Wiki URL 时，`handlers.py` 中的 `_inject_doc_context()` 会**自动读取文档内容**并追加到发送给 AI 的上下文中。用户无需任何额外操作——这是 LarkHelm 与原生飞书 AI 集成的核心差异化能力。
+
+支持的 URL 类型：
+- `https://xxx.feishu.cn/docx/...` — 新版文档
+- `https://xxx.feishu.cn/wiki/...` — Wiki 页面
+- `https://xxx.feishu.cn/sheets/...` — 电子表格
+
+### Crew 断点机制（Human-in-the-Loop）
+
+`/crew` 任务支持在执行过程中插入人工确认节点（`_breakpoint_events`）。当 Agent 到达断点时，飞书卡片上会出现「继续」/「取消」按钮，支持人工审核后再决定是否继续执行。
+
+### Dev 模式 Git 快照（Auto Git Commit）
+
+`/dev` 流水线在每个关键阶段完成后，会通过 `_git_auto_commit()` 自动提交变更作为快照，便于查看每步的 diff 和在出错后回滚。
+
+## Adding a New Command
+
+**Step 1** — define in `commands.py`:
+```python
+def _cmd_new_cmd(chat_id: str, args: str = ""):
+    send_card(chat_id, "Title", "Body", color="blue")
+```
+
+**Step 2** — add import in `handlers.py:38-42`:
+```python
+from larkhelm.commands import _cmd_new_cmd
+```
+
+**Step 3** — add route in `handlers.py:671-740`:
+```python
+if tl.startswith("/new_cmd"):
+    _cmd_new_cmd(chat_id, text[9:].strip())
+    return
+```
+
+**Step 4** (optional) — add button route in `commands.py:681-716`
+
+**Step 5** (optional) — update `_cmd_help()` help text
+
+> **状态读写提示**：若需读写 Per-chat 状态（cwd、model 等），
+> 请使用 `from larkhelm.chat_state import _get_chat_state, _set_chat_field`。
+> 并发锁请使用 `from larkhelm.concurrency import _get_chat_lock`。
+
+## Other Extension Points
+
+| Extension point | File | Notes |
+|---|---|---|
+| Register new Feishu events | bridge.py:86-91 | `.register_p2_xxx_yyy(handler)` |
+| New Feishu API calls | lark_client.py | Follow existing patterns |
+| Card layout | card_builder.py | Modify `_make_card()` |
+| State fields | chat_state.py | Add to `_chat_state_store` data structure |
+| Permission rules | perm.py | Add new permission check logic |
+
+### 6. 状态模块导入指南
+
+各专属模块分工明确，直接按需导入：
+
+| 需求 | 导入来源 |
+|---|---|
+| Per-chat 状态（cwd/model/crons） | `larkhelm.chat_state` |
+| 并发锁、取消事件 | `larkhelm.concurrency` |
+| 日志读写、调试输出 | `larkhelm.log` |
+| Token 统计 | `larkhelm.token_stats` |
+| 消息去重 | `larkhelm.dedup` |
+| Crew 数据类型 | `larkhelm.crew_types` |
+
+### 7. 记忆系统的两条触发路径
+
+`memory.maybe_auto_update(chat_id)` 是后台 LLM 摘要器，把最近对话浓缩成
+session memory，再级联抽取 project / global memory。它有**两条触发路径**：
+
+| 触发 | 何时 | 谁触发 | 频率 |
+|---|---|---|---|
+| 普通节奏 | 普通 `/chat` 查询完成后 | `handlers/_query.py:742` | 每 `AUTO_UPDATE_EVERY=10` 轮一次 |
+| 里程碑节奏 | `/dev` / `/crew` / `/plan` 完成时 | `record_milestone(chat_id, kind, summary)`（`memory.py`）| 每次完成 + 60s 防抖 |
+
+里程碑节奏修复了之前"用 `/dev` 干完一整天但 memory 一字未变"的问题：
+
+- `record_milestone` 写一条 `role="milestone"`、`model="milestone"` 的日志条目
+- `maybe_auto_update` 的过滤器接受 `role in {user, assistant, milestone}`、
+  排除 `model in {crew, shell}`，所以 milestone 条目能被 LLM 摘要看到，
+  普通 crew 子任务的喧嚣仍被屏蔽
+- 然后 `record_milestone` 强制调 `maybe_auto_update(force=True)`，由
+  `_get_update_lock(chat_id)` 防止并发风暴；`_MILESTONE_DEBOUNCE_SEC=60`
+  防止短时间多次开销
+
+新写后台任务（类似 `/dev` / `/crew`）务必在 finally 加 `record_milestone`，
+否则任务结果不会进入 memory。
+
+## lark-oapi SDK — Available API Namespaces
+
+SDK install path: `~/.local/lib/python3.13/site-packages/lark_oapi/`
+
+### Docs & Drive
 
 | Namespace | Version | Resources |
 |---|---|---|
-| `client.docx` | v1 | `document`, `document_block`, `document_block_children`, `document_block_descendant` |
-| `client.drive` | v1, v2 | `file`, `file_comment`, `media`, `meta`, `permission_member`, `permission_public`, `export_task`, `import_task` |
+| `client.docx` | v1 | `document`, `document_block`, `document_block_children`, `document_block_descendant`, `chat_announcement` |
+| `client.drive` | v1, v2 | `file`, `file_comment`, `file_version`, `export_task`, `import_task`, `media`, `meta`, `permission_member`, `permission_public` |
 | `client.sheets` | v3 | `spreadsheet`, `spreadsheet_sheet`, `spreadsheet_sheet_filter`, `spreadsheet_sheet_filter_view` |
-| `client.wiki` | v1, v2 | v1: `node`. v2: `space`, `space_node`, `space_member`, `task` |
-| `client.docs` | v1 | `content` (legacy doc text) |
-| `client.document_ai` | v1 | OCR / doc intelligence |
-| `client.im` | v1 | `message`, `message_resource`, `chat`, `chat_members`, `file` |
+| `client.wiki` | v1, v2 | `node` (v1) / `space`, `space_node`, `space_member`, `task` (v2) |
+| `client.docs` | v1 | `content` — fetch legacy doc content |
+| `client.document_ai` | v1 | Document intelligence / OCR |
 
-Builder pattern, e.g.:
+### Usage examples
 
 ```python
+# Get document content
 resp = client.docx.v1.document.get(
     GetDocumentRequest.builder().document_id("doc_token_xxx").build()
 )
+
+# Upload file to Drive
+resp = client.drive.v1.media.upload_all(
+    UploadAllMediaRequest.builder()
+    .request_body(
+        UploadAllMediaRequestBody.builder()
+        .file_name("report.pdf")
+        .parent_type("explorer")
+        .parent_node("folder_token_xxx")
+        .size(file_size)
+        .file(open("report.pdf", "rb"))
+        .build()
+    ).build()
+)
+
+# List Drive files
+resp = client.drive.v1.file.list(
+    ListFileRequest.builder().folder_token("folder_token_xxx").build()
+)
+
+# Get Wiki node
+resp = client.wiki.v2.space_node.get(
+    GetSpaceNodeRequest.builder()
+    .space_id("space_id_xxx")
+    .node_token("node_token_xxx")
+    .build()
+)
+
+# List spreadsheet sheets
+resp = client.sheets.v3.spreadsheet_sheet.query(
+    QuerySpreadsheetSheetRequest.builder()
+    .spreadsheet_token("sheet_token_xxx")
+    .build()
+)
+
+## 异常处理规范
+
+**三类分类标准**（禁止未经分类就引入新的 `except Exception: pass`）：
+
+| 分类 | 处理方式 | 典型场景 |
+|---|---|---|
+| 高危—业务静默失败 | `_debug_log` + 用户 ⚠️ 卡片 | `/reset` API history 清除失败 |
+| 中危—辅助操作失败 | `_debug_log` 记录，不打断主流程 | token 统计、回调、所有权转移、memory 加载 |
+| 低危/零危—可接受静默 | 保持 `except Exception: pass` | `proc.kill()`、stderr drain、调试 I/O |
+
+**日志格式**（写入 `_cfg.DEBUG_LOG`）：
+
+```
+[HH:MM:SS] [{Module}] {operation} failed: {exception}
 ```
 
-For nested block writes (native tables, etc.) use `POST /docx/v1/documents/:doc_id/blocks/:block_id/descendant` (singular). See `lark_client._md_to_descendants()` + `_append_descendants_http()`.
+### 日志前缀规范
+
+**新代码**约定：`_debug_log` / `safe_log` / `lazy_debug_log` 的第一个参数必须以
+`[Module]` 开头，**模块名采用 PascalCase**（与 Python 类名一致），多词不加空格、
+不加下划线。子组件用空格分隔（例：`[Crew] Manager: ...`）。
+
+下表是当前已完成的小写 → PascalCase 迁移清单（其它模块下次顺手就改，不强制
+批量重写历史日志）：
+
+| ✅ 推荐 | ❌ 已迁移 | 说明 |
+|---|---|---|
+| `[Crew]` / `[Crew] Manager: …` | `[crew]` / `[Crew/Manager]` | 模块统一大写，子组件空格分隔 |
+| `[Checkpoint]` | `[checkpoint]` | |
+| `[Perm]` | `[perm]` | |
+| `[IntentRouter]` | `[intent_router]` | |
+| `[Plan]` | `[plan]` | |
+| `[Dev]` | `[dev]` | |
+| `[BackendRegistry]` | `[recover_thread]` | 用模块名而非线程名 |
+
+**例外**：第三方进程协议 / 外部 CLI 二进制名保留小写（与命令名对齐）：
+`[claude]` / `[gemini]` / `[kimi]` / `[upgrade]` 等。
+
+**未迁移的历史小写前缀**（如 `[memory]` / `[router]` / `[token_stats]` /
+`[lark_client]` / agent_hub 内部 `[agent_audit]` 等）属于知情遗留：新写日志
+请用 PascalCase，遇到时顺手重命名即可，不必专门起 PR 批量改写。
+
+**helper 选择**：
+
+| Helper | 级别 | 何时用 | 实现位置 |
+|---|---|---|---|
+| `_debug_log(msg)` | DEBUG | 主路径诊断；调用方已确保 `larkhelm.log` 已加载 | `log.py:_debug_log` |
+| `safe_log(msg)` | DEBUG | 异常清理 / 永不抛路径；底层等价于 `_debug_log` 套 try-except | `log.py:safe_log` |
+| `lazy_debug_log(msg)` | DEBUG | bootstrap / 循环 import 边缘；模块本身可能尚未完成 import | `log.py:lazy_debug_log` |
+| `info(msg)` | INFO | 阶段性进展、状态变更（"backend X 已注册"） | `log.py:info` |
+| `warn(msg)` | WARN | 降级行为、credential 拉取失败、操作员需要看到的告警 | `log.py:warn` |
+| `error(msg)` | ERROR | 用户可见任务被打断的失败（便于与工单关联） | `log.py:error` |
+
+> `safe_log` 取代 R3 之前 `agent_hub/` 4 处本地 `_safe_log` 副本；
+> `lazy_debug_log` 取代 `config.py`、`agent_hub/agent_base.py.abort()`、
+> `agent_hub/intent_router.py` 中的"双层 try-import"模式。新代码避免再
+> 引入这两种模式的本地拷贝。
+
+### `LARKHELM_LOG_LEVEL` 环境变量过滤
+
+支持通过 `LARKHELM_LOG_LEVEL=DEBUG|INFO|WARN|ERROR` 环境变量在启动时
+过滤诊断写入。默认 `DEBUG`（保留原始 verbose 行为，所有 250+ 现存
+`_debug_log` 调用照旧落盘）。生产环境想降噪：
+
+```bash
+export LARKHELM_LOG_LEVEL=WARN
+python3 -m larkhelm start
+```
+
+实施细节：
+
+- 读取时机：模块 import 时一次性解析（运行中改环境变量**不**生效，
+  避免日志过滤中途翻转造成的诊断盲区）。
+- 输出格式：DEBUG 级别保持 `[HH:MM:SS] [Module] msg` **不变**（grep
+  兼容）；INFO/WARN/ERROR 加显式标签 `[HH:MM:SS] <LEVEL> [Module] msg`。
+- 未知值（如 `VERBOSE`）回退到 DEBUG 并向 stderr 写一行警告，避免拼写
+  错误意外静音整个 bridge。
+- `safe_log` / `lazy_debug_log` 也走 gate（与 `_debug_log` 一致）。
+
+**保留静默清单**（已确认无需改动）：
+
+| 位置 | 原因 |
+|---|---|
+| `runner_base.py` `proc.kill()`（3处：watch/stdin/FileNotFoundError）+ `runner_claude/kimi/gemini` 各 0 | OS 级，进程已退出为预期 |
+| `runner_base.py` `_drain_stderr` 线程 | display-only，失败无副作用 |
+| `runner_base.py` `_cleanup_tmp` unlink | 临时文件已不存在为预期 |
+| `log.py` `_debug_log` 内部两处 pass | 调试基础设施，递归报错无意义 |
+| `log.py:105` JSONL 行解析跳过 | 设计意图：容错读取损坏行 |
+| `memory.py` `_global_memory_file` chat_state 访问 | 已有明确 fallback（返回 None） |
+| `crew/_runner.py` git diff | 非 git 仓库为预期行为 |
+| `mcp_server.py` config inner parse | MCP config 行级容错，解析失败继续下一行 |

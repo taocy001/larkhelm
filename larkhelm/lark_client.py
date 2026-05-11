@@ -16,6 +16,8 @@ from lark_oapi.api.im.v1 import (
     DeleteMessageReactionRequestBuilder, EmojiBuilder,
     GetMessageResourceRequestBuilder, GetMessageRequest,
     CreatePinRequest, CreatePinRequestBody, DeletePinRequest,
+    CreateFileRequestBuilder, CreateFileRequestBodyBuilder,
+    GetFileRequestBuilder,
 )
 from lark_oapi.api.im.v1.model.reply_message_request import ReplyMessageRequest
 from lark_oapi.api.im.v1.model.reply_message_request_body import (ReplyMessageRequestBody, ReplyMessageRequestBodyBuilder)
@@ -237,6 +239,94 @@ def reply_card(chat_id: str, message_id: str,
     for i, chunk in enumerate(rest, 2):
         n = note if i == len(chunks) else ""
         send_card(chat_id, f"{title} ({i}/{len(chunks)})", chunk, color, n)
+
+
+# ═══════════════════════════════════════════════════
+#  File upload / download / send
+# ═══════════════════════════════════════════════════
+
+def upload_file_to_feishu(file_path: Path, file_type: str = "stream") -> str | None:
+    """Upload a local file to Feishu and return the file_key, or None on failure."""
+    if client is None:
+        return None
+    try:
+        with open(file_path, "rb") as f:
+            req = (CreateFileRequestBuilder()
+                   .request_body(
+                       CreateFileRequestBodyBuilder()
+                       .file_type(file_type)
+                       .file_name(file_path.name)
+                       .file(f)
+                       .build()
+                   ).build())
+            resp = client.im.v1.file.create(req)
+        if resp.success() and resp.data:
+            return resp.data.file_key
+        _debug_log(f"[UploadFile] failed code={resp.code}: {resp.msg}")
+        return None
+    except Exception as e:
+        _debug_log(f"[UploadFile] exception: {e}")
+        return None
+
+
+def download_file_by_key(file_key: str, out_path: Path) -> bool:
+    """Download a Feishu file by file_key to a local path."""
+    if client is None:
+        return False
+    try:
+        req = GetFileRequestBuilder().file_key(file_key).build()
+        resp = client.im.v1.file.get(req)
+        if not resp.success():
+            _debug_log(f"[DownloadFile] failed code={resp.code}: {resp.msg}")
+            return False
+        file_data = resp.file
+        if hasattr(file_data, "read"):
+            file_data = file_data.read()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "wb") as f:
+            f.write(file_data)
+        return True
+    except Exception as e:
+        _debug_log(f"[DownloadFile] exception: {e}")
+        return False
+
+
+def send_file_message(chat_id: str, file_key: str, msg_id: str = None) -> str | None:
+    """Send a file message to a chat; returns message_id or None."""
+    if client is None:
+        return None
+    try:
+        content = _json_mod.dumps({"file_key": file_key}, ensure_ascii=False)
+        if msg_id:
+            body = (ReplyMessageRequestBodyBuilder()
+                    .msg_type("file")
+                    .content(content)
+                    .reply_in_thread(False)
+                    .build())
+            req = (ReplyMessageRequest.builder()
+                   .message_id(msg_id)
+                   .request_body(body)
+                   .build())
+            resp = client.im.v1.message.reply(req)
+        else:
+            resp = client.im.v1.message.create(
+                CreateMessageRequestBuilder()
+                .receive_id_type("chat_id")
+                .request_body(
+                    CreateMessageRequestBodyBuilder()
+                    .receive_id(chat_id)
+                    .msg_type("file")
+                    .content(content)
+                    .build()
+                ).build()
+            )
+        if resp.success() and resp.data:
+            return resp.data.message_id
+        _debug_log(f"[SendFileMsg] failed code={resp.code}: {resp.msg}")
+        return None
+    except Exception as e:
+        _debug_log(f"[SendFileMsg] exception: {e}")
+        return None
 
 
 # ═══════════════════════════════════════════════════
