@@ -204,19 +204,56 @@ def _memory_file(chat_id: str) -> Path:
 
 # ── Low-level read/write ─────────────────────────────────────────────────────
 
+# In-process body cache, invalidated on mtime change. Every ``_do_query`` reads
+# all three layers via ``get_memory_context`` and the auto-update cascade reads
+# them again inside ``_try_extract_*`` — that's 6+ disk opens per active turn.
+# Caching cuts that to 3 opens for the first read and stat-only afterward
+# (``path.stat`` is ~10× cheaper than open+read+strip-frontmatter).
+#
+# Invalidation contract:
+#   * ``_save_md`` rewrites the file → mtime changes → next ``_load_md_body``
+#     re-reads automatically.
+#   * Other processes editing memory files manually (eg. ``larkhelm memory
+#     import``) likewise touch mtime, so cross-process consistency is
+#     preserved within mtime resolution (most filesystems: nanoseconds).
+_mem_body_cache: dict[str, tuple[float, str | None]] = {}
+_mem_body_cache_lock = threading.Lock()
+
+
 def _load_md_body(path: Path | None) -> str | None:
-    """Read a memory file body, stripping YAML frontmatter. Returns None if absent/empty."""
+    """Read a memory file body, stripping YAML frontmatter. Returns None if absent/empty.
+
+    Uses an in-process mtime-keyed cache so repeated reads of the same file
+    within a turn (or across turns when memory hasn't been rewritten) avoid
+    re-opening the file. See module-level note above for the contract.
+    """
     if path is None:
         return None
     try:
         if not path.exists():
+            # Drop any stale entry for a now-deleted file so a future re-create
+            # is observed on the next call.
+            with _mem_body_cache_lock:
+                _mem_body_cache.pop(str(path), None)
             return None
+        st_mtime = path.stat().st_mtime
+        key = str(path)
+        with _mem_body_cache_lock:
+            cached = _mem_body_cache.get(key)
+            if cached is not None and cached[0] == st_mtime:
+                return cached[1]
         text = path.read_text(encoding="utf-8")
         if text.startswith("---"):
             end = text.find("\n---", 3)
             if end != -1:
-                return text[end + 4:].strip() or None
-        return text.strip() or None
+                body = text[end + 4:].strip() or None
+            else:
+                body = text.strip() or None
+        else:
+            body = text.strip() or None
+        with _mem_body_cache_lock:
+            _mem_body_cache[key] = (st_mtime, body)
+        return body
     except Exception as e:
         _debug_log(f"[Memory] load error {path.name}: {e}")
         return None
@@ -541,18 +578,33 @@ def inject_memory(chat_id: str, message: str, cwd: str | None = None) -> str:
 _API_PROVIDERS = ("anthropic_api", "google_api", "openai_compat_api")
 
 
-def _run_one_shot(prompt: str, ns: str) -> str:
+def _run_one_shot(prompt: str, ns: str, prefer_cheap: bool = False) -> str:
     """Run a single stateless LLM prompt and return the text output.
 
-    Uses the orchestrator backend. ns is an isolated chat namespace so the call
-    never touches any real chat's session state.
+    Backend selection:
+      * ``prefer_cheap=True`` — try a ``tags=["cheap"]`` backend first
+        (typically DeepSeek; see ``config._auto_discover_http``). Falls back
+        to the orchestrator if no cheap backend is healthy. Used by the
+        memory cascade (session summary + project/global extract) where the
+        marginal quality cost is small but the price ratio is ~30× cheaper.
+      * ``prefer_cheap=False`` (default) — orchestrator only; preserves
+        legacy behaviour for any caller that wants the main model.
+
+    ns is an isolated chat namespace so the call never touches any real
+    chat's session state.
     """
     from larkhelm.backend_registry import BACKEND_REGISTRY
     from larkhelm.perm import grant_yolo, revoke_yolo
 
-    spec = BACKEND_REGISTRY.get_orchestrator()
+    spec = None
+    if prefer_cheap:
+        spec = BACKEND_REGISTRY.get_by_tag(["cheap"])
+        if spec is not None:
+            _debug_log(f"[Memory] one_shot using cheap backend {spec.id} (ns={ns})")
     if spec is None:
-        raise RuntimeError("No orchestrator backend available")
+        spec = BACKEND_REGISTRY.get_orchestrator()
+    if spec is None:
+        raise RuntimeError("No backend available (neither cheap nor orchestrator)")
 
     collected: list[str] = []
 
@@ -670,7 +722,11 @@ def generate_memory(chat_id: str, recent_logs: str,
         logs=recent_logs[:10000],
     )
     try:
-        result = _run_one_shot(prompt, ns=f"_mem_{chat_id}")
+        # ``prefer_cheap=True`` routes session summarization to DeepSeek (or
+        # whichever backend is tagged ``cheap``) when healthy. Summary quality
+        # for compressing 10K-char dialog → 2K-char paragraph is roughly
+        # equivalent across modern LLMs but pricing differs ~30×.
+        result = _run_one_shot(prompt, ns=f"_mem_{chat_id}", prefer_cheap=True)
     except Exception as e:
         _debug_log(f"[Memory] generate_memory error {chat_id}: {e}")
         raise
@@ -700,7 +756,11 @@ def _try_extract_project(session_content: str, cwd: str) -> None:
             session=session_content,
         )
         ns = f"_proj_{hashlib.md5(cwd.encode()).hexdigest()[:8]}"
-        result = _run_one_shot(prompt, ns=ns)
+        # See ``generate_memory`` — cheap-backend route applies here too.
+        # 80%+ of these calls return ``UNCHANGED`` so we're predominantly
+        # paying for input tokens we don't act on; using a cheap model
+        # multiplies that "wasted input" by ~30× less per token.
+        result = _run_one_shot(prompt, ns=ns, prefer_cheap=True)
         result = (result or "").strip()
         if not result or result.upper() == "UNCHANGED":
             return
@@ -726,7 +786,8 @@ def _try_extract_global(session_content: str, chat_id: str) -> None:
             session=session_content,
         )
         ns = f"_glob_{chat_id[:8]}"
-        result = _run_one_shot(prompt, ns=ns)
+        # Same reasoning as project extract.
+        result = _run_one_shot(prompt, ns=ns, prefer_cheap=True)
         result = (result or "").strip()
         if not result or result.upper() == "UNCHANGED":
             return

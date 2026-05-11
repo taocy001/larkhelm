@@ -90,7 +90,8 @@ def _inject_doc_context(text: str, chat_id: str) -> str:
 
 def _run_backend_single(spec, chat_id: str, message: str, cwd: str, cancel_ev,
                         on_text, on_tool, on_tool_result, on_soft_timeout,
-                        images=None, extra_system: str = "") -> str:
+                        images=None, extra_system: str = "",
+                        recent_turns: str = "") -> str:
     """Run a single backend and return its output string.
 
     extra_system:
@@ -98,6 +99,14 @@ def _run_backend_single(spec, chat_id: str, message: str, cwd: str, cancel_ev,
       - CLI backends: prepended as [System]...[User Query] ONLY when no existing session
         (sid=None). Resumed sessions already carry the context from the first turn, so
         re-injecting every message would multiply context size by N turns.
+
+    recent_turns:
+      Last ~6 turns serialized as plain text. Used to give CLI backends some
+      conversational grounding on a fresh session (since after that they
+      ``--resume`` and we never re-inject). **Dropped on API backends** because
+      ``load_history()`` already passes the structured message list — including
+      these same turns — and re-injecting them as a system blob is pure
+      duplicate input tokens (~500 / call, ~50K / 100-turn session).
     """
     from larkhelm.backend_cli import run_claude, run_gemini, run_kimi, run_deepseek
     from larkhelm.backend_api import run_anthropic, run_google, run_openai_compat
@@ -106,6 +115,7 @@ def _run_backend_single(spec, chat_id: str, message: str, cwd: str, cancel_ev,
     provider = spec.provider
     if provider == "anthropic_api":
         history = load_history(provider, chat_id)
+        # NOTE: recent_turns intentionally omitted — history already carries it.
         output, new_history = run_anthropic(spec, chat_id, message, history, cancel_ev, on_text,
                                             extra_system=extra_system)
         save_history(provider, chat_id, new_history)
@@ -121,30 +131,35 @@ def _run_backend_single(spec, chat_id: str, message: str, cwd: str, cancel_ev,
         save_history(provider, chat_id, new_history)
     elif provider == "gemini_cli":
         sid = _load_sid(chat_id, spec.id)
-        cli_msg = f"[System]\n{extra_system}\n\n[User Query]\n{message}" if (extra_system and not sid) else message
+        cli_extra = "\n\n".join(filter(None, [extra_system, recent_turns]))
+        cli_msg = f"[System]\n{cli_extra}\n\n[User Query]\n{message}" if (cli_extra and not sid) else message
         output = run_gemini(spec, chat_id, cli_msg, sid, cwd, cancel_ev,
                             on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
                             on_soft_timeout=on_soft_timeout)
     elif provider == "kimi_cli":
         sid = _load_sid(chat_id, spec.id)
-        cli_msg = f"[System]\n{extra_system}\n\n[User Query]\n{message}" if (extra_system and not sid) else message
+        cli_extra = "\n\n".join(filter(None, [extra_system, recent_turns]))
+        cli_msg = f"[System]\n{cli_extra}\n\n[User Query]\n{message}" if (cli_extra and not sid) else message
         output = run_kimi(spec, chat_id, cli_msg, sid, cwd, cancel_ev,
                           on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
                           on_soft_timeout=on_soft_timeout, images=images)
     elif provider == "deepseek_api":
-        # DeepSeek is HTTP + stateless; system prompt is passed through the
-        # proper system channel by DeepSeekRunner (every call), so this path
-        # mirrors the API backends rather than the CLI new-session-only rule.
+        # DeepSeek is HTTP + stateless but, unlike anthropic_api, the bridge
+        # does NOT load a history list on its behalf — DeepSeekRunner only sees
+        # the current turn + system prompt. So recent_turns is genuinely useful
+        # here and gets appended to the system channel.
+        sys_combined = "\n\n".join(filter(None, [extra_system, recent_turns]))
         output = run_deepseek(spec, chat_id, message, sid=None, cwd=cwd,
                               cancel_ev=cancel_ev, on_text=on_text, on_tool=on_tool,
                               on_tool_result=on_tool_result, on_soft_timeout=on_soft_timeout,
-                              system_prompt=extra_system or None)
+                              system_prompt=sys_combined or None)
     else:  # claude_cli (default)
         sid = _load_sid(chat_id, spec.id)
+        cli_extra = "\n\n".join(filter(None, [extra_system, recent_turns]))
         output = run_claude(spec, chat_id, message, sid, cwd, cancel_ev,
                             on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
                             on_soft_timeout=on_soft_timeout, images=images, allow_retry=True,
-                            system_prompt=extra_system or None)
+                            system_prompt=cli_extra or None)
     return output
 
 
@@ -162,6 +177,7 @@ def _do_query_with_delegation(
     images=None,
     hop: int = 0,
     memory_ctx: str = "",
+    recent_turns: str = "",
 ) -> str:
     """Execute query with delegation support (max 2 hops).
 
@@ -183,7 +199,8 @@ def _do_query_with_delegation(
         # re-emit DELEGATE: in the fallback path.
         return _run_backend_single(orch_spec, chat_id, enriched_msg, cwd, cancel_ev,
                                    on_text, on_tool, on_tool_result, on_soft_timeout, images,
-                                   extra_system=combined_system)
+                                   extra_system=combined_system,
+                                   recent_turns=recent_turns)
 
     # Phase 1: run orchestrator, buffer ALL output until stream ends for DELEGATE detection.
     # We never flush to on_text during streaming — delegation can appear anywhere in the output.
@@ -200,7 +217,8 @@ def _do_query_with_delegation(
 
     orch_output = _run_backend_single(orch_spec, chat_id, enriched_msg, cwd, cancel_ev,
                                       _buffered_on_text, on_tool, on_tool_result, on_soft_timeout,
-                                      images, extra_system=combined_system)
+                                      images, extra_system=combined_system,
+                                      recent_turns=recent_turns)
 
     # Final check on complete output
     delegation = _buf_state["delegation"] or _detect_delegation(orch_output)
@@ -223,7 +241,8 @@ def _do_query_with_delegation(
         fallback_system = "\n\n".join(filter(None, [memory_ctx, _FALLBACK_SYSTEM]))
         return _run_backend_single(orch_spec, chat_id, enriched_msg, cwd, cancel_ev,
                                    on_text, on_tool, on_tool_result, on_soft_timeout, images,
-                                   extra_system=fallback_system)
+                                   extra_system=fallback_system,
+                                   recent_turns=recent_turns)
 
     on_text(f"> 🔀 委托 {specialist_spec.display_name} 处理中...")
     on_tool(f"🔀 委托 {specialist_spec.display_name}", sub_query[:120], "delegation")
@@ -618,11 +637,17 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             except Exception as _mem_err:
                 _debug_log(f"[{trace_id}][DoQuery] memory context error: {_mem_err}")
 
+            # ``recent_turns`` is kept separate from ``memory_ctx`` (rather than
+            # concatenated as before) so the downstream ``_run_backend_single``
+            # can drop it on API backends. API backends already receive the same
+            # turns via ``load_history``; concatenating them into the system
+            # channel was ~500 redundant input tokens per call (~50K / 100-turn
+            # session). CLI + DeepSeek backends still need it because they don't
+            # load a structured history.
+            recent_turns = ""
             try:
                 from larkhelm.log import _get_recent_turns
-                recent = _get_recent_turns(chat_id)
-                if recent:
-                    memory_ctx = "\n\n".join(filter(None, [memory_ctx, recent]))
+                recent_turns = _get_recent_turns(chat_id) or ""
             except Exception as _hist_err:
                 _debug_log(f"[{trace_id}][DoQuery] rolling history error: {_hist_err}")
 
@@ -715,12 +740,14 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                             output = _do_query_with_delegation(
                                 chat_id, message, attempt_spec, worker_specs,
                                 cwd, cancel_ev, on_text, on_tool, on_tool_result,
-                                _on_soft_timeout, images=images, memory_ctx=memory_ctx)
+                                _on_soft_timeout, images=images, memory_ctx=memory_ctx,
+                                recent_turns=recent_turns)
                         else:
                             output = _run_backend_single(
                                 attempt_spec, chat_id, message, cwd, cancel_ev,
                                 on_text, on_tool, on_tool_result, _on_soft_timeout, images,
-                                extra_system=memory_ctx)
+                                extra_system=memory_ctx,
+                                recent_turns=recent_turns)
                         successful_spec = attempt_spec
                         break
                     except QueryCancelledError:

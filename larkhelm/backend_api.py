@@ -86,7 +86,21 @@ def run_anthropic(
         messages=messages,
     )
     if system_parts:
-        kwargs["system"] = "\n\n".join(system_parts)
+        # Prompt caching: send the system channel as a single block with
+        # ``cache_control: ephemeral`` so the same prefix on the next request
+        # within ~5 min is read at ~10% input price. The dominant component
+        # is the 4500-char three-tier memory_ctx — typically stable across
+        # turns. Cache-write costs ~25% more than uncached input, so the
+        # break-even is 2 reads within the TTL; any active chat with >2
+        # turns / 5 min wins. Below the minimum cacheable size (~1024 tokens
+        # for Sonnet, ~2048 for Haiku) Anthropic silently skips caching, so
+        # the marker is a free hint in small-system cases.
+        system_text = "\n\n".join(system_parts)
+        kwargs["system"] = [{
+            "type":          "text",
+            "text":          system_text,
+            "cache_control": {"type": "ephemeral"},
+        }]
 
     _debug_log(f"[anthropic_api] {spec.id} model={kwargs['model']} chat={chat_id}")
 
