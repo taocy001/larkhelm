@@ -1260,11 +1260,26 @@ class FeishuDocClient:
         }}
 
     def transfer_doc_owner(self, doc_token: str, open_id: str, doc_type: str = "docx") -> None:
-        """Transfer document ownership to the given user (by open_id). Requires docs:doc scope."""
+        """Transfer document ownership to the given user (by open_id). Requires docs:doc scope.
+
+        Query parameters:
+          - remove_old_owner=true: drop the app (previous owner) from the collaborator
+            list after transfer — without this the app stays as a co-owner and any
+            future ``transfer_owner`` call still fires "want to transfer ownership"
+            notifications even though the user is already the effective owner.
+          - stay_put=false: move the document to the new owner's drive root so the
+            file is owned + located by the user. ``stay_put=true`` would keep the
+            file under the app's drive namespace, which the user has no UI access to.
+
+        Note: this endpoint still triggers Feishu's system notification "X wants to
+        transfer ownership of Y" — that's a server-side behavior that cannot be
+        suppressed via query parameters. To avoid the notification entirely the
+        document must be created with a user_access_token (see ``oauth_user.py``).
+        """
         token = self._get_tenant_token()
         url   = (f"https://open.feishu.cn/open-apis/drive/v1/permissions"
                  f"/{doc_token}/members/transfer_owner"
-                 f"?type={doc_type}&remove_old_owner=false&stay_put=true")
+                 f"?type={doc_type}&remove_old_owner=true&stay_put=false")
         body  = _json_mod.dumps({
             "member_type": "openid",
             "member_id":   open_id,
