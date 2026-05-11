@@ -575,7 +575,65 @@ def inject_memory(chat_id: str, message: str, cwd: str | None = None) -> str:
 
 # ── LLM one-shot helper ───────────────────────────────────────────────────────
 
-_API_PROVIDERS = ("anthropic_api", "google_api", "openai_compat_api")
+# Backends whose runner is reached via ``backend_api`` (SDK-based stream APIs).
+# Note ``deepseek_api`` is NOT here — DeepSeek's runner historically lives in
+# ``backend_cli`` (it's HTTP but predates the API/CLI split), so it gets its
+# own branch in ``_dispatch_one_shot`` below.
+_SDK_API_PROVIDERS = ("anthropic_api", "google_api", "openai_compat_api")
+
+
+def _dispatch_one_shot(spec, ns: str, prompt: str, on_text) -> str:
+    """Invoke a one-shot LLM call against ``spec``; raises on backend error.
+
+    Extracted from ``_run_one_shot`` so the retry-on-failure path (cheap →
+    orchestrator) can call it twice without duplicating the dispatch tree.
+    Cleans up the session sid in ``finally`` so a backend mid-call crash
+    doesn't leak namespace state.
+    """
+    from larkhelm.perm import grant_yolo, revoke_yolo
+
+    try:
+        if spec.provider in _SDK_API_PROVIDERS:
+            import larkhelm.backend_api as _bapi
+            fn = {
+                "anthropic_api":    _bapi.run_anthropic,
+                "google_api":       _bapi.run_google,
+                "openai_compat_api": _bapi.run_openai_compat,
+            }[spec.provider]
+            output, _ = fn(spec=spec, chat_id=ns, message=prompt,
+                           history=[], on_text=on_text)
+        elif spec.provider == "deepseek_api":
+            # DeepSeek's runner lives in backend_cli (HTTP-via-requests, no SDK).
+            # Routing it through the CLI ``else`` branch by accident used to
+            # spawn ``run_claude`` with a DeepSeek spec — exactly the bug the
+            # post-#3 audit caught.
+            from larkhelm.backend_cli import run_deepseek
+            output = run_deepseek(spec=spec, chat_id=ns, message=prompt,
+                                  sid=None, cwd=str(_cfg.DATA_DIR),
+                                  on_text=on_text)
+        else:
+            from larkhelm.backend_cli import run_claude, run_gemini, run_kimi
+            grant_yolo(ns)
+            try:
+                if spec.provider == "gemini_cli":
+                    output = run_gemini(spec=spec, chat_id=ns, message=prompt,
+                                        sid=None, cwd=str(_cfg.DATA_DIR),
+                                        on_text=on_text, use_session=False)
+                elif spec.provider == "kimi_cli":
+                    output = run_kimi(spec=spec, chat_id=ns, message=prompt,
+                                      sid=None, cwd=str(_cfg.DATA_DIR), on_text=on_text)
+                else:
+                    output = run_claude(spec=spec, chat_id=ns, message=prompt,
+                                        sid=None, cwd=str(_cfg.DATA_DIR), on_text=on_text)
+            finally:
+                revoke_yolo(ns)
+        return output
+    finally:
+        try:
+            from larkhelm.chat_state import _clear_sid
+            _clear_sid(ns, spec.id)
+        except Exception as e:
+            _debug_log(f"[Memory] clear_sid failed: {e}")
 
 
 def _run_one_shot(prompt: str, ns: str, prefer_cheap: bool = False) -> str:
@@ -583,26 +641,27 @@ def _run_one_shot(prompt: str, ns: str, prefer_cheap: bool = False) -> str:
 
     Backend selection:
       * ``prefer_cheap=True`` — try a ``tags=["cheap"]`` backend first
-        (typically DeepSeek; see ``config._auto_discover_http``). Falls back
-        to the orchestrator if no cheap backend is healthy. Used by the
-        memory cascade (session summary + project/global extract) where the
-        marginal quality cost is small but the price ratio is ~30× cheaper.
+        (typically DeepSeek; see ``config._auto_discover_http``). On runtime
+        failure, **falls back to the orchestrator with a single retry** so a
+        DeepSeek quota / network hiccup doesn't break the cascade. Used by
+        the memory cascade where the marginal quality cost of cheap is small
+        but the price ratio is ~30× cheaper.
       * ``prefer_cheap=False`` (default) — orchestrator only; preserves
-        legacy behaviour for any caller that wants the main model.
+        legacy behaviour. No fallback — any failure propagates so the caller
+        can mark the orchestrator unhealthy.
 
     ns is an isolated chat namespace so the call never touches any real
     chat's session state.
     """
     from larkhelm.backend_registry import BACKEND_REGISTRY
-    from larkhelm.perm import grant_yolo, revoke_yolo
 
-    spec = None
+    cheap_spec = None
     if prefer_cheap:
-        spec = BACKEND_REGISTRY.get_by_tag(["cheap"])
-        if spec is not None:
-            _debug_log(f"[Memory] one_shot using cheap backend {spec.id} (ns={ns})")
-    if spec is None:
-        spec = BACKEND_REGISTRY.get_orchestrator()
+        cheap_spec = BACKEND_REGISTRY.get_by_tag(["cheap"])
+        if cheap_spec is not None:
+            _debug_log(f"[Memory] one_shot using cheap backend {cheap_spec.id} (ns={ns})")
+
+    spec = cheap_spec or BACKEND_REGISTRY.get_orchestrator()
     if spec is None:
         raise RuntimeError("No backend available (neither cheap nor orchestrator)")
 
@@ -613,37 +672,24 @@ def _run_one_shot(prompt: str, ns: str, prefer_cheap: bool = False) -> str:
         collected.append(text)
 
     try:
-        if spec.provider in _API_PROVIDERS:
-            import larkhelm.backend_api as _bapi
-            fn = {
-                "anthropic_api":    _bapi.run_anthropic,
-                "google_api":       _bapi.run_google,
-                "openai_compat_api": _bapi.run_openai_compat,
-            }[spec.provider]
-            output, _ = fn(spec=spec, chat_id=ns, message=prompt, history=[], on_text=_on_text)
-        else:
-            from larkhelm.backend_cli import run_claude, run_gemini, run_kimi
-            grant_yolo(ns)
-            try:
-                if spec.provider == "gemini_cli":
-                    output = run_gemini(spec=spec, chat_id=ns, message=prompt,
-                                        sid=None, cwd=str(_cfg.DATA_DIR),
-                                        on_text=_on_text, use_session=False)
-                elif spec.provider == "kimi_cli":
-                    output = run_kimi(spec=spec, chat_id=ns, message=prompt,
-                                      sid=None, cwd=str(_cfg.DATA_DIR), on_text=_on_text)
-                else:
-                    output = run_claude(spec=spec, chat_id=ns, message=prompt,
-                                        sid=None, cwd=str(_cfg.DATA_DIR), on_text=_on_text)
-            finally:
-                revoke_yolo(ns)
+        output = _dispatch_one_shot(spec, ns, prompt, _on_text)
         return output or "".join(collected)
-    finally:
-        try:
-            from larkhelm.chat_state import _clear_sid
-            _clear_sid(ns, spec.id)
-        except Exception as e:
-            _debug_log(f"[Memory] clear_sid failed: {e}")
+    except Exception as cheap_err:
+        # Runtime fallback: cheap path failed (network, quota, model error).
+        # Try orchestrator once. Only kicks in when cheap was actually used —
+        # avoids hiding orchestrator-direct failures from callers.
+        if cheap_spec is None or spec.id != cheap_spec.id:
+            raise
+        orch_spec = BACKEND_REGISTRY.get_orchestrator()
+        if orch_spec is None or orch_spec.id == cheap_spec.id:
+            raise
+        _debug_log(
+            f"[Memory] cheap backend {cheap_spec.id} failed ({type(cheap_err).__name__}: "
+            f"{str(cheap_err)[:120]}); retrying via orchestrator {orch_spec.id}"
+        )
+        collected.clear()
+        output = _dispatch_one_shot(orch_spec, ns, prompt, _on_text)
+        return output or "".join(collected)
 
 
 # ── Session memory generation ─────────────────────────────────────────────────

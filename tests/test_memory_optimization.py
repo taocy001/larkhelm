@@ -228,49 +228,141 @@ class AnthropicCacheControlTests(unittest.TestCase):
 # ════════════════════════════════════════════════════════════════════════
 
 class RunOneShotCheapRoutingTests(unittest.TestCase):
+    """``_run_one_shot`` cheap-backend selection + DeepSeek dispatch + fallback.
 
-    def test_prefer_cheap_uses_cheap_backend_when_available(self):
+    The historically wrong version of this test class used
+    ``provider="openai_compat_api"`` to stand in for the cheap backend,
+    sidestepping the real production case where ``get_by_tag(["cheap"])``
+    returns DeepSeek (``provider="deepseek_api"``). DeepSeek's runner lives
+    in ``backend_cli`` (not ``backend_api``), and the dispatch table used to
+    miss it — silently routing every cascade call through ``run_claude``
+    with a DeepSeek spec attached. The current tests exercise the real
+    DeepSeek path so a regression to "cascade quietly uses claude" would
+    fail loudly.
+    """
+
+    def test_prefer_cheap_dispatches_deepseek_via_backend_cli(self):
+        """The high-value production case: cheap = DeepSeek (deepseek_api)."""
         from larkhelm import memory as mem
         cheap_spec = MagicMock(id="deepseek", provider="deepseek_api",
-                               tags=["cheap"], healthy=True, enabled=True)
-        orch_spec  = MagicMock(id="claude",   provider="claude_cli",
+                               tags=["cheap", "fast"], healthy=True, enabled=True)
+        orch_spec  = MagicMock(id="claude", provider="claude_cli",
                                tags=["tools"], healthy=True, enabled=True)
 
         with patch("larkhelm.backend_registry.BACKEND_REGISTRY") as reg, \
-             patch("larkhelm.backend_cli.run_deepseek", return_value="cheap-output") as run_cheap, \
-             patch("larkhelm.backend_cli.run_claude") as run_orch, \
+             patch("larkhelm.backend_cli.run_deepseek", return_value="cheap-output") as run_deepseek, \
+             patch("larkhelm.backend_cli.run_claude") as run_claude, \
              patch("larkhelm.chat_state._clear_sid"):
             reg.get_by_tag.return_value = cheap_spec
             reg.get_orchestrator.return_value = orch_spec
-            # deepseek_api is in _API_PROVIDERS? let's check — actually no,
-            # it's special-cased. The runner is backend_cli.run_deepseek,
-            # but memory._run_one_shot has a different dispatch table that
-            # only routes the three _API_PROVIDERS via backend_api. We need
-            # to pick a backend whose provider IS in _API_PROVIDERS. Switch
-            # to openai_compat_api which IS in the table.
-            cheap_spec.provider = "openai_compat_api"
-            with patch("larkhelm.backend_api.run_openai_compat",
-                       return_value=("cheap-output", [])) as run_oc:
-                result = mem._run_one_shot("PROMPT", ns="_test_ns",
-                                           prefer_cheap=True)
-            # The cheap backend was selected.
-            reg.get_by_tag.assert_called_once_with(["cheap"])
-            # And the orchestrator was NOT consulted (cheap path resolved).
-            reg.get_orchestrator.assert_not_called()
+            result = mem._run_one_shot("PROMPT", ns="_test_ns", prefer_cheap=True)
+        self.assertEqual(result, "cheap-output")
+        # The cheap backend was selected.
+        reg.get_by_tag.assert_called_once_with(["cheap"])
+        # The orchestrator was NOT consulted (cheap path resolved).
+        reg.get_orchestrator.assert_not_called()
+        # ▶ Critical regression guard: ``run_deepseek`` was called, NOT
+        #   ``run_claude``. The pre-fix bug routed deepseek_api into the CLI
+        #   else-branch and spawned claude with a DeepSeek spec.
+        self.assertEqual(run_deepseek.call_count, 1,
+            "deepseek_api must dispatch to backend_cli.run_deepseek, not run_claude")
+        run_claude.assert_not_called()
+        # And run_deepseek received the cheap spec, not some downgrade.
+        _args, kwargs = run_deepseek.call_args
+        self.assertIs(kwargs.get("spec"), cheap_spec)
+        self.assertEqual(kwargs.get("chat_id"), "_test_ns")
+        self.assertEqual(kwargs.get("message"), "PROMPT")
+        self.assertIsNone(kwargs.get("sid"))
 
-    def test_prefer_cheap_falls_back_to_orchestrator(self):
+    def test_prefer_cheap_dispatches_openai_compat_via_backend_api(self):
+        """Non-DeepSeek cheap backend (eg. openai_compat tagged ``cheap``)
+        must still go through backend_api, not get redirected to deepseek."""
+        from larkhelm import memory as mem
+        cheap_spec = MagicMock(id="cheap-oc", provider="openai_compat_api",
+                               tags=["cheap"], healthy=True, enabled=True)
+        with patch("larkhelm.backend_registry.BACKEND_REGISTRY") as reg, \
+             patch("larkhelm.backend_api.run_openai_compat",
+                   return_value=("oc-output", [])) as run_oc, \
+             patch("larkhelm.backend_cli.run_deepseek") as run_ds, \
+             patch("larkhelm.chat_state._clear_sid"):
+            reg.get_by_tag.return_value = cheap_spec
+            result = mem._run_one_shot("PROMPT", ns="_test_ns", prefer_cheap=True)
+        self.assertEqual(result, "oc-output")
+        run_oc.assert_called_once()
+        run_ds.assert_not_called()
+
+    def test_prefer_cheap_falls_back_to_orchestrator_when_no_cheap_available(self):
         from larkhelm import memory as mem
         orch_spec = MagicMock(id="claude", provider="openai_compat_api",
                               tags=["tools"], healthy=True, enabled=True)
         with patch("larkhelm.backend_registry.BACKEND_REGISTRY") as reg, \
              patch("larkhelm.backend_api.run_openai_compat",
-                   return_value=("orch-output", [])), \
+                   return_value=("orch-output", [])) as run_orch, \
              patch("larkhelm.chat_state._clear_sid"):
-            reg.get_by_tag.return_value = None  # no cheap backend
+            reg.get_by_tag.return_value = None  # no cheap backend healthy
             reg.get_orchestrator.return_value = orch_spec
-            mem._run_one_shot("PROMPT", ns="_test_ns", prefer_cheap=True)
-            reg.get_by_tag.assert_called_once_with(["cheap"])
-            reg.get_orchestrator.assert_called_once()
+            result = mem._run_one_shot("PROMPT", ns="_test_ns", prefer_cheap=True)
+        self.assertEqual(result, "orch-output")
+        reg.get_by_tag.assert_called_once_with(["cheap"])
+        reg.get_orchestrator.assert_called_once()
+        run_orch.assert_called_once()
+
+    def test_cheap_runtime_failure_falls_back_to_orchestrator(self):
+        """If the cheap backend is selected but raises at run-time (quota
+        exhausted, network error, model 5xx), we must retry once via the
+        orchestrator. Without this, a flaky DeepSeek would silently drop
+        memory updates for the entire chat."""
+        from larkhelm import memory as mem
+        cheap_spec = MagicMock(id="deepseek", provider="deepseek_api",
+                               tags=["cheap"], healthy=True, enabled=True)
+        orch_spec  = MagicMock(id="claude", provider="openai_compat_api",
+                               tags=["tools"], healthy=True, enabled=True)
+        with patch("larkhelm.backend_registry.BACKEND_REGISTRY") as reg, \
+             patch("larkhelm.backend_cli.run_deepseek",
+                   side_effect=RuntimeError("simulated 429")) as run_ds, \
+             patch("larkhelm.backend_api.run_openai_compat",
+                   return_value=("orch-rescue", [])) as run_orch, \
+             patch("larkhelm.chat_state._clear_sid"):
+            reg.get_by_tag.return_value = cheap_spec
+            reg.get_orchestrator.return_value = orch_spec
+            result = mem._run_one_shot("PROMPT", ns="_test_ns", prefer_cheap=True)
+        self.assertEqual(result, "orch-rescue",
+            "cheap failure must transparently fall back to orchestrator")
+        run_ds.assert_called_once()
+        run_orch.assert_called_once()
+
+    def test_cheap_failure_with_no_orchestrator_raises(self):
+        """No fallback target → original cheap exception propagates so the
+        cascade caller can log and skip."""
+        from larkhelm import memory as mem
+        cheap_spec = MagicMock(id="deepseek", provider="deepseek_api",
+                               tags=["cheap"], healthy=True, enabled=True)
+        with patch("larkhelm.backend_registry.BACKEND_REGISTRY") as reg, \
+             patch("larkhelm.backend_cli.run_deepseek",
+                   side_effect=RuntimeError("simulated 500")), \
+             patch("larkhelm.chat_state._clear_sid"):
+            reg.get_by_tag.return_value = cheap_spec
+            reg.get_orchestrator.return_value = None  # no fallback target
+            with self.assertRaises(RuntimeError):
+                mem._run_one_shot("PROMPT", ns="_test_ns", prefer_cheap=True)
+
+    def test_orchestrator_only_failure_does_not_loop(self):
+        """When prefer_cheap=False, an orchestrator failure must propagate
+        directly — no implicit retry. Implicit retry would mask backend
+        health issues from callers that rely on the exception to mark
+        orchestrator unhealthy."""
+        from larkhelm import memory as mem
+        orch_spec = MagicMock(id="claude", provider="openai_compat_api",
+                              tags=["tools"], healthy=True, enabled=True)
+        with patch("larkhelm.backend_registry.BACKEND_REGISTRY") as reg, \
+             patch("larkhelm.backend_api.run_openai_compat",
+                   side_effect=RuntimeError("orch fail")) as run_orch, \
+             patch("larkhelm.chat_state._clear_sid"):
+            reg.get_orchestrator.return_value = orch_spec
+            with self.assertRaises(RuntimeError):
+                mem._run_one_shot("PROMPT", ns="_test_ns")  # prefer_cheap=False
+        self.assertEqual(run_orch.call_count, 1,
+            "non-cheap path must not retry — caller relies on first failure")
 
     def test_default_prefer_cheap_false_uses_orchestrator(self):
         from larkhelm import memory as mem
