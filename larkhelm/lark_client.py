@@ -918,9 +918,23 @@ class FeishuDocClient:
             self._append_descendants_http(doc_id, children_ids, descendants)
         return True
 
-    def _http_request(self, method: str, url: str, body: dict) -> dict:
-        """Direct HTTP request (bypasses SDK double-encode issue); returns the response dict."""
-        token     = self._get_tenant_token()
+    def _http_request(self, method: str, url: str, body: dict,
+                      token_type: str = "tenant") -> dict:
+        """Direct HTTP request (bypasses SDK double-encode issue); returns the response dict.
+
+        ``token_type`` selects the access token:
+          * ``"tenant"`` (default) — uses tenant_access_token; existing semantics.
+          * ``"user"`` — uses the user_access_token loaded by ``oauth_user``.
+            Raises ``DocAPIError`` if no user token is available so callers
+            can fall back to the tenant path.
+        """
+        if token_type == "user":
+            from larkhelm.oauth_user import get_user_token
+            token = get_user_token()
+            if not token:
+                raise DocAPIError(0, "user_access_token 不可用（未登录或已过期）")
+        else:
+            token = self._get_tenant_token()
         data_bytes = _json_mod.dumps(body, ensure_ascii=False).encode()
         req = _urllib_req.Request(url, data=data_bytes, headers={
             "Authorization": f"Bearer {token}",
@@ -1296,12 +1310,66 @@ class FeishuDocClient:
 
     # ── Create document / wiki node ──────────────────────────────
 
+    def _should_use_user_token(self, owner_open_id: str) -> bool:
+        """Decide whether to create-as-user (skipping transfer).
+
+        True iff:
+          * ``owner_open_id`` equals the logged-in user's ``open_id`` —
+            user_access_token can only create under the *authorized* user, so
+            transferring to "someone else" must still go through tenant + transfer.
+          * The on-disk user_token is non-expired (``is_token_valid`` is a
+            cheap stat-only check; the actual refresh, if any, happens lazily
+            inside ``get_user_token`` on the first read).
+        """
+        logged = (getattr(_cfg, "LOGGED_IN_OPEN_ID", "") or "").strip()
+        if not logged or not owner_open_id or owner_open_id != logged:
+            return False
+        try:
+            from larkhelm.oauth_user import is_token_valid
+            return is_token_valid()
+        except Exception as e:
+            _debug_log(f"[lark_client] user-token check failed (ignored): {e}")
+            return False
+
     def create_doc(self, title: str, folder_token: str = "",
                    owner_open_id: str = "") -> "DocRef":
         """Create a blank docx document in the specified Drive folder (or root if empty).
-        If owner_open_id is given, transfers ownership immediately after creation.
-        Uses the SDK native interface (raw request has a double-encode issue for docx create).
+
+        Two paths:
+          * **user_access_token** (preferred when ``owner_open_id`` matches the
+            logged-in user): the doc is created *as the user*, so no
+            ``transfer_doc_owner`` call is needed and no transfer notification
+            is fired. See ``oauth_user.py``.
+          * **tenant_access_token** (fallback): legacy path; creates as the app,
+            then transfers ownership — emits a Feishu notification.
+
+        Any failure on the user path silently falls back to tenant so that
+        ``create_doc`` is never blocked by an expired or missing user token.
         """
+        if self._should_use_user_token(owner_open_id):
+            try:
+                body: dict = {"title": title}
+                if folder_token:
+                    body["folder_token"] = folder_token
+                data = self._http_request(
+                    "POST",
+                    "https://open.feishu.cn/open-apis/docx/v1/documents",
+                    body,
+                    token_type="user",
+                )
+                doc_id = (data.get("data", {})
+                              .get("document", {})
+                              .get("document_id", ""))
+                if doc_id:
+                    return DocRef(doc_type="docx", token=doc_id,
+                                  raw_url="", title=title)
+                _debug_log("[lark_client] user-token create_doc: response missing document_id, falling back to tenant")
+            except DocAPIError as e:
+                _debug_log(f"[lark_client] user-token create_doc failed (code={e.code}): {e.msg}; falling back to tenant")
+            except Exception as e:
+                _debug_log(f"[lark_client] user-token create_doc exception: {e}; falling back to tenant")
+
+        # ── Tenant fallback ──────────────────────────────────────
         body_builder = CreateDocumentRequestBody.builder().title(title)
         if folder_token:
             body_builder = body_builder.folder_token(folder_token)
@@ -1334,8 +1402,43 @@ class FeishuDocClient:
         owner_open_id: str = "",
     ) -> "DocRef":
         """Create a new node in a wiki space, also creating the underlying document.
-        If owner_open_id is given, transfers ownership immediately after creation.
+
+        When ``owner_open_id`` matches the logged-in user and a valid user_token
+        exists, the wiki node is created *as the user* and no ownership
+        transfer is performed. Otherwise falls back to tenant + transfer.
         """
+        if self._should_use_user_token(owner_open_id):
+            try:
+                body_u: dict = {
+                    "obj_type":  obj_type,
+                    "node_type": "origin",
+                    "title":     title,
+                }
+                if parent_node_token:
+                    body_u["parent_node_token"] = parent_node_token
+                data_u = self._http_request(
+                    "POST",
+                    f"https://open.feishu.cn/open-apis/wiki/v2/spaces/{space_id}/nodes",
+                    body_u,
+                    token_type="user",
+                )
+                node_u       = data_u.get("data", {}).get("node", {})
+                node_token_u = node_u.get("node_token", "")
+                obj_token_u  = node_u.get("obj_token",  "")
+                if obj_token_u:
+                    return DocRef(
+                        doc_type="docx",
+                        token=obj_token_u,
+                        raw_url=f"wiki/{node_token_u}",
+                        title=title,
+                    )
+                _debug_log("[lark_client] user-token create_wiki_node: missing obj_token, falling back to tenant")
+            except DocAPIError as e:
+                _debug_log(f"[lark_client] user-token create_wiki_node failed (code={e.code}): {e.msg}; falling back")
+            except Exception as e:
+                _debug_log(f"[lark_client] user-token create_wiki_node exception: {e}; falling back")
+
+        # ── Tenant fallback ──────────────────────────────────────
         body: dict = {
             "obj_type":  obj_type,
             "node_type": "origin",
@@ -1366,9 +1469,34 @@ class FeishuDocClient:
     def create_folder(self, name: str, parent_folder_token: str = "",
                       owner_open_id: str = "") -> str:
         """Create a Drive folder inside parent (uses root if parent is empty).
-        If owner_open_id is given, transfers ownership immediately after creation.
+
+        Same user-token shortcut as ``create_doc`` — when ``owner_open_id``
+        matches the logged-in user, creates the folder as the user (no
+        transfer). Falls back to tenant + transfer for any other case or on
+        user-token error.
         Returns new folder token.
         """
+        if self._should_use_user_token(owner_open_id):
+            try:
+                # ``parent_folder_token`` may be empty; the user-token endpoint
+                # accepts that for "drive root of the user".
+                body_u = {"name": name, "folder_token": parent_folder_token or ""}
+                data_u = self._http_request(
+                    "POST",
+                    "https://open.feishu.cn/open-apis/drive/v1/files/create_folder",
+                    body_u,
+                    token_type="user",
+                )
+                folder_token_u = data_u.get("data", {}).get("token", "")
+                if folder_token_u:
+                    return folder_token_u
+                _debug_log("[lark_client] user-token create_folder: missing token, falling back to tenant")
+            except DocAPIError as e:
+                _debug_log(f"[lark_client] user-token create_folder failed (code={e.code}): {e.msg}; falling back")
+            except Exception as e:
+                _debug_log(f"[lark_client] user-token create_folder exception: {e}; falling back")
+
+        # ── Tenant fallback ──────────────────────────────────────
         if not parent_folder_token:
             parent_folder_token = self.get_root_folder_token()
         data = self._http_request(

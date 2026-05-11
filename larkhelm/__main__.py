@@ -222,6 +222,32 @@ def cli():
     mcp_parser.add_argument("--config", metavar="PATH", help="path to config file")
     mcp_parser.add_argument("--data-dir", metavar="DIR", help="path to data directory")
 
+    # `larkhelm user-login` — OAuth authorize as a user so subsequent doc-create
+    # calls happen under user_access_token (no transfer_owner notifications).
+    # See larkhelm/oauth_user.py for the full flow.
+    user_login_parser = sub.add_parser(
+        "user-login",
+        help="OAuth-authorize this user so doc creates skip the transfer-ownership notification",
+    )
+    user_login_parser.add_argument("--config", metavar="PATH",
+                                   help="path to config file (default: auto-detect)")
+    user_login_parser.add_argument("--data-dir", metavar="DIR",
+                                   help="path to data directory (default: auto-detect)")
+
+    user_logout_parser = sub.add_parser(
+        "user-logout",
+        help="clear the saved user_access_token (reverts to tenant + transfer behavior)",
+    )
+    user_logout_parser.add_argument("--config", metavar="PATH")
+    user_logout_parser.add_argument("--data-dir", metavar="DIR")
+
+    user_status_parser = sub.add_parser(
+        "user-status",
+        help="show user_token status (open_id / scope / expiry)",
+    )
+    user_status_parser.add_argument("--config", metavar="PATH")
+    user_status_parser.add_argument("--data-dir", metavar="DIR")
+
     # `larkhelm voice probe` — install-time capability check for local STT
     voice_parser = sub.add_parser(
         "voice",
@@ -256,6 +282,16 @@ def cli():
     elif args.command == "mcp-server":
         from larkhelm.mcp_server import run as mcp_run
         mcp_run(config_path=args.config, data_dir=args.data_dir)
+    elif args.command in ("user-login", "user-logout", "user-status"):
+        import larkhelm.config as _cfg
+        _cfg._init_runtime(config_path=args.config, data_dir=args.data_dir)
+        from larkhelm import oauth_user as _ou
+        if args.command == "user-login":
+            sys.exit(_ou.cli_login())
+        elif args.command == "user-logout":
+            sys.exit(_ou.cli_logout())
+        else:
+            sys.exit(_ou.cli_status())
     elif args.command == "voice":
         if args.voice_command == "probe":
             from larkhelm.voice.system_probe import cli_main as _probe_cli
