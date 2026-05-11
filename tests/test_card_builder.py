@@ -26,6 +26,7 @@ _cfg_module._init_runtime(config_path=str(_cfg_file), data_dir=_TMP)
 
 from larkhelm.card_builder import (
     _fmt_elapsed, _btn_type, _normalize_newlines, _split_md, _make_card,
+    _parse_md_table, _estimate_table_col_widths_px, _tbl_visual_width,
 )
 
 
@@ -313,6 +314,84 @@ class TestMakeCard(unittest.TestCase):
         result = _make_card("测试标题", "测试内容\n包含换行", color="turquoise")
         parsed = json.loads(result)
         self.assertIsInstance(parsed, dict)
+
+
+class TestTableColumnWidths(unittest.TestCase):
+    """Pinned behavior: card tables ship per-column widths + markdown cells.
+
+    Previously every column shipped with ``width: "auto"``, which Feishu
+    rendered as even-split + no wrap. That made long-content columns clip
+    while short ones wasted space. These tests defend against a regression
+    to that mode.
+    """
+
+    def test_visual_width_counts_cjk_double(self):
+        self.assertEqual(_tbl_visual_width(""), 0)
+        self.assertEqual(_tbl_visual_width("abc"), 3)
+        self.assertEqual(_tbl_visual_width("中文"), 4)
+        self.assertEqual(_tbl_visual_width("a中"), 3)
+
+    def test_estimate_clamps_to_min_floor(self):
+        # 1-char column would compute to ~36 px; floor must lift it to 120.
+        widths = _estimate_table_col_widths_px([["x"]], 1)
+        self.assertEqual(widths, [120])
+
+    def test_estimate_clamps_to_max_ceiling(self):
+        # 100-char header would compute to ~1224 px; ceiling caps at 360.
+        widths = _estimate_table_col_widths_px([["x" * 100]], 1)
+        self.assertEqual(widths, [360])
+
+    def test_estimate_returns_one_width_per_column(self):
+        rows = [["a", "b", "cccc"], ["dd", "eee", "f"]]
+        widths = _estimate_table_col_widths_px(rows, 3)
+        self.assertEqual(len(widths), 3)
+
+    def test_estimate_widest_cell_wins_per_column(self):
+        rows = [
+            ["short", "x"],
+            ["m", "verylongcontentinthecolumntwo"],
+        ]
+        widths = _estimate_table_col_widths_px(rows, 2)
+        self.assertLess(widths[0], widths[1],
+            "narrow column must be narrower than wide column")
+
+    def test_parse_md_table_emits_pixel_widths_not_auto(self):
+        table_md = [
+            "| col1 | col2 |",
+            "|------|------|",
+            "| a    | longer content here |",
+            "| b    | c    |",
+        ]
+        elem = _parse_md_table(table_md)
+        self.assertIsNotNone(elem)
+        widths = [c["width"] for c in elem["columns"]]
+        # Regression guard: must NOT be "auto"
+        self.assertTrue(all(w.endswith("px") for w in widths),
+            f"columns must declare px widths, got {widths}")
+        # The "longer content" column should be wider than the bare-letter one
+        px_vals = [int(w.rstrip("px")) for w in widths]
+        self.assertLess(px_vals[0], px_vals[1])
+
+    def test_parse_md_table_uses_markdown_data_type(self):
+        """Cells must render as markdown so long content wraps."""
+        table_md = [
+            "| h1 | h2 |",
+            "|----|----|",
+            "| a  | b  |",
+        ]
+        elem = _parse_md_table(table_md)
+        self.assertTrue(all(c["data_type"] == "markdown" for c in elem["columns"]),
+            "cells must use data_type=markdown to enable wrap; text type was the bug")
+
+    def test_parse_md_table_handles_cjk_widths(self):
+        """CJK content should produce wider columns than equivalent ASCII counts."""
+        ascii_table = ["| col |", "|-----|", "| abcd |"]
+        cjk_table   = ["| col |", "|-----|", "| 中文测试 |"]
+        ascii_w = int(_parse_md_table(ascii_table)["columns"][0]["width"].rstrip("px"))
+        cjk_w   = int(_parse_md_table(cjk_table)["columns"][0]["width"].rstrip("px"))
+        # 4 ASCII chars = 4 units; 4 CJK chars = 8 units. CJK must be wider
+        # unless both are clamped to the floor.
+        self.assertGreaterEqual(cjk_w, ascii_w)
 
 
 if __name__ == "__main__":

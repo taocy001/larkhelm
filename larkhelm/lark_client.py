@@ -31,6 +31,45 @@ client: lark.Client = None  # type: ignore[assignment]  # assigned by main() bef
 BOT_OPEN_ID: str = ""  # This bot's open_id, fetched at startup, used to filter group @mentions
 
 
+# ── Table column-width estimation (shared by docx + Feishu card paths) ───
+#
+# Without explicit per-column widths Feishu defaults to ~80 px / column for
+# docx tables and to evenly-divided "auto" in interactive cards — both clip
+# real-world content. We size each column from the visual width of its
+# longest cell.
+
+# Per-column pixel limits. Floor stops 1-char columns from collapsing into
+# a sliver; ceiling stops a single wide cell from monopolizing the page.
+_COL_MIN_PX = 120
+_COL_MAX_PX = 360
+# Pixels per visual character (ASCII counted as 1, CJK as 2 via the
+# heuristic in ``_visual_width``). Tuned to roughly match Feishu's default
+# 14 px sans-serif body font.
+_COL_PX_PER_CHAR = 12.0
+# Extra padding so the last char in the longest cell doesn't kiss the border.
+_COL_PADDING_PX = 24
+
+
+def _visual_width(s: str) -> int:
+    """ASCII = 1, CJK / wide chars = 2. Cheap heuristic without unicodedata."""
+    if not s:
+        return 0
+    return sum(2 if ord(c) > 0x2E80 else 1 for c in s)
+
+
+def _estimate_col_widths_px(rows: "list[list[str]]", n_cols: int) -> "list[int]":
+    """Return a per-column pixel width list sized to the longest cell content."""
+    widths: list[int] = []
+    for c in range(n_cols):
+        max_w = max(
+            (_visual_width(r[c]) for r in rows if c < len(r)),
+            default=4,
+        )
+        px = max_w * _COL_PX_PER_CHAR + _COL_PADDING_PX
+        widths.append(int(max(_COL_MIN_PX, min(_COL_MAX_PX, px))))
+    return widths
+
+
 def _fetch_bot_open_id() -> None:
     """Call /open-apis/bot/v3/info to fetch this bot's open_id and store it in the global variable."""
     global BOT_OPEN_ID
@@ -1197,14 +1236,23 @@ class FeishuDocClient:
 
                 # Table block (block_type=31). ``cells`` matches ``children`` order;
                 # both are the row-major flattened list of cell IDs.
+                #
+                # ``column_width`` MUST be set — without it Feishu falls back
+                # to a default of ~80 px / col, which clips most real content
+                # and was the "tables are too narrow" bug. Sized per-column
+                # from the longest cell so wide columns get their share without
+                # starving the narrow ones.
+                col_widths = _estimate_col_widths_px(parsed, n_cols)
                 table_id = _uuid.uuid4().hex
                 table_blk = {
                     "block_id": table_id,
                     "block_type": 31,
                     "table": {
                         "property": {
-                            "row_size": n_rows,
-                            "column_size": n_cols,
+                            "row_size":     n_rows,
+                            "column_size":  n_cols,
+                            "column_width": col_widths,
+                            "header_row":   True,  # bold first row
                         },
                         "cells": list(cell_ids),
                     },

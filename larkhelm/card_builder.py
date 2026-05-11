@@ -73,7 +73,23 @@ def _normalize_newlines(text: str) -> str:
 
 
 def _parse_md_table(table_lines: list[str]) -> dict | None:
-    """Convert contiguous markdown table lines → Feishu JSON 2.0 table element."""
+    """Convert contiguous markdown table lines → Feishu JSON 2.0 table element.
+
+    Width / wrap policy (vs. the previous "all columns width=auto" rendering
+    which collapsed to even-split + no wrap on real content):
+
+      * **Column widths** are sized from the longest visual cell. The default
+        ``width: "auto"`` makes Feishu split available width evenly across
+        columns, which clips content in long columns and wastes space in
+        short ones. We emit per-column ``"{N}px"`` strings sized to the
+        longest cell (capped at 360 px so one wide column can't push others
+        off-screen).
+
+      * **Cell rendering** uses ``data_type: "markdown"`` so multi-line
+        content (and bold/code/links) wrap naturally. With ``data_type:
+        "text"`` Feishu renders each cell as a single line, truncating
+        anything past the column width.
+    """
     def split_cells(line: str) -> list[str]:
         return [c.strip() for c in line.strip().strip("|").split("|")]
 
@@ -88,16 +104,28 @@ def _parse_md_table(table_lines: list[str]) -> dict | None:
     if not headers:
         return None
 
-    col_keys = [f"c{i}" for i in range(len(headers))]
-    columns = [{"name": col_keys[i], "display_name": headers[i],
-                "data_type": "text", "width": "auto", "horizontal_align": "left"}
-               for i in range(len(headers))]
-    rows = [{col_keys[i]: cells[i] if i < len(cells) else ""
-             for i in range(len(col_keys))}
-            for cells in (split_cells(l) for l in non_sep[1:])]
-
-    if not rows:
+    body_cells = [split_cells(l) for l in non_sep[1:]]
+    if not body_cells:
         return None
+
+    n_cols = len(headers)
+    # Width estimation looks at the header row too — a long header on a
+    # short data column still needs room.
+    widths_px = _estimate_table_col_widths_px([headers] + body_cells, n_cols)
+
+    col_keys = [f"c{i}" for i in range(n_cols)]
+    columns = [{
+        "name":             col_keys[i],
+        "display_name":     headers[i] if i < len(headers) else "",
+        "data_type":        "markdown",     # enables wrap + inline markdown
+        "width":            f"{widths_px[i]}px",
+        "horizontal_align": "left",
+        "vertical_align":   "top",
+    } for i in range(n_cols)]
+
+    rows = [{col_keys[i]: cells[i] if i < len(cells) else ""
+             for i in range(n_cols)}
+            for cells in body_cells]
 
     return {
         "tag": "table",
@@ -106,6 +134,36 @@ def _parse_md_table(table_lines: list[str]) -> dict | None:
         "columns": columns,
         "rows": rows,
     }
+
+
+# ── Column-width estimator (shared with lark_client docx tables) ─────────
+#
+# Same constants + visual-width heuristic as ``lark_client._estimate_col_widths_px``;
+# kept duplicated here to avoid card_builder → lark_client import cycle (card_builder
+# is imported by lark_client). Drift risk: tune both together.
+
+_TBL_COL_MIN_PX = 120
+_TBL_COL_MAX_PX = 360
+_TBL_COL_PX_PER_CHAR = 12.0
+_TBL_COL_PADDING_PX = 24
+
+
+def _tbl_visual_width(s: str) -> int:
+    if not s:
+        return 0
+    return sum(2 if ord(c) > 0x2E80 else 1 for c in s)
+
+
+def _estimate_table_col_widths_px(rows: list[list[str]], n_cols: int) -> list[int]:
+    widths: list[int] = []
+    for c in range(n_cols):
+        max_w = max(
+            (_tbl_visual_width(r[c]) for r in rows if c < len(r)),
+            default=4,
+        )
+        px = max_w * _TBL_COL_PX_PER_CHAR + _TBL_COL_PADDING_PX
+        widths.append(int(max(_TBL_COL_MIN_PX, min(_TBL_COL_MAX_PX, px))))
+    return widths
 
 
 def _md_to_body_elements(text: str) -> list[dict]:
