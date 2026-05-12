@@ -163,6 +163,14 @@ class SaveListDeleteTests(unittest.TestCase):
             f"on-disk schema must be exactly {allowed!r}, got {set(data.keys())!r}")
         self.assertEqual(data["notify_count"], 0)
         self.assertEqual(data["last_notified_at"], 0.0)
+        # Audit #7: each step record must carry start_time / end_time so
+        # the interrupted-plan card can render duration.
+        step_keys_required = {"idx", "type", "desc", "status", "error",
+                              "retry_count", "start_time", "end_time"}
+        for step_rec in data["steps"]:
+            self.assertEqual(set(step_rec.keys()), step_keys_required,
+                f"per-step schema must include start_time/end_time, got "
+                f"{set(step_rec.keys())!r}")
 
     def test_error_field_truncated_to_200_chars(self):
         """Long error strings (e.g. tool-output dumps) would bloat the
@@ -553,6 +561,235 @@ class FloodingThrottleTests(unittest.TestCase):
         pp._persist_notify_state("p_race", notify_count=1,
                                  last_notified_at=time.time())
         self.assertFalse(path.exists())
+
+
+class StepDurationFormatTests(unittest.TestCase):
+    """Audit #7 follow-up: ``_format_step_duration`` renders per-step
+    timing so the interrupted-plan card can say "卡在该步 X 分钟"
+    rather than "卡在该步 (no timing data)"."""
+
+    def test_no_start_time_returns_empty(self):
+        self.assertEqual(pp._format_step_duration({}), "")
+        self.assertEqual(pp._format_step_duration({"start_time": None}), "")
+
+    def test_running_step_uses_yi_yunxing_verb(self):
+        now = time.time()
+        s = {"start_time": now - 125}  # 2m 5s active
+        out = pp._format_step_duration(s)
+        self.assertTrue(out.startswith("(已运行 "), out)
+        self.assertIn("分钟", out)
+
+    def test_finished_step_uses_yi_haoshi_verb(self):
+        now = time.time()
+        s = {"start_time": now - 300, "end_time": now - 60}  # ran 4 min
+        out = pp._format_step_duration(s)
+        self.assertTrue(out.startswith("(已耗时 "), out)
+        self.assertIn("4 分钟", out)
+
+    def test_sub_minute_renders_seconds(self):
+        """Under 60s, render "N 秒" so a fresh-start step doesn't look
+        like a 0-minute hang."""
+        now = time.time()
+        s = {"start_time": now - 25}
+        self.assertIn("25 秒", pp._format_step_duration(s))
+
+    def test_over_90_minutes_renders_hours(self):
+        """Past 90 min, switch to hours so a 4-hour hang doesn't render
+        as "已运行 240 分钟" (annoying)."""
+        now = time.time()
+        s = {"start_time": now - 4 * 3600 - 10}
+        out = pp._format_step_duration(s)
+        self.assertIn("小时", out)
+        self.assertIn("4 小时", out)
+
+    def test_garbage_timing_values_return_empty(self):
+        # Non-numeric → no crash, just empty
+        self.assertEqual(pp._format_step_duration({"start_time": "yesterday"}), "")
+        self.assertEqual(
+            pp._format_step_duration({"start_time": 100.0, "end_time": "tomorrow"}),
+            "",
+        )
+
+    def test_negative_elapsed_returns_empty(self):
+        """Clock went backwards (NTP correction etc.) — refuse to render
+        a nonsense negative duration."""
+        future = time.time() + 60
+        self.assertEqual(pp._format_step_duration({"start_time": future}), "")
+
+
+class WorkspaceArtefactsListingTests(unittest.TestCase):
+    """N5: interrupted card must list ``.crew_workspace/`` files + sizes,
+    so the user can decide whether to re-run vs resume from partials."""
+
+    def setUp(self):
+        _clean_state_dir()
+        self.workdir = Path(tempfile.mkdtemp(prefix="larkhelm_artefacts_"))
+        self.ws = self.workdir / ".crew_workspace"
+        self.ws.mkdir()
+
+    def tearDown(self):
+        _clean_state_dir()
+        shutil.rmtree(self.workdir, ignore_errors=True)
+
+    def _write(self, name: str, content: str) -> None:
+        (self.ws / name).write_text(content, encoding="utf-8")
+
+    def test_lists_present_files_with_sizes(self):
+        self._write("prd.md", "X" * 1024)
+        self._write("design.md", "Y" * 512)
+        with patch("larkhelm.chat_state._get_cwd",
+                   return_value=str(self.workdir)):
+            out = pp._format_workspace_artefacts("chat_test")
+        self.assertIn("产出", out)
+        self.assertIn("prd.md", out)
+        self.assertIn("design.md", out)
+        # Sizes
+        self.assertIn("1.0 KB", out)
+        self.assertIn("512 B", out)
+        # workspace_meta is internal — must not appear
+        self.assertNotIn("workspace_meta", out)
+
+    def test_empty_files_labelled_explicitly(self):
+        """An empty file is meaningfully different from a missing one
+        (PM step crashed mid-write etc.) — label both states."""
+        (self.ws / "prd.md").write_text("")
+        (self.ws / "design.md").write_text("real content")
+        with patch("larkhelm.chat_state._get_cwd",
+                   return_value=str(self.workdir)):
+            out = pp._format_workspace_artefacts("chat_test")
+        self.assertIn("prd.md (空)", out)
+        self.assertIn("design.md (", out)
+
+    def test_all_files_empty_returns_pre_pm_message(self):
+        """No content anywhere → the plan died before producing anything
+        useful; explicit message rather than an empty list. Phrasing
+        avoids the internal "PM 阶段" jargon (audit #19)."""
+        (self.ws / "prd.md").write_text("")
+        with patch("larkhelm.chat_state._get_cwd",
+                   return_value=str(self.workdir)):
+            out = pp._format_workspace_artefacts("chat_test")
+        self.assertIn("还未生成任何文档", out,
+            "should use user-facing phrasing, not internal 'PM 阶段' jargon")
+        # Negative guard against future regression to internal jargon
+        self.assertNotIn("PM 阶段", out)
+
+    def test_qa_report_md_is_watched_when_test_step_ran(self):
+        """Audit #20: qa_report.md is produced by /plan's [test] step
+        (cmd_plan.py:545+) and must appear on the artefact card. The
+        original watched list omitted it — regression guard."""
+        (self.ws / "qa_report.md").write_text("X" * 800)
+        with patch("larkhelm.chat_state._get_cwd",
+                   return_value=str(self.workdir)):
+            out = pp._format_workspace_artefacts("chat_test")
+        self.assertIn("qa_report.md", out,
+            "qa_report.md (from [test] step) must appear in artefact list")
+        self.assertIn("800 B", out)
+
+    def test_missing_cwd_returns_fallback(self):
+        with patch("larkhelm.chat_state._get_cwd", return_value=""):
+            out = pp._format_workspace_artefacts("chat_test")
+        # Falls back to the legacy opaque hint
+        self.assertIn(".crew_workspace/", out)
+
+    def test_missing_workspace_dir_returns_fallback(self):
+        # cwd resolves but .crew_workspace doesn't exist
+        empty = Path(tempfile.mkdtemp(prefix="larkhelm_empty_"))
+        try:
+            with patch("larkhelm.chat_state._get_cwd", return_value=str(empty)):
+                out = pp._format_workspace_artefacts("chat_test")
+            self.assertIn(".crew_workspace/", out)
+        finally:
+            shutil.rmtree(empty, ignore_errors=True)
+
+    def test_io_error_falls_back_gracefully(self):
+        """Anything raising inside the helper must not break the
+        notification card — return the safe opaque hint."""
+        with patch("larkhelm.chat_state._get_cwd",
+                   side_effect=RuntimeError("boom")):
+            # Must not raise
+            out = pp._format_workspace_artefacts("chat_test")
+        self.assertIn(".crew_workspace/", out)
+
+    def test_humanise_bytes_format(self):
+        self.assertEqual(pp._humanise_bytes(500), "500 B")
+        self.assertEqual(pp._humanise_bytes(1024), "1.0 KB")
+        self.assertEqual(pp._humanise_bytes(5432), "5.3 KB")
+
+
+class NotificationCardContainsArtefactsAndDurationTests(unittest.TestCase):
+    """End-to-end: ``_notify_chat_of_interrupted_plan`` body must include
+    both the artefact list (N5) and the active-step duration (audit #7)."""
+
+    def setUp(self):
+        _clean_state_dir()
+        self.workdir = Path(tempfile.mkdtemp(prefix="larkhelm_notify_"))
+        self.ws = self.workdir / ".crew_workspace"
+        self.ws.mkdir()
+        # Realistic mid-run artefacts: PRD + design done, changes.md only
+        # written if dev step completed (intentionally absent here).
+        (self.ws / "prd.md").write_text("X" * 2048)
+        (self.ws / "design.md").write_text("Y" * 4096)
+
+    def tearDown(self):
+        _clean_state_dir()
+        shutil.rmtree(self.workdir, ignore_errors=True)
+
+    def test_body_includes_step_duration_and_artefacts(self):
+        steps = [
+            PlanStep(idx=0, type="dev", desc="实现 X", status="done",
+                     start_time=time.time() - 600, end_time=time.time() - 480),
+            PlanStep(idx=1, type="review", desc="审查 X", status="running",
+                     start_time=time.time() - 420),  # 7 min active
+            PlanStep(idx=2, type="fix", desc="修问题", status="pending"),
+        ]
+        state = MultiPlanState(
+            plan_id="p_artefacts", chat_id="oc_x", title="MyPlan",
+            steps=steps, phase="running", current_idx=1,
+        )
+        pp.save_plan_state(state)
+
+        sent_args: dict = {}
+        def _capture(chat_id, title, body, **kw):
+            sent_args["chat_id"] = chat_id
+            sent_args["title"]   = title
+            sent_args["body"]    = body
+            sent_args["kw"]      = kw
+
+        with patch("larkhelm.lark_client.send_card", side_effect=_capture), \
+             patch("larkhelm.chat_state._get_cwd",
+                   return_value=str(self.workdir)):
+            sent = pp.resume_interrupted_plans()
+        self.assertEqual(sent, 1)
+        body = sent_args["body"]
+
+        # Audit #7 — duration of the running review step (7 min)
+        self.assertIn("已运行 7 分钟", body,
+            f"body must include active-step duration; got: {body!r}")
+
+        # N5 — artefacts list with sizes
+        self.assertIn("prd.md", body)
+        self.assertIn("design.md", body)
+        self.assertIn("2.0 KB", body)  # prd.md
+        self.assertIn("4.0 KB", body)  # design.md
+        self.assertNotIn("workspace_meta", body)
+
+    def test_body_falls_back_to_opaque_hint_without_cwd(self):
+        """If chat has no registered cwd, the artefact lister can't
+        resolve a workspace dir — body must still send (with the legacy
+        opaque hint) rather than fail to render."""
+        steps = [PlanStep(idx=0, type="dev", desc="X", status="running",
+                          start_time=time.time() - 60)]
+        state = MultiPlanState(
+            plan_id="p_no_cwd", chat_id="oc_x", title="P",
+            steps=steps, phase="running", current_idx=0,
+        )
+        pp.save_plan_state(state)
+        with patch("larkhelm.lark_client.send_card") as card, \
+             patch("larkhelm.chat_state._get_cwd", return_value=""):
+            pp.resume_interrupted_plans()
+        body = card.call_args.args[2]
+        # Opaque fallback when no cwd
+        self.assertIn(".crew_workspace/", body)
 
 
 class ClearButtonTests(unittest.TestCase):

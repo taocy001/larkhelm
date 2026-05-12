@@ -264,6 +264,15 @@ def _serialise(state: "MultiPlanState") -> dict:
                 "status":      s.status,
                 "error":       (s.error or "")[:200],
                 "retry_count": s.retry_count,
+                # Round-2 audit #7: persist per-step timing so the
+                # interrupted-plan card can show "卡在该步 X 分钟" — a
+                # 3-minute hang and a 3-hour hang look identical without
+                # this. ``None`` (step never started / never finished) is
+                # preserved via ``or None`` since dataclass default float
+                # would round-trip through json as 0.0 and lose the
+                # "never started" distinction.
+                "start_time":  s.start_time,
+                "end_time":    s.end_time,
             }
             for s in state.steps
         ],
@@ -306,6 +315,110 @@ def resume_interrupted_plans() -> int:
     if sent:
         _debug_log(f"[PlanPersist] notified {sent} interrupted plan(s) on startup")
     return sent
+
+
+def _format_step_duration(step: dict) -> str:
+    """Build a "(已运行 X 分钟 / 已耗时 Y 分钟)" suffix from a step's
+    start_time / end_time. Empty string when timing data is missing or
+    out of range — caller appends conditionally.
+
+    Cases (in priority order):
+      * No start_time → ``""``                          (step never started)
+      * start_time but no end_time → "已运行 N 分钟"     (was active at crash)
+      * Both present → "已耗时 N 分钟"                  (finished before crash)
+
+    Sub-minute durations show as "N 秒" to avoid the common-but-useless
+    "已运行 0 分钟". Very long durations use "N 小时" past 90 minutes.
+    """
+    start = step.get("start_time")
+    end   = step.get("end_time")
+    if not start:
+        return ""
+    try:
+        start_f = float(start)
+    except (TypeError, ValueError):
+        return ""
+    if end:
+        try:
+            elapsed = float(end) - start_f
+        except (TypeError, ValueError):
+            return ""
+        verb = "已耗时"
+    else:
+        elapsed = time.time() - start_f
+        verb = "已运行"
+    if elapsed < 0:
+        return ""
+    if elapsed < 60:
+        return f"({verb} {int(elapsed)} 秒)"
+    if elapsed < 90 * 60:
+        return f"({verb} {int(elapsed / 60)} 分钟)"
+    return f"({verb} {int(elapsed / 3600)} 小时)"
+
+
+def _format_workspace_artefacts(chat_id: str) -> str:
+    """Render a "**产出**: ..." line listing files in ``.crew_workspace/``
+    and their sizes (or "未生成" if absent).
+
+    Without this, "产出已保存在 .crew_workspace/" was opaque — the user
+    had to drop to a terminal and ``ls -la`` just to know whether the
+    interrupted plan got past the PM stage. Now they see at a glance
+    whether there's meaningful partial work to resume from.
+
+    Fail-soft: any IO error returns the original opaque hint so the
+    card never breaks.
+    """
+    fallback = ("**产出**: 已保存在 `.crew_workspace/`（design.md / tasks.json"
+                " / changes.md / review.md 视进度而定）。")
+    try:
+        from larkhelm.chat_state import _get_cwd
+        cwd = _get_cwd(chat_id)
+        if not cwd:
+            return fallback
+        ws = Path(cwd) / ".crew_workspace"
+        if not ws.is_dir():
+            return fallback
+        # Plan-relevant files in roughly the order a /plan run produces them.
+        # workspace_meta.json is internal bookkeeping — skip from the card.
+        # Plan-relevant files in roughly the order a /plan run produces them.
+        # workspace_meta.json is internal bookkeeping — skip from the card.
+        # ``qa_report.md`` is produced by the [test] step (cmd_plan.py:545+)
+        # and was missing from the original list — audit follow-up #20.
+        watched = ["prd.md", "design.md", "tasks.json", "file_changes.json",
+                   "changes.md", "qa_report.md", "review.md"]
+        rows: list[str] = []
+        any_present = False
+        for name in watched:
+            p = ws / name
+            if p.exists():
+                try:
+                    size = p.stat().st_size
+                except OSError:
+                    size = 0
+                if size > 0:
+                    rows.append(f"  - {name} ({_humanise_bytes(size)})")
+                    any_present = True
+                else:
+                    rows.append(f"  - {name} (空)")
+        if not any_present:
+            # "PM 阶段" is internal /plan jargon (the first crew sub-agent role);
+            # most users don't know what PM is in this context. Audit follow-up
+            # #19: prefer plain "尚未生成任何文档" phrasing instead.
+            return ("**产出**: `.crew_workspace/` 内文件均为空或不存在 — "
+                    "plan 中断时还未生成任何文档。")
+        return "**产出**:\n" + "\n".join(rows)
+    except Exception as e:
+        _debug_log(f"[PlanPersist] artefact listing failed: {e}")
+        return fallback
+
+
+def _humanise_bytes(n: int) -> str:
+    """``5421`` → ``"5.3 KB"``, ``523`` → ``"523 B"``. Plan artefacts top
+    out around 50KB (review.md / changes.md for a multi-step plan), so
+    we only need B / KB precision."""
+    if n < 1024:
+        return f"{n} B"
+    return f"{n / 1024:.1f} KB"
 
 
 def _notify_chat_of_interrupted_plan(rec: dict) -> bool:
@@ -398,19 +511,32 @@ def _notify_chat_of_interrupted_plan(rec: dict) -> bool:
             f"(**[{active_step.get('type', '?')}]** "
             f"{(active_step.get('desc') or '').strip()[:80]}) 时中断。"
         )
+        # Audit #7: render step duration if start_time is present. A
+        # 3-min hang vs a 3-hour hang look identical without this — the
+        # user can't tell if the step was actually doing work when the
+        # bridge died or had been wedged for ages.
+        step_dur = _format_step_duration(active_step)
+        if step_dur:
+            step_line += f" {step_dur}"
     else:
         step_line = f"共 {total} 个阶段，中断时阶段未知。"
 
     age_min = max(0, int((time.time() - float(rec.get("saved_at", 0))) / 60))
     age_str = f"{age_min} 分钟前" if age_min < 60 else f"{age_min // 60} 小时前"
 
+    # N5: list the .crew_workspace artefacts that survived the crash with
+    # their sizes — lets the user decide "is there enough partial work
+    # to resume from, or do I just /plan again". Without this, "产出已
+    # 保存在 .crew_workspace/" is opaque — they have to open a terminal
+    # and `ls -la` to find out.
+    artefacts_line = _format_workspace_artefacts(chat_id)
+
     body = (
         f"**{title}**\n\n"
         f"{step_line}\n"
         f"上次心跳: {age_str} (phase=`{phase}`)\n\n"
-        "**产出**: 已保存在 `.crew_workspace/`（design.md / tasks.json / "
-        "changes.md / review.md 视进度而定）。可重发同样需求复用，或运行 "
-        "`/plan` 全新开始。"
+        f"{artefacts_line}\n\n"
+        "可重发同样需求复用前次产出，或运行 `/plan` 全新开始。"
     )
     buttons = [("🗑️ 清除提示", f"plan_persist_clear:{plan_id}")]
     send_card(chat_id, f"⚠️ Plan 被中断 (bridge 重启)", body,
