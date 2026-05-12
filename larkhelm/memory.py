@@ -5,7 +5,7 @@ Storage: ~/.larkhelm/memory/
                            keyed by sender_open_id; returns None when open_id unknown (group safety)
   project_{hash16}.md    — project-level: tech stack, conventions, keyed by resolved cwd (≤1500 chars)
   session_{chat_id}.md   — session-level: current work, decisions, context (≤2000 chars)
-                           auto-updated every 10 turns; cascades to project/global after each update
+                           first auto-update at turn 3, then every 10 turns; cascades to project/global after each update
 
 Injection order: global → project → session (passed via extra_system channel, new sessions only).
 
@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import threading
 from datetime import datetime
@@ -30,7 +31,7 @@ from typing import Callable
 
 import larkhelm.config as _cfg
 from larkhelm.chat_state import _get_turn_count, _get_chat_state
-from larkhelm.log import _read_logs, _debug_log
+from larkhelm.log import _read_logs, _read_logs_tail, _debug_log
 
 # ── Storage root ─────────────────────────────────────────────────────────────
 
@@ -43,13 +44,48 @@ PROJECT_MAX_CHARS = 1500
 SESSION_MAX_CHARS = 2000
 TOTAL_MEMORY_BUDGET = 4500  # combined cap; tag overhead counted separately
 
-_TAG_OVERHEAD_PER_LAYER = 50  # chars for open/close tag + surrounding newlines
+# Bumped from 50 → 90 to reserve room for the per-layer meter line injected by
+# ``get_memory_context()`` (e.g. ``[1850/2000 chars, 92%] ⚠️ near limit`` is
+# ~36 chars; 90 leaves slack for unicode + newlines). TOTAL_MEMORY_BUDGET is
+# unchanged so user content is preserved as before — only the bookkeeping
+# allowance grows.
+_TAG_OVERHEAD_PER_LAYER = 90
+
+# ── /memory observe tuning ───────────────────────────────────────────────────
+
+_OBSERVE_TAIL_BYTES        = 1 * 1024 * 1024   # all.jsonl tail window (1 MiB)
+_OBSERVE_DEBUG_TAIL_BYTES  = 2 * 1024 * 1024   # DEBUG_LOG tail window (2 MiB)
+_OBSERVE_WINDOW_DAYS       = 7
+_NEAR_LIMIT_PCT            = 90
+
+_CHEAP_FAIL_PAT = re.compile(r"\[Memory\] cheap backend .+? failed")
+_UNCHANGED_PAT  = re.compile(
+    r"\[Memory\] (?:project|global) extract rejected non-useful output"
+    r"|\[Memory\] rejected non-useful summary"
+)
+_SAVE_OK_PAT    = re.compile(r"\[Memory\] saved session_[^\s]+\.md \(\d+ chars\)")
+_TS_PAT         = re.compile(r"^\[(\d{2}:\d{2}:\d{2})\]")
 
 # ── Auto-update tuning ────────────────────────────────────────────────────────
 
-AUTO_UPDATE_EVERY         = 10   # session auto-update every N turns
+AUTO_UPDATE_EVERY         = 10   # session auto-update cadence after the first hit
+AUTO_UPDATE_FIRST         = 3    # first-time threshold: trigger once at turn 3, then every AUTO_UPDATE_EVERY thereafter
 MEMORY_GENERATION_TIMEOUT = 120  # seconds before abandoning a slow generate call
 _EXTRACT_TIMEOUT          = 60   # shorter timeout for cascade extraction calls
+
+
+def _should_auto_update(turn_count: int) -> bool:
+    """True iff a non-forced auto-update should fire at this ``turn_count``.
+
+    Fires at ``AUTO_UPDATE_FIRST`` (=3), then every ``AUTO_UPDATE_EVERY`` (=10)
+    turns thereafter — i.e. turns 3, 13, 23, 33, …  Pure function; testable
+    without touching state.
+    """
+    if turn_count == AUTO_UPDATE_FIRST:
+        return True
+    if turn_count > AUTO_UPDATE_FIRST and (turn_count - AUTO_UPDATE_FIRST) % AUTO_UPDATE_EVERY == 0:
+        return True
+    return False
 
 # ── Lock pools ────────────────────────────────────────────────────────────────
 # Both dicts are bounded to prevent unbounded growth in long-running processes.
@@ -530,6 +566,21 @@ def get_memory_context(chat_id: str, cwd: str | None = None) -> str:
     if not parts:
         return ""
 
+    # Per-layer max_chars used to render the meter line. Aligned with the
+    # tuple order built above (global → project → session).
+    layer_max = {
+        "[GLOBAL MEMORY]":  GLOBAL_MAX_CHARS,
+        "[SESSION MEMORY]": SESSION_MAX_CHARS,
+    }
+
+    def _max_for(open_tag: str) -> int:
+        if open_tag in layer_max:
+            return layer_max[open_tag]
+        # Project tag carries the cwd suffix (e.g. ``[PROJECT MEMORY — /path]``).
+        if open_tag.startswith("[PROJECT MEMORY"):
+            return PROJECT_MAX_CHARS
+        return SESSION_MAX_CHARS
+
     total = sum(len(c) + _TAG_OVERHEAD_PER_LAYER for _, c, _ in parts)
     if total > TOTAL_MEMORY_BUDGET:
         available = max(0, TOTAL_MEMORY_BUDGET - _TAG_OVERHEAD_PER_LAYER * len(parts))
@@ -541,7 +592,10 @@ def get_memory_context(chat_id: str, cwd: str | None = None) -> str:
                 if len(content) > budget_i:
                     parts[i] = (open_tag, content[:budget_i] + "…", close_tag)
 
-    return "\n\n".join(f"{o}\n{c}\n{cl}" for o, c, cl in parts)
+    return "\n\n".join(
+        f"{o}\n{_layer_meter_line(len(c), _max_for(o))}\n{c}\n{cl}"
+        for o, c, cl in parts
+    )
 
 
 def get_project_memory_context(chat_id: str, cwd: str | None = None) -> str:
@@ -891,14 +945,16 @@ def maybe_auto_update(chat_id: str, force: bool = False,
                       ) -> None:
     """Check if session memory needs updating and run in a background thread if so.
 
-    Triggers when turn_count % AUTO_UPDATE_EVERY == 0 (or force=True).
-    After a successful session update, automatically cascades to extract new facts
-    into project and global memory layers (background, non-blocking).
+    Triggers at turn ``AUTO_UPDATE_FIRST`` (=3) and then every
+    ``AUTO_UPDATE_EVERY`` (=10) turns thereafter — i.e. turns 3, 13, 23, … —
+    or whenever ``force=True``. After a successful session update, automatically
+    cascades to extract new facts into project and global memory layers
+    (background, non-blocking).
 
     on_done: optional callback(success, content, error_code)
     """
     turn_count = _get_turn_count(chat_id)
-    if not force and (turn_count == 0 or turn_count % AUTO_UPDATE_EVERY != 0):
+    if not force and not _should_auto_update(turn_count):
         return
 
     def _notify(success: bool, content: str | None, error: str | None) -> None:
@@ -915,7 +971,7 @@ def maybe_auto_update(chat_id: str, force: bool = False,
             _notify(False, None, "already_in_progress")
             return
         try:
-            logs = _read_logs(chat_id)
+            logs = _read_logs_tail(chat_id)
             if not logs:
                 _notify(False, None, "no_logs")
                 return
@@ -1039,3 +1095,250 @@ def record_milestone(chat_id: str, kind: str, summary: str = "") -> None:
         maybe_auto_update(chat_id, force=True)
     except Exception as e:
         _debug_log(f"[Memory] milestone trigger failed: {e}")
+
+
+# ── /memory observe — capacity meter + summary health ─────────────────────────
+
+def _layer_meter_line(chars: int, max_chars: int) -> str:
+    """Format ``[N/M chars, X%]`` (+ ``⚠️ near limit`` when pct >= 90).
+
+    Used both as the in-context inline meter (``get_memory_context``) and as
+    the per-layer indicator in the ``/memory observe`` card. ``pct`` is integer
+    division so callers can render it unambiguously; values >100% indicate the
+    content was already at the budget cap before trim.
+    """
+    if max_chars <= 0:
+        pct = 0
+    else:
+        pct = chars * 100 // max_chars
+    base = f"[{chars}/{max_chars} chars, {pct}%]"
+    if pct >= _NEAR_LIMIT_PCT:
+        base += " ⚠️ near limit"
+    return base
+
+
+def _parse_debug_log_window(tail_bytes: int) -> dict:
+    """Scan ``_cfg.DEBUG_LOG`` tail for cascade-health signals.
+
+    Returns a dict with cheap_fail / unchanged / save_ok counters and the
+    latest matched ``HH:MM:SS`` timestamps. On any I/O failure (file missing
+    or unreadable) returns ``{"unavailable": True, "reason": ...}``; never
+    raises. Time-window is approximated as "last ``tail_bytes`` of the file"
+    — see PRD REQ-09: DEBUG_LOG carries only ``HH:MM:SS`` so a true 7-day
+    filter is not feasible without log-format changes.
+    """
+    try:
+        path = _cfg.DEBUG_LOG
+    except AttributeError:
+        return {"unavailable": True, "reason": "debug_log_unset"}
+
+    try:
+        if not path.exists():
+            return {"unavailable": True, "reason": "debug_log_missing"}
+    except Exception as e:
+        _debug_log(f"[Memory] observe debug_log stat failed: {e}")
+        return {"unavailable": True, "reason": "debug_log_stat_failed"}
+
+    try:
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            if size > tail_bytes:
+                f.seek(size - tail_bytes)
+            else:
+                f.seek(0)
+            raw = f.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        _debug_log(f"[Memory] observe debug_log read failed: {e}")
+        return {"unavailable": True, "reason": "debug_log_read_failed"}
+
+    cheap_fail = 0
+    unchanged = 0
+    save_ok = 0
+    last_cheap_fail_ts: str | None = None
+    last_save_ts: str | None = None
+    last_unchanged_ts: str | None = None
+
+    for line in raw.splitlines():
+        ts_match = _TS_PAT.match(line)
+        ts = ts_match.group(1) if ts_match else None
+        if _CHEAP_FAIL_PAT.search(line):
+            cheap_fail += 1
+            if ts:
+                last_cheap_fail_ts = ts
+        if _UNCHANGED_PAT.search(line):
+            unchanged += 1
+            if ts:
+                last_unchanged_ts = ts
+        if _SAVE_OK_PAT.search(line):
+            save_ok += 1
+            if ts:
+                last_save_ts = ts
+
+    return {
+        "unavailable": False,
+        "cheap_fail_count": cheap_fail,
+        "unchanged_count": unchanged,
+        "save_ok_count": save_ok,
+        "last_cheap_fail_ts": last_cheap_fail_ts,
+        "last_save_ts": last_save_ts,
+        "last_unchanged_ts": last_unchanged_ts,
+    }
+
+
+def _aggregate_memory_observation(
+    chat_id: str,
+    *,
+    now: datetime | None = None,
+) -> dict:
+    """Aggregate three-layer memory health metrics for ``chat_id``.
+
+    See ``.crew_workspace/design.md`` §3.1 for the full return schema. Reads
+    three memory files (global/project/session) for size + updated_at, then
+    scans the JSONL tail and DEBUG_LOG tail for cascade signals. Pure
+    w.r.t. observable side effects: no writes, no LLM calls. Never raises
+    on I/O errors — relevant fields are flagged ``unavailable=True``.
+
+    ``now`` is accepted for tests asserting relative timestamps. Currently
+    unused by the implementation; kept in the signature so future trends
+    work can compute relative-day windows without an API break.
+    """
+    if now is None:
+        now = datetime.now()
+
+    # ── 1. resolve cwd for the project layer ─────────────────────────────────
+    cwd: str | None = None
+    try:
+        from larkhelm.chat_state import _get_cwd
+        cwd = _get_cwd(chat_id)
+    except Exception as e:
+        _debug_log(f"[Memory] observe _get_cwd failed: {e}")
+
+    # ── 2. per-layer chars/pct/updated_at ────────────────────────────────────
+    def _layer_stat(content: str | None, max_chars: int, path: Path | None) -> dict:
+        chars = len(content or "")
+        if max_chars > 0:
+            pct = chars * 100 // max_chars
+        else:
+            pct = 0
+        updated_at: str | None = None
+        try:
+            if path is not None:
+                fm = _load_md_frontmatter(path)
+                updated_at = fm.get("updated_at") or None
+        except Exception as e:
+            _debug_log(f"[Memory] observe frontmatter read failed: {e}")
+        return {
+            "chars": chars,
+            "max_chars": max_chars,
+            "pct": pct,
+            "near_limit": pct >= _NEAR_LIMIT_PCT,
+            "updated_at": updated_at,
+        }
+
+    try:
+        g_content = load_global_memory(chat_id)
+    except Exception as e:
+        _debug_log(f"[Memory] observe load_global failed: {e}")
+        g_content = None
+    try:
+        p_content = load_project_memory(cwd) if cwd else None
+    except Exception as e:
+        _debug_log(f"[Memory] observe load_project failed: {e}")
+        p_content = None
+    try:
+        s_content = load_memory(chat_id)
+    except Exception as e:
+        _debug_log(f"[Memory] observe load_session failed: {e}")
+        s_content = None
+
+    g_path = _global_memory_file(chat_id)
+    p_path = _project_memory_file(cwd) if cwd else None
+    s_path = _session_memory_file(chat_id)
+
+    layers = {
+        "global":  _layer_stat(g_content, GLOBAL_MAX_CHARS,  g_path),
+        "project": _layer_stat(p_content, PROJECT_MAX_CHARS, p_path),
+        "session": _layer_stat(s_content, SESSION_MAX_CHARS, s_path),
+    }
+
+    # ── 3. DEBUG_LOG tail scan (cheap-fail / UNCHANGED / save-ok) ────────────
+    debug = _parse_debug_log_window(_OBSERVE_DEBUG_TAIL_BYTES)
+
+    if debug.get("unavailable"):
+        recent_window: dict = {"unavailable": True, "reason": debug.get("reason", "debug_log_missing")}
+        fallback: dict = {"unavailable": True, "reason": debug.get("reason", "debug_log_missing")}
+    else:
+        unchanged_count = int(debug.get("unchanged_count", 0))
+        save_ok_count = int(debug.get("save_ok_count", 0))
+        total_count = unchanged_count + save_ok_count
+        unchanged_ratio = (unchanged_count / total_count) if total_count > 0 else 0.0
+
+        cheap_fail_count = int(debug.get("cheap_fail_count", 0))
+        # cheap-fail count is an under-count of "one-shot attempts" because
+        # success lines are not currently emitted by ``_run_one_shot``. We
+        # approximate total_one_shot as (cheap_fail + save_ok) — the bulk of
+        # one-shot calls succeed and emit a save line, so the ratio is a
+        # reasonable visible health signal even if not perfectly precise.
+        total_one_shot = cheap_fail_count + save_ok_count
+        ratio = (cheap_fail_count / total_one_shot) if total_one_shot > 0 else 0.0
+
+        recent_window = {
+            "window_days": _OBSERVE_WINDOW_DAYS,
+            "unchanged_count": unchanged_count,
+            "total_count": total_count,
+            "unchanged_ratio": round(unchanged_ratio, 4),
+            "unavailable": False,
+        }
+        fallback = {
+            "window_days": _OBSERVE_WINDOW_DAYS,
+            "count": cheap_fail_count,
+            "total_one_shot": total_one_shot,
+            "ratio": round(ratio, 4),
+            "last_ts": debug.get("last_cheap_fail_ts"),
+            "unavailable": False,
+        }
+
+    # ── 4. last_successful_update — prefer session frontmatter, fall back to log ─
+    last_successful_update: str | None = layers["session"].get("updated_at")
+    if last_successful_update is None and not debug.get("unavailable"):
+        # Fall back to the last [Memory] saved session_*.md timestamp from
+        # the debug log tail. Only HH:MM:SS — but better than nothing.
+        last_successful_update = debug.get("last_save_ts")
+
+    # ── 5. trends — REQ-13 reserved slot, populated from jsonl tail ─────────
+    trends = _compute_session_trends(chat_id)
+
+    # ── 6. recent-turns pruning summary (read-only snapshot) ────────────────
+    # Read the ring-buffer summary from ``log._pruning_stats``. Failure to
+    # import (very early bootstrap) or any unexpected error degrades to a
+    # neutral "unavailable" struct so the observe card can still render.
+    try:
+        from larkhelm.log import _pruning_stats as _log_pruning_stats
+        pruning = dict(_log_pruning_stats.summary())
+        pruning["unavailable"] = False
+    except Exception as e:
+        _debug_log(f"[Memory] observe pruning summary unavailable: {e}")
+        pruning = {
+            "window": 0,
+            "before_sum": 0,
+            "after_sum": 0,
+            "saved_pct": 0,
+            "unavailable": True,
+        }
+
+    return {
+        "chat_id": chat_id,
+        "cwd": cwd,
+        "layers": layers,
+        "recent_window": recent_window,
+        "fallback": fallback,
+        "last_successful_update": last_successful_update,
+        "trends": trends,
+        "pruning": pruning,
+    }
+
+
+def _compute_session_trends(chat_id: str) -> list[int]:
+    """Reserved for REQ-13 — returns [] until log_entry records session sizes."""
+    return []

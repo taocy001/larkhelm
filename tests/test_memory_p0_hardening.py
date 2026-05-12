@@ -144,7 +144,7 @@ class TestGenerateMemoryRejectsNonUsefulOutput(unittest.TestCase):
             captured["ok"], captured["content"], captured["err"] = ok, content, err
             done_evt.set()
 
-        with patch.object(memory, "_read_logs", return_value=records), \
+        with patch.object(memory, "_read_logs_tail", return_value=records), \
              patch.object(memory, "_get_turn_count", return_value=10), \
              patch.object(memory, "load_memory", return_value=prior_session), \
              patch.object(memory, "_run_one_shot",

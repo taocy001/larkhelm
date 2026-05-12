@@ -183,7 +183,11 @@ class TestMemory(unittest.TestCase):
 
     def test_maybe_auto_update_triggers(self):
         chat_id = "auto_chat"
-        chat_state._set_chat_field(chat_id, "turn_count", 20)
+        # turn=23 satisfies the new schedule (AUTO_UPDATE_FIRST=3, then every
+        # AUTO_UPDATE_EVERY=10 thereafter → 3, 13, 23, …). Old value 20 was a
+        # multiple of AUTO_UPDATE_EVERY under the legacy gate but no longer
+        # triggers under the cold-start-carry-over patch.
+        chat_state._set_chat_field(chat_id, "turn_count", 23)
         done = threading.Event()
         fake_logs = [{"ts": "t", "role": "user", "content": "hi"}]
 
@@ -193,7 +197,7 @@ class TestMemory(unittest.TestCase):
             real_save(cid, content)
             done.set()
 
-        with patch("larkhelm.memory._read_logs", return_value=fake_logs), \
+        with patch("larkhelm.memory._read_logs_tail", return_value=fake_logs), \
              patch("larkhelm.memory.generate_memory", return_value="new mem") as mock_gen, \
              patch("larkhelm.memory.save_memory", side_effect=_save_and_signal):
             maybe_auto_update(chat_id)

@@ -47,6 +47,7 @@ def _make_data_dir():
     d = Path(tempfile.mkdtemp(prefix="larkhelm_test_data_"))
     (d / "sessions").mkdir()
     (d / "logs").mkdir()
+    (d / "api_sessions").mkdir()
     return d
 
 
@@ -613,6 +614,278 @@ class TestRoundTrip(unittest.TestCase):
         dst_sid = self.dst / "sessions" / "chat1.sid"
         self.assertTrue(dst_sid.exists())
         self.assertEqual(dst_sid.read_text(), "ses_abc123")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# api_sessions export / import / round-trip
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestApiSessionChatId(unittest.TestCase):
+    """Unit-test the provider-prefix stripping helper."""
+
+    def test_known_prefixes_stripped(self):
+        cases = {
+            "anthropic_chatA": "chatA",
+            "deepseek_chatB": "chatB",
+            "openai_chatC": "chatC",
+            "gemini_http_chatD": "chatD",
+        }
+        for stem, expected in cases.items():
+            self.assertEqual(_mio._api_session_chat_id(stem), expected, msg=stem)
+
+    def test_unknown_prefix_returns_none(self):
+        self.assertIsNone(_mio._api_session_chat_id("kimi_chatX"))
+        self.assertIsNone(_mio._api_session_chat_id("noprefix"))
+
+
+class TestExportApiSessions(unittest.TestCase):
+
+    def setUp(self):
+        self.data = _make_data_dir()
+
+    def tearDown(self):
+        shutil.rmtree(self.data, ignore_errors=True)
+
+    def _write_api_session(self, name: str, payload: list[dict]) -> Path:
+        p = self.data / "api_sessions" / name
+        p.write_text(json.dumps(payload, ensure_ascii=False))
+        return p
+
+    # AC-01 ──────────────────────────────────────────────────────────────────
+
+    def test_api_sessions_in_archive(self):
+        self._write_api_session("anthropic_CHATA.json",
+                                 [{"role": "user", "content": "hello"}])
+        self._write_api_session("deepseek_CHATB.json",
+                                 [{"role": "user", "content": "world"}])
+        out = self.data / "out.zip"
+        _mio.export_memory(out, data_dir=self.data)
+        with zipfile.ZipFile(out, "r") as zf:
+            names = zf.namelist()
+            manifest = json.loads(zf.read("manifest.json"))
+
+        self.assertIn("data/api_sessions/anthropic_CHATA.json", names)
+        self.assertIn("data/api_sessions/deepseek_CHATB.json", names)
+        api_entries = [e for e in manifest["files"] if e.get("role") == "api_session"]
+        self.assertGreaterEqual(len(api_entries), 2)
+
+    # AC-02 ──────────────────────────────────────────────────────────────────
+
+    def test_chat_id_filter(self):
+        self._write_api_session("anthropic_CHATA.json",
+                                 [{"role": "user", "content": "a"}])
+        self._write_api_session("deepseek_CHATB.json",
+                                 [{"role": "user", "content": "b"}])
+        out = self.data / "out.zip"
+        _mio.export_memory(out, chat_ids=["CHATA"], data_dir=self.data)
+        with zipfile.ZipFile(out, "r") as zf:
+            names = zf.namelist()
+        self.assertIn("data/api_sessions/anthropic_CHATA.json", names)
+        self.assertNotIn("data/api_sessions/deepseek_CHATB.json", names)
+
+    def test_unknown_prefix_skipped_under_chat_filter(self):
+        """A file with no known provider prefix has no derivable chat_id and
+        must be excluded when a chat_ids filter is active."""
+        unknown = self.data / "api_sessions" / "myproviderX_CHATA.json"
+        unknown.write_text(json.dumps([{"role": "user", "content": "x"}]))
+        out = self.data / "out.zip"
+        _mio.export_memory(out, chat_ids=["CHATA"], data_dir=self.data)
+        with zipfile.ZipFile(out, "r") as zf:
+            names = zf.namelist()
+        self.assertNotIn("data/api_sessions/myproviderX_CHATA.json", names)
+
+
+class TestImportApiSessions(unittest.TestCase):
+
+    def setUp(self):
+        self.data = _make_data_dir()
+
+    def tearDown(self):
+        shutil.rmtree(self.data, ignore_errors=True)
+
+    def _build_archive(self, files: dict[str, bytes]) -> Path:
+        out = self.data / "_api_archive.zip"
+        entries = [
+            {"zip_path": k, "orig_path": "", "role": "api_session", "size": len(v)}
+            for k, v in files.items()
+        ]
+        manifest = {
+            "format_version": "1",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "app_version": "test",
+            "data_dir": str(self.data),
+            "memory_home_dir": str(_tmp_memory_home),
+            "chat_ids_filter": None,
+            "files": entries,
+        }
+        with zipfile.ZipFile(out, "w") as zf:
+            zf.writestr("manifest.json", json.dumps(manifest))
+            for zpath, content in files.items():
+                zf.writestr(zpath, content)
+        return out
+
+    # AC-08 ──────────────────────────────────────────────────────────────────
+
+    def test_import_routes_to_api_sessions(self):
+        payload = json.dumps([{"role": "user", "content": "hi"}]).encode()
+        archive = self._build_archive(
+            {"data/api_sessions/anthropic_X.json": payload}
+        )
+        result = _mio.import_memory(archive, merge=False, data_dir=self.data)
+        dest = self.data / "api_sessions" / "anthropic_X.json"
+        self.assertTrue(dest.exists())
+        self.assertEqual(dest.read_bytes(), payload)
+        # Path appears in written list (handle macOS /var → /private/var symlinks)
+        written_resolved = [str(Path(p).resolve()) for p in result["written"]]
+        self.assertIn(str(dest.resolve()), written_resolved)
+
+    # AC-03 ──────────────────────────────────────────────────────────────────
+
+    def test_zip_slip_blocked(self):
+        """A crafted entry escaping the api_sessions/ base must be rejected."""
+        evil = b"i am evil"
+        archive = self._build_archive(
+            {"data/api_sessions/../../evil.txt": evil}
+        )
+        result = _mio.import_memory(archive, merge=False, data_dir=self.data)
+        # The evil file must NOT have landed anywhere we can reach
+        for cand in (self.data.parent / "evil.txt",
+                     self.data / "evil.txt",
+                     self.data / "api_sessions" / "evil.txt"):
+            self.assertFalse(cand.exists(),
+                             f"zip-slip path should not have been written: {cand}")
+        skipped_ids = [s[0] for s in result["skipped"]]
+        self.assertIn("data/api_sessions/../../evil.txt", skipped_ids)
+
+    def test_dest_for_api_sessions_valid(self):
+        dest = _mio._dest_for("data/api_sessions/anthropic_X.json", self.data)
+        self.assertIsNotNone(dest)
+        self.assertTrue(str(dest).startswith(
+            str((self.data / "api_sessions").resolve())
+        ))
+
+    def test_dest_for_api_sessions_zip_slip(self):
+        self.assertIsNone(
+            _mio._dest_for("data/api_sessions/../../evil.txt", self.data)
+        )
+
+    def test_skip_reasons_distinguish_zip_slip_from_unknown_prefix(self):
+        """Skip reason must differentiate zip-slip rejection (known prefix,
+        path escapes base) from a genuinely unknown prefix, so ops can tell
+        a malicious archive entry from a stale archive-layout one."""
+        archive = self._build_archive({
+            "data/api_sessions/../../evil.txt": b"slip",
+            "random/file.txt": b"unknown",
+        })
+        result = _mio.import_memory(archive, merge=False, data_dir=self.data)
+        reasons = {zp: reason for (zp, reason) in result["skipped"]}
+        self.assertEqual(reasons.get("data/api_sessions/../../evil.txt"),
+                         "zip-slip rejected")
+        self.assertEqual(reasons.get("random/file.txt"),
+                         "unrecognised path pattern")
+
+
+class TestRoundTripFullFixture(unittest.TestCase):
+    """End-to-end byte-equivalence check covering the 5 file kinds we ship."""
+
+    def setUp(self):
+        self.src = _make_data_dir()
+        self.dst = _make_data_dir()
+
+    def tearDown(self):
+        shutil.rmtree(self.src, ignore_errors=True)
+        shutil.rmtree(self.dst, ignore_errors=True)
+
+    def test_export_import_full_fixture(self):
+        # 1. state.json
+        state = {"chat_rt": {"model": "claude", "cwd": "/tmp", "turn_count": 9}}
+        (self.src / "state.json").write_text(json.dumps(state))
+        # 2. sessions/*.sid
+        sid_content = b"ses_abc_full"
+        (self.src / "sessions" / "chat_rt.sid").write_bytes(sid_content)
+        # 3. all.jsonl
+        jsonl_content = _build_jsonl(
+            {"chat_id": "chat_rt", "role": "user", "content": "hi"},
+            {"chat_id": "chat_rt", "role": "assistant", "content": "ok"},
+        )
+        (self.src / "logs" / "all.jsonl").write_bytes(jsonl_content)
+        # 4. logs/{chat_id}/{date}.md
+        cdir = self.src / "logs" / "chat_rt"
+        cdir.mkdir(parents=True, exist_ok=True)
+        md_content = "# chat_rt\n\nhello world\n"
+        (cdir / "2026-01-01.md").write_text(md_content)
+        # 5. api_sessions/*.json (two providers)
+        api_a = json.dumps([{"role": "user", "content": "hi-a"}]).encode()
+        api_b = json.dumps([{"role": "user", "content": "hi-b"}]).encode()
+        (self.src / "api_sessions" / "anthropic_chat_rt.json").write_bytes(api_a)
+        (self.src / "api_sessions" / "deepseek_chat_rt.json").write_bytes(api_b)
+
+        out = self.src / "rt.zip"
+        _mio.export_memory(out, data_dir=self.src)
+        _mio.import_memory(out, merge=False, data_dir=self.dst)
+
+        # state — content equality
+        dst_state = json.loads((self.dst / "state.json").read_text())
+        self.assertEqual(dst_state, state)
+        # sid byte-equal
+        self.assertEqual((self.dst / "sessions" / "chat_rt.sid").read_bytes(),
+                         sid_content)
+        # jsonl byte-equal (merge=False overwrites)
+        self.assertEqual((self.dst / "logs" / "all.jsonl").read_bytes(),
+                         jsonl_content)
+        # md byte-equal
+        self.assertEqual((self.dst / "logs" / "chat_rt" / "2026-01-01.md").read_text(),
+                         md_content)
+        # api_sessions byte-equal
+        self.assertEqual(
+            (self.dst / "api_sessions" / "anthropic_chat_rt.json").read_bytes(),
+            api_a)
+        self.assertEqual(
+            (self.dst / "api_sessions" / "deepseek_chat_rt.json").read_bytes(),
+            api_b)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# get_memory_status — api_sessions counter
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestStatusApiSessions(unittest.TestCase):
+    """``get_memory_status`` must surface api_sessions count + size."""
+
+    def setUp(self):
+        self.data = _make_data_dir()
+        import larkhelm.config as _cfg_mod
+        self._orig_attrs = {}
+        for attr in ("DATA_DIR", "STATE_FILE", "LOG_DIR"):
+            self._orig_attrs[attr] = getattr(_cfg_mod, attr, None)
+        _cfg_mod.DATA_DIR = self.data
+        _cfg_mod.STATE_FILE = self.data / "state.json"
+        _cfg_mod.LOG_DIR = self.data / "logs"
+        self._cfg_mod = _cfg_mod
+
+    def tearDown(self):
+        for attr, val in self._orig_attrs.items():
+            if val is None:
+                if hasattr(self._cfg_mod, attr):
+                    delattr(self._cfg_mod, attr)
+            else:
+                setattr(self._cfg_mod, attr, val)
+        shutil.rmtree(self.data, ignore_errors=True)
+
+    def test_status_reports_api_session_counts(self):
+        payload = json.dumps([{"role": "user", "content": "x"}]).encode()
+        (self.data / "api_sessions" / "anthropic_C1.json").write_bytes(payload)
+        (self.data / "api_sessions" / "deepseek_C2.json").write_bytes(payload)
+        st = _mio.get_memory_status()
+        self.assertEqual(st["n_api_sessions"], 2)
+        self.assertEqual(st["api_session_size"], 2 * len(payload))
+
+    def test_status_empty_dir_reports_zero(self):
+        st = _mio.get_memory_status()
+        self.assertEqual(st["n_api_sessions"], 0)
+        self.assertEqual(st["api_session_size"], 0)
 
 
 if __name__ == "__main__":

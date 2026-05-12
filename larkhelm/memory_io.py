@@ -26,6 +26,17 @@ _MEMORY_HOME = Path.home() / ".larkhelm" / "memory"
 # app_id identifies the Feishu bot application — treat as sensitive
 _SENSITIVE_KEYS = frozenset({"secret", "api_key", "password", "token", "credential", "app_id"})
 
+# API backend conversation-history filenames live in DATA_DIR/api_sessions/
+# as ``{provider}_{chat_id}.json``. The export uses these prefixes to split
+# the stem when applying ``--chat-ids`` filtering. Order is irrelevant —
+# the helper iterates by descending length so longer prefixes win.
+_API_SESSION_PREFIXES = (
+    "anthropic_",
+    "deepseek_",
+    "openai_",
+    "gemini_http_",
+)
+
 
 def _human_size(n: int) -> str:
     if n >= 1 << 30:
@@ -59,6 +70,18 @@ def _sid_chat_id(stem: str) -> str:
         if stem.startswith(pfx):
             return stem[len(pfx):]
     return stem
+
+
+def _api_session_chat_id(stem: str) -> Optional[str]:
+    """Strip the longest matching provider prefix from an api_sessions file
+    stem (without ``.json``). Returns the chat_id, or ``None`` when no known
+    provider prefix matches (caller treats that as "not filterable by
+    chat_id" and skips the file when a filter is active).
+    """
+    for pfx in sorted(_API_SESSION_PREFIXES, key=len, reverse=True):
+        if stem.startswith(pfx):
+            return stem[len(pfx):]
+    return None
 
 
 def _line_key(raw: bytes) -> str:
@@ -163,6 +186,17 @@ def export_memory(
                     continue
                 _add_file(sid, f"data/sessions/{sid.name}", "session")
 
+        # api_sessions/{provider}_{chat_id}.json — per-backend stream history
+        api_sessions_dir = data / "api_sessions"
+        api_session_count = 0
+        if api_sessions_dir.exists():
+            for sid in sorted(api_sessions_dir.glob("*.json")):
+                cid = _api_session_chat_id(sid.stem)
+                if cid_set and (cid is None or cid not in cid_set):
+                    continue
+                _add_file(sid, f"data/api_sessions/{sid.name}", "api_session")
+                api_session_count += 1
+
         # logs/all.jsonl and all.jsonl.1
         log_dir = data / "logs"
         for jname in ("all.jsonl", "all.jsonl.1"):
@@ -246,7 +280,9 @@ def export_memory(
     try:
         from larkhelm.log import _debug_log
         _debug_log(
-            f"[MemoryIO] exported {len(entries)} files → {out} ({_human_size(out.stat().st_size)})"
+            f"[MemoryIO] exported {len(entries)} files "
+            f"({api_session_count} api_sessions) → {out} "
+            f"({_human_size(out.stat().st_size)})"
         )
     except Exception:
         pass
@@ -311,7 +347,15 @@ def import_memory(
 
             dest = _dest_for(zpath, data)
             if dest is None:
-                result["skipped"].append((zpath, "unrecognised path pattern"))
+                # Distinguish zip-slip rejection (known prefix but path escapes
+                # its base) from a genuinely unknown prefix, so ops can tell
+                # whether an entry was malicious or merely from an older/newer
+                # archive layout.
+                if zpath.startswith(("data/api_sessions/", "data/", "memory/")):
+                    reason = "zip-slip rejected"
+                else:
+                    reason = "unrecognised path pattern"
+                result["skipped"].append((zpath, reason))
                 continue
 
             if dry_run:
@@ -346,6 +390,17 @@ def import_memory(
 def _dest_for(zpath: str, data: Path) -> Optional[Path]:
     if zpath == "manifest.json":
         return None
+    # Explicit api_sessions branch comes BEFORE the generic data/ branch so
+    # zip-slip protection uses ``DATA_DIR/api_sessions/`` as the base (tighter
+    # than ``DATA_DIR/``). Order matters — moving this below the data/ check
+    # would let an api_sessions entry sneak into DATA_DIR root via "../".
+    if zpath.startswith("data/api_sessions/"):
+        base = (data / "api_sessions").resolve()
+        rest = zpath[len("data/api_sessions/"):]
+        dest = (data / "api_sessions" / rest).resolve()
+        if not str(dest).startswith(str(base) + os.sep):
+            return None  # zip slip protection
+        return dest
     if zpath.startswith("data/"):
         dest = (data / zpath[5:]).resolve()
         if not str(dest).startswith(str(data.resolve()) + os.sep):
@@ -458,6 +513,13 @@ def get_memory_status(chat_id: Optional[str] = None) -> dict:
     if ses_dir.exists():
         n_sessions = len(list(ses_dir.glob("*.sid")))
 
+    n_api_sessions, api_session_size = 0, 0
+    api_dir = _cfg.DATA_DIR / "api_sessions"
+    if api_dir.exists():
+        api_files = list(api_dir.glob("*.json"))
+        n_api_sessions = len(api_files)
+        api_session_size = sum(f.stat().st_size for f in api_files)
+
     n_memory, mem_size = 0, 0
     if _MEMORY_HOME.exists():
         mem_files = list(_MEMORY_HOME.glob("*.md"))
@@ -468,6 +530,8 @@ def get_memory_status(chat_id: Optional[str] = None) -> dict:
         "chats": chats,
         "n_chats": len(chats),
         "n_sessions": n_sessions,
+        "n_api_sessions": n_api_sessions,
+        "api_session_size": api_session_size,
         "log_size": _dir_size(_cfg.LOG_DIR),
         "data_size": _dir_size(_cfg.DATA_DIR),
         "memory_files": n_memory,

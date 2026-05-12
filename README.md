@@ -281,6 +281,18 @@ sudo systemctl restart larkhelm
 | `/history all` | 查看全部历史（含重置记录） |
 | `/stats` | 查看 Token 用量统计 |
 
+**记忆系统**
+
+| 命令 | 功能 |
+|---|---|
+| `/memory` | 查看三层记忆（全局/项目/会话）当前内容 |
+| `/memory status` | 查看记忆数据摘要（chat 数、日志大小等） |
+| `/memory observe` | 容量仪表 + 摘要健康度（详见 PRD `.crew_workspace/prd.md`） |
+| `/memory update` | 立即触发会话摘要生成 |
+| `/memory clear session\|project\|global\|all` | 清除指定层记忆 |
+| `/memory gc [天数] [apply]` | 清理 N 天未更新的项目记忆 |
+| `/memory export` / `/memory import [file_key]` | 导出/导入记忆数据为 zip |
+
 **多 Agent 协作**
 
 | 命令 | 功能 |

@@ -450,11 +450,11 @@ class TestMaybeAutoUpdate(unittest.TestCase):
             maybe_auto_update("chat_5")
         mock_gen.assert_not_called()
 
-    @patch("larkhelm.memory._get_turn_count", return_value=20)
+    @patch("larkhelm.memory._get_turn_count", return_value=23)
     def test_multiple_triggers_update(self, mock_turns):
-        """Turn count = 20 (multiple of AUTO_UPDATE_EVERY=20) → trigger"""
-        from larkhelm.memory import maybe_auto_update, AUTO_UPDATE_EVERY
-        self.assertEqual(20 % AUTO_UPDATE_EVERY, 0)
+        """Turn count = 23 ((23 - AUTO_UPDATE_FIRST) % AUTO_UPDATE_EVERY == 0) → trigger"""
+        from larkhelm.memory import maybe_auto_update, AUTO_UPDATE_EVERY, AUTO_UPDATE_FIRST
+        self.assertEqual((23 - AUTO_UPDATE_FIRST) % AUTO_UPDATE_EVERY, 0)
         started = threading.Event()
         original_start = threading.Thread.start
 
@@ -462,9 +462,9 @@ class TestMaybeAutoUpdate(unittest.TestCase):
             started.set()
             original_start(self_thread)
 
-        with patch("larkhelm.memory._read_logs", return_value=[]):
+        with patch("larkhelm.memory._read_logs_tail", return_value=[]):
             with patch.object(threading.Thread, "start", _start):
-                maybe_auto_update("chat_20")
+                maybe_auto_update("chat_23")
         self.assertTrue(started.wait(timeout=1.0), "Expected background thread to start")
 
     @patch("larkhelm.memory._get_turn_count", return_value=3)
@@ -478,12 +478,12 @@ class TestMaybeAutoUpdate(unittest.TestCase):
             started.set()
             original_start(self_thread)
 
-        with patch("larkhelm.memory._read_logs", return_value=[]):
+        with patch("larkhelm.memory._read_logs_tail", return_value=[]):
             with patch.object(threading.Thread, "start", _start):
                 maybe_auto_update("chat_force", force=True)
         self.assertTrue(started.wait(timeout=1.0), "Expected background thread to start with force=True")
 
-    @patch("larkhelm.memory._get_turn_count", return_value=20)
+    @patch("larkhelm.memory._get_turn_count", return_value=23)
     def test_no_logs_no_memory_written(self, mock_turns):
         """Empty logs → generate_memory never called even at trigger point"""
         from larkhelm.memory import maybe_auto_update
@@ -500,7 +500,7 @@ class TestMaybeAutoUpdate(unittest.TestCase):
             self_thread._target = _wrapped
             _real_start(self_thread)
 
-        with patch("larkhelm.memory._read_logs", return_value=[]):
+        with patch("larkhelm.memory._read_logs_tail", return_value=[]):
             with patch("larkhelm.memory.generate_memory") as mock_gen:
                 with patch.object(threading.Thread, "start", _patched_start):
                     maybe_auto_update("chat_nologs")

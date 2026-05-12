@@ -440,6 +440,7 @@ def _cmd_help(chat_id: str, msg_id: str = None):
         "**🧠 记忆系统（自动学习，无需手工维护）**\n"
         "**/memory** — 查看三层记忆（全局/项目/会话）当前内容\n"
         "**/memory status** — 查看记忆数据摘要（chat 数、日志大小等）\n"
+        "**/memory observe** — 查看记忆容量与摘要健康度\n"
         "**/memory export** — 导出当前 chat 的持久化数据为 zip 文件\n"
         "**/memory import [file_key]** — 从 zip 文件导入记忆数据\n"
         "全局/项目记忆每 10 轮自动从对话中提取并更新；以下命令用于手工覆盖：\n"
@@ -1295,6 +1296,73 @@ def _cmd_btw(chat_id: str, question: str, user_msg_id: str):
 #  /memory command
 # ═══════════════════════════════════════════════════
 
+def _render_observe_card(obs: dict) -> tuple[str, str, str]:
+    """Build (title, body_markdown, color) for the ``/memory observe`` card.
+
+    Color: ``orange`` if any layer.near_limit, else ``blue``. Sections (固定顺序):
+      1. 三层容量条 (含百分比 + ⚠️)
+      2. 最近成功摘要时间
+      3. 近 7 天 UNCHANGED ``m/n (X%)``
+      4. 近 7 天 cheap→orchestrator fallback ``k 次, X%``
+    """
+    layers = obs.get("layers", {}) or {}
+    any_near = any((layers.get(k) or {}).get("near_limit") for k in ("global", "project", "session"))
+    color = "orange" if any_near else "blue"
+
+    def _meter(layer: dict | None, label: str) -> str:
+        if not layer:
+            return f"- **{label}**: _(无)_"
+        chars = layer.get("chars", 0)
+        m = layer.get("max_chars", 0)
+        pct = layer.get("pct", 0)
+        suffix = " ⚠️ near limit" if layer.get("near_limit") else ""
+        return f"- **{label}**: `{chars}/{m} chars · {pct}%`{suffix}"
+
+    lines = ["**容量**"]
+    lines.append(_meter(layers.get("global"),  "全局"))
+    lines.append(_meter(layers.get("project"), "项目"))
+    lines.append(_meter(layers.get("session"), "会话"))
+
+    last_ok = obs.get("last_successful_update") or "_(未知)_"
+    lines.append("")
+    lines.append(f"**上次成功摘要**: `{last_ok}`")
+
+    # Pruning summary (per design v1.0 §5.3). Sourced from log._pruning_stats
+    # via memory._aggregate_memory_observation; rendered as a percentage +
+    # window size, or `_(尚无样本)_` when the ring buffer is empty.
+    # Note: _pruning_stats is a per-process ring buffer — after a bridge
+    # restart the window stays at 0 until the next few queries refill it.
+    pr = obs.get("pruning") or {}
+    if pr.get("unavailable") or int(pr.get("window", 0)) == 0:
+        lines.append("**Pruning**: _(尚无样本，重启后需累计若干轮)_")
+    else:
+        lines.append(
+            f"**Pruning**: `saved={int(pr.get('saved_pct', 0))}% "
+            f"(last {int(pr['window'])} calls)`"
+        )
+
+    rw = obs.get("recent_window", {}) or {}
+    if rw.get("unavailable"):
+        lines.append(f"**近 {rw.get('window_days', 7)} 天 UNCHANGED**: _(不可用)_")
+    else:
+        m = rw.get("unchanged_count", 0)
+        n = rw.get("total_count", 0)
+        pct = int(round((rw.get("unchanged_ratio", 0.0) * 100)))
+        lines.append(f"**近 {rw.get('window_days', 7)} 天 UNCHANGED**: `{m}/{n}` ({pct}%)")
+
+    fb = obs.get("fallback", {}) or {}
+    if fb.get("unavailable"):
+        lines.append(f"**近 {fb.get('window_days', 7)} 天 cheap→orchestrator fallback**: _(不可用)_")
+    else:
+        k = fb.get("count", 0)
+        pct = int(round((fb.get("ratio", 0.0) * 100)))
+        ts = fb.get("last_ts")
+        ts_suffix = f"（最近 `{ts}`）" if ts else ""
+        lines.append(f"**近 {fb.get('window_days', 7)} 天 cheap→orchestrator fallback**: `{k} 次` ({pct}%){ts_suffix}")
+
+    return "🔍 记忆观测", "\n".join(lines), color
+
+
 def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None):
     """/memory — show/set/clear/update/gc/export/import/status the three-tier memory system.
 
@@ -1416,6 +1484,7 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None):
             lines = [
                 f"**Chat 数量：** {st['n_chats']}",
                 f"**Session ID 数：** {st['n_sessions']}",
+                f"**API 会话历史：** {st['n_api_sessions']} 个（{st['api_session_size'] // 1024} KB）",
                 f"**日志总大小：** {st['log_size'] // 1024} KB",
                 f"**数据总大小：** {st['data_size'] // 1024} KB",
                 f"**记忆文件数：** {st['memory_files']}（{st['memory_size'] // 1024} KB）",
@@ -1430,6 +1499,18 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None):
         except Exception as e:
             _debug_log(f"[memory status] failed: {e}")
             send_card_reply(chat_id, msg_id, "❌ 查询失败", str(e)[:300], color="red")
+        return
+
+    # ── /memory observe ──────────────────────────────────────────────────────
+    if sub == "observe":
+        try:
+            from larkhelm.memory import _aggregate_memory_observation
+            obs = _aggregate_memory_observation(chat_id)
+            title, body, color = _render_observe_card(obs)
+            send_card_reply(chat_id, msg_id, title, body, color=color, normalize=False)
+        except Exception as e:
+            _debug_log(f"[Memory] observe failed: {e}")
+            send_card_reply(chat_id, msg_id, "❌ 观测失败", str(e)[:300], color="red")
         return
 
     # ── /memory set global <text> ────────────────────────────────────────────

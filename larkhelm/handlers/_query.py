@@ -27,7 +27,7 @@ from larkhelm.lark_client import (
 )
 from larkhelm.card_builder import _make_card, _split_md, _fmt_elapsed
 from larkhelm.ai_runner import query_claude, query_gemini, query_kimi, query_deepseek, QueryCancelledError
-from larkhelm.chat_state import _get_cwd, _load_sid, _increment_turn_count
+from larkhelm.chat_state import _get_cwd, _load_sid, _get_turn_count, _increment_turn_count
 
 # ── Card UX parameters (from config) ────────────────────────────────
 TOOL_HISTORY_CAP   = _cfg.TOOL_HISTORY_CAP
@@ -268,6 +268,31 @@ def _do_query_with_delegation(
     # so the specialist's output is already the final answer.
     on_text(specialist_output)
     return specialist_output
+
+
+def _post_query_memory_hook(chat_id: str, trace_id: str) -> None:
+    """Run after a successful query: increment turn_count, dispatch to
+    ``maybe_auto_update`` with the appropriate ``force`` flag for cold-start
+    carry-over.
+
+    Cold-start rule: when ``old_turn_count == 0`` (i.e. this is the first
+    successful turn for this chat) the hook forces a summarization so the
+    user feels memory continuity immediately rather than waiting for the
+    regular 3-turn threshold. ``maybe_auto_update`` itself short-circuits
+    when the chat has no readable history (``_read_logs_tail`` returns []),
+    and ``_is_useful_summary`` rejects any thin output, so the force call is
+    safe for brand-new chats too.
+    """
+    try:
+        from larkhelm.memory import maybe_auto_update
+        old_count = _get_turn_count(chat_id)
+        _increment_turn_count(chat_id)
+        if old_count == 0:
+            maybe_auto_update(chat_id, force=True)
+            return
+        maybe_auto_update(chat_id)
+    except Exception as _mc_err:
+        _debug_log(f"[{trace_id}][DoQuery] post-query memory error: {_mc_err}")
 
 
 def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
@@ -778,12 +803,9 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             log_entry(chat_id, "assistant", output, model=log_model, trace_id=trace_id)
 
             # Increment turn count and trigger memory auto-update in background
-            try:
-                _increment_turn_count(chat_id)
-                from larkhelm.memory import maybe_auto_update
-                maybe_auto_update(chat_id)
-            except Exception as _mc_err:
-                _debug_log(f"[{trace_id}][DoQuery] post-query memory error: {_mc_err}")
+            # (with cold-start carry-over for first-turn chats whose all.jsonl
+            # already has imported / pre-existing history).
+            _post_query_memory_hook(chat_id, trace_id)
 
             # Stop the heartbeat and wait for any in-flight patch to complete
             # before writing the final card.  join(timeout) alone is insufficient
