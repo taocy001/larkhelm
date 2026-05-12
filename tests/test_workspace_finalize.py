@@ -1,16 +1,21 @@
-"""Tests for ``cmd_plan._finalize_plan_workspace`` and its helpers.
+"""Tests for ``workspace_finalize.finalize_workspace`` and its helpers.
 
 Background
 ----------
-/dev already auto-flips ``workspace_meta.json`` to ``completed=true`` after
-``review.md`` ends with ``APPROVED`` (``crew/_commands.py:903-905``). /plan,
-which can include a [review] step too, was missing the same hook. Plan
-artefacts (new tests / scripts) routinely sat ``untracked`` after the
-plan finished because the user had to compose the commit by hand from
-``.crew_workspace/file_changes.json``.
+``/dev`` and ``/plan`` both end with the same workspace post-processing
+needs: flip ``workspace_meta.json`` to ``completed=true`` when the run's
+``review.md`` ends with ``APPROVED``, and surface a Feishu summary card
+with a copy-paste-able ``git add`` / ``git commit`` hint covering all
+files the run touched.
 
-This module guards both behaviours: meta-flip on APPROVED + workspace-summary
-card with a copy-paste-able ``git add`` / ``git commit`` hint.
+The hook used to live in ``cmd_plan.py`` (P1 follow-up of commit 83d9312);
+it was extracted into ``larkhelm/workspace_finalize.py`` so ``/dev`` could
+share the exact same implementation. ``/dev`` previously did only the
+meta-flip half (``crew/_commands.py:903-905``) and was missing the
+git-add hint card.
+
+This module guards both behaviours plus the ``kind="dev"`` / ``kind="plan"``
+title prefix differentiation on the summary card.
 """
 from __future__ import annotations
 
@@ -31,7 +36,7 @@ _cfg_file.write_text(json.dumps({"APP_ID": "x", "APP_SECRET": "x"}))
 import larkhelm.config as _cfg
 _cfg._init_runtime(config_path=str(_cfg_file), data_dir=_TMP)
 
-import larkhelm.cmd_plan as plan_mod
+from larkhelm import workspace_finalize as wf_mod
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -43,21 +48,21 @@ class FormatWorkspaceSummaryTests(unittest.TestCase):
     def test_approved_marks_meta_flipped(self):
         files = {"from_file_changes": ["a.py"],
                  "tracked_modified": [], "untracked": []}
-        body, color = plan_mod._format_workspace_summary(files, True, "MyPlan")
+        body, color = wf_mod._format_workspace_summary(files, True, "MyPlan")
         self.assertIn("APPROVED", body)
         self.assertIn("completed=true", body)
         self.assertEqual(color, "green")
 
     def test_not_approved_keeps_meta_false(self):
         files = {"from_file_changes": [], "tracked_modified": [], "untracked": []}
-        body, color = plan_mod._format_workspace_summary(files, False, "MyPlan")
+        body, color = wf_mod._format_workspace_summary(files, False, "MyPlan")
         self.assertIn("completed=false", body)
         self.assertEqual(color, "blue")
 
     def test_empty_lists_yield_no_section_headers(self):
         """No file-list sections (and no git-add hint) when nothing changed."""
         files = {"from_file_changes": [], "tracked_modified": [], "untracked": []}
-        body, _ = plan_mod._format_workspace_summary(files, True, "MyPlan")
+        body, _ = wf_mod._format_workspace_summary(files, True, "MyPlan")
         self.assertNotIn("file_changes.json 声明", body)
         self.assertNotIn("工作树 modified", body)
         self.assertNotIn("工作树 untracked", body)
@@ -66,7 +71,7 @@ class FormatWorkspaceSummaryTests(unittest.TestCase):
     def test_list_truncation_caps_at_12_with_overflow_note(self):
         many = [f"path/file{i}.py" for i in range(15)]
         files = {"from_file_changes": many, "tracked_modified": [], "untracked": []}
-        body, _ = plan_mod._format_workspace_summary(files, True, "P")
+        body, _ = wf_mod._format_workspace_summary(files, True, "P")
         # First 12 shown
         self.assertIn("`path/file0.py`", body)
         self.assertIn("`path/file11.py`", body)
@@ -76,7 +81,7 @@ class FormatWorkspaceSummaryTests(unittest.TestCase):
     def test_git_add_hint_quotes_spaces(self):
         files = {"from_file_changes": ["a b/c.py"], "tracked_modified": [],
                  "untracked": []}
-        body, _ = plan_mod._format_workspace_summary(files, True, "P")
+        body, _ = wf_mod._format_workspace_summary(files, True, "P")
         self.assertIn("git add 'a b/c.py'", body)
         # title quoted via shlex.quote — simple alnum string returns as-is
         self.assertIn("git commit -m P", body)
@@ -88,7 +93,7 @@ class FormatWorkspaceSummaryTests(unittest.TestCase):
         files = {"from_file_changes": ["a.py"], "tracked_modified": [],
                  "untracked": []}
         # Title with double-quote + command substitution
-        body, _ = plan_mod._format_workspace_summary(
+        body, _ = wf_mod._format_workspace_summary(
             files, True, 'fix "bug" $(rm -rf /)')
         # shlex.quote wraps in single quotes and escapes inner single quotes
         # — verify NO unquoted ``$(`` reaches the rendered command line
@@ -107,7 +112,7 @@ class FormatWorkspaceSummaryTests(unittest.TestCase):
             "tracked_modified":  ["modified.py"],   # dup of intent
             "untracked":         ["new.py"],         # dup of intent
         }
-        body, _ = plan_mod._format_workspace_summary(files, True, "P")
+        body, _ = wf_mod._format_workspace_summary(files, True, "P")
         # ``git add`` line should contain each path once
         for p in ("new.py", "modified.py"):
             self.assertEqual(body.count(f" {p}"), 1,
@@ -116,7 +121,7 @@ class FormatWorkspaceSummaryTests(unittest.TestCase):
     def test_git_add_truncates_at_20_targets(self):
         many = [f"f{i}.py" for i in range(25)]
         files = {"from_file_changes": many, "tracked_modified": [], "untracked": []}
-        body, _ = plan_mod._format_workspace_summary(files, True, "P")
+        body, _ = wf_mod._format_workspace_summary(files, True, "P")
         self.assertIn("# +5 more — adjust as needed", body)
 
 
@@ -147,18 +152,18 @@ class CollectPlanArtifactsTests(unittest.TestCase):
     def test_reads_file_changes_json(self):
         self._write_file_changes(["new.py", "scripts/x.sh"])
         with self._patch_git_status([]):
-            r = plan_mod._collect_plan_artifacts(self.ws, str(self.workdir))
+            r = wf_mod._collect_plan_artifacts(self.ws, str(self.workdir))
         self.assertEqual(r["from_file_changes"], ["new.py", "scripts/x.sh"])
 
     def test_missing_file_changes_json_returns_empty_intent(self):
         with self._patch_git_status([]):
-            r = plan_mod._collect_plan_artifacts(self.ws, str(self.workdir))
+            r = wf_mod._collect_plan_artifacts(self.ws, str(self.workdir))
         self.assertEqual(r["from_file_changes"], [])
 
     def test_corrupted_file_changes_json_does_not_raise(self):
         (self.ws / "file_changes.json").write_text("{not json")
         with self._patch_git_status([]):
-            r = plan_mod._collect_plan_artifacts(self.ws, str(self.workdir))
+            r = wf_mod._collect_plan_artifacts(self.ws, str(self.workdir))
         # Falls through with empty intent — never raises
         self.assertEqual(r["from_file_changes"], [])
 
@@ -171,7 +176,7 @@ class CollectPlanArtifactsTests(unittest.TestCase):
             "M  README.md",
         ]
         with self._patch_git_status(lines):
-            r = plan_mod._collect_plan_artifacts(self.ws, str(self.workdir))
+            r = wf_mod._collect_plan_artifacts(self.ws, str(self.workdir))
         self.assertIn("larkhelm/log.py",  r["tracked_modified"])
         self.assertIn("README.md",        r["tracked_modified"])
         self.assertIn("scripts/new.py",   r["untracked"])
@@ -182,7 +187,7 @@ class CollectPlanArtifactsTests(unittest.TestCase):
         still returned but tracked / untracked stay empty — never raises."""
         self._write_file_changes(["intent.py"])
         with patch("subprocess.run", side_effect=OSError("no git")):
-            r = plan_mod._collect_plan_artifacts(self.ws, str(self.workdir))
+            r = wf_mod._collect_plan_artifacts(self.ws, str(self.workdir))
         self.assertEqual(r["from_file_changes"], ["intent.py"])
         self.assertEqual(r["tracked_modified"], [])
         self.assertEqual(r["untracked"], [])
@@ -190,7 +195,7 @@ class CollectPlanArtifactsTests(unittest.TestCase):
     def test_status_lines_shorter_than_4_chars_skipped(self):
         self._write_file_changes([])
         with self._patch_git_status(["", "M", " M"]):
-            r = plan_mod._collect_plan_artifacts(self.ws, str(self.workdir))
+            r = wf_mod._collect_plan_artifacts(self.ws, str(self.workdir))
         self.assertEqual(r["tracked_modified"], [])
         self.assertEqual(r["untracked"], [])
 
@@ -202,7 +207,7 @@ class CollectPlanArtifactsTests(unittest.TestCase):
             "R  old.py -> new.py",
             "C  src.py -> copy.py",
         ]):
-            r = plan_mod._collect_plan_artifacts(self.ws, str(self.workdir))
+            r = wf_mod._collect_plan_artifacts(self.ws, str(self.workdir))
         self.assertIn("new.py", r["tracked_modified"])
         self.assertIn("copy.py", r["tracked_modified"])
         # Old paths must NOT leak through — those files no longer exist on disk
@@ -220,14 +225,14 @@ class CollectPlanArtifactsTests(unittest.TestCase):
             captured["args"] = args
             return MagicMock(returncode=0, stdout="")
         with patch("subprocess.run", side_effect=_capture):
-            plan_mod._collect_plan_artifacts(self.ws, str(self.workdir))
+            wf_mod._collect_plan_artifacts(self.ws, str(self.workdir))
         self.assertIn("-c", captured["args"])
         self.assertIn("core.quotePath=false", captured["args"],
             "git invocation must disable octal escaping for non-ASCII paths")
 
 
 # ════════════════════════════════════════════════════════════════════════
-#  _finalize_plan_workspace — end-to-end glue
+#  finalize_workspace — end-to-end glue
 # ════════════════════════════════════════════════════════════════════════
 
 class FinalizePlanWorkspaceTests(unittest.TestCase):
@@ -261,7 +266,7 @@ class FinalizePlanWorkspaceTests(unittest.TestCase):
         self._write_review("...review body...\n\nAPPROVED\n")
         cwd_p, card_p, run_p = self._patch_chat_state_and_lark()
         with cwd_p, card_p, run_p:
-            plan_mod._finalize_plan_workspace("chat1", "MyPlan")
+            wf_mod.finalize_workspace("chat1", "MyPlan")
         meta = json.loads((self.ws / "workspace_meta.json").read_text())
         self.assertTrue(meta["completed"],
             "APPROVED review must flip workspace_meta.completed → true")
@@ -272,7 +277,7 @@ class FinalizePlanWorkspaceTests(unittest.TestCase):
         self._write_review("...body...\n\nREJECTED\n")
         cwd_p, card_p, run_p = self._patch_chat_state_and_lark()
         with cwd_p, card_p, run_p:
-            plan_mod._finalize_plan_workspace("chat1", "MyPlan")
+            wf_mod.finalize_workspace("chat1", "MyPlan")
         meta = json.loads((self.ws / "workspace_meta.json").read_text())
         self.assertFalse(meta["completed"])
 
@@ -280,7 +285,7 @@ class FinalizePlanWorkspaceTests(unittest.TestCase):
         # No review.md created
         cwd_p, card_p, run_p = self._patch_chat_state_and_lark()
         with cwd_p, card_p, run_p:
-            plan_mod._finalize_plan_workspace("chat1", "MyPlan")
+            wf_mod.finalize_workspace("chat1", "MyPlan")
         meta = json.loads((self.ws / "workspace_meta.json").read_text())
         self.assertFalse(meta["completed"])
 
@@ -289,7 +294,7 @@ class FinalizePlanWorkspaceTests(unittest.TestCase):
         self._write_review("APPROVED")
         with patch("larkhelm.chat_state._get_cwd", return_value=""), \
              patch("larkhelm.lark_client.send_card") as card:
-            plan_mod._finalize_plan_workspace("chat1", "MyPlan")
+            wf_mod.finalize_workspace("chat1", "MyPlan")
         meta = json.loads((self.ws / "workspace_meta.json").read_text())
         self.assertFalse(meta["completed"])
         card.assert_not_called()
@@ -299,7 +304,7 @@ class FinalizePlanWorkspaceTests(unittest.TestCase):
         try:
             with patch("larkhelm.chat_state._get_cwd", return_value=str(empty)), \
                  patch("larkhelm.lark_client.send_card") as card:
-                plan_mod._finalize_plan_workspace("chat1", "MyPlan")
+                wf_mod.finalize_workspace("chat1", "MyPlan")
             card.assert_not_called()
         finally:
             shutil.rmtree(empty, ignore_errors=True)
@@ -309,7 +314,7 @@ class FinalizePlanWorkspaceTests(unittest.TestCase):
         cwd_p, _, run_p = self._patch_chat_state_and_lark()
         with cwd_p, run_p, \
              patch("larkhelm.lark_client.send_card") as card:
-            plan_mod._finalize_plan_workspace("chat1", "MyPlan")
+            wf_mod.finalize_workspace("chat1", "MyPlan")
         # Card was sent — verify the title + that body mentions APPROVED + filename.
         self.assertEqual(card.call_count, 1)
         chat_id, title, body = card.call_args.args[:3]
@@ -326,7 +331,7 @@ class FinalizePlanWorkspaceTests(unittest.TestCase):
              patch("larkhelm.lark_client.send_card",
                    side_effect=RuntimeError("network")):
             # Must NOT raise
-            plan_mod._finalize_plan_workspace("chat1", "MyPlan")
+            wf_mod.finalize_workspace("chat1", "MyPlan")
         # Meta flip should still have succeeded — that step ran before the card.
         meta = json.loads((self.ws / "workspace_meta.json").read_text())
         self.assertTrue(meta["completed"])
@@ -336,7 +341,7 @@ class FinalizePlanWorkspaceTests(unittest.TestCase):
         self._write_review("body\n\nAPPROVED\n   \n\n")
         cwd_p, card_p, run_p = self._patch_chat_state_and_lark()
         with cwd_p, card_p, run_p:
-            plan_mod._finalize_plan_workspace("chat1", "MyPlan")
+            wf_mod.finalize_workspace("chat1", "MyPlan")
         meta = json.loads((self.ws / "workspace_meta.json").read_text())
         self.assertTrue(meta["completed"])
 
@@ -351,7 +356,7 @@ class FinalizePlanWorkspaceTests(unittest.TestCase):
         cwd_p, _, run_p = self._patch_chat_state_and_lark()
         with cwd_p, run_p, \
              patch("larkhelm.lark_client.send_card") as card:
-            plan_mod._finalize_plan_workspace("chat1", "MyPlan")
+            wf_mod.finalize_workspace("chat1", "MyPlan")
         card.assert_not_called()
         # Meta flip should still have happened — that's independent of the card.
         meta = json.loads((self.ws / "workspace_meta.json").read_text())
@@ -362,9 +367,115 @@ class FinalizePlanWorkspaceTests(unittest.TestCase):
         self._write_review("APPROVED was the previous run\n\nREJECTED")
         cwd_p, card_p, run_p = self._patch_chat_state_and_lark()
         with cwd_p, card_p, run_p:
-            plan_mod._finalize_plan_workspace("chat1", "MyPlan")
+            wf_mod.finalize_workspace("chat1", "MyPlan")
         meta = json.loads((self.ws / "workspace_meta.json").read_text())
         self.assertFalse(meta["completed"])
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  kind="dev" — title prefix differentiation
+#
+#  /dev calls finalize_workspace(..., kind="dev") and expects the summary
+#  card title to read "📦 Dev 收尾 · 改动文件" (vs the default "📦 Plan 收尾").
+#  This lets the user tell at a glance which flow produced the card when
+#  both /plan and /dev are used in the same chat.
+# ════════════════════════════════════════════════════════════════════════
+
+class FinalizeWorkspaceKindTests(unittest.TestCase):
+
+    def setUp(self):
+        self.workdir = Path(tempfile.mkdtemp(prefix="larkhelm_finkind_"))
+        self.ws = self.workdir / ".crew_workspace"
+        self.ws.mkdir()
+        (self.ws / "workspace_meta.json").write_text(json.dumps({
+            "task_hash": "hashabcdef", "completed": False,
+        }))
+        (self.ws / "file_changes.json").write_text(json.dumps({
+            "files": [{"path": "src/feature.py", "action": "create", "desc": ""}]
+        }))
+        (self.ws / "review.md").write_text("...\nAPPROVED", encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.workdir, ignore_errors=True)
+
+    def _patches(self):
+        return (
+            patch("larkhelm.chat_state._get_cwd", return_value=str(self.workdir)),
+            patch("subprocess.run",
+                  return_value=MagicMock(returncode=0, stdout="")),
+        )
+
+    def test_dev_kind_title_says_dev(self):
+        """``kind='dev'`` → card title contains the literal word ``Dev``,
+        NOT the default ``Plan`` prefix."""
+        cwd_p, run_p = self._patches()
+        with cwd_p, run_p, \
+             patch("larkhelm.lark_client.send_card") as card:
+            wf_mod.finalize_workspace("chat1", "implement OAuth2 flow", kind="dev")
+        self.assertEqual(card.call_count, 1)
+        _, title, _ = card.call_args.args[:3]
+        self.assertIn("Dev", title,
+            f"kind='dev' should yield a card title containing 'Dev', got {title!r}")
+        self.assertNotIn("Plan", title,
+            f"kind='dev' should NOT contain 'Plan' in title, got {title!r}")
+        self.assertIn("收尾", title)
+        self.assertIn("改动文件", title)
+
+    def test_plan_kind_default_title_says_plan(self):
+        """Default ``kind='plan'`` → card title contains ``Plan`` (regression
+        guard so the extracted module preserves the original /plan behaviour)."""
+        cwd_p, run_p = self._patches()
+        with cwd_p, run_p, \
+             patch("larkhelm.lark_client.send_card") as card:
+            wf_mod.finalize_workspace("chat1", "MyPlan")  # default kind
+        self.assertEqual(card.call_count, 1)
+        _, title, _ = card.call_args.args[:3]
+        self.assertIn("Plan", title,
+            f"default kind should yield 'Plan' in title, got {title!r}")
+        self.assertNotIn("Dev", title)
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  /plan → /dev step delegation: suppress_finalize=True must be propagated
+#
+#  When /plan runs a [dev] step it invokes ``_run_dev_crew_inner`` directly.
+#  Without ``suppress_finalize=True`` the user would see ONE summary card
+#  per [dev] step PLUS a final one from /plan — cosmetic noise. The plan
+#  pipeline owns the final card; the per-step /dev hook must stay quiet.
+# ════════════════════════════════════════════════════════════════════════
+
+class PlanDevStepSuppressesFinalizeTests(unittest.TestCase):
+    """Regression guard for the double-card UX bug spotted in commit-time
+    review. ``/plan`` calls ``_run_dev_crew_inner`` once per [dev] step
+    and must pass ``suppress_finalize=True`` so the inner /dev flow skips
+    its own finalize card; /plan emits the consolidated one at the end."""
+
+    def test_run_dev_step_passes_suppress_finalize_true(self):
+        from larkhelm import cmd_plan as plan_mod
+
+        # Build a minimal MultiPlanState shell — only the fields _run_dev_step
+        # touches (chat_id, cancel_ev, plus the step it runs).
+        state = MagicMock()
+        state.chat_id = "chat1"
+        state.cancel_ev = MagicMock()
+        state.cancel_ev.is_set = MagicMock(return_value=False)
+        step = MagicMock()
+        step.desc = "implement login"
+        step.idx = 0
+
+        with patch("larkhelm.crew._commands._run_dev_crew_inner") as inner:
+            plan_mod._run_dev_step(state, step, crew_id="crew-xyz")
+
+        inner.assert_called_once()
+        kwargs = inner.call_args.kwargs
+        self.assertTrue(kwargs.get("suppress_finalize"),
+            "/plan [dev] step MUST pass suppress_finalize=True so the inner "
+            "/dev flow doesn't double-emit a workspace summary card per step "
+            "(/plan emits the consolidated card after all steps complete). "
+            f"Got kwargs={kwargs!r}")
+        # Sanity: the existing suppress_done_signal contract is still in place
+        self.assertTrue(kwargs.get("suppress_done_signal"),
+            "suppress_done_signal=True is the existing contract — must remain")
 
 
 if __name__ == "__main__":
