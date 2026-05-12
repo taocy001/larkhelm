@@ -475,6 +475,214 @@ def _wait_confirm(state: MultiPlanState) -> str:
 
 # ── Main executor ────────────────────────────────────────────────
 
+def _finalize_plan_workspace(chat_id: str, title: str) -> None:
+    """Post-/plan workspace cleanup — runs only when ``phase == "done"``.
+
+    Two responsibilities (P1 from the plan-flow improvement list):
+
+      1. **Flip ``workspace_meta.json`` to ``completed=true`` when the plan's
+         [review] step output ``APPROVED``.** Without this, a follow-up /dev
+         or /plan with the same ``task_hash`` (within the 24h stale TTL)
+         silently reuses ``design.md`` / ``tasks.json`` as if the previous
+         run was still in progress, causing cross-task contamination. /dev
+         already does this in ``crew/_commands.py:903-905``; /plan was the
+         only caller missing the flip.
+
+      2. **Emit a Feishu card listing the files the plan modified and a
+         git-add / git-commit hint command.** Plan artefacts (new tests,
+         scripts, doc changes) routinely stay ``untracked`` after a plan
+         run because the user has to compose the commit by hand from the
+         workspace ``file_changes.json``. Surfacing the list and a copy-
+         paste-able command removes a step where it's easy to drop a file.
+
+    Fail-soft: every external interaction (file read, git invoke, card send)
+    is wrapped so a failure here never affects the plan's reported outcome
+    or escalates an exception into the ``_run_plan`` finally block.
+    """
+    from larkhelm.chat_state import _get_cwd
+    from larkhelm.lark_client import send_card
+
+    cwd = _get_cwd(chat_id)
+    if not cwd:
+        return
+    ws = Path(cwd) / ".crew_workspace"
+    if not ws.is_dir():
+        return
+
+    # 1. Inspect ``review.md`` — flip meta on APPROVED.
+    review_file = ws / "review.md"
+    review_ok = False
+    try:
+        if review_file.exists():
+            # Last *non-blank* line so trailing whitespace / newline doesn't
+            # break the check; ``.endswith("APPROVED")`` (the /dev approach)
+            # also requires last-line APPROVED so the contract stays the same.
+            tail = next((ln for ln in reversed(review_file.read_text(encoding="utf-8").splitlines())
+                         if ln.strip()), "")
+            review_ok = tail.strip().endswith("APPROVED")
+    except Exception as _e:
+        _debug_log(f"[Plan] review.md read failed: {_e}")
+
+    if review_ok:
+        try:
+            from larkhelm.crew._commands import _read_workspace_meta, _write_workspace_meta
+            meta = _read_workspace_meta(ws)
+            task_hash = meta.get("task_hash", "") if isinstance(meta, dict) else ""
+            if task_hash and not meta.get("completed"):
+                _write_workspace_meta(ws, task_hash=task_hash, completed=True)
+                _debug_log(
+                    f"[Plan] workspace_meta flipped to completed=true "
+                    f"(task_hash={task_hash[:8]}, plan={title!r})"
+                )
+        except Exception as _e:
+            _debug_log(f"[Plan] meta flip failed: {_e}")
+
+    # 2. Build files-to-commit list + git-add hint card.
+    files = _collect_plan_artifacts(ws, cwd)
+    # ``files`` is always a dict with the three bucket keys present, so the
+    # truthiness check on the dict itself is meaningless. What we actually
+    # want to know is "did anything land in any bucket". An empty plan
+    # (rare — e.g. all steps were no-ops) skips the card.
+    if not any(files.values()):
+        return
+    try:
+        body, color = _format_workspace_summary(files, review_ok, title)
+        send_card(chat_id, "📦 Plan 收尾 · 改动文件", body, color=color)
+    except Exception as _e:
+        _debug_log(f"[Plan] workspace summary card failed: {_e}")
+
+
+def _collect_plan_artifacts(ws: Path, cwd: str) -> dict:
+    """Return a dict ``{tracked_modified: [...], untracked: [...], from_file_changes: [...]}``.
+
+    Three sources, merged:
+
+      * ``workspace/file_changes.json`` — the design-time list of files the
+        plan *intended* to modify. Always included so the user sees the
+        plan's own intent.
+      * ``git status --porcelain`` filtered to repo-relative paths — actual
+        working-tree state (catches off-plan edits the plan didn't predict).
+      * Files appearing in both are de-duplicated; the intent list is
+        considered authoritative for ordering.
+    """
+    import json as _json
+    result = {
+        "from_file_changes": [],   # plan's declared intent
+        "tracked_modified":  [],   # M in git status
+        "untracked":         [],   # ?? in git status
+    }
+    # (a) file_changes.json — design-time intent.
+    fc_path = ws / "file_changes.json"
+    if fc_path.exists():
+        try:
+            data = _json.loads(fc_path.read_text(encoding="utf-8"))
+            for entry in data.get("files", []) or []:
+                p = entry.get("path") if isinstance(entry, dict) else None
+                if p:
+                    result["from_file_changes"].append(p)
+        except Exception as _e:
+            _debug_log(f"[Plan] file_changes.json parse failed: {_e}")
+    # (b) git status --porcelain.
+    #
+    # Two non-obvious parse hazards:
+    #
+    #   1. Renamed (``R`` status) / copied (``C``) entries appear as
+    #      ``R  old.py -> new.py`` on a single line. Naively taking
+    #      ``line[3:]`` would feed the literal ``"old.py -> new.py"``
+    #      into the git-add hint, which the shell then can't resolve.
+    #      Take the path AFTER ``->`` when the arrow is present.
+    #
+    #   2. Non-ASCII filenames are octal-escaped + double-quoted by git
+    #      by default: ``?? "\344\270\255\346\226\207.py"`` for ``中文.py``.
+    #      Setting ``core.quotePath=false`` makes git emit the literal
+    #      UTF-8 path instead, so a copy-paste ``git add 中文.py`` works.
+    try:
+        import subprocess
+        proc = subprocess.run(
+            ["git", "-c", "core.quotePath=false", "-C", cwd,
+             "status", "--porcelain"],
+            capture_output=True, text=True, timeout=8,
+        )
+        if proc.returncode == 0:
+            for line in proc.stdout.splitlines():
+                # Porcelain v1 format: ``XY path`` (XY = 2-char status code)
+                if len(line) < 4:
+                    continue
+                status, rest = line[:2], line[3:].lstrip()
+                if " -> " in rest:
+                    # Rename / copy — take destination path (the file the
+                    # user will want to ``git add``).
+                    rest = rest.split(" -> ", 1)[1]
+                if "?" in status:
+                    result["untracked"].append(rest)
+                else:
+                    result["tracked_modified"].append(rest)
+    except Exception as _e:
+        _debug_log(f"[Plan] git status failed: {_e}")
+    return result
+
+
+def _format_workspace_summary(files: dict, review_ok: bool, title: str) -> tuple[str, str]:
+    """Render the workspace-summary card body + colour.
+
+    Body sections (omitted when empty):
+      * intent — files the plan declared in file_changes.json
+      * modified / untracked — current working-tree state
+      * git-add hint — ready-to-paste shell line covering both
+
+    Colour:
+      * green if review APPROVED, blue otherwise (no review or REJECTED).
+    """
+    lines: list[str] = []
+    if review_ok:
+        lines.append("**Review**: ✅ APPROVED — `workspace_meta.completed=true` 已刷")
+    else:
+        lines.append("**Review**: ⚠️ 未 APPROVED — `workspace_meta` 保留 `completed=false`")
+
+    def _list_block(header: str, items: list[str], limit: int = 12) -> None:
+        if not items:
+            return
+        lines.append(f"\n**{header}**（{len(items)} 个）")
+        for p in items[:limit]:
+            lines.append(f"- `{p}`")
+        if len(items) > limit:
+            lines.append(f"- _… 余 {len(items) - limit} 个略_")
+
+    _list_block("📋 file_changes.json 声明", files["from_file_changes"])
+    _list_block("✏️ 工作树 modified", files["tracked_modified"])
+    _list_block("📥 工作树 untracked", files["untracked"])
+
+    # Build a git-add / git-commit hint. Combine intent + modified + untracked,
+    # quote any path containing spaces / special chars.
+    import shlex
+    add_targets = []
+    seen = set()
+    for source in (files["from_file_changes"],
+                   files["tracked_modified"],
+                   files["untracked"]):
+        for p in source:
+            if p not in seen:
+                seen.add(p)
+                add_targets.append(p)
+    if add_targets:
+        quoted = " ".join(shlex.quote(p) for p in add_targets[:20])
+        more = "" if len(add_targets) <= 20 else f"  # +{len(add_targets) - 20} more — adjust as needed"
+        # Quote title too — plan titles can contain ``"`` / ``$(...)`` /
+        # backticks that would break or shell-inject the bare ``-m "..."``
+        # form. ``shlex.quote`` returns single-quoted form for strings
+        # with no special chars (e.g. ``"MyPlan"`` → ``'MyPlan'``), keeping
+        # the line paste-able for everyday titles.
+        lines.append(
+            "\n**一键提交命令**\n```bash\n"
+            f"git add {quoted}{more}\n"
+            f"git commit -m {shlex.quote(title)}\n"
+            "```"
+        )
+
+    color = "green" if review_ok else "blue"
+    return "\n".join(lines), color
+
+
 def _run_plan(state: MultiPlanState) -> None:
     from larkhelm.crew._commands import _register_crew_thread, _unregister_crew_thread
     from larkhelm.crew._state import _active_crew, _active_crew_lock
@@ -647,6 +855,16 @@ def _run_plan(state: MultiPlanState) -> None:
             send_card(state.chat_id, "✅ Plan 全部完成",
                       f"**{state.title}**\n\n共 {n} 个阶段 · 耗时 {elapsed}",
                       color="green")
+            # P1: workspace post-plan finalisation — flip
+            # ``workspace_meta.json`` to ``completed=true`` when the included
+            # [review] step output ``APPROVED``, and surface a git-add /
+            # git-commit hint listing the files the plan touched. Mirrors
+            # the analogous hook in ``crew/_commands.py:903-905`` for /dev,
+            # which /plan was missing. Fail-soft: only logs on error.
+            try:
+                _finalize_plan_workspace(state.chat_id, state.title)
+            except Exception as _fe:
+                _debug_log(f"[Plan] workspace finalisation failed: {_fe}")
 
     finally:
         _hb_stop.set()
