@@ -92,19 +92,201 @@ _WAIT_POLL_INTERVAL: float = 1.0
 
 # ── Parser ───────────────────────────────────────────────────────
 
+# Keyword table for the natural-language fallback in _parse_plan.
+# Structure: {type: (chinese_keywords, english_tokens)}.
+# Iteration order is also the conflict-resolution priority: dev > fix > review > test.
+_STEP_KEYWORDS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "dev":    (("开发", "实现", "编写"), ()),
+    "fix":    (("修复", "修改"),         ("fix",)),
+    "review": (("检视", "审查"),         ("review",)),
+    "test":   (("测试", "验证", "回归"), ("test",)),
+}
+
+_STEP_TYPE_PRIORITY: tuple[str, ...] = ("dev", "fix", "review", "test")
+
+_EXPLICIT_TYPE_RE = re.compile(r'\[(dev|review|fix|test)\]\s*(.*)', re.IGNORECASE)
+
+_LLM_CLASSIFY_PROMPT: str = """\
+你是一个 plan step 分类器。下面每行是用户写的一个步骤描述。
+请把每行归类为 dev / review / fix / test 之一，并按 `[类型] 描述` 的格式逐行输出，
+**不要输出任何其他内容**（不要序号、不要解释、不要空行）。
+未知类别一律归 dev。
+
+输入：
+{lines}
+"""
+
+
+def _strip_prefix_kw(line: str, kw: str, ignore_case: bool) -> str:
+    """If ``line`` starts with ``kw`` (optionally case-insensitively),
+    strip it and any following whitespace; otherwise return ``line`` unchanged.
+    Falls back to the original line if stripping leaves an empty string.
+    """
+    head = line[: len(kw)]
+    matches = head.lower() == kw.lower() if ignore_case else head == kw
+    if not matches:
+        return line
+    rest = line[len(kw):].lstrip()
+    return rest if rest else line
+
+
+def _map_step_type(line: str) -> tuple[str, str] | None:
+    """Match keyword table; return ``(type, stripped_desc)`` or ``None``.
+
+    - Chinese keywords: substring (``in``) match.
+    - English tokens: ``\\b<token>\\b`` regex with ``re.IGNORECASE``.
+    - On multi-type hit, picks by ``_STEP_TYPE_PRIORITY`` and ``_debug_log`` the conflict.
+    - ``desc`` strips the triggering keyword only when it is the line prefix.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return None
+
+    hits: list[tuple[str, str]] = []   # (type, desc_after_strip)
+    for typ in _STEP_TYPE_PRIORITY:
+        zh_kws, en_kws = _STEP_KEYWORDS[typ]
+        zh_hit_kw: str | None = None
+        for kw in zh_kws:
+            if kw in stripped:
+                zh_hit_kw = kw
+                break
+        if zh_hit_kw is not None:
+            hits.append((typ, _strip_prefix_kw(stripped, zh_hit_kw, ignore_case=False)))
+            continue
+        en_hit_kw: str | None = None
+        for tok in en_kws:
+            if re.search(rf'\b{re.escape(tok)}\b', stripped, re.IGNORECASE):
+                en_hit_kw = tok
+                break
+        if en_hit_kw is not None:
+            hits.append((typ, _strip_prefix_kw(stripped, en_hit_kw, ignore_case=True)))
+
+    if not hits:
+        return None
+    if len(hits) > 1:
+        _debug_log(
+            f"[Plan] keyword conflict on line: {line!r} → "
+            f"types={[h[0] for h in hits]}, picked={hits[0][0]}"
+        )
+    return hits[0][0], hits[0][1]
+
+
+def _llm_classify_steps(lines: list[str], chat_id: str | None = None) -> list[tuple[str, str]]:
+    """Batch LLM classification for ambiguous /plan lines.
+
+    Single ``_spawn_claude_proc`` call; prompt enforces ``[type] desc`` per line.
+    Output is parsed with the same regex used for explicit syntax. Output rows
+    that fail to parse are silently dropped and ``_debug_log``-ed. Any exception
+    (subprocess failure, timeout, cancellation) propagates up — ``_parse_plan``
+    catches it and drops the whole ambiguous batch (fail-soft per PRD §3 P1).
+    """
+    if not lines:
+        return []
+
+    from larkhelm.ai_runner import _spawn_claude_proc
+    from larkhelm.chat_state import _get_cwd
+    from larkhelm.perm import grant_yolo, revoke_yolo
+
+    cwd = _get_cwd(chat_id) if chat_id else None
+    ns  = f"{chat_id or 'plan'}__classifier_{uuid.uuid4().hex[:8]}"
+    payload = "\n".join(l.strip() for l in lines)
+    prompt  = _LLM_CLASSIFY_PROMPT.format(lines=payload)
+
+    grant_yolo(ns)
+    try:
+        output = _spawn_claude_proc(
+            chat_id=ns, message=prompt, sid=None, cwd=cwd,
+            cancel_ev=None, on_text=None, allow_retry=False,
+            session_namespace=ns,
+        )
+    finally:
+        revoke_yolo(ns)
+
+    results: list[tuple[str, str]] = []
+    for raw in (output or "").splitlines():
+        out_line = raw.strip()
+        if not out_line:
+            continue
+        m = _EXPLICIT_TYPE_RE.match(out_line)
+        if not m:
+            _debug_log(f"[Plan] classifier output unparseable: {out_line!r}")
+            continue
+        results.append((m.group(1).lower(), m.group(2).strip()))
+    return results
+
+
 def _parse_plan(text: str) -> tuple[str, list[PlanStep]]:
-    """Return (title, steps) from /plan body text."""
+    """Return (title, steps) from /plan body text.
+
+    Three-level fallback (PRD §1.2): explicit ``[type]`` syntax → keyword table
+    (``_map_step_type``) → batched LLM classification (``_llm_classify_steps``).
+    The LLM call only happens when at least one line is ambiguous. Failures in
+    the LLM step are fail-soft: the ambiguous batch is dropped silently and the
+    /plan still launches with whatever explicit/keyword steps were parsed.
+    """
     lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
     title = "多阶段开发计划"
-    steps: list[PlanStep] = []
-    idx = 0
-    for line in lines:
-        m = re.match(r'\[(dev|review|fix|test)\]\s*(.*)', line, re.IGNORECASE)
+
+    pass1_slots: list[PlanStep | None] = []
+    ambiguous_lines: list[tuple[int, str]] = []   # (slot_idx, original_line)
+    candidate_title_slot: int | None = None       # reserved slot for the title
+
+    for i, line in enumerate(lines):
+        m = _EXPLICIT_TYPE_RE.match(line)
         if m:
-            steps.append(PlanStep(idx=idx, type=m.group(1).lower(), desc=m.group(2).strip()))
-            idx += 1
-        elif not steps:
-            title = line   # first non-step line is the title
+            pass1_slots.append(PlanStep(idx=0, type=m.group(1).lower(),
+                                        desc=m.group(2).strip()))
+            continue
+        kw = _map_step_type(line)
+        if kw is not None:
+            pass1_slots.append(PlanStep(idx=0, type=kw[0], desc=kw[1]))
+            continue
+        # Tentative title: only the very first line, only if it would otherwise
+        # be ambiguous, and only if no step has been parsed yet. Whether it
+        # ultimately *becomes* the title is decided after Pass 1.
+        if i == 0 and not pass1_slots:
+            candidate_title_slot = len(pass1_slots)
+            pass1_slots.append(None)
+            continue
+        slot_idx = len(pass1_slots)
+        pass1_slots.append(None)
+        ambiguous_lines.append((slot_idx, line))
+
+    # Title resolution: keep the candidate as title only when at least one
+    # explicit/keyword step exists; otherwise demote it to ambiguous so it
+    # gets a fair LLM classification (PRD AC-03).
+    if candidate_title_slot is not None:
+        has_concrete_step = any(s is not None for s in pass1_slots)
+        if has_concrete_step:
+            title = lines[candidate_title_slot]
+        else:
+            ambiguous_lines.insert(
+                0, (candidate_title_slot, lines[candidate_title_slot])
+            )
+
+    if ambiguous_lines:
+        ambiguous_payload = [orig for _, orig in ambiguous_lines]
+        try:
+            classified = _llm_classify_steps(ambiguous_payload)
+        except Exception as e:
+            _debug_log(
+                f"[Plan] LLM fallback failed: {e}; "
+                f"dropping {len(ambiguous_lines)} ambiguous line(s)"
+            )
+            classified = []
+        for (slot_idx, _orig), parsed in zip(ambiguous_lines, classified):
+            t, d = parsed
+            if t not in _STEP_TYPE_PRIORITY:
+                _debug_log(f"[Plan] classifier returned unknown type {t!r}; dropping line")
+                continue
+            pass1_slots[slot_idx] = PlanStep(idx=0, type=t, desc=d.strip())
+
+    steps: list[PlanStep] = []
+    for slot in pass1_slots:
+        if slot is None:
+            continue
+        slot.idx = len(steps)
+        steps.append(slot)
     return title, steps
 
 
@@ -742,7 +924,8 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None) -> None:
                   "也支持从飞书文档读取：`/plan https://feishu.cn/docx/xxx`\n\n"
                   "**选项：**\n"
                   "- `--retry=N` 步骤失败时自动重试 N 次（默认 1）\n"
-                  "- `--no-confirm` 步骤成功后跳过确认，自动连续执行",
+                  "- `--no-confirm` 步骤成功后跳过确认，自动连续执行\n\n"
+                  "也支持自然语言：`开发登录` / `审查安全` 等",
                   color="orange")
         return
 
