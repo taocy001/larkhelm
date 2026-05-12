@@ -478,5 +478,217 @@ class PlanDevStepSuppressesFinalizeTests(unittest.TestCase):
             "suppress_done_signal=True is the existing contract — must remain")
 
 
+# ════════════════════════════════════════════════════════════════════════
+#  U15 — "📊 本次摘要" block on the summary card
+# ════════════════════════════════════════════════════════════════════════
+
+class CollectRunMetricsTests(unittest.TestCase):
+    """``_collect_run_metrics`` reads post-run signals (review, tests, diff,
+    feishu doc URLs) into a metrics dict that ``_format_workspace_summary``
+    renders. Each signal is fail-soft — absent signals leave keys as
+    ``None`` / ``[]`` rather than raise.
+    """
+
+    def setUp(self):
+        self.workdir = Path(tempfile.mkdtemp(prefix="larkhelm_metrics_"))
+        self.ws = self.workdir / ".crew_workspace"
+        self.ws.mkdir()
+
+    def tearDown(self):
+        shutil.rmtree(self.workdir, ignore_errors=True)
+
+    def _write_changes(self, body: str) -> None:
+        (self.ws / "changes.md").write_text(body, encoding="utf-8")
+
+    def _patch_git_shortstat(self, stdout: str):
+        return patch("subprocess.run",
+                     return_value=MagicMock(returncode=0, stdout=stdout))
+
+    def _empty_files(self) -> dict:
+        return {"from_file_changes": [], "tracked_modified": [], "untracked": []}
+
+    def test_file_count_dedups_across_three_buckets(self):
+        files = {
+            "from_file_changes": ["a.py", "b.py"],
+            "tracked_modified":  ["b.py", "c.py"],   # b.py dup'd
+            "untracked":         ["c.py", "d.py"],   # c.py dup'd
+        }
+        with self._patch_git_shortstat(""):
+            m = wf_mod._collect_run_metrics(self.ws, str(self.workdir), files)
+        self.assertEqual(m["file_count"], 4,
+            "a.py / b.py / c.py / d.py should count once across buckets")
+
+    def test_test_count_extracts_pytest_summary_line(self):
+        self._write_changes("Tests: 29 passed, 10 warnings in 5.48s.\n")
+        with self._patch_git_shortstat(""):
+            m = wf_mod._collect_run_metrics(self.ws, str(self.workdir),
+                                            self._empty_files())
+        self.assertEqual(m["tests"], "29 passed")
+
+    def test_test_count_with_failures_renders_combined(self):
+        self._write_changes("3 passed, 2 failed in 0.21s")
+        with self._patch_git_shortstat(""):
+            m = wf_mod._collect_run_metrics(self.ws, str(self.workdir),
+                                            self._empty_files())
+        self.assertEqual(m["tests"], "3 passed, 2 failed")
+
+    def test_test_count_takes_last_match_when_multiple_runs_logged(self):
+        """``changes.md`` may include pre/post-fix pytest output. The LAST
+        line wins — that's the run that produced the final accepted state."""
+        self._write_changes(
+            "Initial run: 5 passed\n"
+            "After fix:   12 passed\n"
+            "Final:       29 passed in 5.4s\n"
+        )
+        with self._patch_git_shortstat(""):
+            m = wf_mod._collect_run_metrics(self.ws, str(self.workdir),
+                                            self._empty_files())
+        self.assertEqual(m["tests"], "29 passed")
+
+    def test_test_count_absent_returns_none(self):
+        self._write_changes("plain prose with no pytest output")
+        with self._patch_git_shortstat(""):
+            m = wf_mod._collect_run_metrics(self.ws, str(self.workdir),
+                                            self._empty_files())
+        self.assertIsNone(m["tests"])
+
+    def test_feishu_doc_urls_extracted_and_deduped(self):
+        self._write_changes(
+            "上传了文档 https://feishu.cn/docx/AAA1111 和 "
+            "https://my.feishu.cn/docx/BBB2222\n"
+            "重复链接: https://feishu.cn/docx/AAA1111\n"
+            "wiki 也算: https://open.feishu.cn/wiki/CCC3333"
+        )
+        with self._patch_git_shortstat(""):
+            m = wf_mod._collect_run_metrics(self.ws, str(self.workdir),
+                                            self._empty_files())
+        # Order preserved by first appearance, AAA seen twice but dedup'd
+        self.assertEqual(m["docx_urls"], [
+            "https://feishu.cn/docx/AAA1111",
+            "https://my.feishu.cn/docx/BBB2222",
+            "https://open.feishu.cn/wiki/CCC3333",
+        ])
+
+    def test_feishu_url_with_trailing_punctuation_not_captured(self):
+        """A docx URL at end of a sentence (``…链接: https://…feishu.cn/docx/X.``)
+        must not keep the trailing period. The regex character class is
+        scoped to URL-safe chars only, so this comes for free — guard
+        against regression."""
+        self._write_changes("查看链接：https://feishu.cn/docx/TOKEN_X.")
+        with self._patch_git_shortstat(""):
+            m = wf_mod._collect_run_metrics(self.ws, str(self.workdir),
+                                            self._empty_files())
+        self.assertEqual(m["docx_urls"], ["https://feishu.cn/docx/TOKEN_X"])
+
+    def test_diff_stats_from_git_shortstat(self):
+        with self._patch_git_shortstat(
+            " 3 files changed, 120 insertions(+), 5 deletions(-)\n"
+        ):
+            m = wf_mod._collect_run_metrics(self.ws, str(self.workdir),
+                                            self._empty_files())
+        self.assertEqual(m["diff_stats"],
+            "3 files changed, 120 insertions(+), 5 deletions(-)")
+
+    def test_diff_stats_empty_when_no_changes(self):
+        with self._patch_git_shortstat(""):
+            m = wf_mod._collect_run_metrics(self.ws, str(self.workdir),
+                                            self._empty_files())
+        self.assertIsNone(m["diff_stats"])
+
+    def test_missing_changes_md_leaves_signals_empty(self):
+        with self._patch_git_shortstat(""):
+            m = wf_mod._collect_run_metrics(self.ws, str(self.workdir),
+                                            self._empty_files())
+        self.assertIsNone(m["tests"])
+        self.assertEqual(m["docx_urls"], [])
+
+    def test_git_failure_leaves_diff_stats_none(self):
+        """git binary missing / not a repo → never raise; just no diff_stats."""
+        with patch("subprocess.run",
+                   side_effect=OSError("git not found")):
+            m = wf_mod._collect_run_metrics(self.ws, str(self.workdir),
+                                            self._empty_files())
+        self.assertIsNone(m["diff_stats"])
+
+    def test_corrupted_changes_md_does_not_raise(self):
+        """Binary garbage in changes.md (a UTF-8 decode error) must not bubble."""
+        (self.ws / "changes.md").write_bytes(b"\xff\xfe not utf-8")
+        with self._patch_git_shortstat(""):
+            # Must not raise
+            m = wf_mod._collect_run_metrics(self.ws, str(self.workdir),
+                                            self._empty_files())
+        # Tests / urls unrecoverable, but function still returns sane shape
+        self.assertIsNone(m["tests"])
+        self.assertEqual(m["docx_urls"], [])
+
+
+class FormatWorkspaceSummaryWithMetricsTests(unittest.TestCase):
+    """``_format_workspace_summary`` U15 rendering: the metrics block is shown
+    only when non-empty, individual rows omitted when their signal is None."""
+
+    def _files(self) -> dict:
+        return {"from_file_changes": ["x.py"],
+                "tracked_modified": [], "untracked": []}
+
+    def test_metrics_block_renders_all_present_fields(self):
+        metrics = {
+            "tests":      "29 passed",
+            "diff_stats": "3 files changed, 120 insertions(+), 5 deletions(-)",
+            "file_count": 4,
+            "docx_urls":  ["https://feishu.cn/docx/A", "https://feishu.cn/docx/B"],
+        }
+        body, _ = wf_mod._format_workspace_summary(self._files(), True, "P", metrics)
+        self.assertIn("📊 本次摘要", body)
+        self.assertIn("测试: `29 passed`", body)
+        self.assertIn("Diff: `3 files changed", body)
+        self.assertIn("改动文件: 4 个", body)
+        self.assertIn("飞书文档产出: 2 个", body)
+        self.assertIn("https://feishu.cn/docx/A", body)
+
+    def test_metrics_block_omitted_when_metrics_none(self):
+        body, _ = wf_mod._format_workspace_summary(self._files(), True, "P", None)
+        self.assertNotIn("📊 本次摘要", body)
+
+    def test_metrics_block_omitted_when_all_signals_empty(self):
+        metrics = {"tests": None, "diff_stats": None, "file_count": 0, "docx_urls": []}
+        body, _ = wf_mod._format_workspace_summary(self._files(), True, "P", metrics)
+        self.assertNotIn("📊 本次摘要", body)
+
+    def test_metrics_partial_renders_only_present_rows(self):
+        """When only ``tests`` is present, other rows must be suppressed
+        (no ``"Diff: None"`` / ``"飞书文档产出: 0 个"`` clutter)."""
+        metrics = {"tests": "12 passed", "diff_stats": None,
+                   "file_count": 0, "docx_urls": []}
+        body, _ = wf_mod._format_workspace_summary(self._files(), True, "P", metrics)
+        self.assertIn("📊 本次摘要", body)
+        self.assertIn("12 passed", body)
+        self.assertNotIn("Diff:", body)
+        self.assertNotIn("飞书文档产出:", body)
+        self.assertNotIn("改动文件:", body)
+
+    def test_metrics_doc_urls_truncate_at_3_with_overflow_note(self):
+        urls = [f"https://feishu.cn/docx/T{i}" for i in range(5)]
+        metrics = {"tests": None, "diff_stats": None, "file_count": 0,
+                   "docx_urls": urls}
+        body, _ = wf_mod._format_workspace_summary(self._files(), True, "P", metrics)
+        self.assertIn("飞书文档产出: 5 个", body)
+        self.assertIn("https://feishu.cn/docx/T0", body)
+        self.assertIn("https://feishu.cn/docx/T2", body)
+        self.assertNotIn("https://feishu.cn/docx/T3", body)
+        self.assertIn("余 2 个略", body)
+
+    def test_metrics_block_appears_between_review_line_and_file_lists(self):
+        """Ordering invariant: review status first, then summary metrics,
+        then file lists. Scannability depends on this order."""
+        metrics = {"tests": "5 passed", "diff_stats": None,
+                   "file_count": 1, "docx_urls": []}
+        body, _ = wf_mod._format_workspace_summary(self._files(), True, "P", metrics)
+        review_pos = body.find("**Review**:")
+        metrics_pos = body.find("📊 本次摘要")
+        files_pos = body.find("file_changes.json 声明")
+        self.assertLess(review_pos, metrics_pos)
+        self.assertLess(metrics_pos, files_pos)
+
+
 if __name__ == "__main__":
     unittest.main()

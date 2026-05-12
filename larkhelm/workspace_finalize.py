@@ -121,8 +121,13 @@ def finalize_workspace(chat_id: str, title: str, *, kind: str = "plan") -> None:
     # the card.
     if not any(files.values()):
         return
+    # Gather "本次摘要" metrics (U15): review verdict + test pass rate (from
+    # changes.md) + diff line counts (from git) + Feishu doc URLs (from
+    # changes.md). All sources are read-only / fail-soft; if a signal is
+    # absent the relevant line is just omitted from the summary block.
+    metrics = _collect_run_metrics(ws, cwd, files)
     try:
-        body, color = _format_workspace_summary(files, review_ok, title)
+        body, color = _format_workspace_summary(files, review_ok, title, metrics)
         kind_label = "Dev" if kind == "dev" else "Plan"
         send_card(chat_id, f"📦 {kind_label} 收尾 · 改动文件", body, color=color)
     except Exception as _e:
@@ -202,10 +207,99 @@ def _collect_plan_artifacts(ws: Path, cwd: str) -> dict:
     return result
 
 
-def _format_workspace_summary(files: dict, review_ok: bool, title: str) -> tuple[str, str]:
+def _collect_run_metrics(ws: "Path", cwd: str, files: dict) -> dict:
+    """Read post-run signals into a metrics dict for the "📊 本次摘要" block.
+
+    Returns a dict with these keys (each may be ``None`` / ``[]`` when the
+    underlying signal isn't present — the summary renderer skips empty
+    fields rather than show "N/A"):
+
+      * ``tests``       — first ``\\d+ passed`` pattern in ``changes.md``,
+                          rendered as ``"N passed"`` or with failures
+                          (``"N passed, M failed"``)
+      * ``diff_stats``  — output of ``git diff --shortstat HEAD`` against
+                          the current cwd, e.g. ``"3 files changed,
+                          120 insertions(+), 5 deletions(-)"``
+      * ``docx_urls``   — unique ``https://*.feishu.cn/docx/<token>`` URLs
+                          appearing in ``changes.md`` (deduped, order-preserving)
+      * ``file_count``  — total distinct paths across the three buckets in
+                          ``files``, for the "改动 N 个文件" tally
+
+    All file IO + subprocess calls are wrapped — never raises so the caller
+    can always render *something*.
+    """
+    import re
+    import subprocess
+
+    metrics = {"tests": None, "diff_stats": None, "docx_urls": [], "file_count": 0}
+
+    # Count distinct paths across the three file buckets (de-duped).
+    seen: set[str] = set()
+    for bucket in ("from_file_changes", "tracked_modified", "untracked"):
+        for p in files.get(bucket, []):
+            seen.add(p)
+    metrics["file_count"] = len(seen)
+
+    # Parse ``changes.md`` for test count + Feishu doc URLs.
+    changes_path = ws / "changes.md"
+    if changes_path.exists():
+        try:
+            text = changes_path.read_text(encoding="utf-8")
+            # Common pytest output shapes:
+            #   "N passed"  /  "N passed, M failed"  /  "N passed in 1.23s"
+            # Prefer the LAST occurrence — multiple pytest runs append upward.
+            test_matches = list(re.finditer(
+                r"(\d+)\s+passed(?:,\s+(\d+)\s+failed)?", text))
+            if test_matches:
+                m = test_matches[-1]
+                passed = m.group(1)
+                failed = m.group(2)
+                metrics["tests"] = (f"{passed} passed, {failed} failed"
+                                    if failed and int(failed) > 0
+                                    else f"{passed} passed")
+            # Feishu doc URLs. We accept any subdomain (``feishu.cn`` /
+            # ``my.feishu.cn`` / ``open.feishu.cn``) since plan output
+            # quoting style varies. Strip trailing punctuation so a URL
+            # at the end of a sentence (e.g. ``…文档：https://…feishu.cn/docx/X.``)
+            # doesn't keep the period.
+            url_matches = re.findall(
+                r"https?://[a-zA-Z0-9.-]*feishu\.cn/(?:docx|wiki)/[A-Za-z0-9_-]+",
+                text)
+            seen_urls: set[str] = set()
+            for u in url_matches:
+                if u not in seen_urls:
+                    seen_urls.add(u)
+                    metrics["docx_urls"].append(u)
+        except Exception as _e:
+            _debug_log(f"[WorkspaceFinalize] changes.md parse failed: {_e}")
+
+    # ``git diff --shortstat HEAD`` for total +/- and file count.
+    # Note: this captures *both* staged and unstaged working-tree changes
+    # since the last commit, matching the user's mental model of "what
+    # this run produced". Untracked files don't show up in this stat —
+    # the file_count above does cover them.
+    try:
+        proc = subprocess.run(
+            ["git", "-C", cwd, "diff", "--shortstat", "HEAD"],
+            capture_output=True, text=True, timeout=_GIT_STATUS_TIMEOUT_SEC,
+        )
+        if proc.returncode == 0:
+            stat_line = proc.stdout.strip().splitlines()[0] if proc.stdout.strip() else ""
+            if stat_line:
+                metrics["diff_stats"] = stat_line
+    except Exception as _e:
+        _debug_log(f"[WorkspaceFinalize] git diff --shortstat failed: {_e}")
+
+    return metrics
+
+
+def _format_workspace_summary(files: dict, review_ok: bool, title: str,
+                              metrics: "dict | None" = None) -> tuple[str, str]:
     """Render the workspace-summary card body + colour.
 
     Body sections (omitted when empty):
+      * 📊 本次摘要 (U15) — review verdict + test pass rate + diff stats
+        + doc-URL count, when ``metrics`` is provided and non-empty
       * intent — files the run declared in file_changes.json
       * modified / untracked — current working-tree state
       * git-add hint — ready-to-paste shell line covering both
@@ -218,6 +312,27 @@ def _format_workspace_summary(files: dict, review_ok: bool, title: str) -> tuple
         lines.append("**Review**: ✅ APPROVED — `workspace_meta.completed=true` 已刷")
     else:
         lines.append("**Review**: ⚠️ 未 APPROVED — `workspace_meta` 保留 `completed=false`")
+
+    # 📊 本次摘要 (U15). Render only the rows we actually have data for,
+    # so the section doesn't become a sea of "N/A".
+    if metrics:
+        summary_rows: list[str] = []
+        if metrics.get("tests"):
+            summary_rows.append(f"- 测试: `{metrics['tests']}`")
+        if metrics.get("diff_stats"):
+            summary_rows.append(f"- Diff: `{metrics['diff_stats']}`")
+        if metrics.get("file_count"):
+            summary_rows.append(f"- 改动文件: {metrics['file_count']} 个")
+        urls = metrics.get("docx_urls") or []
+        if urls:
+            # Show the first 3 URLs inline; tally the rest. >3 飞书 docs in
+            # one run is unusual but possible for big plans.
+            preview = "\n".join(f"  - {u}" for u in urls[:3])
+            extra = f"\n  - _… 余 {len(urls) - 3} 个略_" if len(urls) > 3 else ""
+            summary_rows.append(f"- 飞书文档产出: {len(urls)} 个\n{preview}{extra}")
+        if summary_rows:
+            lines.append("\n**📊 本次摘要**")
+            lines.extend(summary_rows)
 
     def _list_block(header: str, items: list[str], limit: int = _DISPLAY_LIMIT) -> None:
         if not items:
