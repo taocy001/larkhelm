@@ -323,13 +323,24 @@ def _format_step_duration(step: dict) -> str:
     out of range — caller appends conditionally.
 
     Cases (in priority order):
+      * step is not a dict (None / list / str) → ``""``  (defensive — see below)
       * No start_time → ``""``                          (step never started)
       * start_time but no end_time → "已运行 N 分钟"     (was active at crash)
       * Both present → "已耗时 N 分钟"                  (finished before crash)
 
     Sub-minute durations show as "N 秒" to avoid the common-but-useless
     "已运行 0 分钟". Very long durations use "N 小时" past 90 minutes.
+
+    Defensive type check: ``rec.get("steps")`` from a corrupted on-disk
+    record can yield anything (None, list-of-strings if someone schema-
+    bumped wrong, etc). The outer ``_notify_chat_of_interrupted_plan``
+    catches exceptions globally, but failing here would silently kill
+    the whole notification card. Returning "" lets the caller fall
+    back to the bare ``step_line`` without duration suffix, which is
+    still useful information for the user. Round-2 audit #6 follow-up.
     """
+    if not isinstance(step, dict):
+        return ""
     start = step.get("start_time")
     end   = step.get("end_time")
     if not start:

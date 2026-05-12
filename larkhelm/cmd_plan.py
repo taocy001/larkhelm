@@ -137,6 +137,26 @@ def _map_step_type(line: str) -> tuple[str, str] | None:
     - English tokens: ``\\b<token>\\b`` regex with ``re.IGNORECASE``.
     - On multi-type hit, picks by ``_STEP_TYPE_PRIORITY`` and ``_debug_log`` the conflict.
     - ``desc`` strips the triggering keyword only when it is the line prefix.
+
+    English token behaviour in mixed CJK context
+    --------------------------------------------
+    Python 3's ``re`` defaults to Unicode ``\\w`` — meaning CJK characters
+    count as "word" chars. That makes ``\\b<token>\\b`` reject English
+    tokens embedded in Chinese: ``re一下view`` and ``走fix流程`` both
+    return ``None`` because there's no word boundary between ``走`` /
+    ``流`` and ``fix``.
+
+    This is **intentional**, not a bug: it avoids false-positive
+    matches like ``previewer`` triggering ``review``, and matches the
+    user's intuition that ``fix`` written inside a Chinese sentence
+    isn't really an English keyword invocation. The token branch is
+    designed for whitespace-separated English input (``Review API`` /
+    ``FIX login bug``); pure-Chinese input goes through the substring
+    branch above.
+
+    The downside is that a user typing ``开fix掉那个 bug`` gets a None
+    here (no Chinese keyword present either) and ends up in the LLM
+    fallback — slower but still correct.
     """
     stripped = line.strip()
     if not stripped:

@@ -616,6 +616,28 @@ class StepDurationFormatTests(unittest.TestCase):
         future = time.time() + 60
         self.assertEqual(pp._format_step_duration({"start_time": future}), "")
 
+    def test_non_dict_step_returns_empty_does_not_raise(self):
+        """Audit follow-up #6: corrupted on-disk record may yield a
+        non-dict 'step' (None / list / str). Helper must return ""
+        rather than ``AttributeError`` propagating up — the caller's
+        outer try/except would catch it but would then drop the WHOLE
+        notification card, not just the duration suffix."""
+        for bad in (None, [], "hello", 42, ("type", "dev")):
+            self.assertEqual(pp._format_step_duration(bad), "",
+                f"non-dict input {bad!r} must yield empty string")
+
+    def test_exact_60_seconds_renders_as_one_minute(self):
+        """Audit follow-up #11: critical boundary at the seconds /
+        minutes transition. 60s exactly → '1 分钟' (not '60 秒')."""
+        s = {"start_time": time.time() - 60}
+        self.assertEqual(pp._format_step_duration(s), "(已运行 1 分钟)")
+
+    def test_exact_90_minutes_renders_as_one_hour(self):
+        """Audit follow-up #11: critical boundary at minutes / hours
+        transition. 5400s (= 90 min) → '1 小时' (not '90 分钟')."""
+        s = {"start_time": time.time() - 5400}
+        self.assertEqual(pp._format_step_duration(s), "(已运行 1 小时)")
+
 
 class WorkspaceArtefactsListingTests(unittest.TestCase):
     """N5: interrupted card must list ``.crew_workspace/`` files + sizes,
@@ -672,6 +694,28 @@ class WorkspaceArtefactsListingTests(unittest.TestCase):
             "should use user-facing phrasing, not internal 'PM 阶段' jargon")
         # Negative guard against future regression to internal jargon
         self.assertNotIn("PM 阶段", out)
+
+    def test_files_outside_watched_list_are_ignored(self):
+        """Audit follow-up #12: only files in the ``watched`` allow-list
+        appear on the card. Other files in .crew_workspace/ (e.g. an
+        ad-hoc note left by a crew agent, or workspace_meta.json itself)
+        must NOT leak into the user-facing list — that list is curated
+        for the plan-artefact narrative, not a free-form directory dump."""
+        # Real artefact present
+        (self.ws / "prd.md").write_text("content here", encoding="utf-8")
+        # Non-watched files that should be filtered out:
+        (self.ws / "workspace_meta.json").write_text(
+            '{"task_hash": "x", "completed": false}')
+        (self.ws / "ad_hoc_notes.md").write_text("scratch")
+        (self.ws / "random_log.txt").write_text("foo")
+        with patch("larkhelm.chat_state._get_cwd",
+                   return_value=str(self.workdir)):
+            out = pp._format_workspace_artefacts("chat_test")
+        self.assertIn("prd.md", out)
+        # Non-watched files explicitly absent
+        self.assertNotIn("workspace_meta", out)
+        self.assertNotIn("ad_hoc_notes", out)
+        self.assertNotIn("random_log", out)
 
     def test_qa_report_md_is_watched_when_test_step_ran(self):
         """Audit #20: qa_report.md is produced by /plan's [test] step
@@ -772,6 +816,38 @@ class NotificationCardContainsArtefactsAndDurationTests(unittest.TestCase):
         self.assertIn("2.0 KB", body)  # prd.md
         self.assertIn("4.0 KB", body)  # design.md
         self.assertNotIn("workspace_meta", body)
+
+    def test_body_renders_zero_byte_files_with_empty_marker(self):
+        """Audit follow-up #13: a 0-byte file in .crew_workspace/ is
+        meaningfully different from a missing one (PM step crashed
+        mid-write before tasks.json got content). End-to-end check
+        that the card body shows the explicit '(空)' marker rather
+        than swallowing the entry."""
+        # Empty design.md (started but never written), non-empty prd.md
+        (self.ws / "design.md").write_text("")
+        # prd.md (4096 B) is set up in self.setUp already
+        steps = [PlanStep(idx=0, type="dev", desc="X", status="running",
+                          start_time=time.time() - 30)]
+        state = MultiPlanState(
+            plan_id="p_zero_byte", chat_id="oc_x", title="P",
+            steps=steps, phase="running", current_idx=0,
+        )
+        pp.save_plan_state(state)
+
+        sent_body: dict = {}
+        def _capture(chat_id, title, body, **kw):
+            sent_body["body"] = body
+        with patch("larkhelm.lark_client.send_card", side_effect=_capture), \
+             patch("larkhelm.chat_state._get_cwd",
+                   return_value=str(self.workdir)):
+            pp.resume_interrupted_plans()
+        body = sent_body["body"]
+        self.assertIn("design.md (空)", body,
+            "0-byte files must show '(空)' so user knows the step "
+            "started writing but didn't finish")
+        # Non-empty prd.md still rendered with size
+        self.assertIn("prd.md", body)
+        self.assertIn("KB", body)
 
     def test_body_falls_back_to_opaque_hint_without_cwd(self):
         """If chat has no registered cwd, the artefact lister can't
