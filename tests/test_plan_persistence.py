@@ -144,15 +144,25 @@ class SaveListDeleteTests(unittest.TestCase):
         """``MultiPlanState`` contains ``threading.Event`` / ``Lock`` that
         can't be JSON-serialised. The save path must not try to include
         them — verified by reading the on-disk file and asserting only
-        the schema-allowed keys are present."""
+        the schema-allowed keys are present.
+
+        ``notify_count`` / ``last_notified_at`` were added in the
+        round-2 follow-up (#11) as forward-compatible fields for
+        startup-notification throttling. ``save_plan_state`` initialises
+        them to 0 / 0.0 on every write since the plan thread itself never
+        notifies — only the startup notifier does.
+        """
         state = _make_state()
         pp.save_plan_state(state)
         raw = (pp._state_dir() / f"{state.plan_id}.json").read_text()
         data = json.loads(raw)
         allowed = {"schema_version", "plan_id", "chat_id", "title", "phase",
-                   "current_idx", "start_time", "saved_at", "steps"}
+                   "current_idx", "start_time", "saved_at", "steps",
+                   "notify_count", "last_notified_at"}
         self.assertEqual(set(data.keys()), allowed,
             f"on-disk schema must be exactly {allowed!r}, got {set(data.keys())!r}")
+        self.assertEqual(data["notify_count"], 0)
+        self.assertEqual(data["last_notified_at"], 0.0)
 
     def test_error_field_truncated_to_200_chars(self):
         """Long error strings (e.g. tool-output dumps) would bloat the
@@ -339,6 +349,211 @@ class ResumeNotifierTests(unittest.TestCase):
 # ════════════════════════════════════════════════════════════════════════
 #  clear_plan_state_button — the card callback
 # ════════════════════════════════════════════════════════════════════════
+
+class TerminalPhaseSkipTests(unittest.TestCase):
+    """Round-2 follow-up #15: a state file whose ``phase`` is ``done`` /
+    ``failed`` / ``cancelled`` means the plan thread reached its
+    completion-card emission and either (a) the finally-block delete
+    raced with SIGKILL or (b) ``finalize_workspace`` itself blocked
+    long enough to take a SIGKILL during it. Either way, the user
+    already saw the proper terminal card — surfacing this as
+    "interrupted" would be a false alarm. Skip + auto-delete.
+    """
+
+    def setUp(self):
+        _clean_state_dir()
+
+    def tearDown(self):
+        _clean_state_dir()
+
+    def _save_phase(self, plan_id: str, phase: str) -> None:
+        """Write a record directly with the given phase (since
+        ``save_plan_state`` always pulls phase off a live MultiPlanState)."""
+        state = _make_state(plan_id=plan_id, phase=phase)
+        pp.save_plan_state(state)
+
+    def test_done_phase_skipped_and_file_removed(self):
+        self._save_phase("p_done", "done")
+        with patch("larkhelm.lark_client.send_card") as card:
+            sent = pp.resume_interrupted_plans()
+        self.assertEqual(sent, 0)
+        card.assert_not_called()
+        # File must be auto-removed so subsequent scans don't re-evaluate
+        self.assertFalse((pp._state_dir() / "p_done.json").exists(),
+            "terminal-phase file must be GC'd on first scan")
+
+    def test_failed_phase_skipped_and_file_removed(self):
+        self._save_phase("p_failed", "failed")
+        with patch("larkhelm.lark_client.send_card") as card:
+            sent = pp.resume_interrupted_plans()
+        self.assertEqual(sent, 0)
+        card.assert_not_called()
+        self.assertFalse((pp._state_dir() / "p_failed.json").exists())
+
+    def test_cancelled_phase_skipped_and_file_removed(self):
+        self._save_phase("p_cancelled", "cancelled")
+        with patch("larkhelm.lark_client.send_card") as card:
+            sent = pp.resume_interrupted_plans()
+        self.assertEqual(sent, 0)
+        card.assert_not_called()
+        self.assertFalse((pp._state_dir() / "p_cancelled.json").exists())
+
+    def test_running_phase_still_notified(self):
+        """Sanity: the existing happy path still works — only terminal
+        phases are skipped, ``running`` (and ``waiting``) still notify."""
+        self._save_phase("p_running", "running")
+        with patch("larkhelm.lark_client.send_card") as card:
+            sent = pp.resume_interrupted_plans()
+        self.assertEqual(sent, 1)
+        card.assert_called_once()
+        # And the file is RETAINED so the user's "🗑️ 清除提示" button works
+        self.assertTrue((pp._state_dir() / "p_running.json").exists())
+
+    def test_terminal_skip_takes_priority_over_throttle(self):
+        """A terminal-phase record bypasses notification regardless of
+        notify_count / cooldown — we want it gone, not delayed."""
+        self._save_phase("p_done_throttled", "done")
+        # Force throttle state that would otherwise allow notify
+        path = pp._state_dir() / "p_done_throttled.json"
+        rec = json.loads(path.read_text())
+        rec["notify_count"] = 0
+        rec["last_notified_at"] = 0.0
+        path.write_text(json.dumps(rec))
+        with patch("larkhelm.lark_client.send_card") as card:
+            pp.resume_interrupted_plans()
+        card.assert_not_called()
+        self.assertFalse(path.exists())
+
+
+class FloodingThrottleTests(unittest.TestCase):
+    """Round-2 follow-up #11: bridge crash-loop must not spam the user.
+
+    Throttle rules (see ``_FLOOD_THROTTLE_SEC`` / ``_MAX_NOTIFY_COUNT``):
+      * After a successful notification, ``notify_count`` increments
+        and ``last_notified_at`` updates.
+      * Within ``_FLOOD_THROTTLE_SEC`` of the last send, subsequent
+        scans see the record but skip the send (file retained).
+      * After ``_MAX_NOTIFY_COUNT`` total notifications, the file is
+        auto-deleted — the user clearly isn't going to triage.
+    """
+
+    def setUp(self):
+        _clean_state_dir()
+
+    def tearDown(self):
+        _clean_state_dir()
+
+    def _save_with_throttle_state(self, plan_id: str, notify_count: int,
+                                  last_notified_at: float) -> None:
+        """Write a running-phase record with prescribed throttle fields."""
+        state = _make_state(plan_id=plan_id, phase="running")
+        pp.save_plan_state(state)
+        path = pp._state_dir() / f"{plan_id}.json"
+        rec = json.loads(path.read_text())
+        rec["notify_count"]     = notify_count
+        rec["last_notified_at"] = last_notified_at
+        path.write_text(json.dumps(rec))
+
+    def test_first_notify_succeeds_and_writes_count_1(self):
+        pp.save_plan_state(_make_state(plan_id="p_first"))
+        with patch("larkhelm.lark_client.send_card") as card:
+            sent = pp.resume_interrupted_plans()
+        self.assertEqual(sent, 1)
+        # Throttle state updated
+        rec = json.loads((pp._state_dir() / "p_first.json").read_text())
+        self.assertEqual(rec["notify_count"], 1)
+        self.assertGreater(rec["last_notified_at"], 0)
+        card.assert_called_once()
+
+    def test_recent_notification_is_throttled_within_window(self):
+        """Last sent 60s ago, window is 30 min → skip."""
+        self._save_with_throttle_state(
+            "p_recent", notify_count=1, last_notified_at=time.time() - 60)
+        with patch("larkhelm.lark_client.send_card") as card:
+            sent = pp.resume_interrupted_plans()
+        self.assertEqual(sent, 0)
+        card.assert_not_called()
+        # File retained so next restart can re-evaluate
+        self.assertTrue((pp._state_dir() / "p_recent.json").exists())
+
+    def test_old_notification_allows_resend_after_window(self):
+        """Last sent over 30 min ago — throttle window elapsed, allow."""
+        self._save_with_throttle_state(
+            "p_aged", notify_count=1,
+            last_notified_at=time.time() - (pp._FLOOD_THROTTLE_SEC + 60))
+        with patch("larkhelm.lark_client.send_card") as card:
+            sent = pp.resume_interrupted_plans()
+        self.assertEqual(sent, 1)
+        card.assert_called_once()
+        # Updated count
+        rec = json.loads((pp._state_dir() / "p_aged.json").read_text())
+        self.assertEqual(rec["notify_count"], 2)
+
+    def test_max_notify_count_triggers_auto_gc(self):
+        """After _MAX_NOTIFY_COUNT (3) notifications, the file is
+        auto-deleted regardless of cooldown — user clearly isn't acting."""
+        self._save_with_throttle_state(
+            "p_maxed", notify_count=pp._MAX_NOTIFY_COUNT,
+            last_notified_at=time.time() - (pp._FLOOD_THROTTLE_SEC + 60))
+        with patch("larkhelm.lark_client.send_card") as card:
+            sent = pp.resume_interrupted_plans()
+        self.assertEqual(sent, 0)
+        card.assert_not_called()
+        # GC'd
+        self.assertFalse((pp._state_dir() / "p_maxed.json").exists())
+
+    def test_throttle_persists_across_multiple_scans(self):
+        """Three rapid bridge restarts must produce **at most** one card
+        (the very first), the next two are throttled."""
+        pp.save_plan_state(_make_state(plan_id="p_loop"))
+        # First restart — should notify
+        with patch("larkhelm.lark_client.send_card") as card1:
+            pp.resume_interrupted_plans()
+        self.assertEqual(card1.call_count, 1)
+        # Immediately re-scan (simulating crash + auto-restart within
+        # seconds): must be throttled.
+        with patch("larkhelm.lark_client.send_card") as card2:
+            pp.resume_interrupted_plans()
+        self.assertEqual(card2.call_count, 0)
+        with patch("larkhelm.lark_client.send_card") as card3:
+            pp.resume_interrupted_plans()
+        self.assertEqual(card3.call_count, 0)
+        # File still around, awaiting cooldown OR user action
+        self.assertTrue((pp._state_dir() / "p_loop.json").exists())
+
+    def test_notify_count_lost_on_save_plan_state_resave(self):
+        """If a plan thread is still alive somehow during throttle window
+        and ``save_plan_state`` runs again, ``_serialise`` resets
+        notify_count to 0 — by design, since save_plan_state means the
+        plan is running again and any prior "interrupted" notification
+        was for a now-superseded process. Document this for future
+        readers."""
+        # Simulate first notification
+        pp.save_plan_state(_make_state(plan_id="p_resave"))
+        with patch("larkhelm.lark_client.send_card"):
+            pp.resume_interrupted_plans()
+        rec1 = json.loads((pp._state_dir() / "p_resave.json").read_text())
+        self.assertEqual(rec1["notify_count"], 1)
+        # Plan thread re-saves (e.g. step transition after a phantom
+        # resume): _serialise resets the throttle fields
+        pp.save_plan_state(_make_state(plan_id="p_resave"))
+        rec2 = json.loads((pp._state_dir() / "p_resave.json").read_text())
+        self.assertEqual(rec2["notify_count"], 0)
+        self.assertEqual(rec2["last_notified_at"], 0.0)
+
+    def test_persist_notify_state_is_no_op_when_file_vanishes(self):
+        """User races the button: file is deleted between send_card and
+        the throttle-write. ``_persist_notify_state`` must respect the
+        deletion (don't re-create the file)."""
+        # Pretend a record exists, capture the path, then delete it
+        pp.save_plan_state(_make_state(plan_id="p_race"))
+        path = pp._state_dir() / "p_race.json"
+        path.unlink()
+        # Must not raise + must not re-create the file
+        pp._persist_notify_state("p_race", notify_count=1,
+                                 last_notified_at=time.time())
+        self.assertFalse(path.exists())
+
 
 class ClearButtonTests(unittest.TestCase):
 

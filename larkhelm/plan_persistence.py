@@ -77,6 +77,33 @@ _STATE_SCHEMA_VERSION = 1
 # does the bridge keep on disk" find both in adjacent subdirs.
 _DIRNAME = "_active_plans"
 
+# Phases that mean "the plan thread already finished by the time the
+# state file was last written"; the file only survives because the
+# finally-block delete didn't get to run (e.g. SIGKILL between
+# ``save_plan_state(phase=done)`` and the finally clause's
+# ``delete_plan_state``). On next startup, surfacing these as
+# "interrupted" would be a false alarm — the user already saw the
+# proper completion / failure / cancellation card. Skip + delete.
+# Audit ref: round-2 review #15.
+_TERMINAL_PHASES = frozenset({"done", "failed", "cancelled"})
+
+# Audit ref: round-2 review #11 — crash-loop flooding. When the bridge
+# OOM-restarts repeatedly, the same plan would otherwise spawn one
+# "⚠️ Plan 被中断" card per restart, drowning the user's chat. The
+# notifier writes back ``notify_count`` + ``last_notified_at`` after
+# each successful send and uses these thresholds to throttle:
+#
+#   * ``_FLOOD_THROTTLE_SEC`` — minimum gap between successive
+#     notifications for the same plan. 30 min covers a typical
+#     OOM-restart loop window without delaying meaningful re-notify
+#     when a different problem causes a restart hours later.
+#   * ``_MAX_NOTIFY_COUNT`` — after this many notifications without
+#     user action (i.e. the "🗑️ 清除提示" button), the file is
+#     auto-deleted on next scan. The user has either acknowledged
+#     and moved on, or doesn't care to triage.
+_FLOOD_THROTTLE_SEC = 30 * 60
+_MAX_NOTIFY_COUNT = 3
+
 # Serialize on-disk writes per plan_id. Without this, two near-simultaneous
 # ``save_plan_state`` calls (e.g. step transition + phase change) could
 # write half a record each. ``threading.Lock`` is enough — the persistence
@@ -199,26 +226,36 @@ def _serialise(state: "MultiPlanState") -> dict:
     Schema (locked at version 1):
 
       {
-        "schema_version":  1,
-        "plan_id":         "abc123def456",
-        "chat_id":         "oc_xxxx",
-        "title":           "<plan title>",
-        "phase":           "running" | "waiting" | "done" | ...,
-        "current_idx":     <int>,
-        "start_time":      <epoch float>,
-        "saved_at":        <epoch float>,
-        "steps":           [{idx, type, desc, status, error, retry_count}],
+        "schema_version":     1,
+        "plan_id":            "abc123def456",
+        "chat_id":            "oc_xxxx",
+        "title":              "<plan title>",
+        "phase":              "running" | "waiting" | "done" | ...,
+        "current_idx":        <int>,
+        "start_time":         <epoch float>,
+        "saved_at":           <epoch float>,
+        "notify_count":       <int>,         # round-2 follow-up #11
+        "last_notified_at":   <epoch float>, # round-2 follow-up #11
+        "steps":              [{idx, type, desc, status, error, retry_count}],
       }
+
+    ``notify_count`` / ``last_notified_at`` start at 0 and are
+    updated by the startup notifier after each successful notify
+    (see ``_persist_notify_state``). They are forward-compatible
+    additions — older records without these keys default via
+    ``.get(..., 0)`` so the schema version is **not** bumped.
     """
     return {
-        "schema_version": _STATE_SCHEMA_VERSION,
-        "plan_id":        state.plan_id,
-        "chat_id":        state.chat_id,
-        "title":          state.title,
-        "phase":          state.phase,
-        "current_idx":    state.current_idx,
-        "start_time":     state.start_time,
-        "saved_at":       time.time(),
+        "schema_version":   _STATE_SCHEMA_VERSION,
+        "plan_id":          state.plan_id,
+        "chat_id":          state.chat_id,
+        "title":            state.title,
+        "phase":            state.phase,
+        "current_idx":      state.current_idx,
+        "start_time":       state.start_time,
+        "saved_at":         time.time(),
+        "notify_count":     0,
+        "last_notified_at": 0.0,
         "steps": [
             {
                 "idx":         s.idx,
@@ -274,10 +311,21 @@ def resume_interrupted_plans() -> int:
 def _notify_chat_of_interrupted_plan(rec: dict) -> bool:
     """Build + send the "Plan 被中断" card for a single interrupted plan.
 
-    Returns True iff a card was actually sent. ``False`` is used to
-    distinguish "skipped because the record was malformed (missing
-    chat_id / plan_id)" from "tried to send and Feishu raised", which
-    the caller wraps in its own try/except.
+    Returns True iff a card was actually sent. ``False`` indicates one
+    of:
+
+      * malformed record (missing chat_id / plan_id) → can't send
+      * **terminal-phase record** (#15) — the plan finished cleanly but
+        its file outlived the finally-block delete (likely a SIGKILL
+        during ``finalize_workspace``). The user already saw the proper
+        completion card; surfacing it as "interrupted" would be a false
+        alarm. Silently delete the stale file.
+      * **throttle-skipped** (#11) — either we've already notified the
+        max number of times (``_MAX_NOTIFY_COUNT``) or we're inside the
+        ``_FLOOD_THROTTLE_SEC`` cooldown after the most recent send.
+        Bridge crash-loops would otherwise spam the chat with one card
+        per restart. After ``_MAX_NOTIFY_COUNT`` notifications the file
+        is auto-deleted (user clearly isn't going to triage).
     """
     from larkhelm.lark_client import send_card
 
@@ -291,6 +339,46 @@ def _notify_chat_of_interrupted_plan(rec: dict) -> bool:
     cur_idx = int(rec.get("current_idx", 0))
     total = len(steps)
     phase = rec.get("phase", "running")
+
+    # #15 — terminal-phase record. Plan thread already ran the
+    # phase-write line; the only reason this file still exists is the
+    # finally-block delete didn't get a chance (SIGKILL mid-finalize).
+    # The user already saw the real "✅/❌ Plan 完成" card — surfacing
+    # this as "interrupted" would confuse, not inform. Drop silently.
+    if phase in _TERMINAL_PHASES:
+        _debug_log(
+            f"[PlanPersist] dropping terminal-phase record "
+            f"plan={plan_id[:8]} phase={phase} (no notify, file removed)"
+        )
+        delete_plan_state(plan_id)
+        return False
+
+    # #11 — throttle. Read previous notify state from the record (which
+    # ``_serialise`` initialised to 0 + we overwrite via
+    # ``_persist_notify_state`` below after every successful send).
+    notify_count     = int(rec.get("notify_count", 0))
+    last_notified_at = float(rec.get("last_notified_at", 0.0))
+    now              = time.time()
+
+    if notify_count >= _MAX_NOTIFY_COUNT:
+        # Auto-GC: user has had 3 chances to triage; if they haven't
+        # pressed the button by now, the file is just clutter. Remove
+        # it so subsequent restarts don't keep scanning + skipping it.
+        _debug_log(
+            f"[PlanPersist] auto-removing plan={plan_id[:8]} after "
+            f"{notify_count} notifications (no user action)"
+        )
+        delete_plan_state(plan_id)
+        return False
+
+    cooldown = now - last_notified_at
+    if last_notified_at > 0 and cooldown < _FLOOD_THROTTLE_SEC:
+        _debug_log(
+            f"[PlanPersist] throttling plan={plan_id[:8]} — "
+            f"last notified {int(cooldown)}s ago (< "
+            f"{_FLOOD_THROTTLE_SEC}s window); file retained for next restart"
+        )
+        return False
 
     # Locate the step that was running when the bridge died — use
     # ``current_idx`` first, fall back to the first non-done step. This
@@ -327,7 +415,51 @@ def _notify_chat_of_interrupted_plan(rec: dict) -> bool:
     buttons = [("🗑️ 清除提示", f"plan_persist_clear:{plan_id}")]
     send_card(chat_id, f"⚠️ Plan 被中断 (bridge 重启)", body,
               color="orange", buttons=buttons)
+    # #11 — record this notification so the next bridge restart can
+    # throttle / GC accordingly. Persist failure here doesn't fail
+    # the notify (the card was already sent); next scan just won't
+    # know about it and may double-send, which is the previous bug
+    # we're trying to fix — log loudly.
+    try:
+        _persist_notify_state(plan_id,
+                              notify_count=notify_count + 1,
+                              last_notified_at=now)
+    except Exception as e:
+        _debug_log(
+            f"[PlanPersist] _persist_notify_state failed for "
+            f"plan={plan_id[:8]}: {e} — next restart will not throttle"
+        )
     return True
+
+
+def _persist_notify_state(plan_id: str, *, notify_count: int,
+                          last_notified_at: float) -> None:
+    """Update only the throttle fields on an existing state record,
+    leaving the rest of the snapshot untouched.
+
+    Read-modify-write inside the per-plan write lock so a concurrent
+    ``save_plan_state`` from a re-running plan thread (rare, but
+    possible if the user's chat had crash → restart → user re-runs
+    the same plan_id manually) doesn't get clobbered. If the record
+    has vanished between read and write — e.g. the user pressed
+    "🗑️ 清除提示" mid-call — we drop the update silently rather than
+    re-create the file.
+    """
+    path = _state_path(plan_id)
+    lock = _get_write_lock(plan_id)
+    with lock:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return   # user cleared it while we were sending; respect that
+        if not isinstance(data, dict):
+            return
+        data["notify_count"]     = int(notify_count)
+        data["last_notified_at"] = float(last_notified_at)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False),
+                       encoding="utf-8")
+        os.replace(tmp, path)
 
 
 def clear_plan_state_button(plan_id: str) -> bool:
