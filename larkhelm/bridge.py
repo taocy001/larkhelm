@@ -183,6 +183,16 @@ def main(config_path: str = None, data_dir: str = None) -> None:
     from larkhelm.crew import resume_interrupted_crews
     resume_interrupted_crews()
 
+    # U17: surface any /plan whose bridge died mid-flight. Sends an
+    # informational card per interrupted plan — does NOT auto-resume
+    # execution (state.cancel_ev / step-level checkpointing wouldn't
+    # survive restart anyway; user awareness is the high-value bit).
+    try:
+        from larkhelm.plan_persistence import resume_interrupted_plans
+        resume_interrupted_plans()
+    except Exception as _e:
+        _debug_log(f"[Startup] resume_interrupted_plans failed: {_e}")
+
     # If restarted via /upgrade, notify the requester that the bot is back online
     import json as _json
     _notify_path = _cfg.DATA_DIR / "_restart_notify.json"

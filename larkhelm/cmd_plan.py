@@ -481,6 +481,13 @@ def _run_plan(state: MultiPlanState) -> None:
     from larkhelm.crew._state import _active_crew, _active_crew_lock
     from larkhelm.lark_client import send_card
     from larkhelm.token_stats import evict_crew_agent_tokens
+    from larkhelm.plan_persistence import save_plan_state, delete_plan_state
+
+    # U17: persist plan state at the start so a bridge crash mid-step is
+    # discoverable on next startup. The state file is updated on every
+    # step transition + deleted in the ``finally`` block when the plan
+    # exits cleanly. See ``plan_persistence`` module docstring.
+    save_plan_state(state)
 
     # Heartbeat: keep the plan card's elapsed time ticking
     _hb_stop = threading.Event()
@@ -551,6 +558,7 @@ def _run_plan(state: MultiPlanState) -> None:
 
             step.status = "done" if ok else "failed"
             _update_plan_card(state)
+            save_plan_state(state)   # U17: persist after each step transition
 
             is_last = (idx == len(state.steps) - 1)
 
@@ -641,6 +649,10 @@ def _run_plan(state: MultiPlanState) -> None:
 
         _release_slot()
         _update_plan_card(state)
+        save_plan_state(state)   # U17: persist final phase (done/failed/cancelled)
+                                 # before finally-block delete, so a crash in
+                                 # the finally itself still leaves a recoverable
+                                 # record of the terminal state.
 
         if state.phase == "done":
             n       = len(state.steps)
@@ -662,6 +674,14 @@ def _run_plan(state: MultiPlanState) -> None:
 
     finally:
         _hb_stop.set()
+        # U17: plan exited cleanly (success / fail / cancel / exception) →
+        # delete the persisted state. From here on, the on-disk record
+        # would only mislead the next bridge boot's "interrupted plans"
+        # scanner. delete is idempotent + fail-soft so it's safe in finally.
+        try:
+            delete_plan_state(state.plan_id)
+        except Exception as _pe:
+            _debug_log(f"[Plan] delete_plan_state failed: {_pe}")
         with _active_plans_lock:
             _active_plans.pop(state.plan_id, None)
         from larkhelm.crew._state import _signal_crew_done

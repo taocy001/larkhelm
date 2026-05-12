@@ -129,6 +129,30 @@ def handle_card_action(event: P2CardActionTrigger) -> P2CardActionTriggerRespons
             return resp
 
         # Plan step confirmation buttons
+        # U17: "🗑️ 清除提示" button on the bridge-restart interrupted-plan
+        # notification card. Just deletes the persisted state file — no
+        # execution restart involved (that's not what U17 promises; we
+        # only notify, the user decides whether to re-run by hand).
+        if cmd.startswith("plan_persist_clear:"):
+            plan_id = cmd.split(":", 1)[1]
+            try:
+                from larkhelm.plan_persistence import clear_plan_state_button
+                existed = clear_plan_state_button(plan_id)
+            except Exception as e:
+                _debug_log(f"[CardAction] plan_persist_clear failed: {e}")
+                existed = False
+            from lark_oapi.event.callback.model.p2_card_action_trigger import CallBackCard
+            cb_card = CallBackCard()
+            cb_card.type = "raw"
+            label = "🗑️ 已清除中断提示" if existed else "🗑️ 提示已不存在"
+            cb_card.data = _make_card_dict(label, "", color="grey")
+            resp.card = cb_card
+            toast = CallBackToast()
+            toast.type = "success"
+            toast.content = label
+            resp.toast = toast
+            return resp
+
         if cmd.startswith("plan_continue:") or cmd.startswith("plan_skip:") or cmd.startswith("plan_cancel:") or cmd.startswith("plan_retry:"):
             parts  = cmd.split(":", 1)
             action = parts[0].replace("plan_", "")   # "continue" | "skip" | "cancel" | "retry"
