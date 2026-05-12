@@ -6,14 +6,17 @@ import json
 import os
 import sys
 import threading
+from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import larkhelm.config as _cfg
 from larkhelm.concurrency import _jsonl_lock as _log_lock  # shared with token_stats.py
 
 __all__ = [
-    "_log_lock", "log_entry", "_read_logs", "_get_recent_turns",
+    "_log_lock", "log_entry", "_read_logs", "_read_logs_tail", "_get_recent_turns",
     "_debug_log", "safe_log", "lazy_debug_log",
     "info", "warn", "error",
     "Level", "current_log_level",
@@ -88,9 +91,16 @@ def _level_enabled(level: Level) -> bool:
     return _LEVEL_ORDER[level] >= _LEVEL_ORDER[_min_level]
 
 _MAX_JSONL_BYTES = 100 * 1024 * 1024  # 100 MB
+_MAX_LOG_MD_BYTES = 10 * 1024 * 1024   # 10 MiB per Markdown shard
+_TAIL_SCAN_DEFAULT_BYTES = 1 * 1024 * 1024  # 1 MiB tail window for _read_logs_tail
 _jsonl_write_count = 0
 _JSONL_ROTATION_CHECK_EVERY = 1000  # check rotation every N log entries
 _rotation_lock = threading.Lock()   # separate lock so rotation never deadlocks with _log_lock
+
+# Pending Markdown shard-rotation events; appended by ``_log_file`` while it
+# holds ``_log_lock`` and drained by ``log_entry`` *after* release so the
+# ``info()`` call (which re-acquires ``_log_lock``) cannot deadlock.
+_pending_md_rotation_msgs: list[str] = []
 
 # DEBUG_LOG rotation. Threshold is stricter than all.jsonl because every
 # _debug_log call also writes to stdout, so the file fills faster from
@@ -149,9 +159,49 @@ def rotate_debug_log_if_needed() -> None:
 
 
 def _log_file(chat_id: str) -> Path:
+    """Active Markdown shard for chat_id today.
+
+    First shard is ``{date}.md`` (legacy name preserved). Once it grows to
+    ``_MAX_LOG_MD_BYTES`` the next ``log_entry`` writes into ``{date}-1.md``,
+    then ``{date}-2.md``, etc. Returns the *currently active* shard so
+    ``log_entry`` can append + add a header for newly created shards.
+    """
     d = _cfg.LOG_DIR / chat_id
     d.mkdir(parents=True, exist_ok=True)
-    return d / f"{datetime.now().strftime('%Y-%m-%d')}.md"
+    date_str = datetime.now().strftime('%Y-%m-%d')
+
+    max_n = 0
+    prefix = f"{date_str}-"
+    for p in d.glob(f"{date_str}-*.md"):
+        stem = p.stem
+        if not stem.startswith(prefix):
+            continue
+        try:
+            n = int(stem[len(prefix):])
+        except ValueError:
+            continue
+        if n > max_n:
+            max_n = n
+
+    if max_n == 0:
+        current = d / f"{date_str}.md"
+    else:
+        current = d / f"{date_str}-{max_n}.md"
+
+    try:
+        if current.exists() and current.stat().st_size >= _MAX_LOG_MD_BYTES:
+            new_n = max_n + 1
+            # Defer the info() call: this function runs inside _log_lock and
+            # info() re-acquires it (non-reentrant) — emitting here would
+            # deadlock. log_entry drains the buffer after releasing the lock.
+            _pending_md_rotation_msgs.append(
+                f"[Log] logs/{chat_id}/{date_str}.md size > 10 MB, "
+                f"rolling to {date_str}-{new_n}.md"
+            )
+            return d / f"{date_str}-{new_n}.md"
+    except OSError:
+        pass
+    return current
 
 
 def log_entry(
@@ -179,8 +229,17 @@ def log_entry(
         try:
             p = _log_file(chat_id)
             if not p.exists() or p.stat().st_size == 0:
+                date_str = now.strftime('%Y-%m-%d')
+                stem = p.stem
+                part_label = ""
+                if stem != date_str and stem.startswith(date_str + "-"):
+                    try:
+                        n = int(stem[len(date_str) + 1:])
+                        part_label = f" (part {n + 1})"
+                    except ValueError:
+                        part_label = ""
                 with p.open("a", encoding="utf-8") as f:
-                    f.write(f"# {chat_id}  —  {now.strftime('%Y-%m-%d')}\n")
+                    f.write(f"# {chat_id}  —  {date_str}{part_label}\n")
             with p.open("a", encoding="utf-8") as f:
                 f.write(md_line)
         except OSError as e:
@@ -193,9 +252,17 @@ def log_entry(
             print(f"[Log] JSONL 写入失败: {e}", file=sys.stderr)
         _jsonl_write_count += 1
         should_rotate = (_jsonl_write_count % _JSONL_ROTATION_CHECK_EVERY == 0)
+        # Drain any deferred Markdown-shard rotation messages while we still
+        # hold the lock — the drain itself doesn't take any other lock.
+        rotation_msgs: list[str] = []
+        if _pending_md_rotation_msgs:
+            rotation_msgs = list(_pending_md_rotation_msgs)
+            _pending_md_rotation_msgs.clear()
     # Call outside the lock: rotate_jsonl_if_needed calls _debug_log which also needs _log_lock
     if should_rotate:
         rotate_jsonl_if_needed()
+    for msg in rotation_msgs:
+        info(msg)
 
 
 def _read_logs(chat_id: str) -> list[dict]:
@@ -226,11 +293,231 @@ def _read_logs(chat_id: str) -> list[dict]:
     return result
 
 
+def _read_logs_tail(chat_id: str, *, max_bytes: int = _TAIL_SCAN_DEFAULT_BYTES) -> list[dict]:
+    """Read records belonging to chat_id from the *tail* of all.jsonl.
+
+    Scans at most ``max_bytes`` from the end of ``all.jsonl``. Does NOT read
+    ``all.jsonl.1`` — those records are by definition >100 MB old and not
+    summary-relevant.
+
+    When the scan window is truncated (file size > ``max_bytes``), emits a
+    single ``_debug_log`` line so operators can correlate a missing record
+    with the bound. The first decoded line may be partial (seek can land
+    mid-record) — caught by the inner try/except, same pattern as
+    ``_get_recent_turns``.
+    """
+    jsonl_path = _cfg.LOG_DIR / "all.jsonl"
+    if not jsonl_path.exists():
+        return []
+    try:
+        with jsonl_path.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            if size > max_bytes:
+                f.seek(size - max_bytes)
+                _debug_log(
+                    f"[Memory] tail-scan truncated at {max_bytes} bytes for {chat_id[:8]}"
+                )
+            else:
+                f.seek(0)
+            raw = f.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        _debug_log(f"[Memory] _read_logs_tail failed: {e}")
+        return []
+
+    result: list[dict] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+            if r.get("chat_id") == chat_id:
+                result.append(r)
+        except Exception:
+            continue
+    return result
+
+
+# ── Recent-turn pruning (orchestrator context injection) ─────────────────
+#
+# Replaces ``tool_result`` block content > 500 bytes with a fixed placeholder
+# when ``_get_recent_turns`` builds the ``[Recent conversation]`` block fed
+# to the orchestrator. The JSONL on disk is unchanged — only the in-memory
+# context string seen by the LLM. See ``.crew_workspace/design.md`` for
+# the full rationale and acceptance criteria.
+
+_TOOL_RESULT_THRESHOLD: int = 500
+_PRUNE_MAX_DEPTH: int = 8
+_TOOL_RESULT_PLACEHOLDER_FMT: str = "[tool_result truncated — {n} bytes]"
+
+
+@dataclass
+class PruningStats:
+    """Process-local ring buffer for the last N ``_get_recent_turns`` calls.
+
+    Writes guarded by ``threading.Lock``; reads also hold the lock to
+    snapshot the deque safely. No persistence — process exit drops state.
+    """
+    capacity: int = 100
+    calls: "deque[tuple[int, int]]" = field(
+        default_factory=lambda: deque(maxlen=100)
+    )
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def record(self, bytes_before: int, bytes_after: int) -> None:
+        # 0-byte guard (design §7.4): avoid polluting saved_pct with no-op
+        # samples (e.g. empty chat, JSON parse drop).
+        if bytes_before <= 0:
+            return
+        with self.lock:
+            self.calls.append((bytes_before, bytes_after))
+
+    def summary(self) -> dict:
+        with self.lock:
+            samples = list(self.calls)
+        window = len(samples)
+        before_sum = sum(b for b, _ in samples)
+        after_sum = sum(a for _, a in samples)
+        if before_sum > 0:
+            saved_pct = int((before_sum - after_sum) * 100 / before_sum)
+        else:
+            saved_pct = 0
+        return {
+            "window": window,
+            "before_sum": before_sum,
+            "after_sum": after_sum,
+            "saved_pct": saved_pct,
+        }
+
+
+_pruning_stats: PruningStats = PruningStats()
+
+
+def _maybe_rehydrate_json(s: str) -> Any:
+    """Try ``json.loads(s)`` iff ``len(s) >= 50 and s[:1] in ('[', '{')``.
+
+    50-char + first-char heuristic shortcuts the try/except cost for the
+    common plain-dialog case. Returns parsed list/dict on success, else
+    ``None``. Never raises.
+    """
+    if not isinstance(s, str):
+        return None
+    if len(s) < 50 or s[:1] not in ("[", "{"):
+        return None
+    try:
+        return json.loads(s)
+    except Exception:
+        return None
+
+
+def _content_byte_len(value: Any) -> int:
+    """UTF-8 byte length of ``value``'s serialized form. Never raises."""
+    if isinstance(value, str):
+        try:
+            return len(value.encode("utf-8"))
+        except Exception:
+            return 0
+    if isinstance(value, (bytes, bytearray)):
+        return len(value)
+    try:
+        return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+    except Exception:
+        try:
+            return len(repr(value).encode("utf-8"))
+        except Exception:
+            return 0
+
+
+def _prune_content(content: Any, _depth: int = 0) -> Any:
+    """Recursively prune ``tool_result`` blocks whose content > 500 bytes.
+
+    Returns the *same reference* when no pruning occurred (G3 zero-regression
+    guarantee). Safe for arbitrary input — never raises. Depth ≤ 8.
+    """
+    if _depth > _PRUNE_MAX_DEPTH:
+        return content
+
+    if isinstance(content, str):
+        # JSON-string rehydration: the JSONL on-disk record stores content as
+        # a str, but stream-json producers occasionally embed structured
+        # content as a serialized list/dict. The 50-char + first-char
+        # heuristic gates the try/except so plain dialog pays zero cost.
+        if len(content) >= 50 and content[:1] in ("[", "{"):
+            parsed = _maybe_rehydrate_json(content)
+            if parsed is not None:
+                # Rehydration restarts depth at 0 (design §1.2.3).
+                pruned = _prune_content(parsed, _depth=0)
+                if pruned is parsed:
+                    return content  # no modification → preserve str identity
+                try:
+                    return json.dumps(pruned, ensure_ascii=False)
+                except Exception:
+                    return content
+        return content
+
+    if isinstance(content, list):
+        new_items = None
+        for i, item in enumerate(content):
+            new_item = _prune_content(item, _depth=_depth + 1)
+            if new_item is not item:
+                if new_items is None:
+                    new_items = list(content)
+                new_items[i] = new_item
+        return new_items if new_items is not None else content
+
+    if isinstance(content, dict):
+        # tool_result block: when its serialized content exceeds the
+        # threshold, swap for a deterministic placeholder string.
+        if content.get("type") == "tool_result":
+            inner = content.get("content")
+            if inner is not None:
+                size = _content_byte_len(inner)
+                if size > _TOOL_RESULT_THRESHOLD:
+                    new_dict = dict(content)
+                    new_dict["content"] = _TOOL_RESULT_PLACEHOLDER_FMT.format(n=size)
+                    return new_dict
+        # Recurse into non-truncated dicts (tool_use, text, etc.). Identity
+        # preserved when no nested replacement happens.
+        new_dict = None
+        for k, v in content.items():
+            new_v = _prune_content(v, _depth=_depth + 1)
+            if new_v is not v:
+                if new_dict is None:
+                    new_dict = dict(content)
+                new_dict[k] = new_v
+        return new_dict if new_dict is not None else content
+
+    return content
+
+
+def _stringify_for_display(value: Any) -> str:
+    """Render pruned content as a string for the [Recent conversation] body.
+
+    Strings pass through; lists/dicts are JSON-encoded; other types fall
+    back to ``str()``. Never raises.
+    """
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:
+        try:
+            return str(value)
+        except Exception:
+            return ""
+
+
+_PLACEHOLDER_MARKER = "[tool_result truncated —"
+
+
 def _get_recent_turns(chat_id: str, max_turns: int = 6, max_chars: int = 2000) -> str:
     """Return last N user/assistant turns as compact context for orchestrator injection.
 
     Reads the tail of all.jsonl (100 KB) to avoid scanning the full file.
-    Skips tool/error/shell entries — only user and assistant text.
+    Skips tool/error/shell entries — only user and assistant text. Per
+    record, large ``tool_result`` block bodies are replaced with a
+    placeholder before the 400-char dialog cap (design v1.0).
     """
     TAIL_BYTES = 100 * 1024
     jsonl_path = _cfg.LOG_DIR / "all.jsonl"
@@ -261,13 +548,42 @@ def _get_recent_turns(chat_id: str, max_turns: int = 6, max_chars: int = 2000) -
     if not turns:
         return ""
 
+    total_before = 0
+    total_after = 0
+
     lines = ["[Recent conversation]"]
     for r in turns:
         role = "User" if r["role"] == "user" else "Assistant"
-        content = r.get("content", "").strip()
+        raw_content = r.get("content", "")
+
+        bytes_before = _content_byte_len(raw_content)
+        pruned = _prune_content(raw_content)
+        display = _stringify_for_display(pruned)
+        bytes_after = len(display.encode("utf-8")) if display else 0
+
+        if bytes_after < bytes_before:
+            blocks = display.count(_PLACEHOLDER_MARKER)
+            try:
+                _debug_log(
+                    f"[Log] _get_recent_turns pruned chat={chat_id[:8]} "
+                    f"blocks={blocks} saved={bytes_before - bytes_after}"
+                )
+            except Exception:
+                pass
+
+        total_before += bytes_before
+        total_after += bytes_after
+
+        content = display.strip()
         if len(content) > 400:
             content = content[:400] + "..."
         lines.append(f"{role}: {content}")
+
+    if total_before > 0:
+        try:
+            _pruning_stats.record(total_before, total_after)
+        except Exception:
+            pass
 
     result = "\n".join(lines)
     if len(result) > max_chars:
