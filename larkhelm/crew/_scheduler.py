@@ -72,21 +72,70 @@ def _topo_waves_subset(all_agents: list[AgentSpec], subset_ids: set[str]) -> lis
 
 
 # Phase 4: failure propagation helper
-def _get_failed_dep(state: CrewState, spec: AgentSpec) -> str:
+def _get_failed_dep(state: CrewState, spec: AgentSpec,
+                    workspace_path: "Path | None" = None) -> str:
     """Return the first failed dependency id if any upstream (transitively) of spec is FAILED/CANCELLED
     and not needs_retry; otherwise return None.
-    CANCELLED upstream: treated as incomplete (not success), blocking downstream execution with empty context."""
+
+    Partial-delivery rule (when ``workspace_path`` provided)
+    --------------------------------------------------------
+    A FAILED upstream is treated as "delivered" — and therefore does
+    NOT block its downstream — when ALL of:
+
+      * its ``AgentSpec.output_file`` is set,
+      * the file at ``workspace_path / output_file`` exists, and
+      * the file size is > 0 bytes.
+
+    Real-world case this fixes (commit b3a116f post-mortem): the
+    implementer's claude CLI got OOM-killed mid-stream **after** the
+    Write tool had atomically committed the file. The agent thread
+    caught the subprocess error and marked status=FAILED, even though
+    ``changes.md`` was complete on disk. The pre-fix behavior cascaded
+    that FAILED into fixer→qa→reviewer = three more skipped agents
+    for one real failure. With this rule, fixer (which reads
+    changes.md anyway) gets to run on the delivered artefact.
+
+    CANCELLED upstream is **unchanged** — user pressed cancel, so we
+    respect that intent even if the file happened to be written first.
+    Only FAILED is reinterpreted.
+
+    ``workspace_path=None`` (the legacy signature) preserves the old
+    "any FAILED blocks downstream" behavior — keeps non-runner callers
+    (scheduler unit tests, possible external dispatchers) unchanged.
+    """
     id_map  = {s.id: s for s in state.plan.agents}
     checked: set[str] = set()
+
+    def _has_partial_delivery(dep_spec: AgentSpec) -> bool:
+        """True iff the dep's declared ``output_file`` exists and is non-empty."""
+        if workspace_path is None or not dep_spec.output_file:
+            return False
+        try:
+            p = workspace_path / dep_spec.output_file
+            return p.exists() and p.stat().st_size > 0
+        except Exception:
+            # Disk weirdness / perms — fall back to "no delivery" so we
+            # behave like the conservative legacy path on any IO trouble.
+            return False
 
     def _check(dep_id: str) -> str:
         if dep_id in checked:
             return None
         checked.add(dep_id)
         ag = state.agents.get(dep_id)
-        if ag and ag.status in (AgentStatus.FAILED, AgentStatus.CANCELLED) and not ag.needs_retry:
-            return dep_id
         dep_spec = id_map.get(dep_id)
+        if ag and ag.status in (AgentStatus.FAILED, AgentStatus.CANCELLED) and not ag.needs_retry:
+            # Only FAILED qualifies for the partial-delivery escape;
+            # CANCELLED stays blocking (user-intent semantics).
+            if ag.status == AgentStatus.FAILED and dep_spec is not None \
+                    and _has_partial_delivery(dep_spec):
+                # Don't return as a blocking failure, but still recurse
+                # upstream — the dep's own dependencies might be the
+                # real reason it didn't finish, and those could lack
+                # output_file fallbacks.
+                pass
+            else:
+                return dep_id
         if dep_spec:
             for upstream in dep_spec.depends_on:
                 r = _check(upstream)

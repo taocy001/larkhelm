@@ -616,6 +616,19 @@ def _execute(state: CrewState, total_timeout: int):
     wave_queue   = deque(_topo_waves(state.plan.agents))
     retry_counts: dict[str, int] = {spec.id: 0 for spec in state.plan.agents}
 
+    # Workspace path resolved once and passed into ``_get_failed_dep`` for
+    # the partial-delivery rule (see scheduler docstring). When an upstream
+    # FAILED agent has already written its declared ``output_file``, we
+    # let downstream agents run instead of cascading the FAILED into N
+    # more skipped agents. Real motivator: implementer's claude CLI gets
+    # OOM-killed after the Write tool atomically committed changes.md,
+    # but fixer/qa/reviewer were all marked "skipped because upstream
+    # implementer failed". Now fixer can actually run.
+    try:
+        _crew_ws_path = Path(_get_cwd(state.chat_id)) / ".crew_workspace"
+    except Exception:
+        _crew_ws_path = None
+
     while wave_queue:
         if cancel_ev.is_set():
             raise QueryCancelledError("Crew cancelled")
@@ -633,7 +646,7 @@ def _execute(state: CrewState, total_timeout: int):
         runnable: list[AgentSpec] = []
         with state.lock:
             for spec in wave:
-                failed_dep = _get_failed_dep(state, spec)
+                failed_dep = _get_failed_dep(state, spec, _crew_ws_path)
                 if failed_dep:
                     _debug_log(f"[Crew] {spec.id} skipped because upstream {failed_dep} failed")
                     ag = state.agents[spec.id]
@@ -777,6 +790,7 @@ def _execute(state: CrewState, total_timeout: int):
 
 def _execute_from(state: CrewState, total_timeout: int, skip_ids: set):
     """Continue execution after a set of already-completed agents, skipping agents in skip_ids."""
+    from larkhelm.chat_state import _get_cwd
     from larkhelm.crew._scheduler import _topo_waves, _get_failed_dep
     from larkhelm.crew._checkpoint import _save_checkpoint
 
@@ -784,6 +798,12 @@ def _execute_from(state: CrewState, total_timeout: int, skip_ids: set):
     deadline   = time.time() + total_timeout
     all_waves  = _topo_waves(state.plan.agents)
     wave_queue = deque()
+
+    # Same partial-delivery context as ``_execute``; see commentary there.
+    try:
+        _crew_ws_path = Path(_get_cwd(state.chat_id)) / ".crew_workspace"
+    except Exception:
+        _crew_ws_path = None
 
     for wave in all_waves:
         # If all agents in this wave are already completed, skip the wave
@@ -819,7 +839,7 @@ def _execute_from(state: CrewState, total_timeout: int, skip_ids: set):
             for spec in wave:
                 if spec.id in skip_ids:
                     continue
-                failed_dep = _get_failed_dep(state, spec)
+                failed_dep = _get_failed_dep(state, spec, _crew_ws_path)
                 if failed_dep:
                     ag = state.agents[spec.id]
                     ag.status = AgentStatus.FAILED
