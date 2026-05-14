@@ -116,7 +116,7 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
             output_file="changes.md",
         ),
         AgentSpec(
-            id="qa", role="测试工程师", model="gemini",
+            id="qa", role="测试工程师", model="claude",
             system=(
                 "你是一个测试工程师。工作分两个阶段：\n\n"
                 "## 阶段一：环境准备（测试前必须完成）\n"
