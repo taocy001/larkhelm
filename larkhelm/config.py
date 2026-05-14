@@ -638,26 +638,33 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     BACKEND_REGISTRY = BackendRegistry()
     _backends_list = _migrate_legacy_backends(config)
     BACKEND_REGISTRY.load(_backends_list)
-    BACKEND_REGISTRY.health_check()
     # Also update the module-level singleton in backend_registry so imports of it stay fresh
     import larkhelm.backend_registry as _br_mod
     _br_mod.BACKEND_REGISTRY = BACKEND_REGISTRY
 
-    from larkhelm.model_probe import run_probes_async
-    run_probes_async(BACKEND_REGISTRY.all_enabled(), BACKEND_REGISTRY)
+    # ``LARKHELM_TEST_MODE`` (non-empty) skips network probes / daemon threads /
+    # plugin discovery so pytest --co stays fast and tests don't hit live APIs.
+    # Runtime behaviour (bridge start) is unchanged when the env is unset.
+    _test_mode = bool(os.environ.get("LARKHELM_TEST_MODE", "").strip())
 
-    _start_recover_thread()
+    if not _test_mode:
+        BACKEND_REGISTRY.health_check()
 
-    # Phase 5: load third-party agent plugins. Built-in agents register
-    # themselves via ``larkhelm.agent_hub.builtin`` import side-effects.
-    try:
-        from larkhelm.agent_hub.plugin_loader import load_plugins
-        load_plugins(config)
-    except Exception as e:
-        # Plugin discovery runs during startup, when ``larkhelm.log`` may not
-        # be wired up yet — ``lazy_debug_log`` is the bootstrap-safe variant.
-        from larkhelm.log import lazy_debug_log
-        lazy_debug_log(f"[Config] agent plugin load failed: {e}")
+        from larkhelm.model_probe import run_probes_async
+        run_probes_async(BACKEND_REGISTRY.all_enabled(), BACKEND_REGISTRY)
+
+        _start_recover_thread()
+
+        # Phase 5: load third-party agent plugins. Built-in agents register
+        # themselves via ``larkhelm.agent_hub.builtin`` import side-effects.
+        try:
+            from larkhelm.agent_hub.plugin_loader import load_plugins
+            load_plugins(config)
+        except Exception as e:
+            # Plugin discovery runs during startup, when ``larkhelm.log`` may not
+            # be wired up yet — ``lazy_debug_log`` is the bootstrap-safe variant.
+            from larkhelm.log import lazy_debug_log
+            lazy_debug_log(f"[Config] agent plugin load failed: {e}")
 
     # Build the typed config object (for mypy etc.; module-level globals remain for backward compat)
     global _runtime

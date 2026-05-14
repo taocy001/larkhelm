@@ -55,7 +55,7 @@ def run_anthropic(
     message: str,
     history: list[dict],
     cancel_ev: "object | None" = None,
-    on_text: Callable = None,
+    on_text: Callable | None = None,
     extra_system: str = "",
 ) -> tuple[str, list[dict]]:
     """Stream via Anthropic SDK. Returns (response_text, updated_history)."""
@@ -138,7 +138,7 @@ def run_google(
     message: str,
     history: list[dict],
     cancel_ev: "object | None" = None,
-    on_text: Callable = None,
+    on_text: Callable | None = None,
     extra_system: str = "",
 ) -> tuple[str, list[dict]]:
     """Stream via google-genai SDK. Returns (response_text, updated_history)."""
@@ -208,7 +208,7 @@ def run_openai_compat(
     message: str,
     history: list[dict],
     cancel_ev: "object | None" = None,
-    on_text: Callable = None,
+    on_text: Callable | None = None,
     extra_system: str = "",
 ) -> tuple[str, list[dict]]:
     """Stream via OpenAI-compat SDK (DeepSeek etc.). Returns (response_text, updated_history)."""

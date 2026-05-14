@@ -20,7 +20,8 @@ from larkhelm.concurrency import (
     _reset_cancel,
 )
 from larkhelm.lark_client import (
-    send_card, reply_card, _send_card_raw, _patch_card_raw, _reply_card_raw,
+    send_card, send_card_reply, reply_card,
+    _send_card_raw, _patch_card_raw, _reply_card_raw,
     _pin_task_card, react_to_message, delete_reaction,
     EMOJI_PROCESSING, EMOJI_DONE, EMOJI_ERROR,
     _index_reply,
@@ -82,6 +83,43 @@ def _inject_doc_context(text: str, chat_id: str) -> str:
     if injections:
         return "\n\n".join(injections) + "\n\n---\n\n" + text
     return text
+
+
+def _maybe_doc_usage_hint(text: str, chat_id: str, user_msg_id: str) -> bool:
+    """Detect a bare unrecognised Feishu URL and reply with a usage card.
+
+    Returns ``True`` (caller should short-circuit) only when ``text`` consists
+    of *exactly one* Feishu URL that ``parse_doc_url`` cannot classify.
+    All other shapes (no URL, multiple URLs, URL + extra text, URL parses
+    successfully) return ``False`` so normal routing — including
+    ``_inject_doc_context`` — continues unchanged.
+    """
+    urls = _extract_feishu_urls(text)
+    if len(urls) != 1:
+        return False
+    # Allow only the bare-URL case to trigger the hint; if the user wrote
+    # something around the URL we assume they meant to chat about it.
+    if text.replace(urls[0], "").strip():
+        return False
+    from larkhelm.lark_client import parse_doc_url
+    if parse_doc_url(urls[0]) is not None:
+        return False
+    body = (
+        "支持的飞书链接类型：\n"
+        "- `docx` — 新版文档 `https://xxx.feishu.cn/docx/...`\n"
+        "- `wiki` — Wiki 页面 `https://xxx.feishu.cn/wiki/...`\n"
+        "- `sheets` — 电子表格 `https://xxx.feishu.cn/sheets/...`\n"
+        "- `folder` / `drive` — 云盘文件夹 `https://xxx.feishu.cn/drive/folder/...`\n\n"
+        "请检查链接类型是否正确，或在 URL 旁补一句你想做的事，"
+        "机器人会按普通对话处理。"
+    )
+    send_card_reply(
+        chat_id, user_msg_id,
+        "⚠️ 飞书 URL 无法识别",
+        body,
+        color="orange",
+    )
+    return True
 
 
 # ═══════════════════════════════════════════════════

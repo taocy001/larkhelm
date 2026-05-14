@@ -81,6 +81,8 @@ cd larkhelm
 ./install.sh --mode user       # 安装为用户态服务，无需 sudo（默认）
 ```
 
+> **开发者**：跑测试 / lint / type check 需要装额外依赖（pytest、pytest-timeout、mypy、ruff）。从源码 clone 后执行 `pip install -e ".[dev]"`，否则 `pytest` 会缺 `pytest-timeout`。
+
 #### 3. 配置文件
 
 配置文件位于：
@@ -117,7 +119,7 @@ cd larkhelm
 | `kimi_command` | Kimi Code CLI 路径或命令名 | `kimi` |
 | `default_model` | 默认模型：`claude` 或 `gemini` | `claude` |
 | `default_cwd` | Shell 命令的初始工作目录 | `~/code` |
-| `skip_permissions` | 自动放行 Claude 工具权限审批 | `false` |
+| `skip_permissions` | 自动放行 Claude 工具权限审批（生产环境建议保持 `false`，仅在受信开发机临时打开） | `false` |
 | `response_timeout` | 软超时（秒），超时后后台继续运行 | `300` |
 | `hard_timeout` | 硬超时（秒），强制终止子进程 | `21600` |
 | `max_card_len` | 卡片单次最大字符数 | `3000` |
@@ -439,6 +441,8 @@ After install, fill in the config file and run `./install.sh` again to start the
 ./install.sh --mode user       # User service, no sudo needed (default)
 ```
 
+> **Developers**: Running tests / lint / type checks needs the extra dependencies (pytest, pytest-timeout, mypy, ruff). After cloning, run `pip install -e ".[dev]"` — otherwise `pytest` will complain about the missing `pytest-timeout`.
+
 #### 3. Configuration
 
 Config file location:
@@ -475,7 +479,7 @@ Config file location:
 | `kimi_command` | Kimi Code CLI path or command name | `kimi` |
 | `default_model` | Default model: `claude` or `gemini` | `claude` |
 | `default_cwd` | Initial working directory for shell commands | `~/code` |
-| `skip_permissions` | Auto-approve Claude tool permission prompts | `false` |
+| `skip_permissions` | Auto-approve Claude tool permission prompts (keep `false` in production; only flip on a trusted dev box) | `false` |
 | `response_timeout` | Soft timeout (s), task continues in background | `300` |
 | `hard_timeout` | Hard timeout (s), force kill subprocess | `21600` |
 | `max_card_len` | Max characters per card update | `3000` |

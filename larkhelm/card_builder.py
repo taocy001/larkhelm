@@ -203,47 +203,90 @@ def _section_elements(section: str, normalize: bool) -> list[dict]:
     return _md_to_body_elements(content) if content else []
 
 
+def _split_long_line(line: str, max_len: int) -> list[str]:
+    """Best-effort soft-wrap of a single oversized line.
+
+    Guarantee: every character of ``line`` appears in the returned list (in
+    order, concatenated). The current implementation returns ``[line]``
+    unchanged — Feishu's card renderer handles long lines via its own wrap
+    logic, so cutting mid-line tends to make things worse (it breaks inline
+    markdown syntax). The hook is kept as an extension point.
+    """
+    return [line]
+
+
 def _split_md(text: str) -> list[str]:
-    if len(text) <= _cfg.MAX_CARD_LEN:
+    """Split markdown into chunks ≤ ``MAX_CARD_LEN`` where possible.
+
+    Guarantees:
+      - All characters of ``text`` are preserved across the returned list.
+      - Fenced code blocks (``` … ```) are kept intact — no chunk boundary
+        falls inside a block. An entire code block exceeding ``MAX_CARD_LEN``
+        is emitted as one oversized-but-valid chunk.
+      - A single line exceeding ``MAX_CARD_LEN`` is emitted as its own chunk
+        (no mid-line split).
+      - For multi-line input, chunks try to stay within the limit by flushing
+        on line boundaries.
+    """
+    max_len = _cfg.MAX_CARD_LEN
+    if len(text) <= max_len:
         return [text]
-    chunks, buf, buf_len, in_code = [], [], 0, False
-    for line in text.split("\n"):
-        if line.lstrip().startswith("```"):
-            in_code = not in_code
-        line_len = len(line) + 1
-        if line_len > _cfg.MAX_CARD_LEN:
-            if in_code:
-                # Close fence, flush, reopen — keeps each chunk a valid code block
-                buf.append(line)
-                buf_len += line_len
-                if buf_len > _cfg.MAX_CARD_LEN:
-                    buf.append("```")
-                    chunks.append("\n".join(buf))
-                    buf, buf_len = ["```"], len("```") + 1
-                continue
-            if buf:
-                chunks.append("\n".join(buf))
-                buf, buf_len = [], 0
-            remainder = line
-            while len(remainder) > _cfg.MAX_CARD_LEN:
-                chunks.append(remainder[:_cfg.MAX_CARD_LEN])
-                remainder = remainder[_cfg.MAX_CARD_LEN:]
-            if remainder:
-                buf.append(remainder)
-                buf_len = len(remainder) + 1
-            continue
-        if buf_len + line_len > _cfg.MAX_CARD_LEN and buf and not in_code:
+
+    lines = text.split("\n")
+    chunks: list[str] = []
+    buf: list[str] = []
+    buf_len = 0
+    in_code = False
+
+    def flush():
+        nonlocal buf, buf_len
+        if buf:
             chunks.append("\n".join(buf))
-            buf, buf_len = [], 0
+            buf = []
+            buf_len = 0
+
+    for line in lines:
+        is_fence = line.lstrip().startswith("```")
+        line_len = len(line) + 1  # +1 for the newline join
+
+        if is_fence and not in_code:
+            # Opening fence: flush pending normal lines so the code block
+            # starts at a clean chunk boundary, then enter code mode.
+            flush()
+            buf.append(line)
+            buf_len += line_len
+            in_code = True
+            continue
+
+        if is_fence and in_code:
+            # Closing fence: include in the current chunk, then optionally
+            # flush — closing here keeps the fence pair on the same chunk.
+            buf.append(line)
+            buf_len += line_len
+            in_code = False
+            if buf_len > max_len:
+                flush()
+            continue
+
+        if in_code:
+            # Inside a code block: never split, even if buf overruns.
+            buf.append(line)
+            buf_len += line_len
+            continue
+
+        # Normal line outside a code block.
+        if len(line) > max_len:
+            # Oversized single line: emit on its own (no mid-line break).
+            flush()
+            chunks.extend(_split_long_line(line, max_len))
+            continue
+
+        if buf_len + line_len > max_len and buf:
+            flush()
         buf.append(line)
         buf_len += line_len
-        # Within code blocks the `not in_code` guard above never fires; flush here instead
-        if in_code and buf_len > _cfg.MAX_CARD_LEN:
-            buf.append("```")
-            chunks.append("\n".join(buf))
-            buf, buf_len = ["```"], len("```") + 1
-    if buf:
-        chunks.append("\n".join(buf))
+
+    flush()
     return chunks or [text]
 
 

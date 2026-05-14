@@ -230,14 +230,83 @@ def _reply_card_raw(message_id: str, card_json: str, in_thread: bool = True) -> 
 #  High-level card operations
 # ═══════════════════════════════════════════════════
 
+def _send_chunks_compat(
+    chat_id: "str | None",
+    title: str,
+    chunks: "list[str]",
+    color: str,
+    note: str,
+    buttons: list,
+    kind: str,                         # one of: "send" / "reply" / "patch"
+    first_target_id: "str | None",     # msg_id for reply / message_id for patch
+    normalize: bool = True,
+) -> "str | None":
+    """Dispatch the first chunk via the requested ``kind``; send the remainder
+    as fresh cards in ``chat_id``.
+
+    Returns the message_id of the first chunk on success (``True``/``None`` for
+    patch). When ``kind == "patch"`` and ``chat_id`` is ``None``, additional
+    chunks beyond the first are dropped with a ``_debug_log`` warning so legacy
+    call sites that only patch one card keep working unchanged.
+    """
+    if not chunks:
+        chunks = [""]
+    first = chunks[0].strip()
+    total = len(chunks)
+    suffix = f" (1/{total})" if total > 1 else ""
+    first_card = _make_card(
+        title + suffix, first, color, note, buttons, normalize=normalize,
+    )
+    fallback = f"[{title}]\n{first[:500]}" if first else title
+
+    first_mid: "str | None"
+    if kind == "send":
+        first_mid = _send_card_raw(chat_id, first_card, _fallback_text=fallback)
+    elif kind == "reply":
+        first_mid = None
+        if first_target_id:
+            first_mid = _reply_card_raw(first_target_id, first_card, in_thread=False)
+        if not first_mid:
+            # Legacy fallback: reply API failed → send to chat as a new card.
+            first_mid = _send_card_raw(chat_id, first_card, _fallback_text=fallback)
+    elif kind == "patch":
+        ok = _patch_card_raw(first_target_id, first_card) if first_target_id else False
+        # Patch returns bool; expose it through ``first_mid`` so the helper
+        # keeps a single return contract. Caller decides what to surface.
+        first_mid = first_target_id if ok else None
+        if total > 1 and not chat_id:
+            _debug_log(
+                f"[UpdateCard] dropping {total - 1} continuation chunk(s): "
+                f"chat_id not provided"
+            )
+            return first_mid
+    else:
+        raise ValueError(f"_send_chunks_compat: unknown kind={kind!r}")
+
+    if total <= 1 or not chat_id:
+        return first_mid
+
+    for idx, chunk in enumerate(chunks[1:], start=2):
+        body = chunk.strip()
+        cont_title = f"{title} ({idx}/{total})"
+        cont_card = _make_card(
+            cont_title, body, color, "", None, normalize=normalize,
+        )
+        cont_fallback = f"[{cont_title}]\n{body[:500]}" if body else cont_title
+        _send_card_raw(chat_id, cont_card, _fallback_text=cont_fallback)
+
+    return first_mid
+
+
 def send_card(chat_id: str, title: str, body: str,
               color: str = "blue", note: str = "",
               buttons: list = None,
               normalize: bool = True) -> str:
-    chunk = _split_md(body.strip())[0]
-    fallback = f"[{title}]\n{chunk.strip()[:500]}" if chunk.strip() else title
-    return _send_card_raw(chat_id, _make_card(title, chunk.strip(), color, note, buttons, normalize=normalize),
-                          _fallback_text=fallback)
+    chunks = _split_md(body.strip())
+    return _send_chunks_compat(
+        chat_id, title, chunks, color, note, buttons,
+        kind="send", first_target_id=None, normalize=normalize,
+    )
 
 
 def send_card_reply(chat_id: str, msg_id: str, title: str, body: str,
@@ -245,23 +314,29 @@ def send_card_reply(chat_id: str, msg_id: str, title: str, body: str,
                     buttons: list = None,
                     normalize: bool = True) -> str:
     """Send a card; if msg_id is set, send as a quote-reply to that message, otherwise send directly to the chat."""
-    chunk = _split_md(body.strip())[0]
-    card_json = _make_card(title, chunk.strip(), color, note, buttons, normalize=normalize)
-    if msg_id:
-        mid = _reply_card_raw(msg_id, card_json, in_thread=False)
-        if mid:
-            return mid
-    fallback = f"[{title}]\n{chunk.strip()[:500]}" if chunk.strip() else title
-    return _send_card_raw(chat_id, card_json, _fallback_text=fallback)
+    chunks = _split_md(body.strip())
+    kind = "reply" if msg_id else "send"
+    return _send_chunks_compat(
+        chat_id, title, chunks, color, note, buttons,
+        kind=kind, first_target_id=msg_id, normalize=normalize,
+    )
 
 
 def update_card(message_id: str, title: str, body: str,
                 color: str = "blue", note: str = "",
-                buttons: list = None) -> bool:
+                buttons: list = None,
+                chat_id: "str | None" = None) -> bool:
+    """Patch an existing card. If ``body`` needs splitting and ``chat_id`` is
+    provided, continuation chunks are sent to that chat; if ``chat_id`` is
+    ``None``, continuations are dropped with a ``_debug_log`` warning."""
     if not message_id:
         return False
-    chunk = _split_md(body.strip())[0]
-    return _patch_card_raw(message_id, _make_card(title, chunk.strip(), color, note, buttons))
+    chunks = _split_md(body.strip())
+    result = _send_chunks_compat(
+        chat_id, title, chunks, color, note, buttons,
+        kind="patch", first_target_id=message_id,
+    )
+    return bool(result)
 
 
 def reply_card(chat_id: str, message_id: str,

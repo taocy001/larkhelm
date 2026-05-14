@@ -2,7 +2,7 @@
   "APP_ID":            "YOUR_APP_ID",
   "APP_SECRET":        "YOUR_APP_SECRET",
   "default_cwd":       "/home/YOUR_USER/code",
-  "skip_permissions":  true,
+  "skip_permissions":  false,
   "response_timeout":  300,
   "hard_timeout":      21600,
   "max_card_len":      3000,

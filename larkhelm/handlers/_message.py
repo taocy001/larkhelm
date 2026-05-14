@@ -35,6 +35,34 @@ from larkhelm.voice.transcribe import transcribe as transcribe_file
 from larkhelm.voice.merge import add_voice
 
 
+def _thread_error_card(chat_id: str, label: str, exc: Exception) -> None:
+    """Log full traceback and notify the user with a red error card.
+
+    Used by ``/plan`` / ``/crew`` / ``/dev`` daemon thread wrappers — those
+    threads previously only wrote to ``_debug_log`` on uncaught exceptions, so
+    the user saw the task silently disappear. The user-visible body truncates
+    ``str(exc)`` to 200 chars; the full ``traceback.format_exc()`` still lands
+    in the debug log under ``[<label>]`` for diagnosis.
+    """
+    try:
+        _debug_log(
+            f"[{label}] unhandled exception: {exc}\n{traceback.format_exc()}"
+        )
+    except Exception:
+        pass
+    try:
+        send_card(
+            chat_id, "❌ 任务失败",
+            f"{label} 任务失败：{str(exc)[:200]}",
+            color="red",
+        )
+    except Exception as _send_err:
+        try:
+            _debug_log(f"[{label}] error-card send failed: {_send_err}")
+        except Exception:
+            pass
+
+
 def _intent_router_active(chat_id: str) -> bool:
     """Return True iff the phase-5 intent router should run for this chat.
 
@@ -478,8 +506,7 @@ def handle_message(data: P2ImMessageReceiveV1):
                 try:
                     cmd_crew(*a)
                 except Exception as _e:
-                    import traceback as _tb
-                    _debug_log(f"[Crew] unhandled exception: {_e}\n{_tb.format_exc()}")
+                    _thread_error_card(a[0], "Crew", _e)
             threading.Thread(target=_crew_target, args=(chat_id, text[5:].strip(), message.message_id),
                              daemon=True, name=f"crew-{chat_id[:8]}").start()
             return
@@ -489,8 +516,7 @@ def handle_message(data: P2ImMessageReceiveV1):
                 try:
                     cmd_dev(*a)
                 except Exception as _e:
-                    import traceback as _tb
-                    _debug_log(f"[Dev] unhandled exception: {_e}\n{_tb.format_exc()}")
+                    _thread_error_card(a[0], "Dev", _e)
             threading.Thread(target=_dev_target, args=(chat_id, text[5:].strip(), message.message_id),
                              daemon=True, name=f"dev-{chat_id[:8]}").start()
             return
@@ -500,8 +526,7 @@ def handle_message(data: P2ImMessageReceiveV1):
                 try:
                     cmd_plan(*a)
                 except Exception as _e:
-                    import traceback as _tb
-                    _debug_log(f"[Plan] unhandled exception: {_e}\n{_tb.format_exc()}")
+                    _thread_error_card(a[0], "Plan", _e)
             threading.Thread(target=_plan_target, args=(chat_id, text[5:].strip(), message.message_id),
                              daemon=True, name=f"plan-{chat_id[:8]}").start()
             return
@@ -524,10 +549,24 @@ def handle_message(data: P2ImMessageReceiveV1):
             return
         if tl == "/pwd":
             _cmd_pwd(chat_id, _mid); return
+        if tl == "/cd":
+            send_card_reply(
+                chat_id, _mid, "⚠️ 用法",
+                "`/cd <path>` — 切换工作目录",
+                color="orange",
+            )
+            return
         if tl.startswith("/cd "):
             _cmd_cd(chat_id, text[4:].strip(), _mid); return
         if tl.startswith("/ls"):
             _cmd_ls(chat_id, text[3:].strip(), _mid); return
+        if tl == "/run":
+            send_card_reply(
+                chat_id, _mid, "⚠️ 用法",
+                "`/run <command>` — 执行 shell 命令（30s 超时）",
+                color="orange",
+            )
+            return
         if tl.startswith("/run "):
             threading.Thread(target=_cmd_run, args=(chat_id, text[5:].strip(), _mid),
                              daemon=True).start()
@@ -646,6 +685,13 @@ def handle_message(data: P2ImMessageReceiveV1):
 
         if prompt.startswith("/"):
             _cmd_cli_native(chat_id, target_model, prompt, _mid)
+            return
+
+        # Bare-URL guard: a lone unrecognised Feishu URL gets an orange usage
+        # card instead of being shipped to the AI (which would then waste a
+        # turn explaining it can't read random URLs).
+        from larkhelm.handlers._query import _maybe_doc_usage_hint
+        if _maybe_doc_usage_hint(text, chat_id, _mid):
             return
 
         # Context injection: attempt in priority order.

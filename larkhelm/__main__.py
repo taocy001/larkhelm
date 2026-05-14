@@ -2,6 +2,7 @@
 """larkhelm CLI entry point"""
 import argparse
 import sys
+from pathlib import Path
 
 
 def _cmd_memory(args, memory_parser):
@@ -96,7 +97,7 @@ def _cmd_doc(args):
     _lc.client = lark.Client.builder().app_id(_cfg.APP_ID).app_secret(_cfg.APP_SECRET).build()
     doc_client = FeishuDocClient()
 
-    content = sys.stdin.read() if args.file == "-" else open(args.file, encoding="utf-8").read()
+    content = sys.stdin.read() if args.file == "-" else Path(args.file).read_text(encoding="utf-8")
 
     if args.doc_command == "create":
         owner_open_id = getattr(args, "owner", None) or _cfg.DEFAULT_OWNER_OPEN_ID

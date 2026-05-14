@@ -143,6 +143,24 @@ class TestSplitMd(unittest.TestCase):
         chunks = _split_md("")
         self.assertEqual(chunks, [""])
 
+    def test_code_block_oversized_kept_intact(self):
+        # An oversized single code block must NOT be split — fences stay
+        # paired and the interior is preserved as one chunk so the
+        # rendered markdown is still a valid code block.
+        inner = "\n".join(f"code_line_{i}" for i in range(50))
+        text = f"```\n{inner}\n```"
+        chunks = _split_md(text)
+        # Fence pairs must remain balanced: total ``` count across all
+        # chunks should be even.
+        total_fences = sum(c.count("```") for c in chunks)
+        self.assertEqual(total_fences % 2, 0,
+                         f"unbalanced fences across chunks: {total_fences}")
+        # First and last code lines must appear in the SAME chunk
+        same_chunk = any("code_line_0" in c and "code_line_49" in c
+                         for c in chunks)
+        self.assertTrue(same_chunk,
+                        "oversized code block was split across chunks")
+
 
 class TestMakeCard(unittest.TestCase):
     # ── JSON 2.0 (no buttons) ────────────────────────────────────
