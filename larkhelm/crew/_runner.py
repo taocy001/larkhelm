@@ -476,6 +476,80 @@ def _write_hermes_summary(state: CrewState, agent_id: str, result: str, workspac
         _debug_log(f"[HermesOrchestrator] failed to write summary: {e}")
 
 
+# OOM detection signature set. The two main sources of OOM in this
+# project's history:
+#
+#   * cgroup OOM-killer killing the node CLI (claude/kimi/gemini)
+#     subprocess. ``runner_base._on_kill_signal`` wraps SIGKILL into
+#     ``RuntimeError(..."killed by OS (rc=-9)..."``).
+#   * V8 internal "FATAL ERROR: Reached heap limit" — the node CLI
+#     prints this to stderr and exits non-zero with a different
+#     message shape; the runner reports it as ``"abnormal exit
+#     rc=N\n<stderr-tail>"``.
+#
+# Match conservatively against both shapes; over-matching here just
+# means an unrelated transient error gets the 8s backoff instead of
+# 1s (harmless), while under-matching means an OOM gets 1s and likely
+# OOMs again (the bug we're fixing). The substrings are deliberately
+# lowercased / case-insensitive checked.
+_OOM_ERROR_MARKERS = (
+    "killed by os",                   # runner_base._on_kill_signal
+    "rc=-9",                          # explicit SIGKILL exit code
+    "cgroup oom",                     # explicit kernel cgroup OOM
+    "out of memory",                  # generic
+    "memorymax",                      # systemd cgroup property name
+    "reached heap limit",             # V8 native OOM
+    "javascript heap out of memory",  # node default OOM phrase
+    "fatal error: ineffective mark-compacts near heap limit",  # V8 specific
+)
+
+
+def _is_likely_oom_error(exc: Exception) -> bool:
+    """Return True iff the exception message matches a known OOM
+    signature. Used to bias the retry backoff toward giving the
+    cgroup time to reclaim memory before re-spawning.
+
+    Conservative + idempotent — never raises; bad exception object
+    just falls through to False.
+    """
+    try:
+        msg = str(exc).lower()
+    except Exception:
+        return False
+    return any(marker in msg for marker in _OOM_ERROR_MARKERS)
+
+
+def _log_oom_diagnostics(agent_id: str) -> None:
+    """Snapshot the larkhelm cgroup's memory state into the debug log.
+
+    Sole purpose: forensic. When OOM hits in production it's often
+    investigated hours later when the kernel ring buffer / journalctl
+    has already rotated. Persisting one line per OOM into
+    ``_cfg.DEBUG_LOG`` keeps the signal close to the failure for
+    later grep.
+
+    Fail-soft: any disk / IO error is swallowed so this diagnostic
+    helper can never compound an already-bad situation.
+    """
+    try:
+        cgroup_root = Path("/sys/fs/cgroup/system.slice/larkhelm.service")
+        if not cgroup_root.is_dir():
+            return
+        snapshot = {}
+        for f in ("memory.current", "memory.high", "memory.max",
+                  "memory.peak", "memory.swap.current"):
+            try:
+                snapshot[f] = (cgroup_root / f).read_text(encoding="utf-8").strip()
+            except OSError:
+                snapshot[f] = "?"
+        _debug_log(
+            f"[Crew] {agent_id} OOM diagnostic — cgroup state: " +
+            " ".join(f"{k}={v}" for k, v in snapshot.items())
+        )
+    except Exception as e:
+        _debug_log(f"[Crew] {agent_id} OOM diagnostic snapshot failed: {e}")
+
+
 def _run_agent_wrapper(state: CrewState, agent_id: str) -> None:
     """Agent execution shell: catches exceptions, updates state, detects exit markers.
     Process-level failures (subprocess crashes, etc.) are retried at most once.
@@ -530,8 +604,27 @@ def _run_agent_wrapper(state: CrewState, agent_id: str) -> None:
         except Exception as e:
             last_exc = e
             if proc_attempt == 0:
-                _debug_log(f"[Crew] {agent_id} process failed (attempt 1/2), retrying in 1s: {e}")
-                time.sleep(1)
+                # OOM-aware retry backoff. A claude/node CLI killed by the
+                # cgroup OOM-killer (rc=-9) leaves the cgroup near its
+                # memory.max — page cache and V8 native allocations don't
+                # release instantly. Retrying after 1s usually re-trips
+                # the same OOM. 8s gives the kernel a chance to reclaim
+                # + lets MAX_AI_PROCS=2 wave back below the high-water
+                # mark before a second large process starts. Other errors
+                # (HTTP transient, parse error, etc.) keep the original
+                # 1s — no point waiting 8s on a quick recoverable failure.
+                _oom = _is_likely_oom_error(e)
+                backoff_sec = 8 if _oom else 1
+                if _oom:
+                    _debug_log(
+                        f"[Crew] {agent_id} OOM-class failure on attempt 1/2 — "
+                        f"backing off {backoff_sec}s before retry "
+                        f"(let cgroup reclaim memory). Error: {str(e)[:200]}"
+                    )
+                    _log_oom_diagnostics(agent_id)
+                else:
+                    _debug_log(f"[Crew] {agent_id} process failed (attempt 1/2), retrying in {backoff_sec}s: {e}")
+                time.sleep(backoff_sec)
                 with state.lock:   # Reset to PENDING for retry
                     state.agents[agent_id].status     = AgentStatus.PENDING
                     state.agents[agent_id].start_time = None
