@@ -130,6 +130,36 @@ class SplitSessionSlotsTests(unittest.TestCase):
         self.assertFalse(slots.parsed)
         self.assertEqual(slots.work_context, "")
 
+    def test_chinese_headers_three_section_parse(self):
+        # The summariser tells the LLM to emit H2 sections "in the SAME
+        # LANGUAGE as the conversation". Chinese sessions therefore
+        # produce 工作上下文 / 关键决策 / 后续步骤 (or 下一步). All three
+        # must classify into the right slot — previously `## 后续步骤`
+        # fell through to None because the `history` branch's Chinese
+        # vocabulary only covered "进展".
+        body = (
+            "## 工作上下文\n"
+            "在 larkhelm 修 bug Y。\n\n"
+            "## 关键决策\n"
+            "选择 X 而不是 Z。\n\n"
+            "## 后续步骤\n"
+            "继续重构。\n"
+        )
+        slots = mc.split_session_slots(body)
+        self.assertTrue(slots.parsed)
+        self.assertIn("修 bug Y", slots.work_context)
+        self.assertIn("选择 X", slots.decisions)
+        self.assertIn("继续重构", slots.history)
+
+    def test_chinese_alternative_next_step_synonym(self):
+        # `## 下一步` and `## 步骤` should also map to history.
+        for header in ("## 下一步", "## 步骤", "## 进展"):
+            with self.subTest(header=header):
+                body = f"{header}\n要写测试\n"
+                slots = mc.split_session_slots(body)
+                self.assertTrue(slots.parsed, f"failed to parse {header!r}")
+                self.assertIn("要写测试", slots.history)
+
 
 # ════════════════════════════════════════════════════════════════════════
 #  dedup_recent_turns

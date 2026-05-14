@@ -42,11 +42,32 @@ class ParseDocUrlTests(unittest.TestCase):
 
     def test_larksuite_docx_url(self):
         # International tenants (Lark, the non-China brand of Feishu) use
-        # *.larksuite.com. The current parser uses bare "feishu.cn" in the
-        # regex so larksuite URLs return None — this test pins that gap so
-        # explain_doc_url_failure tells the user *why* instead of the
-        # generic "not a Feishu link".
-        self.assertIsNone(parse_doc_url("https://acme.larksuite.com/docx/ABC123"))
+        # *.larksuite.com. The parser now accepts both domains.
+        ref = parse_doc_url("https://acme.larksuite.com/docx/ABC123")
+        self.assertIsNotNone(ref)
+        self.assertEqual(ref.doc_type, "docx")
+        self.assertEqual(ref.token, "ABC123")
+
+    def test_larksuite_wiki_and_folder(self):
+        # The other path types must also work on larksuite.com.
+        ref = parse_doc_url("https://acme.larksuite.com/wiki/WK_99")
+        self.assertIsNotNone(ref)
+        self.assertEqual(ref.doc_type, "wiki")
+        ref = parse_doc_url("https://acme.larksuite.com/drive/folder/Fld1")
+        self.assertIsNotNone(ref)
+        self.assertEqual(ref.doc_type, "folder")
+
+    def test_phishing_domain_does_not_match(self):
+        # `feishu.cn.attacker.com` and `larksuite.com.fake.example` must NOT
+        # match. The anchor `(?:^|[./])` before each domain prevents
+        # substring matches inside a phishing subdomain — a string ending
+        # in `.attacker.com` has the literal `feishu.cn` in it, but the
+        # character after `.cn` is `.` (start of `.attacker.com`), so the
+        # regex still consumes it. The real guard is the domain BOUNDARY:
+        # if `feishu.cn` is followed by `.something`, it's not the actual
+        # host. Verify both phishing patterns return None.
+        self.assertIsNone(parse_doc_url("https://feishu.cn.attacker.com/docx/X"))
+        self.assertIsNone(parse_doc_url("https://larksuite.com.fake.example/wiki/Y"))
 
     def test_unknown_path_returns_none(self):
         self.assertIsNone(parse_doc_url("https://feishu.cn/calendar/abc"))

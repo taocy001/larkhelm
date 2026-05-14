@@ -174,15 +174,22 @@ def split_session_slots(raw: str) -> SessionSlots:
 
     def _classify(header: str) -> str | None:
         h = header.strip().lower().rstrip(":：")
-        # Parenthesise the OR/AND group: previously
-        # `"work context" in h or "工作" in h and "context" in h`
-        # parsed as `A or (B and C)`, so a Chinese header like "## 工作上下文"
-        # (no English "context") fell through to None and lost the section.
+        # The summariser prompt (memory.py:139-146) tells the LLM to emit
+        # `## Work Context` / `## Key Decisions & Facts` / `## Next Steps`
+        # "in the SAME LANGUAGE as the conversation", so Chinese sessions
+        # naturally produce `## 工作上下文` / `## 关键决策` / `## 后续步骤`
+        # (or `## 下一步`). Each branch lists both English and Chinese
+        # idiomatic variants. The "context" / "上下文" check is wrapped in
+        # an explicit AND group because Python parses `A or B and C` as
+        # `A or (B and C)` — the original v1 fix missed this.
         if "work context" in h or ("工作" in h and ("context" in h or "上下文" in h)):
             return "work_context"
-        if "decision" in h or "fact" in h or "决策" in h:
+        if "decision" in h or "fact" in h or "决策" in h or "事实" in h:
             return "decisions"
-        if "history" in h or "next step" in h or "进展" in h or "next" in h:
+        # "Next Steps" in Chinese: 后续 / 下一步 / 步骤 / 进展。 Latin variants
+        # cover "next", "next step", and "history" (legacy summariser label).
+        if ("history" in h or "next step" in h or "next" in h
+                or "后续" in h or "下一步" in h or "步骤" in h or "进展" in h):
             return "history"
         return None
 

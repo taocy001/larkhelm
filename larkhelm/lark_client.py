@@ -720,12 +720,17 @@ def _index_reply(msg_id: str, chat_id: str, prompt: str, model: str):
 
 DocType = Literal["docx", "docs", "wiki", "sheets", "folder", "unknown"]
 
+# Feishu (China) and Lark (international) tenants share the same URL paths
+# but live on different domains: feishu.cn vs larksuite.com. We anchor on
+# `(?:^|[./])` so neither side matches feishu.cn.attacker.com / larksuite.com.fake.
+_HOST_RE = r'(?:^|[./])(?:feishu\.cn|larksuite\.com)'
+
 _DOC_URL_PATTERNS = [
-    (re.compile(r'feishu\.cn/docx/([A-Za-z0-9_-]+)'),          "docx"),
-    (re.compile(r'feishu\.cn/docs/([A-Za-z0-9_-]+)'),          "docs"),
-    (re.compile(r'feishu\.cn/wiki/([A-Za-z0-9_-]+)'),          "wiki"),
-    (re.compile(r'feishu\.cn/sheets/([A-Za-z0-9_-]+)'),        "sheets"),
-    (re.compile(r'feishu\.cn/drive/folder/([A-Za-z0-9_-]+)'),  "folder"),
+    (re.compile(_HOST_RE + r'/docx/([A-Za-z0-9_-]+)'),          "docx"),
+    (re.compile(_HOST_RE + r'/docs/([A-Za-z0-9_-]+)'),          "docs"),
+    (re.compile(_HOST_RE + r'/wiki/([A-Za-z0-9_-]+)'),          "wiki"),
+    (re.compile(_HOST_RE + r'/sheets/([A-Za-z0-9_-]+)'),        "sheets"),
+    (re.compile(_HOST_RE + r'/drive/folder/([A-Za-z0-9_-]+)'),  "folder"),
 ]
 
 
