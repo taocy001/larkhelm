@@ -20,23 +20,45 @@ set -euo pipefail
 UNIT="larkhelm.service"
 VENV_PYTHON="$HOME/.local/pipx/venvs/larkhelm/bin/python"
 SRC="$(cd "$(dirname "$0")" && pwd)"
-INSTALL_ARGS=("--no-deps")
 
-# Flags
-for arg in "$@"; do
-    case "$arg" in
-        --with-deps)    INSTALL_ARGS=() ;;        # full resolve, picks up new deps
-        --skip-install) INSTALL_ARGS=("--skip") ;;  # restart only
-        -h|--help)
-            cat <<'EOF'
-Usage: ./deploy.sh [--with-deps|--skip-install]
+# Mode is exclusive: default | with-deps | skip-install. Track the selection
+# explicitly so we can reject conflicting flags instead of silently last-wins.
+MODE="default"
+
+usage() {
+    cat <<'EOF'
+Usage: ./deploy.sh [--with-deps|--skip-install] [-h|--help]
   (default)        Reinstall source into pipx venv with --no-deps, then restart.
   --with-deps      Reinstall and re-resolve dependencies (slower; use when
                    pyproject.toml deps change).
   --skip-install   Skip pip install, only restart the service (useful when you
                    just edited source under an editable install).
+The two mode flags are mutually exclusive.
 EOF
-            exit 0
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        --with-deps)
+            if [ "$MODE" != "default" ] && [ "$MODE" != "with-deps" ]; then
+                echo "[deploy] ERROR: --with-deps conflicts with --$MODE." >&2; usage >&2; exit 2
+            fi
+            MODE="with-deps"
+            ;;
+        --skip-install)
+            if [ "$MODE" != "default" ] && [ "$MODE" != "skip-install" ]; then
+                echo "[deploy] ERROR: --skip-install conflicts with --$MODE." >&2; usage >&2; exit 2
+            fi
+            MODE="skip-install"
+            ;;
+        -h|--help)
+            usage; exit 0 ;;
+        --)
+            ;;
+        *)
+            echo "[deploy] ERROR: unknown argument '$arg'." >&2
+            usage >&2
+            exit 2
             ;;
     esac
 done
@@ -48,15 +70,20 @@ if ! systemctl cat "$UNIT" >/dev/null 2>&1; then
     exit 1
 fi
 
-# 2) Install (unless --skip-install)
-if [ "${INSTALL_ARGS[0]:-}" != "--skip" ]; then
+# 2) Install (skipped when --skip-install was passed)
+if [ "$MODE" != "skip-install" ]; then
     if [ ! -x "$VENV_PYTHON" ]; then
         echo "[deploy] ERROR: pipx venv python not found at $VENV_PYTHON" >&2
         echo "[deploy] Run 'pipx install -e $SRC' first." >&2
         exit 1
     fi
-    echo "[deploy] Installing from $SRC (${INSTALL_ARGS[*]:-full deps})..."
-    "$VENV_PYTHON" -m pip install -q "${INSTALL_ARGS[@]}" "$SRC"
+    if [ "$MODE" = "with-deps" ]; then
+        echo "[deploy] Installing from $SRC (re-resolving deps)..."
+        "$VENV_PYTHON" -m pip install -q "$SRC"
+    else
+        echo "[deploy] Installing from $SRC (--no-deps; pass --with-deps to re-resolve)..."
+        "$VENV_PYTHON" -m pip install --no-deps -q "$SRC"
+    fi
 fi
 
 # 3) Restart via systemctl. sudo will prompt if no cached creds; that's expected.

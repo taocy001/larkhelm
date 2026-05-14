@@ -952,6 +952,15 @@ def _try_extract_project(session_content: str, cwd: str,
         # paying for input tokens we don't act on; using a cheap model
         # multiplies that "wasted input" by ~30× less per token.
         result = _run_one_shot(prompt, ns=ns, prefer_cheap=True)
+        # Post-LLM cancel re-check: a newer cascade may have arrived during
+        # the LLM call. Without this guard the old worker still writes its
+        # (now-stale) session_hash into project frontmatter AFTER the new
+        # worker started, briefly leaving the wrong hash on disk. The
+        # atomic-rename in _save_md prevents corruption, but the stale hash
+        # would suppress legitimate re-extracts until the next session turn.
+        if cancel_ev is not None and cancel_ev.is_set():
+            _debug_log(f"[Memory] project extract cancelled post-LLM for {cwd!r} (discarding result)")
+            return
         result = (result or "").strip()
         if not result or result.upper() == "UNCHANGED":
             return
@@ -993,8 +1002,11 @@ def _try_extract_global(session_content: str, chat_id: str,
         if cancel_ev is not None and cancel_ev.is_set():
             _debug_log(f"[Memory] global extract cancelled pre-LLM for {chat_id[:8]}")
             return
-        # Same reasoning as project extract.
+        # Same reasoning as project extract (including post-LLM cancel re-check).
         result = _run_one_shot(prompt, ns=ns, prefer_cheap=True)
+        if cancel_ev is not None and cancel_ev.is_set():
+            _debug_log(f"[Memory] global extract cancelled post-LLM for {chat_id[:8]} (discarding result)")
+            return
         result = (result or "").strip()
         if not result or result.upper() == "UNCHANGED":
             return

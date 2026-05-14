@@ -426,7 +426,9 @@ def _default_registrations() -> None:
     register(CommandSpec(name="/voice", handler=_h_voice, match_kind="prefix"))
 
 
-# Register defaults at import time. Subsequent imports are no-ops because
-# CommandRegistry.register raises on duplicates — but the module-level
-# singleton is shared, so this only runs once per process.
+# Register defaults at import time. Python caches the module after the first
+# import, so this runs exactly once per process under normal usage. Note:
+# ``importlib.reload(larkhelm.command_registry)`` rebuilds COMMAND_REGISTRY
+# from scratch (re-executing module body), so reload is effectively a clean
+# slate — not a no-op. We don't rely on reload in production.
 _default_registrations()

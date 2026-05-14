@@ -782,6 +782,21 @@ def parse_doc_url(url: str) -> "DocRef":
     return None
 
 
+def _md_inline_safe(s: str, max_len: int = 80) -> str:
+    """Truncate and sanitise ``s`` for embedding inside a Feishu card markdown
+    inline code span (``\\`...\\```).
+
+    Backticks in the input would close the surrounding span and break the
+    rest of the card's markdown rendering (cards turn into raw text). We
+    strip them entirely rather than escape — Feishu's lark_md inline code
+    has no escape syntax for backticks (unlike GFM nested-fence). Loss of
+    backticks in the echoed URL is acceptable because legitimate Feishu
+    URLs never contain backticks.
+    """
+    s = (s or "")[:max_len].replace("`", "")
+    return s
+
+
 def explain_doc_url_failure(url: str) -> str:
     """Return a human-readable hint explaining why ``url`` failed to parse.
 
@@ -793,16 +808,17 @@ def explain_doc_url_failure(url: str) -> str:
     if not url or not url.strip():
         return "URL 为空。请粘贴完整的飞书文档链接（含 `https://`）。"
     u = url.strip()
+    echo = _md_inline_safe(u, 80) + ("…" if len(u) > 80 else "")
     if "feishu.cn" not in u and "larksuite.com" not in u:
         return (
             f"识别不到飞书域名（feishu.cn / larksuite.com）。\n"
-            f"收到的输入：`{u[:80]}{'…' if len(u) > 80 else ''}`\n"
+            f"收到的输入：`{echo}`\n"
             f"请确认你复制的是飞书文档的浏览器地址栏链接。"
         )
     # Feishu host but no matching pattern → tell user which path types we support.
     return (
         f"飞书链接但路径不是支持的类型。\n"
-        f"收到：`{u[:80]}{'…' if len(u) > 80 else ''}`\n\n"
+        f"收到：`{echo}`\n\n"
         f"**支持的路径**：`/docx/...` · `/docs/...` · `/wiki/...` · "
         f"`/sheets/...` · `/drive/folder/...`\n"
         f"**不支持**：日历、邮箱、表单、应用主页、企业空间首页等。"

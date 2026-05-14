@@ -174,11 +174,15 @@ def split_session_slots(raw: str) -> SessionSlots:
 
     def _classify(header: str) -> str | None:
         h = header.strip().lower().rstrip(":：")
-        if "work context" in h or "工作" in h and "context" in h:
+        # Parenthesise the OR/AND group: previously
+        # `"work context" in h or "工作" in h and "context" in h`
+        # parsed as `A or (B and C)`, so a Chinese header like "## 工作上下文"
+        # (no English "context") fell through to None and lost the section.
+        if "work context" in h or ("工作" in h and ("context" in h or "上下文" in h)):
             return "work_context"
         if "decision" in h or "fact" in h or "决策" in h:
             return "decisions"
-        if "history" in h or "next step" in h or "history" in h or "进展" in h or "next" in h:
+        if "history" in h or "next step" in h or "进展" in h or "next" in h:
             return "history"
         return None
 
