@@ -31,6 +31,80 @@ HISTORY_MAX = 1200
 DECISIONS_MAX = 400
 
 
+# ── Smart truncation (S42) ─────────────────────────────────────────────────
+#
+# When a memory layer must be trimmed to fit the combined budget, prefer
+# cutting at a semantic boundary (paragraph > sentence > line > word) instead
+# of a raw character cut that can mid-chop a Chinese character, a markdown
+# fence, or a numbered list item.
+#
+# Strategy: scan backwards from ``budget`` looking for the latest acceptable
+# boundary that's still within a "slack window" (so we don't trim away half
+# the budget chasing a paragraph break). Slack defaults to 15% of budget.
+
+_PARAGRAPH_SEP = "\n\n"
+_LINE_SEP = "\n"
+_SENTENCE_ENDERS = ("。", "！", "？", "；", ". ", "! ", "? ", "; ")
+
+
+def smart_truncate(text: str, budget: int, *, slack_pct: float = 0.15) -> str:
+    """Truncate ``text`` to at most ``budget`` chars, preferring a semantic
+    boundary within the last ``slack_pct`` of the budget.
+
+    Returns the input unchanged when ``len(text) <= budget``. Always appends
+    ``"…"`` when a trim actually occurs. Falls back to a raw character cut
+    only if no boundary exists within the slack window.
+
+    ``budget`` must be > 0; a budget of 0 or negative returns the empty
+    string (matches the legacy behaviour of ``text[:0] + "…"`` collapsed).
+    """
+    if budget <= 0:
+        return ""
+    if len(text) <= budget:
+        return text
+    # The truncation slack: only look back this far for a boundary. Without
+    # a lower bound a paragraph far below ``budget`` could shrink the output
+    # way below target.
+    slack = max(1, int(budget * slack_pct))
+    floor = max(0, budget - slack)
+
+    # 1. Paragraph break — strongest semantic boundary.
+    idx = text.rfind(_PARAGRAPH_SEP, floor, budget)
+    if idx >= floor:
+        return text[:idx].rstrip() + "\n…"
+
+    # 2. Sentence-ending punctuation (Chinese full-width + ASCII with
+    #    trailing space; bare ASCII "." is too ambiguous — version numbers,
+    #    abbreviations — so we require the trailing space).
+    best = -1
+    for ender in _SENTENCE_ENDERS:
+        i = text.rfind(ender, floor, budget)
+        if i > best:
+            best = i + len(ender)
+    if best > floor:
+        return text[:best].rstrip() + "…"
+
+    # 3. Line break.
+    idx = text.rfind(_LINE_SEP, floor, budget)
+    if idx >= floor:
+        return text[:idx] + "\n…"
+
+    # 4. Word break (ASCII): last whitespace within slack. CJK doesn't use
+    #    whitespace word separators so this primarily helps English text.
+    idx = max(text.rfind(" ", floor, budget),
+              text.rfind("\t", floor, budget))
+    if idx >= floor:
+        return text[:idx] + "…"
+
+    # 5. Fallback: raw character cut. This may split a multi-byte UTF-8
+    #    sequence mid-codepoint, but since Python strings are Unicode
+    #    (not bytes) the cut is always on a codepoint boundary; the
+    #    cosmetic hazard is splitting a grapheme cluster (e.g. emoji
+    #    + skin-tone modifier). Accept this — the alternative is
+    #    chasing far below the budget.
+    return text[:budget] + "…"
+
+
 # ── Lazy-global / project-conditional gating (S50 / S51) ────────────────────
 
 _GLOBAL_INJECT_KEYWORDS: tuple[str, ...] = (
@@ -328,8 +402,10 @@ class MemoryContextBuilder:
                 trimmed: list[tuple[str, str, str, int]] = []
                 for open_tag, content, close_tag, max_c in parts:
                     budget_i = int(available * len(content) / content_total)
-                    if len(content) > budget_i:
-                        content = content[:budget_i] + "…"
+                    # S42: prefer a semantic boundary (paragraph > sentence >
+                    # line > word) over a raw char-cut that can split a
+                    # Chinese sentence mid-character or chop a markdown fence.
+                    content = smart_truncate(content, budget_i)
                     trimmed.append((open_tag, content, close_tag, max_c))
                 parts = trimmed
 

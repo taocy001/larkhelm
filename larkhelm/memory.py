@@ -44,6 +44,18 @@ PROJECT_MAX_CHARS = 1500
 SESSION_MAX_CHARS = 2000
 TOTAL_MEMORY_BUDGET = 4500  # combined cap; tag overhead counted separately
 
+# ── Schema version (S47) ──────────────────────────────────────────────────────
+#
+# Bumped when the on-disk layout of a memory file changes in a way that
+# requires the loader to migrate or refuse to read it. ``_save_md`` writes
+# this as ``schema_version: "N"`` in the frontmatter; ``_load_md_frontmatter``
+# returns it like any other field, and ``_check_schema_version`` warns when
+# a file is newer than the binary supports.
+#
+# History:
+#   1 — initial layout (frontmatter + body, used since pre-Phase B)
+MEMORY_SCHEMA_VERSION = "1"
+
 # Bumped from 50 → 90 to reserve room for the per-layer meter line injected by
 # ``get_memory_context()`` (e.g. ``[1850/2000 chars, 92%] ⚠️ near limit`` is
 # ~36 chars; 90 leaves slack for unicode + newlines). TOTAL_MEMORY_BUDGET is
@@ -296,7 +308,11 @@ def _load_md_body(path: Path | None) -> str | None:
 
 
 def _load_md_frontmatter(path: Path | None) -> dict[str, str]:
-    """Parse YAML-like frontmatter key: value pairs from a memory file."""
+    """Parse YAML-like frontmatter key: value pairs from a memory file.
+
+    Caller can read the ``schema_version`` field directly; ``_check_schema_version``
+    is also available for a quick "is this file from a newer binary?" check.
+    """
     result: dict[str, str] = {}
     if path is None:
         return result
@@ -316,6 +332,39 @@ def _load_md_frontmatter(path: Path | None) -> dict[str, str]:
     except Exception as e:
         _debug_log(f"[Memory] frontmatter parse error: {e}")
     return result
+
+
+# Track which file paths we've already logged a schema warning for so the
+# debug log doesn't fill with the same line every cascade tick. Lifetime
+# matches the process; restart clears it (acceptable — operator gets a
+# fresh warning after restart, which is signal not noise).
+_SCHEMA_WARN_SEEN: set[str] = set()
+
+
+def _check_schema_version(path: Path | None, fm: dict[str, str]) -> str:
+    """Return the file's declared ``schema_version`` (default ``"1"``).
+
+    Logs a one-shot warning when the file is *newer* than this binary
+    understands. Files at or below the binary version are silently
+    accepted — older files implicitly upgrade on next ``_save_md`` since
+    we always re-stamp ``schema_version`` on write.
+    """
+    v = (fm.get("schema_version") or "1").strip()
+    try:
+        if path is not None and int(v) > int(MEMORY_SCHEMA_VERSION):
+            key = str(path)
+            if key not in _SCHEMA_WARN_SEEN:
+                _SCHEMA_WARN_SEEN.add(key)
+                _debug_log(
+                    f"[Memory] schema_version={v} on {path.name} is newer than "
+                    f"this binary supports ({MEMORY_SCHEMA_VERSION}); "
+                    f"reading anyway, fields may be ignored"
+                )
+    except (TypeError, ValueError):
+        # schema_version isn't numeric — treat as v1 silently. Future
+        # versions can switch to semver if needed.
+        pass
+    return v
 
 
 def _save_md(
@@ -349,7 +398,15 @@ def _save_md(
                 for k, v in extra_fm_pairs.items():
                     safe_v = str(v).replace('"', '\\"')
                     extra_pairs_text += f'{k}: "{safe_v}"\n'
-            fm = f'---\nupdated_at: "{now}"\n{extra_fm}{extra_pairs_text}---\n\n'
+            # S47: schema_version is written by every save so future loaders
+            # can detect old / forward-incompatible files. ``extra_fm`` and
+            # ``extra_fm_pairs`` retain precedence — a caller that explicitly
+            # passes ``schema_version`` in either wins (used by migration
+            # tools that re-stamp an older file at its declared version).
+            schema_line = ""
+            if "schema_version" not in (extra_fm_pairs or {}) and "schema_version" not in extra_fm:
+                schema_line = f'schema_version: "{MEMORY_SCHEMA_VERSION}"\n'
+            fm = f'---\nupdated_at: "{now}"\n{schema_line}{extra_fm}{extra_pairs_text}---\n\n'
             body = content[:max_chars]
             tmp = path.with_suffix(".md.tmp")
             tmp.write_text(fm + body, encoding="utf-8")
@@ -372,7 +429,11 @@ def _save_md(
 # ── Public load/save API ──────────────────────────────────────────────────────
 
 def load_global_memory(chat_id: str | None = None) -> str | None:
-    return _load_md_body(_global_memory_file(chat_id))
+    path = _global_memory_file(chat_id)
+    content = _load_md_body(path)
+    if content is not None:
+        _check_schema_version(path, _load_md_frontmatter(path))
+    return content
 
 
 def save_global_memory(content: str, chat_id: str | None = None,
@@ -387,6 +448,7 @@ def load_project_memory(cwd: str) -> str | None:
     if content is None:
         return None
     fm = _load_md_frontmatter(path)
+    _check_schema_version(path, fm)
     stored_cwd = fm.get("cwd", "")
     if stored_cwd:
         canonical = str(Path(cwd).resolve())
@@ -538,7 +600,10 @@ def gc_project_memory(threshold_days: int = _GC_DEFAULT_DAYS,
 
 def load_memory(chat_id: str) -> str | None:
     """Load session memory. Transparently migrates from old DATA_DIR location."""
-    content = _load_md_body(_session_memory_file(chat_id))
+    path = _session_memory_file(chat_id)
+    content = _load_md_body(path)
+    if content is not None:
+        _check_schema_version(path, _load_md_frontmatter(path))
     if content is None:
         old = _cfg.DATA_DIR / "memory" / f"{chat_id}.md"
         content = _load_md_body(old)
