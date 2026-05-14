@@ -103,6 +103,44 @@ class SmartTruncateTests(unittest.TestCase):
                 self.assertTrue(result.endswith("…"),
                                 f"missing ellipsis for budget={budget}: {result!r}")
 
+    def test_cut_between_period_and_space_falls_back_gracefully(self):
+        # Round-2 review #5: the sentence boundary search uses rfind(". ",
+        # floor, budget). If the budget cut lands EXACTLY between "." and
+        # " " (e.g. budget points to the index of the space), the two-char
+        # sequence isn't entirely inside [floor, budget) and the search
+        # misses. We should still emit a sensible result via word / char
+        # fallback, not crash, and not produce an empty body.
+        text = "A sentence here. Another sentence follows here."
+        for budget in range(14, 22):
+            with self.subTest(budget=budget):
+                result = smart_truncate(text, budget)
+                self.assertTrue(result.endswith("…"),
+                                f"missing ellipsis at budget={budget}: {result!r}")
+                # Must produce non-trivial output (more than just "…")
+                self.assertGreater(len(result), 1)
+
+    def test_ellipsis_style_consistent_after_rstrip(self):
+        # Round-2 review #4: every boundary path now rstrip()s before
+        # the ellipsis. Verify no trailing whitespace appears between
+        # the body and the ellipsis (which used to leak through on
+        # line/word paths).
+        cases = [
+            # paragraph: cut at "\n\n"
+            "first paragraph here.\n\nsecond paragraph contents here are long enough to overflow",
+            # line break with trailing spaces before "\n"
+            "line one with trailing space   \nline two contents extend beyond the budget",
+            # word break with multiple spaces
+            "word one     word two contents continue past the budget",
+        ]
+        for text in cases:
+            with self.subTest(text=text[:30]):
+                result = smart_truncate(text, 30)
+                self.assertTrue(result.endswith("…"))
+                body = result.rstrip("…").rstrip("\n")
+                # No trailing whitespace before the ellipsis marker
+                self.assertFalse(body != body.rstrip(),
+                                 f"trailing whitespace before ellipsis: {result!r}")
+
     def test_markdown_code_fence_not_split_midline(self):
         # A common pain case: budget cuts mid-fence. With line-boundary
         # fallback (no paragraph / sentence here), we should at least cut

@@ -56,6 +56,10 @@ TOTAL_MEMORY_BUDGET = 4500  # combined cap; tag overhead counted separately
 #   1 — initial layout (frontmatter + body, used since pre-Phase B)
 MEMORY_SCHEMA_VERSION = "1"
 
+# Anchored at line start to avoid matching keys that merely *contain* the
+# substring "schema_version" (e.g. last_schema_version_check, my_schema_version_note).
+_SCHEMA_KEY_RE = re.compile(r'(?m)^schema_version\s*:')
+
 # Bumped from 50 → 90 to reserve room for the per-layer meter line injected by
 # ``get_memory_context()`` (e.g. ``[1850/2000 chars, 92%] ⚠️ near limit`` is
 # ~36 chars; 90 leaves slack for unicode + newlines). TOTAL_MEMORY_BUDGET is
@@ -403,8 +407,16 @@ def _save_md(
             # ``extra_fm_pairs`` retain precedence — a caller that explicitly
             # passes ``schema_version`` in either wins (used by migration
             # tools that re-stamp an older file at its declared version).
+            #
+            # The presence check must be ANCHORED at line start: a plain
+            # substring search in ``extra_fm`` mis-fires on legitimate
+            # keys that contain "schema_version" as a substring (e.g.
+            # ``last_schema_version_check: ...``), suppressing the
+            # auto-stamp and leaving the file with no version line.
             schema_line = ""
-            if "schema_version" not in (extra_fm_pairs or {}) and "schema_version" not in extra_fm:
+            has_in_pairs = "schema_version" in (extra_fm_pairs or {})
+            has_in_extra = bool(_SCHEMA_KEY_RE.search(extra_fm))
+            if not has_in_pairs and not has_in_extra:
                 schema_line = f'schema_version: "{MEMORY_SCHEMA_VERSION}"\n'
             fm = f'---\nupdated_at: "{now}"\n{schema_line}{extra_fm}{extra_pairs_text}---\n\n'
             body = content[:max_chars]
@@ -539,6 +551,11 @@ def gc_project_memory(threshold_days: int = _GC_DEFAULT_DAYS,
             stored_cwd = ""
             try:
                 fm = _load_md_frontmatter(path)
+                # GC reads + may delete the file; we want to know about
+                # forward-incompatible files BEFORE deciding to unlink one
+                # the binary doesn't understand. The one-shot warning per
+                # path keeps log noise bounded.
+                _check_schema_version(path, fm)
                 stored_cwd = fm.get("cwd", "") or ""
                 if stored_cwd:
                     cwd_gone = not Path(stored_cwd).expanduser().exists()

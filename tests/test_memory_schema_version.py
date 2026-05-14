@@ -57,6 +57,43 @@ class SchemaVersionStampTests(unittest.TestCase):
         text = self.path.read_text(encoding="utf-8")
         self.assertEqual(text.count("schema_version:"), 1)
 
+    def test_extra_fm_substring_does_not_suppress_stamp(self):
+        # Regression for round-2 review must-fix #1: a legitimate key
+        # containing the substring "schema_version" (e.g. a hypothetical
+        # last_schema_version_check audit field) must NOT suppress the
+        # auto-stamp. The presence check uses an anchored regex now,
+        # so the stamp survives.
+        mem._save_md(
+            self.path, "body", max_chars=100,
+            extra_fm='last_schema_version_check: "2026-01-01T00:00:00"\n',
+        )
+        text = self.path.read_text(encoding="utf-8")
+        # Both the real schema_version line and the audit field must be
+        # present. The previous substring-based check incorrectly matched
+        # "schema_version" inside "last_schema_version_check" and
+        # suppressed the auto-stamp; the anchored regex no longer does.
+        self.assertIn(f'schema_version: "{mem.MEMORY_SCHEMA_VERSION}"', text)
+        self.assertIn('last_schema_version_check:', text)
+        # And critically: only ONE real ``schema_version:`` line (the
+        # auto-stamp), not zero (suppressed) and not duplicated.
+        anchored = sum(1 for ln in text.splitlines()
+                       if ln.lstrip().startswith("schema_version:"))
+        self.assertEqual(anchored, 1,
+                         f"expected exactly 1 schema_version line, got {anchored}:\n{text}")
+
+    def test_extra_fm_pairs_substring_does_not_suppress_stamp(self):
+        # Same regression but via extra_fm_pairs. The dict check uses
+        # ``"schema_version" in pairs`` which is an exact-key match, so
+        # a legitimate key like ``last_schema_version_check`` here also
+        # must not suppress the auto-stamp.
+        mem._save_md(
+            self.path, "body", max_chars=100,
+            extra_fm_pairs={"last_schema_version_check": "2026-01-01"},
+        )
+        text = self.path.read_text(encoding="utf-8")
+        self.assertIn(f'schema_version: "{mem.MEMORY_SCHEMA_VERSION}"', text)
+        self.assertIn('last_schema_version_check:', text)
+
 
 class CheckSchemaVersionTests(unittest.TestCase):
     """The version check emits a one-shot warning for newer files."""

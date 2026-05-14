@@ -68,6 +68,16 @@ def smart_truncate(text: str, budget: int, *, slack_pct: float = 0.15) -> str:
     slack = max(1, int(budget * slack_pct))
     floor = max(0, budget - slack)
 
+    # Convention for the ellipsis suffix:
+    #   - "\n…"  — used after paragraph / line breaks; the ellipsis renders
+    #              on its own line as a "more content" marker.
+    #   - "…"    — used after sentence-ending punctuation, word breaks, and
+    #              the raw char-cut fallback; inline because the prior char
+    #              already provides the visual break (punctuation or
+    #              whitespace) or because there's no break at all.
+    # Every boundary path .rstrip()s before appending so trailing
+    # whitespace from the boundary itself doesn't show up before "…".
+
     # 1. Paragraph break — strongest semantic boundary.
     idx = text.rfind(_PARAGRAPH_SEP, floor, budget)
     if idx >= floor:
@@ -87,21 +97,22 @@ def smart_truncate(text: str, budget: int, *, slack_pct: float = 0.15) -> str:
     # 3. Line break.
     idx = text.rfind(_LINE_SEP, floor, budget)
     if idx >= floor:
-        return text[:idx] + "\n…"
+        return text[:idx].rstrip() + "\n…"
 
     # 4. Word break (ASCII): last whitespace within slack. CJK doesn't use
     #    whitespace word separators so this primarily helps English text.
     idx = max(text.rfind(" ", floor, budget),
               text.rfind("\t", floor, budget))
     if idx >= floor:
-        return text[:idx] + "…"
+        return text[:idx].rstrip() + "…"
 
     # 5. Fallback: raw character cut. This may split a multi-byte UTF-8
     #    sequence mid-codepoint, but since Python strings are Unicode
     #    (not bytes) the cut is always on a codepoint boundary; the
     #    cosmetic hazard is splitting a grapheme cluster (e.g. emoji
     #    + skin-tone modifier). Accept this — the alternative is
-    #    chasing far below the budget.
+    #    chasing far below the budget. No rstrip here: a raw cut may
+    #    legitimately land inside a word.
     return text[:budget] + "…"
 
 
