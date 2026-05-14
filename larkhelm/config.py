@@ -607,6 +607,18 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     config.setdefault("intent_feedback_path", "")
     config.setdefault("intent_audit_path", "")
 
+    # Phase B: memory token-optimization flags (S49–S53 + S3 GC).
+    # All default to "true" so the new code paths run by default; toggle
+    # individually to bisect token-regression reports without redeploying.
+    config.setdefault("memory_lazy_global", True)
+    config.setdefault("memory_project_conditional", True)
+    config.setdefault("memory_session_layered", True)
+    config.setdefault("memory_recent_turns_dedup", True)
+    config.setdefault("memory_cascade_shortcircuit", True)
+    config.setdefault("memory_cascade_max_concurrent", 4)
+    config.setdefault("memory_session_gc_enabled", True)
+    config.setdefault("memory_session_gc_max_age_days", 7)
+
     # ── OAuth user_access_token (see oauth_user.py) ──────────────────────
     # The token file is loaded lazily by oauth_user.get_user_token(); this
     # block only reads the cached ``open_id`` to populate LOGGED_IN_OPEN_ID
@@ -665,6 +677,16 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
             # be wired up yet — ``lazy_debug_log`` is the bootstrap-safe variant.
             from larkhelm.log import lazy_debug_log
             lazy_debug_log(f"[Config] agent plugin load failed: {e}")
+
+        # Phase B: spin up the session-memory GC daemon (S3). Lazy import
+        # avoids dragging memory.py into the bootstrap path before its own
+        # config-dependent constants are needed.
+        try:
+            from larkhelm.memory_gc import start_memory_gc_thread
+            start_memory_gc_thread()
+        except Exception as e:
+            from larkhelm.log import lazy_debug_log
+            lazy_debug_log(f"[Config] memory_gc start failed: {e}")
 
     # Build the typed config object (for mypy etc.; module-level globals remain for backward compat)
     global _runtime

@@ -693,12 +693,33 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
 
             # Memory is passed as extra_system (proper system channel) rather than prepended
             # to the user message, so the model receives clean user turn content.
+            #
+            # Phase B: ``get_memory_context_v2`` lets the builder see the live
+            # query + recent turns so it can apply lazy-global / project-conditional
+            # / session-layered / recent-turns dedup. Default flags keep the
+            # builder fail-open (everything injected) when in doubt.
             memory_ctx = ""
+            recent_turns_list: list[str] = []
             try:
-                from larkhelm.memory import get_memory_context, maybe_auto_update
-                memory_ctx = get_memory_context(chat_id, cwd=cwd)
+                from larkhelm.log import _get_recent_turns
+                _raw_recent = _get_recent_turns(chat_id) or ""
+                if _raw_recent:
+                    recent_turns_list = [
+                        ln for ln in _raw_recent.splitlines() if ln.strip()
+                    ]
+            except Exception as _hist_err:
+                _debug_log(f"[{trace_id}][DoQuery] rolling history error: {_hist_err}")
+
+            try:
+                from larkhelm.memory import get_memory_context_v2, maybe_auto_update
+                memory_ctx, deduped_recent = get_memory_context_v2(
+                    chat_id, cwd=cwd, query=message,
+                    recent_turns=recent_turns_list,
+                    has_doc_urls=has_doc_urls,
+                )
             except Exception as _mem_err:
                 _debug_log(f"[{trace_id}][DoQuery] memory context error: {_mem_err}")
+                deduped_recent = recent_turns_list
 
             # ``recent_turns`` is kept separate from ``memory_ctx`` (rather than
             # concatenated as before) so the downstream ``_run_backend_single``
@@ -707,12 +728,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             # channel was ~500 redundant input tokens per call (~50K / 100-turn
             # session). CLI + DeepSeek backends still need it because they don't
             # load a structured history.
-            recent_turns = ""
-            try:
-                from larkhelm.log import _get_recent_turns
-                recent_turns = _get_recent_turns(chat_id) or ""
-            except Exception as _hist_err:
-                _debug_log(f"[{trace_id}][DoQuery] rolling history error: {_hist_err}")
+            recent_turns = "\n".join(deduped_recent)
 
             from larkhelm.router import resolve_backend, LockedBackendUnavailableError
             from larkhelm.backend_registry import BACKEND_REGISTRY

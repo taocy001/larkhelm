@@ -318,8 +318,18 @@ def _load_md_frontmatter(path: Path | None) -> dict[str, str]:
     return result
 
 
-def _save_md(path: Path | None, content: str, max_chars: int, extra_fm: str = "") -> None:
+def _save_md(
+    path: Path | None,
+    content: str,
+    max_chars: int,
+    extra_fm: str = "",
+    extra_fm_pairs: dict[str, str] | None = None,
+) -> None:
     """Atomically write a memory file with YAML frontmatter, protected by a per-file lock.
+
+    ``extra_fm_pairs`` is the structured form of ``extra_fm``: callers pass a
+    ``{key: value}`` dict and the function renders each as a quoted YAML pair.
+    The two arguments coexist (legacy callers still pass ``extra_fm`` strings).
 
     Permissions: the tmp file is chmod'd 0600 BEFORE the atomic replace so the
     final file inherits user-only read/write regardless of process umask.
@@ -334,7 +344,12 @@ def _save_md(path: Path | None, content: str, max_chars: int, extra_fm: str = ""
     with lock:
         try:
             now = datetime.now().isoformat(timespec="seconds")
-            fm = f'---\nupdated_at: "{now}"\n{extra_fm}---\n\n'
+            extra_pairs_text = ""
+            if extra_fm_pairs:
+                for k, v in extra_fm_pairs.items():
+                    safe_v = str(v).replace('"', '\\"')
+                    extra_pairs_text += f'{k}: "{safe_v}"\n'
+            fm = f'---\nupdated_at: "{now}"\n{extra_fm}{extra_pairs_text}---\n\n'
             body = content[:max_chars]
             tmp = path.with_suffix(".md.tmp")
             tmp.write_text(fm + body, encoding="utf-8")
@@ -360,8 +375,10 @@ def load_global_memory(chat_id: str | None = None) -> str | None:
     return _load_md_body(_global_memory_file(chat_id))
 
 
-def save_global_memory(content: str, chat_id: str | None = None) -> None:
-    _save_md(_global_memory_file(chat_id), content, GLOBAL_MAX_CHARS)
+def save_global_memory(content: str, chat_id: str | None = None,
+                       extra_fm_pairs: dict[str, str] | None = None) -> None:
+    _save_md(_global_memory_file(chat_id), content, GLOBAL_MAX_CHARS,
+             extra_fm_pairs=extra_fm_pairs)
 
 
 def load_project_memory(cwd: str) -> str | None:
@@ -383,10 +400,11 @@ def load_project_memory(cwd: str) -> str | None:
     return content
 
 
-def save_project_memory(cwd: str, content: str) -> None:
+def save_project_memory(cwd: str, content: str,
+                        extra_fm_pairs: dict[str, str] | None = None) -> None:
     canonical = str(Path(cwd).resolve())
     _save_md(_project_memory_file(cwd), content, PROJECT_MAX_CHARS,
-             f'cwd: "{canonical}"\n')
+             f'cwd: "{canonical}"\n', extra_fm_pairs=extra_fm_pairs)
 
 
 # ── Project-memory garbage collection (user-explicit /memory gc) ────────────
@@ -544,75 +562,50 @@ def save_memory(chat_id: str, content: str) -> None:
 def get_memory_context(chat_id: str, cwd: str | None = None) -> str:
     """Build the combined memory context string for injection as extra_system.
 
-    Enforces TOTAL_MEMORY_BUDGET (tag overhead counted): each layer is trimmed
-    proportionally when the combined total exceeds the budget.
-    Returns empty string when no memory is active.
+    Phase B (S49–S52) forwards to ``MemoryContextBuilder``. Default arguments
+    (no ``query``, no ``recent_turns``) hit the fail-open paths in
+    ``should_include_*`` so behaviour is byte-equivalent to the legacy
+    implementation: every layer is included (subject to budget trim).
     """
-    parts: list[tuple[str, str, str]] = []
+    from larkhelm.memory_context import MemoryContextBuilder
+    return MemoryContextBuilder(chat_id, cwd).build()
 
-    g = load_global_memory(chat_id)
-    if g:
-        parts.append(("[GLOBAL MEMORY]", g, "[/GLOBAL MEMORY]"))
 
-    if cwd:
-        p = load_project_memory(cwd)
-        if p:
-            parts.append((f"[PROJECT MEMORY — {cwd}]", p, "[/PROJECT MEMORY]"))
+def get_memory_context_v2(
+    chat_id: str,
+    cwd: str | None = None,
+    *,
+    query: str = "",
+    recent_turns: list[str] | None = None,
+    has_doc_urls: bool = False,
+) -> tuple[str, list[str]]:
+    """Build memory context AND return deduped recent turns in one pass.
 
-    s = load_memory(chat_id)
-    if s:
-        parts.append(("[SESSION MEMORY]", s, "[/SESSION MEMORY]"))
-
-    if not parts:
-        return ""
-
-    # Per-layer max_chars used to render the meter line. Aligned with the
-    # tuple order built above (global → project → session).
-    layer_max = {
-        "[GLOBAL MEMORY]":  GLOBAL_MAX_CHARS,
-        "[SESSION MEMORY]": SESSION_MAX_CHARS,
-    }
-
-    def _max_for(open_tag: str) -> int:
-        if open_tag in layer_max:
-            return layer_max[open_tag]
-        # Project tag carries the cwd suffix (e.g. ``[PROJECT MEMORY — /path]``).
-        if open_tag.startswith("[PROJECT MEMORY"):
-            return PROJECT_MAX_CHARS
-        return SESSION_MAX_CHARS
-
-    total = sum(len(c) + _TAG_OVERHEAD_PER_LAYER for _, c, _ in parts)
-    if total > TOTAL_MEMORY_BUDGET:
-        available = max(0, TOTAL_MEMORY_BUDGET - _TAG_OVERHEAD_PER_LAYER * len(parts))
-        content_total = sum(len(c) for _, c, _ in parts)
-        if content_total > 0:
-            _debug_log(f"[Memory] budget trim: total={total} > {TOTAL_MEMORY_BUDGET}, available={available}")
-            for i, (open_tag, content, close_tag) in enumerate(parts):
-                budget_i = int(available * len(content) / content_total)
-                if len(content) > budget_i:
-                    parts[i] = (open_tag, content[:budget_i] + "…", close_tag)
-
-    return "\n\n".join(
-        f"{o}\n{_layer_meter_line(len(c), _max_for(o))}\n{c}\n{cl}"
-        for o, c, cl in parts
+    Returns ``(composed_memory, deduped_recent_turns)``. ``recent_turns`` is
+    deduped against the *raw* session body (so dedup remains correct even
+    when the session view is sliced down by ``memory_session_layered``).
+    """
+    from larkhelm.memory_context import MemoryContextBuilder
+    builder = MemoryContextBuilder(
+        chat_id, cwd,
+        query=query, recent_turns=recent_turns,
+        has_doc_urls=has_doc_urls,
     )
+    composed = builder.build()
+    session_raw = load_memory(chat_id) or ""
+    deduped = builder.deduped_recent_turns(session_raw)
+    return composed, deduped
 
 
 def get_project_memory_context(chat_id: str, cwd: str | None = None) -> str:
     """Build project + session memory context (no global layer).
 
-    Used by crew agents for task-scoped context. Global layer is intentionally
-    excluded to keep the function behaviour predictable.
+    Used by crew agents for task-scoped context. Phase B forwards to
+    ``MemoryContextBuilder.build_for_crew`` so per-layer changes (eg.
+    project memory frontmatter) are applied uniformly.
     """
-    parts: list[str] = []
-    if cwd:
-        p = load_project_memory(cwd)
-        if p:
-            parts.append(f"[PROJECT MEMORY — {cwd}]\n{p}\n[/PROJECT MEMORY]")
-    s = load_memory(chat_id)
-    if s:
-        parts.append(f"[SESSION MEMORY]\n{s}\n[/SESSION MEMORY]")
-    return "\n\n".join(parts) if parts else ""
+    from larkhelm.memory_context import MemoryContextBuilder
+    return MemoryContextBuilder(chat_id, cwd, force_project=True).build_for_crew()
 
 
 def inject_memory(chat_id: str, message: str, cwd: str | None = None) -> str:
@@ -842,13 +835,108 @@ def generate_memory(chat_id: str, recent_logs: str,
 
 # ── Cascade extraction (project + global auto-learning) ──────────────────────
 
-def _try_extract_project(session_content: str, cwd: str) -> None:
+# S53 hash short-circuit: a cascade with the same session_content as the
+# previous successful extract can skip the LLM call entirely. We persist
+# md5(session_content)[:16] + len into the project/global frontmatter and
+# compare on the next call. The two-hash check is keyed by file (cwd-derived
+# for project, chat_id-derived for global) so cross-chat contention is nil.
+
+def _session_hash(session_content: str) -> str:
+    return hashlib.md5((session_content or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _should_skip_extract_by_hash(prev_fm: dict, session_content: str,
+                                 *, len_tolerance: int = 100) -> bool:
+    """Return True iff the previous extract used the same session payload.
+
+    Equivalence definition:
+      * ``last_extracted_session_hash`` matches md5(session_content)[:16] AND
+      * ``abs(prev_len - cur_len) < len_tolerance`` (defends against rare
+        hash false-positive on near-empty inputs).
+
+    Missing fields → False (no skip), so old memory files written before
+    this feature continue to extract normally on next cascade.
+    """
+    if not prev_fm:
+        return False
+    if not _config_flag("memory_cascade_shortcircuit", True):
+        return False
+    prev_hash = (prev_fm.get("last_extracted_session_hash") or "").strip()
+    if not prev_hash:
+        return False
+    cur_hash = _session_hash(session_content)
+    if prev_hash != cur_hash:
+        return False
+    try:
+        prev_len = int(prev_fm.get("last_extracted_session_len", "-1"))
+    except (TypeError, ValueError):
+        return False
+    if prev_len < 0:
+        return False
+    return abs(prev_len - len(session_content)) < len_tolerance
+
+
+def _config_flag(key: str, default: bool = True) -> bool:
+    """Local copy of memory_context._config_flag — avoids cross-import cycle."""
+    try:
+        cfg = getattr(_cfg, "config", None) or {}
+    except Exception:
+        cfg = {}
+    return bool(cfg.get(key, default))
+
+
+# ── Cascade coordinator (S43) ────────────────────────────────────────────
+
+# Global semaphore caps in-flight extract LLM calls so a busy chat can't
+# spawn an unbounded number of daemon threads (token-blackhole risk). Default
+# 4 mirrors typical orchestrator concurrency.
+
+def _cascade_max_concurrent() -> int:
+    try:
+        cfg = getattr(_cfg, "config", None) or {}
+        v = int(cfg.get("memory_cascade_max_concurrent", 4) or 4)
+        return max(1, v)
+    except Exception:
+        return 4
+
+
+_CASCADE_SEM: threading.BoundedSemaphore | None = None
+_CASCADE_SEM_LOCK = threading.Lock()
+
+
+def _get_cascade_sem() -> threading.BoundedSemaphore:
+    global _CASCADE_SEM
+    with _CASCADE_SEM_LOCK:
+        if _CASCADE_SEM is None:
+            _CASCADE_SEM = threading.BoundedSemaphore(_cascade_max_concurrent())
+        return _CASCADE_SEM
+
+
+# Per-chat cancel events: when a new cascade starts for chat_id X, the
+# previous cascade's event is set so its workers can early-exit before
+# making the (expensive) LLM call.
+_active_cascade_cancels: dict[str, threading.Event] = {}
+_active_cancels_lock = threading.Lock()
+
+
+def _try_extract_project(session_content: str, cwd: str,
+                         cancel_ev: threading.Event | None = None) -> None:
     """Extract project facts from a fresh session summary → update project layer if new info found.
 
     Runs in a background daemon thread. Writes only when the LLM finds genuinely new
     information (output != "UNCHANGED"). Safe to call concurrently; file write lock serialises.
     """
     try:
+        if cancel_ev is not None and cancel_ev.is_set():
+            _debug_log(f"[Memory] project extract cancelled before start for {cwd!r}")
+            return
+        proj_path = _project_memory_file(cwd)
+        prev_fm = _load_md_frontmatter(proj_path)
+        if _should_skip_extract_by_hash(prev_fm, session_content):
+            _debug_log(
+                f"[Memory] project cascade shortcircuit (hash match) for {cwd!r}"
+            )
+            return
         existing = load_project_memory(cwd) or "(empty)"
         prompt = _EXTRACT_PROJECT_PROMPT.format(
             max_chars=PROJECT_MAX_CHARS,
@@ -856,6 +944,9 @@ def _try_extract_project(session_content: str, cwd: str) -> None:
             session=session_content,
         )
         ns = f"_proj_{hashlib.md5(cwd.encode()).hexdigest()[:8]}"
+        if cancel_ev is not None and cancel_ev.is_set():
+            _debug_log(f"[Memory] project extract cancelled pre-LLM for {cwd!r}")
+            return
         # See ``generate_memory`` — cheap-backend route applies here too.
         # 80%+ of these calls return ``UNCHANGED`` so we're predominantly
         # paying for input tokens we don't act on; using a cheap model
@@ -867,18 +958,31 @@ def _try_extract_project(session_content: str, cwd: str) -> None:
         if not _is_useful_summary(result):
             _debug_log(f"[Memory] project extract rejected non-useful output for {cwd!r}")
             return
-        save_project_memory(cwd, result)
+        save_project_memory(cwd, result, extra_fm_pairs={
+            "last_extracted_session_hash": _session_hash(session_content),
+            "last_extracted_session_len":  str(len(session_content)),
+        })
         _debug_log(f"[Memory] project layer auto-updated from session cascade ({len(result)} chars)")
     except Exception as e:
         _debug_log(f"[Memory] extract_project error for {cwd!r}: {e}")
 
 
-def _try_extract_global(session_content: str, chat_id: str) -> None:
+def _try_extract_global(session_content: str, chat_id: str,
+                        cancel_ev: threading.Event | None = None) -> None:
     """Extract user preferences from a fresh session summary → update global layer if new info found."""
     try:
+        if cancel_ev is not None and cancel_ev.is_set():
+            _debug_log(f"[Memory] global extract cancelled before start for {chat_id[:8]}")
+            return
         g_path = _global_memory_file(chat_id)
         if g_path is None:
             return  # no open_id (group chat) — skip global layer
+        prev_fm = _load_md_frontmatter(g_path)
+        if _should_skip_extract_by_hash(prev_fm, session_content):
+            _debug_log(
+                f"[Memory] global cascade shortcircuit (hash match) for {chat_id[:8]}"
+            )
+            return
         existing = _load_md_body(g_path) or "(empty)"
         prompt = _EXTRACT_GLOBAL_PROMPT.format(
             max_chars=GLOBAL_MAX_CHARS,
@@ -886,6 +990,9 @@ def _try_extract_global(session_content: str, chat_id: str) -> None:
             session=session_content,
         )
         ns = f"_glob_{chat_id[:8]}"
+        if cancel_ev is not None and cancel_ev.is_set():
+            _debug_log(f"[Memory] global extract cancelled pre-LLM for {chat_id[:8]}")
+            return
         # Same reasoning as project extract.
         result = _run_one_shot(prompt, ns=ns, prefer_cheap=True)
         result = (result or "").strip()
@@ -894,7 +1001,10 @@ def _try_extract_global(session_content: str, chat_id: str) -> None:
         if not _is_useful_summary(result):
             _debug_log(f"[Memory] global extract rejected non-useful output for {chat_id[:8]}")
             return
-        save_global_memory(result, chat_id=chat_id)
+        save_global_memory(result, chat_id=chat_id, extra_fm_pairs={
+            "last_extracted_session_hash": _session_hash(session_content),
+            "last_extracted_session_len":  str(len(session_content)),
+        })
         _debug_log(f"[Memory] global layer auto-updated from session cascade ({len(result)} chars)")
     except Exception as e:
         _debug_log(f"[Memory] extract_global error for {chat_id[:8]}: {e}")
@@ -903,8 +1013,16 @@ def _try_extract_global(session_content: str, chat_id: str) -> None:
 def _cascade_extract(session_content: str, chat_id: str) -> None:
     """Launch background threads to extract project and global facts from a fresh session summary.
 
-    Each extraction thread is guarded by _EXTRACT_TIMEOUT so a slow LLM call cannot
-    leak daemon threads indefinitely.
+    Coordinator semantics (S43):
+
+    1. A new cascade for ``chat_id`` cancels any previous in-flight cascade
+       for the same chat (sets its cancel event so workers exit before the
+       LLM call). Cancellation is best-effort; once the LLM call has begun
+       it cannot be interrupted mid-flight.
+    2. A global ``BoundedSemaphore`` caps in-flight extract calls to
+       ``memory_cascade_max_concurrent`` (default 4). When the sem is full
+       the new worker logs WARN and exits — better to drop one cascade than
+       to let the daemon-thread count grow without bound.
     """
     try:
         from larkhelm.chat_state import _get_cwd
@@ -912,25 +1030,50 @@ def _cascade_extract(session_content: str, chat_id: str) -> None:
     except Exception:
         cwd = None
 
-    def _guarded(target, args, name):
-        t = threading.Thread(target=target, args=args, daemon=True, name=name)
-        t.start()
-        t.join(timeout=_EXTRACT_TIMEOUT)
-        if t.is_alive():
-            _debug_log(f"[Memory] {name} extraction timed out ({_EXTRACT_TIMEOUT}s), daemon thread abandoned")
+    # Swap the per-chat cancel event: signal old workers to bow out.
+    new_ev = threading.Event()
+    with _active_cancels_lock:
+        old_ev = _active_cascade_cancels.get(chat_id)
+        if old_ev is not None:
+            old_ev.set()
+        _active_cascade_cancels[chat_id] = new_ev
+
+    def _coordinated(target, args, label: str):
+        sem = _get_cascade_sem()
+        if not sem.acquire(timeout=0.5):
+            _debug_log(
+                f"[Memory] cascade sem busy ({label}), abandoning extract for {chat_id[:8]}"
+            )
+            return
+        try:
+            target(*args, cancel_ev=new_ev)
+        finally:
+            try:
+                sem.release()
+            except ValueError:
+                # BoundedSemaphore raises if released past initial value;
+                # a bug elsewhere triggered an extra release. Log and move on.
+                _debug_log(f"[Memory] cascade sem over-release on {label}")
+            with _active_cancels_lock:
+                # Only clear if we're still the active event (a newer cascade
+                # may have already replaced us, in which case we leave it).
+                if _active_cascade_cancels.get(chat_id) is new_ev:
+                    _active_cascade_cancels.pop(chat_id, None)
 
     def _run_cascade():
         threads = []
         if cwd:
             threads.append(threading.Thread(
-                target=_guarded,
-                args=(_try_extract_project, (session_content, cwd), f"memext-proj-{chat_id[:8]}"),
+                target=_coordinated,
+                args=(_try_extract_project, (session_content, cwd), "project"),
                 daemon=True,
+                name=f"memext-proj-{chat_id[:8]}",
             ))
         threads.append(threading.Thread(
-            target=_guarded,
-            args=(_try_extract_global, (session_content, chat_id), f"memext-glob-{chat_id[:8]}"),
+            target=_coordinated,
+            args=(_try_extract_global, (session_content, chat_id), "global"),
             daemon=True,
+            name=f"memext-glob-{chat_id[:8]}",
         ))
         for t in threads:
             t.start()

@@ -441,5 +441,124 @@ class LoadMdBodyCacheTests(unittest.TestCase):
         self.assertIsNone(self.mem._load_md_body(None))
 
 
+# ════════════════════════════════════════════════════════════════════════
+#  #5 — Cascade UNCHANGED short-circuit (S53) + cascade coordinator (S43)
+# ════════════════════════════════════════════════════════════════════════
+
+
+class CascadeShortCircuitTests(unittest.TestCase):
+    """``_should_skip_extract_by_hash`` + ``_try_extract_*`` integration."""
+
+    def test_hash_match_with_close_len_returns_true(self):
+        from larkhelm import memory as mem
+        session = "x" * 500
+        cur_hash = mem._session_hash(session)
+        prev_fm = {
+            "last_extracted_session_hash": cur_hash,
+            "last_extracted_session_len": "500",
+        }
+        self.assertTrue(mem._should_skip_extract_by_hash(prev_fm, session))
+
+    def test_hash_match_far_len_returns_false(self):
+        from larkhelm import memory as mem
+        session = "x" * 500
+        cur_hash = mem._session_hash(session)
+        prev_fm = {
+            "last_extracted_session_hash": cur_hash,
+            "last_extracted_session_len": "100",
+        }
+        self.assertFalse(mem._should_skip_extract_by_hash(prev_fm, session))
+
+    def test_hash_mismatch_returns_false(self):
+        from larkhelm import memory as mem
+        prev_fm = {"last_extracted_session_hash": "deadbeef" + "0" * 8,
+                   "last_extracted_session_len": "500"}
+        self.assertFalse(mem._should_skip_extract_by_hash(prev_fm, "x" * 500))
+
+    def test_missing_fields_returns_false(self):
+        from larkhelm import memory as mem
+        self.assertFalse(mem._should_skip_extract_by_hash({}, "x" * 100))
+        self.assertFalse(mem._should_skip_extract_by_hash(
+            {"last_extracted_session_hash": ""}, "x" * 100))
+
+    def test_short_circuit_skips_one_shot(self):
+        """When the hash matches, ``_try_extract_project`` must return WITHOUT
+        invoking ``_run_one_shot``. This is the central token-saving path."""
+        from larkhelm import memory as mem
+        session = "## Work Context\n" + ("body line\n" * 20)
+        cur_hash = mem._session_hash(session)
+        with patch.object(mem, "_load_md_frontmatter", return_value={
+                "last_extracted_session_hash": cur_hash,
+                "last_extracted_session_len": str(len(session)),
+             }), \
+             patch.object(mem, "_run_one_shot") as run_one_shot:
+            mem._try_extract_project(session, "/tmp/x")
+        run_one_shot.assert_not_called()
+
+    def test_short_circuit_can_be_disabled_by_config(self):
+        from larkhelm import memory as mem
+        session = "## Work Context\nbody"
+        cur_hash = mem._session_hash(session)
+        with patch.dict(_cfg.config, {"memory_cascade_shortcircuit": False}, clear=False):
+            self.assertFalse(mem._should_skip_extract_by_hash({
+                "last_extracted_session_hash": cur_hash,
+                "last_extracted_session_len": str(len(session)),
+            }, session))
+
+
+class CascadeCoordinatorTests(unittest.TestCase):
+    """``_cascade_extract`` cancel-event + BoundedSemaphore semantics."""
+
+    def setUp(self):
+        from larkhelm import memory as mem
+        # Reset coordinator state between tests.
+        with mem._active_cancels_lock:
+            mem._active_cascade_cancels.clear()
+        with mem._CASCADE_SEM_LOCK:
+            mem._CASCADE_SEM = None
+
+    def test_new_cascade_cancels_prior(self):
+        """Submitting a new cascade for the same chat MUST set the prior
+        cascade's cancel event."""
+        from larkhelm import memory as mem
+        prior_ev = __import__("threading").Event()
+        with mem._active_cancels_lock:
+            mem._active_cascade_cancels["chat_x"] = prior_ev
+        with patch("larkhelm.chat_state._get_cwd", return_value=None), \
+             patch.object(mem, "_run_one_shot", return_value="UNCHANGED"):
+            mem._cascade_extract("session content", "chat_x")
+        # Give the spawned cascade a moment to wire up the new event.
+        import time as _t
+        _t.sleep(0.05)
+        self.assertTrue(prior_ev.is_set(),
+                        "prior cancel event must be set when new cascade arrives")
+
+    def test_sem_busy_skips_extract(self):
+        """When the semaphore is exhausted, the worker MUST exit without
+        calling ``_run_one_shot`` (otherwise we'd burst past the configured
+        concurrency cap)."""
+        import threading as _t
+        from larkhelm import memory as mem
+        # Squeeze the sem to 1 for this test.
+        with mem._CASCADE_SEM_LOCK:
+            mem._CASCADE_SEM = _t.BoundedSemaphore(1)
+        # Hold the sole permit ourselves.
+        mem._CASCADE_SEM.acquire()
+        try:
+            with patch("larkhelm.chat_state._get_cwd", return_value=None), \
+                 patch.object(mem, "_load_md_frontmatter", return_value={}), \
+                 patch.object(mem, "_run_one_shot") as run_one_shot:
+                mem._cascade_extract("payload", "chat_y")
+                # Wait long enough for the worker to time out on sem.acquire.
+                import time as _time
+                _time.sleep(1.0)
+            run_one_shot.assert_not_called()
+        finally:
+            try:
+                mem._CASCADE_SEM.release()
+            except ValueError:
+                pass
+
+
 if __name__ == "__main__":
     unittest.main()

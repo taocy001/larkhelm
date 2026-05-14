@@ -36,6 +36,16 @@
   "intent_feedback_path":   "",
   "intent_audit_path":      "",
 
+  "_comment_memory_phase_b": "Phase B memory token-optimization (S49–S53). All flags default to true; flip individually to bisect a token regression without redeploying. memory_session_gc_enabled triggers a daemon that unlinks session_*.md older than memory_session_gc_max_age_days.",
+  "memory_lazy_global":            true,
+  "memory_project_conditional":    true,
+  "memory_session_layered":        true,
+  "memory_recent_turns_dedup":     true,
+  "memory_cascade_shortcircuit":   true,
+  "memory_cascade_max_concurrent": 4,
+  "memory_session_gc_enabled":     true,
+  "memory_session_gc_max_age_days": 7,
+
   "_comment_probe_models": "Optional. If omitted, installed CLIs are auto-discovered from PATH (no model pinning or capabilities). Uncomment and customize to pin models and enable orchestrator routing hints.",
   "probe_models": [
     {

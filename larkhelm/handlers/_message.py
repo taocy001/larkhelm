@@ -457,79 +457,10 @@ def handle_message(data: P2ImMessageReceiveV1):
         _mid = message.message_id
 
         from larkhelm.commands import (
-            _cmd_reset, _cmd_status, _cmd_help, _cmd_pickup, _cmd_history,
-            _cmd_stats, _cmd_cron, _cmd_cd, _cmd_pwd, _cmd_ls, _cmd_run,
-            _cmd_model, _cmd_lock, _cmd_cli_native, _cmd_btw, _cmd_upgrade, _cmd_memory,
-            _cmd_voice, _strip_at_mention,
+            _cmd_btw, _cmd_cli_native, _strip_at_mention,
         )
-        from larkhelm.cmd_doc import _cmd_doc
 
-        if tl == "/reset":
-            _cmd_reset(chat_id, None, _mid); return
-        if tl == "/reset claude":
-            _cmd_reset(chat_id, "claude", _mid); return
-        if tl == "/reset gemini":
-            _cmd_reset(chat_id, "gemini", _mid); return
-        if tl == "/reset kimi":
-            _cmd_reset(chat_id, "kimi", _mid); return
-        if tl == "/reset deepseek":
-            _cmd_reset(chat_id, "deepseek", _mid); return
-        if tl in ("/reset permissions", "/reset perm"):
-            _cmd_reset(chat_id, "perm", _mid); return
-        if tl == "/reset memory":
-            _cmd_reset(chat_id, "memory", _mid); return
-        if tl == "/status":
-            _cmd_status(chat_id, _mid); return
-        if tl == "/help":
-            _cmd_help(chat_id, _mid); return
-        if tl == "/pickup":
-            _cmd_pickup(chat_id, _mid); return
-        if tl == "/history":
-            _cmd_history(chat_id, msg_id=_mid); return
-        if tl == "/history all":
-            _cmd_history(chat_id, show_all=True, msg_id=_mid); return
-        if tl == "/upgrade":
-            _cmd_upgrade(chat_id, _mid); return
-        if tl == "/stats":
-            _cmd_stats(chat_id, _mid); return
-        if tl.startswith("/stats "):
-            _cmd_stats(chat_id, _mid, args=text[7:].strip()); return
-        if tl == "/memory" or tl.startswith("/memory "):
-            _cmd_memory(chat_id, text[7:].strip(), _mid); return
-        if tl.startswith("/doc"):
-            _cmd_doc(chat_id, text[4:].strip()); return
-        if tl.startswith("/cron"):
-            _cmd_cron(chat_id, text[5:].strip(), _mid); return
-        if tl.startswith("/crew"):
-            from larkhelm.crew import cmd_crew
-            def _crew_target(*a):
-                try:
-                    cmd_crew(*a)
-                except Exception as _e:
-                    _thread_error_card(a[0], "Crew", _e)
-            threading.Thread(target=_crew_target, args=(chat_id, text[5:].strip(), message.message_id),
-                             daemon=True, name=f"crew-{chat_id[:8]}").start()
-            return
-        if tl == "/dev" or tl.startswith("/dev "):
-            from larkhelm.crew import cmd_dev
-            def _dev_target(*a):
-                try:
-                    cmd_dev(*a)
-                except Exception as _e:
-                    _thread_error_card(a[0], "Dev", _e)
-            threading.Thread(target=_dev_target, args=(chat_id, text[5:].strip(), message.message_id),
-                             daemon=True, name=f"dev-{chat_id[:8]}").start()
-            return
-        if tl.startswith("/plan"):
-            from larkhelm.cmd_plan import cmd_plan
-            def _plan_target(*a):
-                try:
-                    cmd_plan(*a)
-                except Exception as _e:
-                    _thread_error_card(a[0], "Plan", _e)
-            threading.Thread(target=_plan_target, args=(chat_id, text[5:].strip(), message.message_id),
-                             daemon=True, name=f"plan-{chat_id[:8]}").start()
-            return
+        # ── /cancel — touches per-chat lock + cancel-event; not registry-able ──
         if tl == "/cancel":
             chat_lock = _get_chat_lock(chat_id)
             is_running = not chat_lock.acquire(blocking=False)
@@ -547,45 +478,17 @@ def handle_message(data: P2ImMessageReceiveV1):
                     body += f"\n排队消息「{pending[0][:40]}」已取消。"
             send_card_reply(chat_id, _mid, "🛑 已取消", body, color="orange")
             return
-        if tl == "/pwd":
-            _cmd_pwd(chat_id, _mid); return
-        if tl == "/cd":
-            send_card_reply(
-                chat_id, _mid, "⚠️ 用法",
-                "`/cd <path>` — 切换工作目录",
-                color="orange",
-            )
+
+        # ── Registry-driven dispatch (S1+S7) ──
+        # Covers /reset, /status, /help, /pickup, /upgrade, /history, /stats,
+        # /memory, /doc, /cron, /crew, /dev, /plan, /pwd, /cd, /ls, /run,
+        # /model (+ /lock alias), /voice. See command_registry._default_registrations.
+        from larkhelm.command_registry import COMMAND_REGISTRY, DispatchContext
+        _dctx = DispatchContext(chat_id=chat_id, msg_id=_mid, text=text, tl=tl)
+        if COMMAND_REGISTRY.dispatch(_dctx) == "handled":
             return
-        if tl.startswith("/cd "):
-            _cmd_cd(chat_id, text[4:].strip(), _mid); return
-        if tl.startswith("/ls"):
-            _cmd_ls(chat_id, text[3:].strip(), _mid); return
-        if tl == "/run":
-            send_card_reply(
-                chat_id, _mid, "⚠️ 用法",
-                "`/run <command>` — 执行 shell 命令（30s 超时）",
-                color="orange",
-            )
-            return
-        if tl.startswith("/run "):
-            threading.Thread(target=_cmd_run, args=(chat_id, text[5:].strip(), _mid),
-                             daemon=True).start()
-            return
-        if tl == "/model" or tl.startswith("/model "):
-            parts = text.split(None, 1)
-            arg = parts[1].strip() if len(parts) == 2 else ""
-            _cmd_lock(chat_id, arg, _mid)
-            return
-        if tl == "/lock" or tl.startswith("/lock "):
-            parts = text.split(None, 1)
-            arg = parts[1].strip() if len(parts) == 2 else ""
-            _cmd_lock(chat_id, arg, _mid)
-            return
-        if tl == "/voice" or tl.startswith("/voice "):
-            parts = text.split(None, 1)
-            arg = parts[1].strip() if len(parts) == 2 else ""
-            _cmd_voice(chat_id, arg, _mid)
-            return
+
+        # ── /rename — chat_state mutator; not registry-able ──
         if tl.startswith("/rename "):
             import re as _re
             name = text[8:].strip()

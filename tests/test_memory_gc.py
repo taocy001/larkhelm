@@ -341,5 +341,102 @@ class TestMemoryGcDispatcher(unittest.TestCase):
         self.assertIn("**2**", body)  # n_deleted
 
 
+# ── 3. larkhelm.memory_gc — session GC daemon (Phase B / S3) ──────────
+
+
+class TestSessionMemoryGCRunner(_GCBaseTestCase):
+    """Coverage for ``larkhelm.memory_gc.MemoryGCRunner.run_once``."""
+
+    def _seed_session(self, name: str, age_days: float = 0) -> Path:
+        p = self.tmp_dir / name
+        p.write_text("---\nupdated_at: x\n---\nbody", encoding="utf-8")
+        if age_days > 0:
+            old = time.time() - age_days * 86400
+            os.utime(p, (old, old))
+        return p
+
+    def test_run_once_deletes_old_session_files(self):
+        from larkhelm import memory_gc
+        # 2 old, 2 fresh
+        old_a = self._seed_session("session_a.md", age_days=10)
+        old_b = self._seed_session("session_b.md", age_days=20)
+        new_a = self._seed_session("session_c.md", age_days=0)
+        new_b = self._seed_session("session_d.md", age_days=2)
+        runner = memory_gc.MemoryGCRunner(max_age_days=7)
+        scanned, deleted = runner.run_once()
+        self.assertEqual(scanned, 4)
+        self.assertEqual(deleted, 2)
+        self.assertFalse(old_a.exists())
+        self.assertFalse(old_b.exists())
+        self.assertTrue(new_a.exists())
+        self.assertTrue(new_b.exists())
+
+    def test_run_once_ignores_non_session_files(self):
+        from larkhelm import memory_gc
+        # Even if mtime is far in the past, project_/global_ files must be left alone.
+        proj = self.tmp_dir / "project_xyz.md"
+        proj.write_text("body", encoding="utf-8")
+        glob = self.tmp_dir / "global_user.md"
+        glob.write_text("body", encoding="utf-8")
+        old = time.time() - 30 * 86400
+        os.utime(proj, (old, old))
+        os.utime(glob, (old, old))
+        runner = memory_gc.MemoryGCRunner(max_age_days=7)
+        scanned, deleted = runner.run_once()
+        self.assertEqual(scanned, 0,
+                         "non-session_*.md files must never enter the GC scan")
+        self.assertEqual(deleted, 0)
+        self.assertTrue(proj.exists())
+        self.assertTrue(glob.exists())
+
+    def test_age_boundary_inclusive_keep(self):
+        """A file aged just under the threshold MUST survive."""
+        from larkhelm import memory_gc
+        # Use a fractional offset to avoid mtime-resolution flakiness.
+        survivor = self._seed_session("session_just_inside.md", age_days=6.9)
+        runner = memory_gc.MemoryGCRunner(max_age_days=7)
+        runner.run_once()
+        self.assertTrue(survivor.exists())
+
+    def test_run_once_handles_missing_home(self):
+        """If the memory home dir doesn't exist, run_once returns (0, 0)
+        without raising."""
+        from larkhelm import memory_gc
+        from larkhelm import memory as mem
+        with patch.object(mem, "MEMORY_HOME_DIR", self.tmp_dir / "nope"):
+            runner = memory_gc.MemoryGCRunner(max_age_days=7)
+            scanned, deleted = runner.run_once()
+        self.assertEqual((scanned, deleted), (0, 0))
+
+
+class TestStartMemoryGCThread(unittest.TestCase):
+    """``start_memory_gc_thread`` test-mode + config gating."""
+
+    def test_test_mode_skips_thread_start(self):
+        """LARKHELM_TEST_MODE prevents the daemon from being spawned."""
+        from larkhelm import memory_gc as mg
+        with patch.dict(os.environ, {"LARKHELM_TEST_MODE": "1"}, clear=False), \
+             patch("threading.Thread") as ThreadCls:
+            mg.start_memory_gc_thread()
+        ThreadCls.assert_not_called()
+
+    def test_config_disabled_skips_thread_start(self):
+        from larkhelm import memory_gc as mg
+        from larkhelm import config as _cfg
+        # Bootstrap config if a prior test didn't already.
+        if getattr(_cfg, "config", None) is None:
+            import json as _json
+            import tempfile as _tempfile
+            cfg_dir = _tempfile.mkdtemp(prefix="larkhelm_gc_cfg_")
+            cfg_path = Path(cfg_dir) / "config.json"
+            cfg_path.write_text(_json.dumps({"APP_ID": "x", "APP_SECRET": "x"}))
+            _cfg._init_runtime(config_path=str(cfg_path), data_dir=cfg_dir)
+        with patch.dict(os.environ, {"LARKHELM_TEST_MODE": ""}, clear=False), \
+             patch.dict(_cfg.config, {"memory_session_gc_enabled": False}, clear=False), \
+             patch("threading.Thread") as ThreadCls:
+            mg.start_memory_gc_thread()
+        ThreadCls.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
