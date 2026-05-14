@@ -95,7 +95,11 @@ def _load_model() -> Optional[object]:
         try:
             from faster_whisper import WhisperModel  # lazy import boundary
         except Exception as e:
-            _disable_voice(f"import faster_whisper failed: {e}")
+            _disable_voice(
+                f"import faster_whisper failed: {e}. "
+                f"Install with: pipx runpip larkhelm install faster-whisper "
+                f"(or reinstall larkhelm with: pipx install -e '.[voice-local]')"
+            )
             return None
         try:
             model = WhisperModel(

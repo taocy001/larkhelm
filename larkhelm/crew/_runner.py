@@ -246,14 +246,25 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
         )
         full_prompt = _resume_prefix + full_prompt
 
-    # Resolve memory context for this agent (B1/B6):
+    # Resolve memory context for this agent (B1/B6 + Phase B S44 unification):
     # API backends receive it as extra_system; CLI backends get a [System] prefix.
     # hermes orchestrators have their own context and don't need memory injection.
+    #
+    # Phase B unifies crew agents with /chat and /plan: all three now call
+    # ``get_memory_context`` (global + project + session). Previously crew
+    # agents called ``get_project_memory_context`` which dropped the global
+    # layer, hiding user-level preferences (style / language) from sub-agents
+    # — a frequent source of "agent ignored my preferences" reports.
+    # Per-layer S49–S52 budget logic in ``MemoryContextBuilder`` keeps the
+    # token footprint bounded; passing ``full_prompt`` as the gating query
+    # lets ``should_include_*`` make keyword-aware decisions.
     _crew_mem_ctx = ""
     if not spec.model.startswith("hermes_"):
         try:
-            from larkhelm.memory import get_project_memory_context
-            _crew_mem_ctx = get_project_memory_context(state.chat_id, cwd=str(cwd))
+            from larkhelm.memory import get_memory_context_v2
+            _crew_mem_ctx, _ = get_memory_context_v2(
+                state.chat_id, cwd=str(cwd), query=full_prompt,
+            )
         except Exception as e:
             _debug_log(f"[Crew] memory load failed: {e}")
 

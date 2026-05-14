@@ -56,7 +56,7 @@ def _cmd_doc(chat_id: str, args: str):
 
 def _cmd_doc_setfolder(chat_id: str, url: str):
     """/doc setfolder <url> — Set the default storage folder for crew/dev documents."""
-    from larkhelm.lark_client import parse_doc_url, DocError
+    from larkhelm.lark_client import parse_doc_url, explain_doc_url_failure
     if not url:
         send_card(chat_id, "❌ 缺少参数",
                   "用法：`/doc setfolder <飞书云盘文件夹链接>`\n\n"
@@ -67,10 +67,9 @@ def _cmd_doc_setfolder(chat_id: str, url: str):
         _cfg.save_config_field("default_drive_folder", "")
         send_card(chat_id, "✅ 已清空", "默认文件夹设置已清除。", color="green")
         return
-    try:
-        ref = parse_doc_url(url)
-    except (DocError, Exception) as e:
-        send_card(chat_id, "❌ 链接解析失败", str(e), color="red")
+    ref = parse_doc_url(url)
+    if ref is None:
+        send_card(chat_id, "❌ 链接解析失败", explain_doc_url_failure(url), color="red")
         return
 
     if ref.doc_type != "folder":
@@ -91,7 +90,7 @@ def _cmd_doc_setfolder(chat_id: str, url: str):
 def _cmd_doc_read(chat_id: str, url: str):
     """/doc read <url>"""
     from larkhelm.lark_client import (
-        FeishuDocClient, parse_doc_url,
+        FeishuDocClient, parse_doc_url, explain_doc_url_failure,
         DocError, DocNotFoundError, DocPermissionError, DocAPIError,
     )
     if not url:
@@ -99,7 +98,9 @@ def _cmd_doc_read(chat_id: str, url: str):
         return
     ref = parse_doc_url(url)
     if ref is None:
-        send_card(chat_id, "⚠️ 无法识别", "不是有效的飞书文档链接。\n\n" + _DOC_HELP, color="orange")
+        send_card(chat_id, "⚠️ 无法识别",
+                  explain_doc_url_failure(url) + "\n\n" + _DOC_HELP,
+                  color="orange")
         return
     try:
         result = FeishuDocClient().read(ref, max_chars=_cfg.DOC_READ_MAX_CHARS)
@@ -122,7 +123,7 @@ def _cmd_doc_read(chat_id: str, url: str):
 def _cmd_doc_append(chat_id: str, rest: str):
     """/doc append <url> <content>"""
     from larkhelm.lark_client import (
-        FeishuDocClient, parse_doc_url,
+        FeishuDocClient, parse_doc_url, explain_doc_url_failure,
         DocError, DocNotFoundError, DocPermissionError,
         DocWriteNotSupportedError, DocAPIError,
     )
@@ -134,7 +135,7 @@ def _cmd_doc_append(chat_id: str, rest: str):
     url, content = parts[0], parts[1]
     ref = parse_doc_url(url)
     if ref is None:
-        send_card(chat_id, "⚠️ 无法识别", "不是有效的飞书文档链接。", color="orange")
+        send_card(chat_id, "⚠️ 无法识别", explain_doc_url_failure(url), color="orange")
         return
     doc_client = FeishuDocClient()
     try:
@@ -167,7 +168,7 @@ def _cmd_doc_append(chat_id: str, rest: str):
 
 def _cmd_doc_write(chat_id: str, rest: str):
     """/doc write <url> <content> — Send a confirmation card first and stash the content."""
-    from larkhelm.lark_client import parse_doc_url
+    from larkhelm.lark_client import parse_doc_url, explain_doc_url_failure
     parts = rest.split(maxsplit=1)
     if len(parts) < 2:
         send_card(chat_id, "⚠️ 用法", "`/doc write <url> <内容>`", color="orange")
@@ -175,7 +176,7 @@ def _cmd_doc_write(chat_id: str, rest: str):
     url, content = parts[0], parts[1]
     ref = parse_doc_url(url)
     if ref is None:
-        send_card(chat_id, "⚠️ 无法识别", "不是有效的飞书文档链接。", color="orange")
+        send_card(chat_id, "⚠️ 无法识别", explain_doc_url_failure(url), color="orange")
         return
     if _cfg.DOC_WRITE_CONFIRM:
         set_pending_doc_write(chat_id, url, content, ref)
@@ -233,14 +234,19 @@ def _cmd_doc_write_do(chat_id: str):
 def _cmd_doc_ls(chat_id: str, url: str):
     """/doc ls [url]"""
     from larkhelm.lark_client import (
-        FeishuDocClient, parse_doc_url,
+        FeishuDocClient, parse_doc_url, explain_doc_url_failure,
         DocError, DocPermissionError, DocAPIError,
     )
     if url:
         ref = parse_doc_url(url)
-        if ref is None or ref.doc_type != "folder":
-            send_card(chat_id, "⚠️ 无法识别",
-                      "请提供云盘文件夹链接（`feishu.cn/drive/folder/...`）。", color="orange")
+        if ref is None:
+            send_card(chat_id, "⚠️ 无法识别", explain_doc_url_failure(url), color="orange")
+            return
+        if ref.doc_type != "folder":
+            send_card(chat_id, "⚠️ 类型不符",
+                      f"识别到的类型为 `{ref.doc_type}`，但 `/doc ls` 需要**云盘文件夹**链接\n"
+                      f"（形如 `https://xxx.feishu.cn/drive/folder/xxxxx`）。",
+                      color="orange")
             return
         folder_token = ref.token
     else:
@@ -275,7 +281,7 @@ def _cmd_doc_ls(chat_id: str, url: str):
 def _cmd_doc_create(chat_id: str, rest: str):
     """/doc create <title> [folder_or_wiki_url]"""
     from larkhelm.lark_client import (
-        FeishuDocClient, parse_doc_url,
+        FeishuDocClient, parse_doc_url, explain_doc_url_failure,
         DocError, DocNotFoundError, DocPermissionError, DocAPIError,
     )
     parts = rest.split(maxsplit=1)
@@ -299,7 +305,7 @@ def _cmd_doc_create(chat_id: str, rest: str):
     if url:
         ref = parse_doc_url(url)
         if ref is None:
-            send_card(chat_id, "⚠️ 无法识别", "不是有效的飞书链接。", color="orange")
+            send_card(chat_id, "⚠️ 无法识别", explain_doc_url_failure(url), color="orange")
             return
         if ref.doc_type == "folder":
             folder_token = ref.token

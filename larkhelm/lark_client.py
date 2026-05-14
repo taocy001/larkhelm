@@ -782,6 +782,33 @@ def parse_doc_url(url: str) -> "DocRef":
     return None
 
 
+def explain_doc_url_failure(url: str) -> str:
+    """Return a human-readable hint explaining why ``url`` failed to parse.
+
+    Distinguishes the common user mistakes: empty input, non-feishu host,
+    Feishu host but unsupported path (e.g. ``/space/``, ``/calendar/``),
+    or feishu URL with an empty / malformed token. Always returns a
+    non-empty string suitable for Feishu card body text.
+    """
+    if not url or not url.strip():
+        return "URL 为空。请粘贴完整的飞书文档链接（含 `https://`）。"
+    u = url.strip()
+    if "feishu.cn" not in u and "larksuite.com" not in u:
+        return (
+            f"识别不到飞书域名（feishu.cn / larksuite.com）。\n"
+            f"收到的输入：`{u[:80]}{'…' if len(u) > 80 else ''}`\n"
+            f"请确认你复制的是飞书文档的浏览器地址栏链接。"
+        )
+    # Feishu host but no matching pattern → tell user which path types we support.
+    return (
+        f"飞书链接但路径不是支持的类型。\n"
+        f"收到：`{u[:80]}{'…' if len(u) > 80 else ''}`\n\n"
+        f"**支持的路径**：`/docx/...` · `/docs/...` · `/wiki/...` · "
+        f"`/sheets/...` · `/drive/folder/...`\n"
+        f"**不支持**：日历、邮箱、表单、应用主页、企业空间首页等。"
+    )
+
+
 class FeishuDocClient:
     """Feishu document read/write client. Reuses the module-level global client."""
 

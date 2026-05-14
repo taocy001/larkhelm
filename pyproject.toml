@@ -13,7 +13,6 @@ dependencies = [
     "lark-oapi>=1.0,<2",
     "croniter>=1.3",
     "mcp>=1.0",
-    "faster-whisper>=1.2",
 ]
 
 [project.scripts]
@@ -33,6 +32,15 @@ api-backends = [
     "anthropic>=0.30",
     "google-genai>=0.8",
     "openai>=1.30",
+]
+voice-local = [
+    # faster-whisper — local CPU/GPU STT engine. Pulls ~250MB of torch/ctranslate2;
+    # install only if you set voice_engine="faster-whisper" (or voice_enabled=true
+    # without overriding the engine, since faster-whisper is the default engine):
+    #   pipx install -e ".[voice-local]"
+    # Or, post-install:
+    #   pipx runpip larkhelm install faster-whisper
+    "faster-whisper>=1.2",
 ]
 voice-cloud = [
     # DashScope (Aliyun) Paraformer ASR — opt-in cloud STT engine.

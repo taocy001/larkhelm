@@ -176,7 +176,11 @@ def run_benchmark(model_size: str = "small") -> tuple[bool, dict[str, Any]]:
     try:
         from faster_whisper import WhisperModel
     except ImportError as e:
-        info["error"] = f"faster-whisper not installed: {e}"
+        info["error"] = (
+            f"faster-whisper not installed: {e}. "
+            f"Install with: pipx runpip larkhelm install faster-whisper "
+            f"(or reinstall larkhelm with: pipx install -e '.[voice-local]')"
+        )
         return False, info
 
     tmpdir = Path("/tmp/larkhelm_voice_probe")

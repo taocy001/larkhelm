@@ -137,7 +137,9 @@ cd larkhelm
 
 LarkHelm 支持将飞书语音消息转写为文字，转写结果作为普通查询发送给 AI。提供两个引擎，**根据机器实力选择**：
 
-* **`faster_whisper`**（默认，本地，免费）— 基于 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) 的 CTranslate2 推理。需要 CPU 有 AVX/AVX2 + 至少 1.5 GB 可用内存。无月费。
+* **`faster_whisper`**（默认引擎，本地，免费）— 基于 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) 的 CTranslate2 推理。需要 CPU 有 AVX/AVX2 + 至少 1.5 GB 可用内存。无月费。**自 v0.7 起 faster-whisper 不再随主包安装**（避免给纯文本部署拉 ~250 MB 的 torch 依赖）；通过下面任一方式按需安装：
+  * 安装时带 extra：`pipx install -e '.[voice-local]'`
+  * 已装 larkhelm 后追加：`pipx runpip larkhelm install faster-whisper`
 * **`dashscope`**（云 API，opt-in，**付费**）— 阿里云 [Paraformer](https://www.aliyun.com/product/bailian) ASR。中文 CER ~2.8%，0.288 元/小时（百炼版）。无 ffmpeg 依赖、无模型下载。**用户必须显式开启**才会调用——absent opt-in，bridge 永远不会调用 DashScope，不会产生任何费用。
 
 #### 一键 probe：自动决定能不能跑本地
