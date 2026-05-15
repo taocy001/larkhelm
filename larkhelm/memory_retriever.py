@@ -756,11 +756,13 @@ class EmbeddingRetriever:
         for sl in pool:
             try:
                 s_vec = self.cache.get_or_compute(sl.id, sl.body, self.backend)
-            except Exception as e:
+            except Exception:
                 # Bubble up — caller distinguishes EmbeddingError from
                 # other failures (HybridRetriever fails open, EmbeddingRetriever
                 # propagates so MemoryContextBuilder can fail-open keyword).
-                raise e
+                # Bare ``raise`` preserves the original traceback frame
+                # (NIT-02 — was ``raise e`` which drops one frame).
+                raise
             sim = max(0.0, cosine_similarity(q_vec, s_vec))
             rec = _recency_score(sl, now)
             imp = max(0.0, min(1.0, float(sl.importance or 0.0)))
@@ -865,40 +867,47 @@ class HybridRetriever:
                 )
                 top_k = int(policy.top_k or 6)
                 return keyword_scored[:top_k]
-            # Note: keyword_scored may already carry a stale-decayed
-            # ``relevance_score``. We undo the decay locally so the fusion
-            # math operates on the raw BM25 norm, then re-apply once at the
-            # end. Without this a stale slice would be discounted twice.
+            # Stale-decay accounting — read this carefully (NIT-04 follow-up):
+            #
+            # KeywordRetriever has *already* multiplied ``item.relevance_score``
+            # by ``decay`` (typically 0.5) for stale slices, so we receive a
+            # pre-decayed BM25 norm. If we just fuse that with the cosine
+            # similarity directly, the BM25 contribution gets decayed once
+            # (already-done) AND the final ``score`` would get decayed a
+            # second time when we apply the stale-decay tail below — net 0.25×
+            # instead of the intended 0.5×.
+            #
+            # The clean fix: undo the keyword-side decay → fuse on RAW values →
+            # re-apply ONE decay to the fused score at the end. Same observable
+            # effect as a "stale flag + decay-at-the-edge" architecture, but
+            # without forcing KeywordRetriever to expose extra fields.
+            is_stale = sl.stale and decay < 1.0   # decay==1 means feature off
             raw_kw_relevance = item.relevance_score
-            if sl.stale and decay > 0:
-                raw_kw_relevance = item.relevance_score / decay if decay != 0 else 0.0
+            if is_stale and decay > 0:
+                raw_kw_relevance = item.relevance_score / decay
             fused_relevance = alpha * sim + (1.0 - alpha) * raw_kw_relevance
             # Recompute total score with policy alphas on the fused relevance,
             # using the same recency/importance components keyword path emitted.
-            score = (
+            score_raw = (
                 float(policy.alpha_recency) * item.recency_score
                 + float(policy.alpha_importance) * item.importance_score
                 + float(policy.alpha_relevance) * fused_relevance
             )
+            # Apply stale-decay exactly once, at the boundary (mirrors what
+            # KeywordRetriever-only path does to its score).
+            final_score = score_raw * decay if is_stale else score_raw
+            final_relevance = fused_relevance * decay if is_stale else fused_relevance
             reason = f"hybrid α={alpha:.2f},cos={sim:.2f},bm25={raw_kw_relevance:.2f}"
-            new_item = ScoredSlice(
+            if is_stale:
+                reason += ",stale"
+            fused.append(ScoredSlice(
                 slice=sl,
-                score=score,
+                score=final_score,
                 recency_score=item.recency_score,
                 importance_score=item.importance_score,
-                relevance_score=fused_relevance,
+                relevance_score=final_relevance,
                 reason=reason,
-            )
-            if sl.stale and decay < 1.0:
-                new_item = ScoredSlice(
-                    slice=sl,
-                    score=new_item.score * decay,
-                    recency_score=item.recency_score,
-                    importance_score=item.importance_score,
-                    relevance_score=fused_relevance * decay,
-                    reason=reason + ",stale",
-                )
-            fused.append(new_item)
+            ))
 
         fused.sort(key=lambda x: x.score, reverse=True)
         top_k = int(policy.top_k or 6)
@@ -951,8 +960,9 @@ def resolve_actual_mode(
             if traffic >= 1.0:
                 active = True
             elif traffic > 0.0:
-                import hashlib as _hl
-                digest = _hl.md5(str(chat_id).encode("utf-8")).hexdigest()
+                # hashlib is imported at module top (line 26); no local
+                # alias needed — review NIT-01 cleanup.
+                digest = hashlib.md5(str(chat_id).encode("utf-8")).hexdigest()
                 bucket = int(digest[:8], 16) % 10000
                 active = bucket < int(traffic * 10000)
             if active:

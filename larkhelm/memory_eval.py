@@ -73,7 +73,10 @@ def score_against_golden(golden_path: Path) -> dict:
     try:
         from larkhelm.memory_embedding import get_embedding_backend
     except Exception:
-        get_embedding_backend = lambda _cfg=None: None  # type: ignore[misc]
+        # NIT-03: avoid the ``_cfg`` parameter name — project-wide convention
+        # is ``import larkhelm.config as _cfg``, so this shadowing was a
+        # readability trap. ``_config`` is unambiguous.
+        get_embedding_backend = lambda _config=None: None  # type: ignore[misc]
 
     n = 0
     parse_errors = 0
