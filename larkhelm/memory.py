@@ -660,19 +660,37 @@ def get_memory_context_v2(
     query: str = "",
     recent_turns: list[str] | None = None,
     has_doc_urls: bool = False,
+    intent=None,
 ) -> tuple[str, list[str]]:
     """Build memory context AND return deduped recent turns in one pass.
 
     Returns ``(composed_memory, deduped_recent_turns)``. ``recent_turns`` is
     deduped against the *raw* session body (so dedup remains correct even
     when the session view is sliced down by ``memory_session_layered``).
-    """
+
+    Phase D — ``intent``: when an :class:`IntentResult`-shaped object is
+    supplied, its ``agent_type`` / ``sub_intent`` / ``complexity`` /
+    ``confidence`` fields are forwarded to the builder so the retriever
+    path (gated by ``memory_retriever_enabled``) can apply per-agent
+    policy. When ``intent is None`` the call is byte-equivalent to the
+    legacy v2 signature; this is duck-typed so third-party plugins can
+    pass any namespace object exposing the four fields."""
     from larkhelm.memory_context import MemoryContextBuilder
-    builder = MemoryContextBuilder(
-        chat_id, cwd,
+
+    builder_kwargs: dict = dict(
         query=query, recent_turns=recent_turns,
         has_doc_urls=has_doc_urls,
     )
+    if intent is not None:
+        builder_kwargs["agent_type"] = getattr(intent, "agent_type", "chat") or "chat"
+        builder_kwargs["sub_intent"] = getattr(intent, "sub_intent", "") or ""
+        builder_kwargs["complexity"] = getattr(intent, "complexity", "medium") or "medium"
+        try:
+            builder_kwargs["confidence"] = float(getattr(intent, "confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            builder_kwargs["confidence"] = 0.0
+
+    builder = MemoryContextBuilder(chat_id, cwd, **builder_kwargs)
     composed = builder.build()
     session_raw = load_memory(chat_id) or ""
     deduped = builder.deduped_recent_turns(session_raw)

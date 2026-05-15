@@ -66,24 +66,16 @@ def _thread_error_card(chat_id: str, label: str, exc: Exception) -> None:
 def _intent_router_active(chat_id: str) -> bool:
     """Return True iff the phase-5 intent router should run for this chat.
 
-    Two gates: ``intent_router_enabled`` flag + a deterministic chat_id hash
-    against ``intent_router_traffic`` ∈ [0, 1]. Same chat always takes the
-    same path so A/B comparison stays clean.
+    Delegates to the shared ``_gating.hash_traffic_active`` helper so that
+    ``intent_router_traffic`` and ``memory_retriever_traffic`` bucket the
+    same chat_id identically (AC-05 / NFR-DEPLOY-1). The helper short-
+    circuits on flag=False without importing agent_hub so AC-10 still
+    holds.
     """
-    cfg = getattr(_cfg, "config", {}) or {}
-    if not cfg.get("intent_router_enabled", False):
-        return False
-    try:
-        traffic = float(cfg.get("intent_router_traffic", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        return False
-    if traffic <= 0.0:
-        return False
-    if traffic >= 1.0:
-        return True
-    import hashlib
-    h = hashlib.md5(chat_id.encode("utf-8")).hexdigest()
-    return (int(h, 16) / float(1 << 128)) < traffic
+    from larkhelm._gating import hash_traffic_active
+    return hash_traffic_active(
+        chat_id, "intent_router_enabled", "intent_router_traffic",
+    )
 
 
 def handle_reaction_created(data: P2ImMessageReactionCreatedV1):
@@ -480,6 +472,18 @@ def handle_message(data: P2ImMessageReceiveV1):
             send_card_reply(chat_id, _mid, "🛑 已取消", body, color="orange")
             return
 
+        # ── /memory diagnose [N] (Phase D / Phase 2 REQ-38) ──
+        # Handled here (ahead of the registry) so the prefix-match on /memory
+        # in command_registry doesn't double-dispatch. The body of the handler
+        # lives in larkhelm.commands so test_memory_diagnose_cmd can import it
+        # directly without spinning up the message router.
+        if tl.startswith("/memory diagnose"):
+            from larkhelm.commands import _cmd_memory_diagnose
+            _cmd_memory_diagnose(
+                chat_id, text[len("/memory diagnose"):].strip(), msg_id=_mid,
+            )
+            return
+
         # ── Registry-driven dispatch (S1+S7) ──
         # Covers /reset, /status, /help, /pickup, /upgrade, /history, /stats,
         # /memory, /doc, /cron, /crew, /dev, /plan, /pwd, /cd, /ls, /run,
@@ -535,6 +539,20 @@ def handle_message(data: P2ImMessageReceiveV1):
                 except Exception as _ex:
                     _debug_log(f"[IntentRouter] resolve_intent failed: {_ex}")
                     intent = None
+                # Phase D: stash the resolved IntentResult on this chat so
+                # the chat-agent fall-through (which exits this block without
+                # calling AgentDispatcher) can pick it up inside _do_query and
+                # forward to get_memory_context_v2(intent=...).
+                # Restrict to agent_type == "chat" so dev/crew/plan/doc
+                # intents (which go straight to AgentDispatcher and never
+                # reach _do_query) don't leak into the *next* chat turn —
+                # crew/dev paths synthesize their own IntentResult anyway.
+                if intent is not None and intent.agent_type == "chat":
+                    try:
+                        from larkhelm.chat_state import _set_pending_intent
+                        _set_pending_intent(chat_id, intent)
+                    except Exception as _ex:
+                        _debug_log(f"[IntentRouter] _set_pending_intent failed: {_ex}")
                 if intent is not None and intent.agent_type != "chat":
                     # Mirror the legacy path's _reset_cancel: a stale chat-level
                     # cancel from the previous /cancel must be cleared, otherwise

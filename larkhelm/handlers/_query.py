@@ -587,12 +587,26 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             except Exception as _hist_err:
                 _debug_log(f"[{trace_id}][DoQuery] rolling history error: {_hist_err}")
 
+            # Phase D: lift any IntentResult that _message.py staged before
+            # falling through to _do_query so memory injection can use the
+            # per-agent policy. Wrapped in try/except + None fallback so the
+            # default v2 behaviour holds when intent_router_enabled is off
+            # (or the chat_state import races during early bootstrap).
+            _pending_intent = None
+            try:
+                from larkhelm.chat_state import _pop_pending_intent
+                _pending_intent = _pop_pending_intent(chat_id)
+            except Exception as _pi_err:
+                _debug_log(f"[{trace_id}][DoQuery] _pop_pending_intent error: {_pi_err}")
+                _pending_intent = None
+
             try:
                 from larkhelm.memory import get_memory_context_v2, maybe_auto_update
                 memory_ctx, deduped_recent = get_memory_context_v2(
                     chat_id, cwd=cwd, query=message,
                     recent_turns=recent_turns_list,
                     has_doc_urls=has_doc_urls,
+                    intent=_pending_intent,
                 )
             except Exception as _mem_err:
                 _debug_log(f"[{trace_id}][DoQuery] memory context error: {_mem_err}")

@@ -1,0 +1,5 @@
+{"query": "如何修复 OOM 错误", "expected_slice_titles": ["OOM 双层防护"], "chat_id": "eval", "agent_type": "dev"}
+{"query": "memory retriever architecture", "expected_slice_titles": ["三级记忆系统"], "chat_id": "eval", "agent_type": "chat"}
+{"query": "drive folder", "expected_slice_titles": ["Architecture"], "chat_id": "eval", "agent_type": "dev"}
+{"query": "Crew 断点机制", "expected_slice_titles": ["Crew 断点机制（Human-in-the-Loop）"], "chat_id": "eval", "agent_type": "crew"}
+{"query": "feishu doc auto inject", "expected_slice_titles": ["飞书文档自动注入（Auto Doc Context Injection）"], "chat_id": "eval", "agent_type": "doc"}

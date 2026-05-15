@@ -365,6 +365,56 @@ AgentSpec(
 推送 ⚠️ 卡片，提示用户检查 `/status`。**不会**重试 — 这是 config / 健康问题，
 不是瞬时失败。
 
+### Phase D · Phase 2 召回栈
+
+Phase 2 引入 **embedding + hybrid 召回**、**stale slice 软删除**、**审计 v2 schema**
+与 `/memory diagnose` 飞书命令；默认全关，灰度默认 0%（与 Phase 1 完全
+byte-compatible，AC-01）。`memory_retriever_enabled` + `memory_retriever_traffic`
+是 **Stage A**（Phase 1 / Phase 2 共享）；`embedding_enabled` + `embedding_traffic`
+是 **Stage B**（仅 Phase 2 引入）。两段独立 hash 分桶——同一 chat 必须同时命中
+Stage A 与 Stage B 才会真正走到 hybrid。
+
+**Hybrid 调用顺序**：
+`KeywordRetriever(top_k × multiplier)` → cosine rerank → `α·cos_sim + (1-α)·BM25_norm`
+（默认 α=0.6）→ stale × `memory_stale_decay`（默认 0.5）→ top_k。
+
+**核心新模块**：
+- `larkhelm/memory_embedding.py` — `EmbeddingBackend` 三实现（Local ONNX / HTTP /
+  Stub）+ `EmbeddingCache(maxsize=2048)` + circuit breaker。**numpy / onnxruntime 是
+  optional**，缺装时 `get_embedding_backend()` 自动返回 `None`，retriever 安全退到
+  Keyword 路径。
+- `larkhelm/memory_lifecycle.py` — `mark_stale_slices()` / `inject_stale_marks()` /
+  `unstale_slice_id()`。每个 `.md` 配一个 0600 的 `.meta.json` sidecar，
+  保存 `stale_slice_ids` 列表与 `last_gc_at`。
+
+**飞书命令 / CLI**：
+- `/memory diagnose [N]` — 取该 chat 最近 24h 的 N 条召回审计，渲染 mode /
+  elapsed / 命中 slice 标题（**不展示 body**，避免泄漏）。N 默认 3，上限 10。
+- `/memory status` — 在原状态卡上新增 `Stale slice` 与 `上次 GC` 行。
+- `larkhelm memory audit-summary [--since 1h] [--chat-id X] [--mode hybrid] [--json]`
+  — 跨 rotation 聚合审计 JSONL，输出 mode 分布 / p95 / fail_open_rate / 每 agent
+  细分。运维健康面板首选。
+- `larkhelm memory unstale --slice-id <12-hex>` — 从所有 `.meta.json` sidecar 中
+  剔除某个 id（重新激活被降权的 slice）。
+
+**审计 v2 schema**（`schema_version="2"`）新增字段：`mode` / `declared_mode` /
+`hybrid_alpha` / `query_token_count` / `top_k_returned` / `stale_hit_count`。
+Phase 1 reader 兼容——多余字段 `json.loads` 忽略即可（已 pinned 于
+`tests/test_memory_audit_summary.py::test_legacy_fixture_still_parses`）。
+
+**stale 概念**：连续 `memory_stale_window_days`（默认 90 天）未在审计日志中
+被命中的 slice 标记为 stale；检索时 `relevance *= memory_stale_decay`（默认 0.5），
+reason 串后缀 `stale`。**不删 `.md` 文件**——`/memory unstale` 可单条恢复。
+boot 时 `bridge._start_memory_boot_warmup()` 启动一次 daemon 跑全量重计算 +
+embedding 模型预热；每次常规 `MemoryGC` tick 也会触发 audit JSONL rotate +
+新一轮 stale 标记（一日一次 + 32MiB 翻滚 + 30 天 unlink）。
+
+**当 embedding 失败时**（onnxruntime 缺失 / HTTP 5xx / circuit 打开）：
+`HybridRetriever.retrieve` 把已计算好的 KeywordRetriever pool 截到 top_k 返回；
+`_build_with_retriever` 顶层另有一层 `try/except`，捕获任何下游异常后 fail-open 到
+KeywordRetriever 并写 `audit.fail_open=True`。`_build_with_retriever` 自己异常时
+仍按 Phase 1 行为 fall back 到 `_build_legacy_v2`（外层 `build()` 的 try/except）。
+
 ### Dev 模式 Git 快照（Auto Git Commit）
 
 `/dev` 流水线在每个关键阶段完成后，会通过 `_git_auto_commit()` 自动提交变更作为快照，便于查看每步的 diff 和在出错后回滚。

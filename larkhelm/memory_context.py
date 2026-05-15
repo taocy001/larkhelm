@@ -22,7 +22,7 @@ import larkhelm.config as _cfg
 from larkhelm.log import _debug_log
 
 if TYPE_CHECKING:
-    pass
+    from larkhelm.memory_slice import RetrievalRequest  # noqa: F401
 
 
 # ── Per-slot caps for the layered session view (S49) ───────────────────────
@@ -362,6 +362,13 @@ class MemoryContextBuilder:
         has_doc_urls: bool = False,
         force_project: bool = False,
         force_global: bool = False,
+        # Phase D: intent-aware injection. Defaults keep legacy callers byte-
+        # identical because ``build()`` only enters the retriever path when
+        # ``memory_retriever_enabled`` AND an upstream caller signalled intent.
+        agent_type: str = "chat",
+        sub_intent: str = "",
+        complexity: str = "medium",
+        confidence: float = 0.0,
     ):
         self.chat_id = chat_id
         self.cwd = cwd
@@ -370,10 +377,41 @@ class MemoryContextBuilder:
         self.has_doc_urls = has_doc_urls
         self.force_project = force_project
         self.force_global = force_global
+        self.agent_type = agent_type or "chat"
+        self.sub_intent = sub_intent or ""
+        self.complexity = complexity or "medium"
+        self.confidence = float(confidence or 0.0)
 
     # ── public entry points ────────────────────────────────────────────
 
     def build(self) -> str:
+        """Top-level dispatch between legacy v2 and Phase D retriever path.
+
+        - When the retriever flag is off OR traffic-split says skip OR the
+          retriever raises → fall back to ``_build_legacy_v2`` (byte-identical
+          to the master code path so existing tests stay green).
+        - Otherwise consult ``memory_retriever`` for an intent-shaped context."""
+        try:
+            from larkhelm.memory_retriever import _retriever_active
+        except Exception as e:
+            _debug_log(f"[MemoryRetriever] import failed, using v2: {e}")
+            return self._build_legacy_v2()
+
+        try:
+            active = _retriever_active(self.chat_id)
+        except Exception as e:
+            _debug_log(f"[MemoryRetriever] _retriever_active failed: {e}")
+            active = False
+        if not active:
+            return self._build_legacy_v2()
+
+        try:
+            return self._build_with_retriever()
+        except Exception as e:
+            _debug_log(f"[MemoryRetriever] fail-open to v2: {e}")
+            return self._build_legacy_v2()
+
+    def _build_legacy_v2(self) -> str:
         """Full context: global (if relevant) + project (if relevant) + session."""
         from larkhelm.memory import (
             GLOBAL_MAX_CHARS, PROJECT_MAX_CHARS, SESSION_MAX_CHARS,
@@ -424,6 +462,101 @@ class MemoryContextBuilder:
             f"{o}\n{_layer_meter_line(len(c), max_c)}\n{c}\n{cl}"
             for o, c, cl, max_c in parts
         )
+
+    def _build_request(self) -> "RetrievalRequest":
+        """Assemble a :class:`RetrievalRequest` from this builder's state."""
+        from larkhelm.memory_slice import RetrievalRequest
+        has_code_fence = bool(_CODE_FENCE_RE.search(self.query))
+        return RetrievalRequest(
+            chat_id=self.chat_id,
+            cwd=self.cwd,
+            query=self.query,
+            recent_turns=tuple(self.recent_turns),
+            agent_type=self.agent_type,
+            sub_intent=self.sub_intent,
+            complexity=self.complexity,
+            confidence=self.confidence,
+            is_explicit_cmd=False,
+            has_doc_urls=self.has_doc_urls,
+            has_images=False,
+            has_code_fence=has_code_fence,
+        )
+
+    def _build_with_retriever(self) -> str:
+        """Phase D retriever path: load slices → score → compose.
+
+        Phase 2: the retriever is selected by :func:`resolve_actual_mode`
+        and the audit record uses v2 schema. Any failure inside the
+        embedding/hybrid path falls open to :class:`KeywordRetriever` with
+        ``audit.fail_open=True``.
+        """
+        import time as _time
+        from larkhelm.memory_retriever import (
+            KeywordRetriever,
+            _audit_decision,
+            build_audit_record_v2,
+            compose_slices_to_context,
+            get_policy,
+            get_retriever,
+            load_slices,
+            resolve_actual_mode,
+        )
+        from larkhelm.memory_embedding import get_embedding_backend
+
+        t0 = _time.perf_counter()
+        request = self._build_request()
+        policy = get_policy(self.agent_type)
+        cfg = getattr(_cfg, "config", {}) or {}
+
+        # Mode resolution: physical mode that will actually dispatch.
+        declared_mode = policy.retrieval_mode
+        try:
+            actual_mode = resolve_actual_mode(policy, self.chat_id, cfg)
+        except Exception as e:
+            _debug_log(f"[MemoryRetriever] resolve_actual_mode failed: {e}")
+            actual_mode = "keyword"
+
+        backend = None
+        if actual_mode in ("embedding", "hybrid"):
+            try:
+                backend = get_embedding_backend(cfg)
+            except Exception as e:
+                _debug_log(f"[MemoryRetriever] get_embedding_backend failed: {e}")
+                backend = None
+            if backend is None:
+                # Couldn't materialise a backend — degrade to keyword.
+                actual_mode = "keyword"
+
+        slices = load_slices(self.chat_id, self.cwd)
+        fail_open = False
+        try:
+            retriever = get_retriever(actual_mode, backend=backend)
+            scored = retriever.retrieve(request, policy, slices)
+        except Exception as e:
+            _debug_log(
+                f"[MemoryRetriever] {actual_mode} retriever failed (fail-open to keyword): {e}"
+            )
+            fail_open = True
+            actual_mode = "keyword"
+            scored = KeywordRetriever().retrieve(request, policy, slices)
+
+        composed = compose_slices_to_context(scored, policy, cwd=self.cwd)
+        elapsed_ms = int((_time.perf_counter() - t0) * 1000)
+        try:
+            _audit_decision(build_audit_record_v2(
+                request=request,
+                policy=policy,
+                scored=scored,
+                candidate_count=len(slices),
+                elapsed_ms=elapsed_ms,
+                selected_chars=len(composed),
+                fail_open=fail_open,
+                actual_mode=actual_mode,
+                declared_mode=declared_mode,
+            ))
+        except Exception as e:
+            _debug_log(f"[MemoryRetriever] audit enqueue failed: {e}")
+        return composed
 
     def build_for_crew(self) -> str:
         """Project + session only; mirrors the legacy

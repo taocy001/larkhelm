@@ -609,6 +609,38 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     config.setdefault("intent_feedback_path", "")
     config.setdefault("intent_audit_path", "")
 
+    # Phase D: on-demand memory retriever knobs (default off — flag-gated
+    # roll-out, same model as intent_router_*). Algorithm: see
+    # ``larkhelm/_gating.py`` and ``larkhelm/memory_retriever.py``.
+    config.setdefault("memory_retriever_enabled", False)
+    config.setdefault("memory_retriever_traffic", 0.0)
+    # Phase D / Phase 2 — was "keyword"; now "auto" follows POLICY_TABLE,
+    # which already encodes the three "hybrid" entries (dev/crew/plan).
+    # Operators wanting the Phase 1 behaviour explicitly can still set this
+    # to "keyword".
+    config.setdefault("memory_retriever_mode", "auto")
+    config.setdefault("memory_retriever_top_k_default", 6)
+    config.setdefault("memory_retriever_alpha_recency", 0.3)
+    config.setdefault("memory_retriever_alpha_importance", 0.3)
+    config.setdefault("memory_retriever_alpha_relevance", 0.4)
+    config.setdefault("memory_retriever_debug_card", False)
+    config.setdefault("memory_retriever_audit_path", "")
+
+    # Phase D / Phase 2 — hybrid recall + stale lifecycle knobs (REQ-48).
+    # All default to "off / neutral" so the bridge runs as Phase 1 unless an
+    # operator explicitly opens the gate. See design.md §6.3 for the table.
+    config.setdefault("embedding_backend", "none")          # "local" | "http" | "none"
+    config.setdefault("embedding_http_endpoint", "")
+    config.setdefault("embedding_model_path", "~/.larkhelm/models/bge-small-zh-v1.5.onnx")
+    config.setdefault("embedding_dim", 512)
+    config.setdefault("embedding_http_timeout_sec", 5.0)
+    config.setdefault("embedding_traffic", 0.0)             # Stage B gradual rollout, orthogonal to memory_retriever_traffic
+    config.setdefault("embedding_enabled", False)           # Stage B master switch
+    config.setdefault("memory_stale_window_days", 90)       # how far back to look for "never hit"
+    config.setdefault("memory_stale_decay", 0.5)            # stale relevance multiplier
+    config.setdefault("memory_audit_rotate_max_mb", 32)     # per-file rollover threshold
+    config.setdefault("memory_audit_retain_days", 30)       # unlink rotated files older than this
+
     # Phase B: memory token-optimization flags (S49–S53 + S3 GC).
     # All default to "true" so the new code paths run by default; toggle
     # individually to bisect token-regression reports without redeploying.

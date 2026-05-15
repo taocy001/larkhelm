@@ -65,12 +65,21 @@ class MemoryGCRunner:
              f"interval_sec={self.interval_sec})")
 
     def run_once(self) -> tuple[int, int]:
-        """Single sweep — returns ``(scanned, deleted)``."""
+        """Single sweep — returns ``(scanned, deleted)``.
+
+        Phase 2 additions (run at the tail of the sweep, never raise):
+
+          * :func:`memory_retriever.rotate_audit_files` — daily + 32MiB
+            rollover + 30 day unlink of audit JSONL archives.
+          * :func:`memory_lifecycle.mark_stale_slices` over every known
+            (chat_id, cwd) pair — refreshes ``.meta.json`` sidecars.
+        """
         from larkhelm.memory import MEMORY_HOME_DIR
         scanned = 0
         deleted = 0
         try:
             if not MEMORY_HOME_DIR.exists():
+                self._phase2_tail()
                 return (0, 0)
         except Exception as e:
             _debug_log(f"[MemoryGC] home dir stat failed: {e}")
@@ -95,7 +104,36 @@ class MemoryGCRunner:
                 _debug_log(f"[MemoryGC] unlink failed for {path.name}: {e}")
         if scanned or deleted:
             info(f"[MemoryGC] sweep complete scanned={scanned} deleted={deleted}")
+        self._phase2_tail()
         return (scanned, deleted)
+
+    def _phase2_tail(self) -> None:
+        """Run Phase 2 housekeeping hooks; failures are swallowed."""
+        try:
+            from larkhelm.memory_retriever import rotate_audit_files
+            rotate_audit_files()
+        except Exception as e:
+            _debug_log(f"[MemoryGC] rotate_audit_files failed: {e}")
+        try:
+            from larkhelm.memory_lifecycle import (
+                iter_known_chat_cwd_pairs,
+                mark_stale_slices,
+            )
+            cfg = getattr(_cfg, "config", None) or {}
+            window_days = int(cfg.get("memory_stale_window_days", 90) or 90)
+            count = 0
+            for chat_id, cwd in iter_known_chat_cwd_pairs():
+                try:
+                    mark_stale_slices(chat_id, cwd, dry_run=False, window_days=window_days)
+                    count += 1
+                except Exception as inner:
+                    _debug_log(
+                        f"[MemoryGC] mark_stale_slices({chat_id}) failed: {inner}"
+                    )
+            if count:
+                _debug_log(f"[MemoryGC] stale sweep covered {count} chat(s)")
+        except Exception as e:
+            _debug_log(f"[MemoryGC] stale sweep failed: {e}")
 
     # ── internals ──────────────────────────────────────────────────
 

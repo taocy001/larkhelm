@@ -118,6 +118,45 @@ def _start_cron_scheduler():
     threading.Thread(target=_loop, daemon=True, name="cron-scheduler").start()
 
 
+def _start_memory_boot_warmup() -> None:
+    """Phase D / Phase 2 (REQ-45) — boot-time stale GC + embedding warmup.
+
+    Runs in a daemon thread so traffic serving is never blocked. Failures
+    inside the loop are caught and logged; the bridge tolerates a totally
+    silent skip of warmup (the next regular GC tick will still refresh
+    ``.meta.json`` and the first real query will lazy-init the embedding
+    backend on its own).
+    """
+    def _loop():
+        try:
+            import larkhelm.config as _cfg
+            cfg = getattr(_cfg, "config", None) or {}
+            from larkhelm.memory_lifecycle import (
+                iter_known_chat_cwd_pairs, mark_stale_slices,
+            )
+            window_days = int(cfg.get("memory_stale_window_days", 90) or 90)
+            for chat_id, cwd in iter_known_chat_cwd_pairs():
+                try:
+                    mark_stale_slices(chat_id, cwd, dry_run=False, window_days=window_days)
+                except Exception as inner:
+                    _debug_log(f"[MemoryLifecycle] boot warmup mark_stale failed: {inner}")
+        except Exception as e:
+            _debug_log(f"[MemoryLifecycle] boot warmup phase 1 (stale) failed: {e}")
+
+        try:
+            from larkhelm.memory_embedding import get_embedding_backend
+            backend = get_embedding_backend()
+            if backend is not None:
+                backend.warm()
+                _debug_log(
+                    f"[MemoryRetriever] embedding backend '{backend.name}' warmed"
+                )
+        except Exception as e:
+            _debug_log(f"[MemoryRetriever] embedding warmup failed: {e}")
+
+    threading.Thread(target=_loop, daemon=True, name="boot-warmup").start()
+
+
 def main(config_path: str = None, data_dir: str = None) -> None:
     import larkhelm.config as _cfg
 
@@ -174,6 +213,7 @@ def main(config_path: str = None, data_dir: str = None) -> None:
 
     _start_cron_scheduler()
     _start_gc_thread()
+    _start_memory_boot_warmup()
 
     from larkhelm.memory_watchdog import start_memory_watchdog
     start_memory_watchdog(_cfg.MEMORY_LIMIT_MB)

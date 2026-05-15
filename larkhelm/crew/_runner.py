@@ -267,8 +267,36 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
     if not spec.model.startswith("hermes_"):
         try:
             from larkhelm.memory import get_memory_context_v2
+            # Phase D: map AgentSpec.task_profile → agent_type so the
+            # retriever (when enabled) chooses a sensible per-agent policy.
+            # Unknown profiles fall back to ``crew`` policy (large budget,
+            # decision-heavy kind priority).
+            _tp_to_agent_type = {
+                "planner": "plan",
+                "engineer": "dev",
+                "qa": "dev",
+                "reviewer": "dev",
+                "chat": "chat",
+            }
+            _agent_type = _tp_to_agent_type.get(
+                (spec.task_profile or ""), "crew",
+            )
+            _crew_intent = None
+            try:
+                from larkhelm.agent_hub.intent_types import IntentResult
+                _crew_intent = IntentResult(
+                    agent_type=_agent_type,
+                    sub_intent=spec.id,
+                    complexity="complex",
+                    confidence=0.9,
+                    layer="override",
+                    raw_text=full_prompt,
+                )
+            except Exception as _ie:
+                _debug_log(f"[Crew] IntentResult synth failed: {_ie}")
             _crew_mem_ctx, _ = get_memory_context_v2(
                 state.chat_id, cwd=str(cwd), query=full_prompt,
+                intent=_crew_intent,
             )
         except Exception as e:
             _debug_log(f"[Crew] memory load failed: {e}")

@@ -670,7 +670,13 @@ def _log_at(level: Level, msg: str) -> None:
         # on every diagnostic line. With N=500 and 50 MB threshold the
         # worst-case overshoot is bounded by the largest write batch.
         should_rotate = (_debug_write_count % _DEBUG_ROTATE_CHECK_EVERY == 0)
-    # stdout 输出到文件（当 stdout 被重定向时）
+    # Diagnostics go to stdout (preserved from pre-Phase-2 behaviour) so
+    # ``test_log_level.py::TestLarkClientWarnConsolidation`` keeps its
+    # "no stderr double-write" invariant. CLI subcommands that emit
+    # machine-readable output (e.g. ``larkhelm memory audit-summary --json``)
+    # are kept pipe-safe by ``__main__._cmd_memory`` not invoking
+    # ``_init_runtime`` for the read-only branches that trigger Runner /
+    # ModelProbe / MemoryGC boot logs.
     try:
         sys.stdout.write(line)
         sys.stdout.flush()

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """larkhelm CLI entry point"""
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -11,7 +12,6 @@ def _cmd_memory(args, memory_parser):
 
     if args.memory_command == "status":
         import json
-        from pathlib import Path
 
         data_dir = _resolve_data_dir(getattr(args, "data_dir", None) or None)
         state_file = data_dir / "state.json"
@@ -81,9 +81,157 @@ def _cmd_memory(args, memory_parser):
         for w in result["warnings"]:
             print(f"Warning: {w}", file=sys.stderr)
 
+    elif args.memory_command == "audit-summary":
+        # Phase D / Phase 2 (REQ-37) — operator-facing aggregation over the
+        # retriever audit JSONL trail. Runtime-independent: no live bridge
+        # required, scans rotated files under DATA_DIR/<audit_path>.
+        import contextlib
+        import io
+        import json
+        from datetime import timedelta
+        # 1) ``LARKHELM_TEST_MODE`` short-circuits backend health-probe /
+        #    model probe / MemoryGC daemon startup inside ``_init_runtime``.
+        # 2) ``_init_ai_sem`` is called UNCONDITIONALLY and emits a one-line
+        #    ``[Runner] MAX_AI_PROCS=...`` info log via ``larkhelm.log.info``,
+        #    which goes to stdout (preserved for systemd journal). Redirect
+        #    stdout for the duration of ``_init_runtime`` so the JSON
+        #    contract (AC-07) is not polluted when this CLI is piped into
+        #    ``python -c "json.load(sys.stdin)"``.
+        os.environ.setdefault("LARKHELM_TEST_MODE", "1")
+        import larkhelm.config as _cfg
+        _init_buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(_init_buf):
+                _cfg._init_runtime(data_dir=getattr(args, "data_dir", None) or None)
+        except SystemExit:
+            # Missing APP_ID in test envs — degrade and continue with module
+            # defaults (DATA_DIR may be unset; iter falls back to tempdir).
+            pass
+        from larkhelm.memory_retriever import iter_audit_records
+
+        delta = _parse_audit_summary_duration(args.since)
+        records = []
+        for rec in iter_audit_records(delta, chat_id=args.chat_id):
+            if args.mode and rec.get("mode") != args.mode:
+                continue
+            records.append(rec)
+        result = _compute_audit_summary(records, delta)
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(_render_audit_summary_text(result))
+
+    elif args.memory_command == "unstale":
+        from larkhelm.memory_lifecycle import unstale_slice_id
+        found = unstale_slice_id(args.slice_id)
+        if found:
+            print(f"OK · removed {args.slice_id} from .meta.json sidecars")
+            sys.exit(0)
+        else:
+            print(f"NOT FOUND · {args.slice_id} not present in any .meta.json", file=sys.stderr)
+            sys.exit(1)
+
     else:
         memory_parser.print_help()
         sys.exit(0)
+
+
+# ── audit-summary helpers ────────────────────────────────────────────────
+
+
+def _parse_audit_summary_duration(spec: str | None):
+    """Parse "30m" / "2h" / "1d" / "PT15M"; default 1 hour."""
+    from datetime import timedelta
+    if not spec:
+        return timedelta(hours=1)
+    s = str(spec).strip().lower()
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 7 * 86400}
+    try:
+        if s and s[-1] in units:
+            return timedelta(seconds=int(s[:-1] or "0") * units[s[-1]])
+        return timedelta(seconds=int(s))
+    except Exception:
+        return timedelta(hours=1)
+
+
+def _compute_audit_summary(records: list, delta) -> dict:
+    """Aggregate a list of audit records into the JSON contract dict (design.md §3.7)."""
+    from datetime import datetime, timezone
+    until = datetime.now(timezone.utc).astimezone()
+    since = until - delta
+    if not records:
+        return {
+            "schema_version": "2",
+            "since": since.isoformat(timespec="seconds"),
+            "until": until.isoformat(timespec="seconds"),
+            "total_records": 0,
+            "mode_distribution": {},
+            "avg_elapsed_ms": 0.0,
+            "p95_elapsed_ms": 0.0,
+            "fail_open_rate": 0.0,
+            "avg_selected_chars": 0,
+            "avg_selected_slice_count": 0.0,
+            "by_agent_type": {},
+        }
+    elapsed_ms = [int(r.get("elapsed_ms", 0)) for r in records]
+    elapsed_ms_sorted = sorted(elapsed_ms)
+    p95_idx = max(0, int(round(0.95 * (len(elapsed_ms_sorted) - 1))))
+    fail_open_count = sum(1 for r in records if r.get("fail_open"))
+    mode_distribution: dict[str, int] = {}
+    by_agent: dict[str, list] = {}
+    for r in records:
+        mode = str(r.get("mode", "?"))
+        mode_distribution[mode] = mode_distribution.get(mode, 0) + 1
+        by_agent.setdefault(str(r.get("agent_type", "?")), []).append(r)
+    by_agent_summary: dict[str, dict] = {}
+    for agent, rs in by_agent.items():
+        e = sorted(int(x.get("elapsed_ms", 0)) for x in rs)
+        idx = max(0, int(round(0.95 * (len(e) - 1))))
+        f_open = sum(1 for x in rs if x.get("fail_open"))
+        by_agent_summary[agent] = {
+            "count": len(rs),
+            "p95_elapsed_ms": float(e[idx]),
+            "fail_open_rate": f_open / len(rs),
+        }
+    total = len(records)
+    avg_selected_chars = sum(int(r.get("selected_token_chars", 0)) for r in records) / total
+    avg_slice_count = sum(len(r.get("selected_slice_ids", []) or []) for r in records) / total
+    return {
+        "schema_version": "2",
+        "since": since.isoformat(timespec="seconds"),
+        "until": until.isoformat(timespec="seconds"),
+        "total_records": total,
+        "mode_distribution": mode_distribution,
+        "avg_elapsed_ms": sum(elapsed_ms) / total,
+        "p95_elapsed_ms": float(elapsed_ms_sorted[p95_idx]),
+        "fail_open_rate": fail_open_count / total,
+        "avg_selected_chars": int(avg_selected_chars),
+        "avg_selected_slice_count": avg_slice_count,
+        "by_agent_type": by_agent_summary,
+    }
+
+
+def _render_audit_summary_text(d: dict) -> str:
+    """Render the JSON summary dict as a human-readable text block."""
+    lines = [
+        f"window     : {d.get('since')} → {d.get('until')}",
+        f"records    : {d.get('total_records', 0)}",
+        f"elapsed    : avg={d.get('avg_elapsed_ms', 0):.1f}ms  p95={d.get('p95_elapsed_ms', 0):.0f}ms",
+        f"fail-open  : {d.get('fail_open_rate', 0):.2%}",
+        f"avg slice  : {d.get('avg_selected_slice_count', 0):.1f} per query  ({d.get('avg_selected_chars', 0)} chars)",
+    ]
+    md = d.get("mode_distribution") or {}
+    if md:
+        lines.append("modes      : " + ", ".join(f"{k}={v}" for k, v in sorted(md.items())))
+    bya = d.get("by_agent_type") or {}
+    if bya:
+        lines.append("per agent  :")
+        for agent, st in sorted(bya.items()):
+            lines.append(
+                f"  {agent:<8} n={st['count']:<4} p95={st['p95_elapsed_ms']:.0f}ms"
+                f" fail-open={st['fail_open_rate']:.2%}"
+            )
+    return "\n".join(lines)
 
 
 def _cmd_doc(args):
@@ -210,6 +358,42 @@ def cli():
     p_mem_status.add_argument(
         "--data-dir", metavar="DIR",
         help="data directory (default: auto-detect)",
+    )
+
+    # Phase D / Phase 2 (REQ-37) — aggregate audit JSONL records.
+    p_mem_audit = memory_sub.add_parser(
+        "audit-summary",
+        help="aggregate Phase D retriever audit records (mode/p95/fail-open/agent breakdown)",
+    )
+    p_mem_audit.add_argument(
+        "--since", metavar="DURATION", default="1h",
+        help="time window (e.g. 30m / 2h / 1d). Default: 1h",
+    )
+    p_mem_audit.add_argument(
+        "--chat-id", metavar="CHAT_ID",
+        help="filter to one chat only",
+    )
+    p_mem_audit.add_argument(
+        "--mode", choices=["keyword", "embedding", "hybrid"],
+        help="filter to records with this actual mode",
+    )
+    p_mem_audit.add_argument(
+        "--json", action="store_true",
+        help="emit a single JSON object instead of human-readable text",
+    )
+    p_mem_audit.add_argument(
+        "--data-dir", metavar="DIR",
+        help="data directory (default: auto-detect)",
+    )
+
+    # Phase D / Phase 2 (REQ-47) — re-activate a slice that was demoted to stale.
+    p_mem_unstale = memory_sub.add_parser(
+        "unstale",
+        help="remove a slice_id from every .meta.json sidecar (re-activate after demotion)",
+    )
+    p_mem_unstale.add_argument(
+        "--slice-id", metavar="ID", required=True,
+        help="the 12-char slice id (md5 hex prefix). See `/memory diagnose` output.",
     )
 
     # Keep the version sub-command for backward compatibility (prefer the --version flag)

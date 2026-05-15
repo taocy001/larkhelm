@@ -49,6 +49,20 @@
   "_comment_crew_phase_c": "Phase C crew enhancements. crew_breakpoint_timeout_sec controls how long /dev waits for the user to click 继续/取消 before auto-cancelling (default 1800s = 30 min). task_profiles are referenced by larkhelm/crew/_backend_resolver.py — the in-code defaults are authoritative; this comment lists them for operator awareness: planner / engineer / qa / reviewer / chat. To override per-profile capability weights in the future, populate task_profiles[<name>] with required_capabilities / latency_pref / require_tools.",
   "crew_breakpoint_timeout_sec":   1800,
 
+  "_comment_memory_phase_d2": "Phase D / Phase 2 — on-demand memory recall stack. All flags default to keyword-only (Phase 1 behaviour); flip `embedding_enabled=true` AND set `embedding_traffic>0` AND `embedding_backend!=\"none\"` to roll out hybrid recall. Stages roll out independently: Stage A (`memory_retriever_traffic`) is Phase 1, Stage B (`embedding_traffic`) is Phase 2. Both must hit for a chat to use hybrid; otherwise it stays on the Phase 1 keyword path. memory_retriever_mode='auto' means follow POLICY_TABLE per agent_type; override globally with 'keyword'|'embedding'|'hybrid'. memory_stale_window_days controls how many days of audit JSONL we scan to decide whether a slice has been forgotten; memory_stale_decay multiplies the relevance score of stale slices (0.5 = halve). memory_audit_rotate_max_mb gives the rollover threshold per day; memory_audit_retain_days unlinks anything older than this many days. embedding_model_path defaults to ~/.larkhelm/models/bge-small-zh-v1.5.onnx; download instructions: see README.md \"Phase D 召回灰度开关\".",
+  "memory_retriever_mode":         "auto",
+  "embedding_backend":             "none",
+  "embedding_http_endpoint":       "",
+  "embedding_model_path":          "~/.larkhelm/models/bge-small-zh-v1.5.onnx",
+  "embedding_dim":                 512,
+  "embedding_http_timeout_sec":    5.0,
+  "embedding_traffic":             0.0,
+  "embedding_enabled":             false,
+  "memory_stale_window_days":      90,
+  "memory_stale_decay":            0.5,
+  "memory_audit_rotate_max_mb":    32,
+  "memory_audit_retain_days":      30,
+
   "_comment_probe_models": "Optional. If omitted, installed CLIs are auto-discovered from PATH (no model pinning or capabilities). Uncomment and customize to pin models and enable orchestrator routing hints.",
   "probe_models": [
     {

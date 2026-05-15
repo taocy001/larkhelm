@@ -1258,8 +1258,25 @@ def _cmd_btw(chat_id: str, question: str, user_msg_id: str):
                 _btw_mem_ctx = ""
                 try:
                     from larkhelm.memory import get_memory_context_v2
+                    # Phase D: synthesise a btw-flavoured IntentResult so the
+                    # retriever (when enabled) picks the smaller btw policy
+                    # (token_budget=800, prefer preference/context_summary)
+                    # rather than the default chat policy.
+                    _btw_intent = None
+                    try:
+                        from larkhelm.agent_hub.intent_types import IntentResult
+                        _btw_intent = IntentResult(
+                            agent_type="btw",
+                            layer="override",
+                            confidence=1.0,
+                            is_explicit_command=True,
+                            raw_text=question,
+                        )
+                    except Exception as _ie:
+                        _debug_log(f"[btw] IntentResult synth failed: {_ie}")
                     _btw_mem_ctx, _ = get_memory_context_v2(
                         chat_id, cwd=cwd, query=question,
+                        intent=_btw_intent,
                     )
                 except Exception as e:
                     _debug_log(f"[btw] memory load failed: {e}")
@@ -1400,6 +1417,89 @@ def _render_observe_card(obs: dict) -> tuple[str, str, str]:
     return "🔍 记忆观测", "\n".join(lines), color
 
 
+def _cmd_memory_diagnose(chat_id: str, args: str = "", msg_id: str = None) -> None:
+    """/memory diagnose [N] — show the last N audit decisions for this chat.
+
+    Phase D / Phase 2 (REQ-38). Renders the last ``N`` audit records emitted
+    in the trailing 24 hours for this chat_id as a single Markdown card. Body
+    is intentionally **omitted** — only titles, modes, elapsed times and the
+    scoring reason strings. ``N`` defaults to 3 and is clipped to ``[1, 10]``.
+
+    Errors are caught and surfaced as a red card so the operator sees the
+    failure mode rather than a silent no-op.
+    """
+    from datetime import timedelta
+    try:
+        n = int((args or "").strip() or "3")
+    except (TypeError, ValueError):
+        n = 3
+    n = max(1, min(10, n))
+
+    try:
+        from larkhelm.memory_retriever import iter_audit_records
+        records = list(iter_audit_records(timedelta(hours=24), chat_id=chat_id))
+    except Exception as e:
+        _debug_log(f"[memory diagnose] iter failed: {e}")
+        send_card_reply(chat_id, msg_id, "❌ 诊断失败",
+                        f"读取审计日志失败：{str(e)[:200]}", color="red")
+        return
+
+    if not records:
+        send_card_reply(chat_id, msg_id, "🔍 记忆诊断",
+                        "本会话最近 24 小时无召回记录。", color="grey")
+        return
+
+    # `iter_audit_records` already yields oldest → newest; take the tail.
+    records = records[-n:]
+
+    lines: list[str] = [f"**最近 {len(records)} 条召回（24h 内）：**\n"]
+    # Build title lookup so we can show slice titles, not just ids — load
+    # current slices once (cheap, LRU-cached). Records for slices that no
+    # longer exist fall back to the id.
+    title_by_id: dict[str, str] = {}
+    try:
+        from larkhelm.memory_retriever import load_slices
+        # Resolve _get_cwd at call time (not module-load) so unit tests can
+        # monkeypatch ``larkhelm.chat_state._get_cwd`` and have the patch reach
+        # this lookup — see ``test_card_omits_slice_body``.
+        from larkhelm.chat_state import _get_cwd as _resolve_cwd
+        cwd = _resolve_cwd(chat_id)
+        for sl in load_slices(chat_id, cwd):
+            title_by_id[sl.id] = sl.title or sl.id[:10]
+    except Exception as e:
+        _debug_log(f"[memory diagnose] slice title load failed: {e}")
+
+    for rec in records:
+        ts = str(rec.get("ts", "?"))[:19]
+        mode = rec.get("mode", "?")
+        declared = rec.get("declared_mode", mode)
+        elapsed = rec.get("elapsed_ms", 0)
+        fail_open = rec.get("fail_open", False)
+        agent = rec.get("agent_type", "?")
+        q = rec.get("query_head", "")[:60]
+        ids = rec.get("selected_slice_ids", []) or []
+        stale_count = rec.get("stale_hit_count", 0)
+        titles: list[str] = []
+        for sid in ids[:6]:
+            titles.append(title_by_id.get(sid, str(sid)[:10]))
+        header = (f"`{ts}` · **{mode}**"
+                  f"{' (declared=' + declared + ')' if declared and declared != mode else ''}"
+                  f" · {elapsed}ms · agent={agent}")
+        if fail_open:
+            header += " · ⚠️ fail-open"
+        if stale_count:
+            header += f" · stale={stale_count}"
+        lines.append(header)
+        if q:
+            lines.append(f"> {q}")
+        if titles:
+            lines.append("命中：" + "、".join(f"`{t}`" for t in titles))
+        lines.append("")  # blank line between records
+
+    body = "\n".join(lines).rstrip()
+    send_card_reply(chat_id, msg_id, "🔍 记忆诊断", body, color="blue")
+
+
 def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None):
     """/memory — show/set/clear/update/gc/export/import/status the three-tier memory system.
 
@@ -1423,7 +1523,6 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None):
         _load_md_frontmatter, _load_md_body, _ensure_dir, MEMORY_HOME_DIR,
         GLOBAL_MAX_CHARS, PROJECT_MAX_CHARS, AUTO_UPDATE_EVERY,
     )
-    from larkhelm.chat_state import _get_cwd, _set_chat_field, _get_chat_state
     cwd = _get_cwd(chat_id)
     args = args.strip()
     sub = args.lower()
@@ -1526,6 +1625,30 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None):
                 f"**数据总大小：** {st['data_size'] // 1024} KB",
                 f"**记忆文件数：** {st['memory_files']}（{st['memory_size'] // 1024} KB）",
             ]
+            # Phase D / Phase 2 (REQ-46) — stale slice summary aggregated
+            # over all known .meta.json sidecars. Best-effort — failures are
+            # silently swallowed so /memory status never breaks for stale UX.
+            try:
+                from larkhelm.memory import MEMORY_HOME_DIR
+                from larkhelm.memory_lifecycle import load_slice_meta
+                total_stale = 0
+                last_gc = ""
+                for meta_path in Path(MEMORY_HOME_DIR).glob("*.meta.json"):
+                    meta = load_slice_meta(meta_path)
+                    total_stale += len(meta.stale_slice_ids or ())
+                    if meta.last_gc_at and meta.last_gc_at > last_gc:
+                        last_gc = meta.last_gc_at
+                # "all slices" is the number under MEMORY_HOME — the precise
+                # count requires loading + slicing every layer; use the file
+                # count as a cheap upper bound proxy.
+                total_files = st.get("memory_files", 0)
+                lines.append(
+                    f"**Stale slice：** {total_stale} 个（全部 {total_files} 文件）"
+                )
+                if last_gc:
+                    lines.append(f"**上次 GC：** {last_gc}")
+            except Exception as inner:
+                _debug_log(f"[memory status] stale summary failed: {inner}")
             if st['chats']:
                 lines.append("\n**各 Chat 摘要：**")
                 for c in st['chats'][:10]:
@@ -1536,6 +1659,12 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None):
         except Exception as e:
             _debug_log(f"[memory status] failed: {e}")
             send_card_reply(chat_id, msg_id, "❌ 查询失败", str(e)[:300], color="red")
+        return
+
+    # ── /memory diagnose [N] ─────────────────────────────────────────────────
+    if sub == "diagnose" or sub.startswith("diagnose "):
+        rest = args[len("diagnose"):].strip()
+        _cmd_memory_diagnose(chat_id, rest, msg_id=msg_id)
         return
 
     # ── /memory observe ──────────────────────────────────────────────────────

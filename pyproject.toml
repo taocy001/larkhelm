@@ -50,6 +50,20 @@ voice-cloud = [
     #   pipx runpip larkhelm install dashscope
     "dashscope>=1.20.0",
 ]
+memory-embedding = [
+    # Phase D / Phase 2 — optional local ONNX embedding backend for hybrid recall.
+    # Install only when you flip `embedding_backend="local"` in config.json:
+    #   pipx install -e ".[memory-embedding]"
+    # The HTTP backend (`embedding_backend="http"`) does NOT need these deps.
+    "onnxruntime>=1.18",
+    "numpy>=1.26",
+]
+
+[project.entry-points."larkhelm.embedding_backends"]
+# Third-party embedding backends register here. Example:
+#   my-backend = "mypkg.backend:MyEmbedding"
+# Placeholder — no built-in entry points; the bundled `local` / `http` / `stub`
+# backends are resolved directly by `get_embedding_backend`.
 
 [tool.hatch.version]
 path = "larkhelm/__init__.py"
