@@ -732,3 +732,65 @@ def test_run_agent_wrapper_oom_first_attempt_uses_8s_backoff(
     assert sleeps == [8], (
         f"OOM-class error must trigger the 8s backoff, got {sleeps}"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  OBS-01 watcher early-exit (review F-2 follow-up)
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_timeout_watcher_exits_when_agent_cancel_set(
+    init_test_config, fake_agent_spec, fake_card_sender, monkeypatch,
+):
+    """OBS-01 regression: the Phase-1 sem-wait loop in
+    ``_timeout_watcher`` must honour ``agent_cancel`` so it doesn't
+    leak a daemon thread per failed agent.
+
+    Setup: stub ``resolve_backend`` to raise ``NoBackendAvailableError``
+    BEFORE any subprocess starts. ``_run_agent``'s outer try/finally
+    sets ``agent_cancel`` on the way out. The watcher (already spawned
+    by then) must observe the flag at the next 0.3s tick and return,
+    leaving the active-thread count back at baseline within ~0.5s.
+
+    Without the OBS-01 fix the watcher would loop until ``cancel_ev``
+    fires (i.e. the entire crew is cancelled) — never on a single
+    failed agent. Counting threads is the canonical way to pin "no
+    leaked daemon".
+    """
+    import threading
+    import time
+    from larkhelm.crew_types import NoBackendAvailableError
+    from larkhelm.crew import _runner as cr
+
+    _stub_perm_and_memory(monkeypatch)
+
+    # Force backend resolution to fail immediately.
+    def boom(spec, **kw):
+        raise NoBackendAvailableError("test_profile", "all disabled")
+    monkeypatch.setattr(cr, "resolve_backend", boom)
+
+    specs = [fake_agent_spec(id="impl", depends_on=[], task_profile="engineer")]
+    state = _make_state(specs)
+
+    baseline_threads = {t.ident for t in threading.enumerate()}
+
+    with pytest.raises(NoBackendAvailableError):
+        cr._run_agent(state, "impl")
+
+    # Give the watcher up to 1.0s to notice agent_cancel and exit.
+    # 0.3s tick + some scheduler slack = comfortably under 1.0s.
+    deadline = time.monotonic() + 1.0
+    leaked: set[int] = set()
+    while time.monotonic() < deadline:
+        current = {t.ident for t in threading.enumerate()}
+        leaked = current - baseline_threads
+        if not leaked:
+            break
+        time.sleep(0.05)
+
+    # All new threads should have exited. If the watcher is still alive
+    # we leaked one daemon — exactly the bug OBS-01 was about.
+    leaked_names = [t.name for t in threading.enumerate() if t.ident in leaked]
+    assert not leaked, (
+        f"OBS-01 regression: {len(leaked)} thread(s) leaked after "
+        f"NoBackendAvailableError: {leaked_names}"
+    )

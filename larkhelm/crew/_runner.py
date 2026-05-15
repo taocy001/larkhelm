@@ -293,12 +293,15 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
         Forwarding cancel_ev + logging soft is the only remaining job.
         """
         # Phase 1: wait for process slot while monitoring crew-level cancellation.
-        # Also honours ``agent_cancel`` — set by the finally block of
-        # _run_agent_wrapper when the agent body exits early (e.g.
-        # NoBackendAvailableError before any subprocess starts). Without
-        # this check the watcher would self-spin for the full sem-wait
-        # window after each failed agent, accumulating one daemon thread
-        # per failure until the crew completes. Cheap fix per review OBS-01.
+        # Also honours ``agent_cancel`` — set by ``_run_agent``'s own
+        # ``finally`` block at the bottom of this function (line ~472),
+        # which fires when the agent body exits early (e.g.
+        # ``NoBackendAvailableError`` raised before any subprocess starts).
+        # Without this check the watcher would self-spin for the full
+        # sem-wait window after each failed agent, accumulating one
+        # daemon thread per failure until the crew completes. Cheap fix
+        # per review OBS-01; regression test:
+        # ``test_timeout_watcher_exits_when_agent_cancel_set``.
         while not _slot_ready.is_set():
             if cancel_ev.is_set() or agent_cancel.is_set():
                 agent_cancel.set()

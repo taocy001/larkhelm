@@ -189,3 +189,51 @@ def test_emit_breakpoint_timeout_no_breakpoint_agent(
     state.breakpoint_agent_id = ""
     emit_breakpoint_timeout(state)
     assert state.phase == "cancelled"
+
+
+# ── never-raises contract: emit_terminal_failure + emit_breakpoint_timeout ──
+# (review F-3 follow-up: emit_agent_failure_never_raises was already pinned,
+# but the parallel contract on the other two emit_* functions was only
+# documented in their docstring, not pinned by a test. Add coverage.)
+
+def test_emit_terminal_failure_never_raises_on_lark_error(
+    init_test_config, monkeypatch,
+):
+    """Network failures during the red terminal card push must be
+    swallowed. The docstring promises ``never raises``; pin it so a
+    future refactor that drops the outer try-except gets caught."""
+    from larkhelm.crew._failure_card import emit_terminal_failure
+    import larkhelm.crew._failure_card as fc
+
+    def _boom(*a, **kw):
+        raise RuntimeError("lark API down")
+    monkeypatch.setattr(fc, "send_card", _boom, raising=False)
+
+    # Must not raise even when the underlying card send blows up.
+    emit_terminal_failure("test_chat", kind="dev",
+                          reason="disk full", exc=OSError("ENOSPC"))
+
+
+def test_emit_breakpoint_timeout_never_raises_on_lark_error(
+    init_test_config, fake_crew_state, monkeypatch,
+):
+    """Network failures during the orange breakpoint-timeout card push
+    must be swallowed."""
+    from larkhelm.crew._failure_card import emit_breakpoint_timeout
+    import larkhelm.crew._failure_card as fc
+
+    def _boom(state):
+        raise RuntimeError("lark API down")
+    monkeypatch.setattr(fc, "_crew_update_card", _boom, raising=False)
+    # send_card is the fallback path when there's no breakpoint agent;
+    # also rig that to blow up so neither path can succeed.
+    def _boom_send(*a, **kw):
+        raise RuntimeError("lark API down (fallback path)")
+    monkeypatch.setattr(fc, "send_card", _boom_send, raising=False)
+
+    state = fake_crew_state(["pm"])
+    state.breakpoint_agent_id = "pm"
+    # Must not raise.
+    emit_breakpoint_timeout(state)
+    # State mutation must still complete despite the doomed card push.
+    assert state.phase == "cancelled"
