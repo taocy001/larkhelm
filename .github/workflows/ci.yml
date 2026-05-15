@@ -57,10 +57,27 @@ jobs:
         # (see project memory). Excluded here to keep CI green until
         # the underlying mock issue is fixed. Treat any other failure
         # as a regression.
+        #
+        # The first CI run (commit 1b8cd48) failed on all 4 Python
+        # versions while a local fresh venv with the same install steps
+        # produced 1260 passed — the failure is GitHub-runner-specific.
+        # We run with -v so individual test names appear in the live
+        # log and tee the entire stream to a file uploaded as an
+        # artifact below; the artifact survives the job's `exit 1`
+        # so we can diagnose without admin log access.
         run: |
+          set -o pipefail
           python -m pytest tests/ \
             --ignore=tests/test_idle_timeout.py \
-            -q --tb=short
+            -v --tb=long 2>&1 | tee pytest-output.log
+
+      - name: Upload pytest output (on failure or success)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-output-py${{ matrix.python-version }}
+          path: pytest-output.log
+          retention-days: 7
 
   lint:
     name: ruff (bug-detector subset)
