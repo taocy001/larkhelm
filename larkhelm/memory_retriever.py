@@ -20,6 +20,14 @@ Phase 2 additions:
     rotate_audit_files()                  (daily + 32MiB rollover + 30d unlink)
     iter_audit_records(window, chat_id=None) -> Iterator[dict]
 
+Phase 3 additions:
+    LLMRouterRetriever (in ``memory_llm_router`` — wraps keyword/hybrid)
+    ``"llm_router"`` actual mode in ``resolve_actual_mode`` — gated by
+    ``memory_llm_router_enabled`` + ``memory_llm_router_traffic`` AND
+    the resolved keyword/hybrid base mode (LLM router decorates, never
+    replaces an unavailable underlying retriever).
+    Audit record gains ``llm_router_*`` fields when the LLM tier runs.
+
 Log prefix: ``[MemoryRetriever]`` (NFR-OBS-1)."""
 from __future__ import annotations
 
@@ -940,6 +948,12 @@ def resolve_actual_mode(
       2. embedding_traffic gate ON ⇒ force "hybrid"
       3. embedding_backend == "none" ⇒ collapse to "keyword"
       4. anything other than the 3 actual modes ⇒ "keyword"
+
+    Note on llm_router: the Phase 3 LLM-router is a *decorator* over the
+    underlying keyword/hybrid output, not a separate "actual mode" — it
+    keeps the underlying mode here (so audit records report the data
+    source correctly) and is invoked by ``_should_wrap_with_llm_router``
+    + the dispatch layer in ``memory_context._build_with_retriever``.
     """
     cfg = config if config is not None else (getattr(_cfg, "config", {}) or {})
     override = str(cfg.get("memory_retriever_mode", "auto") or "auto").lower()
@@ -980,9 +994,77 @@ def resolve_actual_mode(
         # Embedding off — collapse to keyword regardless.
         mode = "keyword"
 
+    # ``llm_router`` is a declared/policy-level mode but never an actual
+    # mode — collapse to the underlying mode (defaults to "keyword") so
+    # the audit ``mode`` field still reports the data source. The LLM
+    # decoration is layered on top by the dispatch site via
+    # ``_should_wrap_with_llm_router``.
+    if mode == "llm_router":
+        mode = "keyword"
+
     if mode not in ("keyword", "embedding", "hybrid"):
         mode = "keyword"
     return mode  # type: ignore[return-value]
+
+
+# ── Phase 3 — LLM router gating ────────────────────────────────────────────
+
+
+def _should_wrap_with_llm_router(
+    request: RetrievalRequest,
+    policy: InjectionPolicy,
+    chat_id: str,
+    config: dict[str, Any] | None = None,
+) -> bool:
+    """Stage C gate: should we wrap the underlying retriever with the
+    LLM router for this (chat, agent_type, complexity)?
+
+    Decision table:
+      * ``memory_llm_router_enabled=false`` → never
+      * Underlying actual mode is not in ``{"keyword", "hybrid"}`` → never
+        (no point routing pure embedding output)
+      * Policy declared ``retrieval_mode != "llm_router"`` AND the per-
+        chat traffic gate misses → never
+      * ``request.complexity != "high"`` AND ``request.agent_type`` not in
+        ``{"crew", "dev"}`` → never (PRD §7.3 explicitly limits Phase 3
+        rollout to `/crew` and `/dev` complex tasks)
+      * Otherwise → True
+
+    Salted hash-bucket gating (matches Stage A/B style) on
+    ``memory_llm_router_traffic``.
+    """
+    cfg = config if config is not None else (getattr(_cfg, "config", {}) or {})
+    if not bool(cfg.get("memory_llm_router_enabled", False)):
+        return False
+
+    # Scope: only `/crew` and `/dev` (PRD §7.3). Other agent_types still
+    # may have policy.retrieval_mode == "llm_router" set (forward-compat),
+    # but the rollout gate keeps them out of Stage C unless explicitly
+    # extended.
+    if request.agent_type not in ("crew", "dev"):
+        return False
+
+    # Complexity gate: only "high" complexity benefits from the extra
+    # round-trip. "low"/"medium" tasks usually have small slice pools
+    # where keyword/hybrid already pick the right ones.
+    if (request.complexity or "medium") != "high":
+        return False
+
+    # Traffic gate (per-chat hash bucket; salted independently from
+    # memory_retriever_traffic / embedding_traffic so the three rollouts
+    # are statistically independent — matches the SF-01 fix pattern).
+    try:
+        traffic = float(cfg.get("memory_llm_router_traffic", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if traffic <= 0.0:
+        return False
+    if traffic >= 1.0:
+        return True
+    salted = f"memory_llm_router_traffic:{chat_id}".encode("utf-8")
+    digest = hashlib.md5(salted).hexdigest()
+    bucket = int(digest[:8], 16) % 10000
+    return bucket < int(traffic * 10000)
 
 
 def get_retriever(
@@ -1216,18 +1298,24 @@ def build_audit_record_v2(
     fail_open: bool,
     actual_mode: ActualRetrievalMode,
     declared_mode: RetrievalMode | None = None,
+    llm_router_diag: Any = None,
 ) -> dict[str, Any]:
     """Phase 2 audit record (schema_version="2").
 
     All Phase 1 fields are preserved so the legacy reader can still parse
     these records (extra fields are ignored). Phase 2 additions follow
     design.md §3.4.
+
+    Phase 3: when ``llm_router_diag`` is a ``RouterDiagnostics``
+    instance (or any object with the same attrs), append four
+    ``llm_router_*`` fields. Missing diag (the common case) keeps the
+    record byte-identical to Phase 2.
     """
     if declared_mode is None:
         declared_mode = policy.retrieval_mode
     selected_ids = [s.slice.id for s in scored]
     stale_hits = sum(1 for s in scored if getattr(s.slice, "stale", False))
-    return {
+    rec: dict[str, Any] = {
         "schema_version": "2",
         "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
         "chat_id": request.chat_id,
@@ -1245,6 +1333,12 @@ def build_audit_record_v2(
         "fail_open": bool(fail_open),
         "stale_hit_count": stale_hits,
     }
+    if llm_router_diag is not None:
+        rec["llm_router_invoked"]    = bool(getattr(llm_router_diag, "invoked", False))
+        rec["llm_router_cache_hit"]  = bool(getattr(llm_router_diag, "cache_hit", False))
+        rec["llm_router_skipped"]    = str(getattr(llm_router_diag, "skipped_reason", "") or "")
+        rec["llm_router_selected_n"] = int(getattr(llm_router_diag, "selected_by_llm", 0))
+    return rec
 
 
 # ── Audit rotation (REQ-39) ───────────────────────────────────────────────

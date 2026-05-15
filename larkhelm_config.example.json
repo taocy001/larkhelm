@@ -63,6 +63,12 @@
   "memory_audit_rotate_max_mb":    32,
   "memory_audit_retain_days":      30,
 
+  "_comment_memory_phase_d3": "Phase D / Phase 3 — LLM-driven memory router (Stage C). Decorator on top of the keyword/hybrid retriever: the cheap-tier LLM picks the most relevant slices from the top-N candidate pool for high-complexity /crew and /dev tasks. ALL of these must hold for the LLM to run: memory_llm_router_enabled=true AND memory_llm_router_traffic > 0 (per-chat hash bucket, independent salt from Stage A/B) AND agent_type ∈ {crew, dev} AND request.complexity == 'high'. Per-chat rate limit caps cost. Cache reuses verdicts within memory_llm_router_cache_ttl_sec for identical (query, candidate-set) pairs. All failure paths fall back to the underlying retriever output silently; the audit JSONL records `llm_router_*` fields so /memory audit-summary can show invocation rate.",
+  "memory_llm_router_enabled":              false,
+  "memory_llm_router_traffic":              0.0,
+  "memory_llm_router_max_per_chat_per_min": 3,
+  "memory_llm_router_cache_ttl_sec":        300,
+
   "_comment_probe_models": "Optional. If omitted, installed CLIs are auto-discovered from PATH (no model pinning or capabilities). Uncomment and customize to pin models and enable orchestrator routing hints.",
   "probe_models": [
     {

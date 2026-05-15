@@ -529,9 +529,35 @@ class MemoryContextBuilder:
 
         slices = load_slices(self.chat_id, self.cwd)
         fail_open = False
+        llm_router_diag = None
+        # Phase 3: optionally wrap the underlying retriever with the
+        # LLM router. ``_should_wrap_with_llm_router`` enforces the
+        # per-chat / per-agent / per-complexity gating; when it returns
+        # True we construct an ``LLMRouterRetriever`` over the resolved
+        # underlying retriever. The decorator pattern keeps the audit
+        # ``mode`` field reporting the *data source* (keyword/hybrid),
+        # while the new ``llm_router_*`` audit fields record the
+        # decoration's behaviour (invoked / cache_hit / skipped_reason).
         try:
-            retriever = get_retriever(actual_mode, backend=backend)
-            scored = retriever.retrieve(request, policy, slices)
+            from larkhelm.memory_retriever import _should_wrap_with_llm_router
+            wrap_with_llm = _should_wrap_with_llm_router(
+                request, policy, self.chat_id, cfg,
+            )
+        except Exception as e:
+            _debug_log(
+                f"[MemoryRetriever] _should_wrap_with_llm_router failed (treating as off): {e}"
+            )
+            wrap_with_llm = False
+
+        try:
+            underlying = get_retriever(actual_mode, backend=backend)
+            if wrap_with_llm:
+                from larkhelm.memory_llm_router import LLMRouterRetriever
+                router = LLMRouterRetriever(underlying)
+                scored = router.retrieve(request, policy, slices)
+                llm_router_diag = router.diagnostics
+            else:
+                scored = underlying.retrieve(request, policy, slices)
         except Exception as e:
             _debug_log(
                 f"[MemoryRetriever] {actual_mode} retriever failed (fail-open to keyword): {e}"
@@ -539,6 +565,7 @@ class MemoryContextBuilder:
             fail_open = True
             actual_mode = "keyword"
             scored = KeywordRetriever().retrieve(request, policy, slices)
+            llm_router_diag = None
 
         composed = compose_slices_to_context(scored, policy, cwd=self.cwd)
         elapsed_ms = int((_time.perf_counter() - t0) * 1000)
@@ -553,6 +580,7 @@ class MemoryContextBuilder:
                 fail_open=fail_open,
                 actual_mode=actual_mode,
                 declared_mode=declared_mode,
+                llm_router_diag=llm_router_diag,
             ))
         except Exception as e:
             _debug_log(f"[MemoryRetriever] audit enqueue failed: {e}")

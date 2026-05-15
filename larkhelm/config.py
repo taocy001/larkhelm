@@ -641,6 +641,16 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     config.setdefault("memory_audit_rotate_max_mb", 32)     # per-file rollover threshold
     config.setdefault("memory_audit_retain_days", 30)       # unlink rotated files older than this
 
+    # Phase D · Phase 3 — LLM memory router (Stage C). Decorator over the
+    # underlying keyword/hybrid retriever; cheap LLM picks the most
+    # relevant slices from the top-N candidate pool. Gated by all four
+    # flags + scope: agent_type ∈ {crew, dev} AND complexity == "high".
+    # Defaults conservative — feature off, 3 calls/chat/min, 5 min cache.
+    config.setdefault("memory_llm_router_enabled", False)             # Stage C master switch
+    config.setdefault("memory_llm_router_traffic", 0.0)               # Stage C gradual rollout, orthogonal to A/B
+    config.setdefault("memory_llm_router_max_per_chat_per_min", 3)    # per-chat rate ceiling
+    config.setdefault("memory_llm_router_cache_ttl_sec", 300)         # (query, candidate_set) verdict TTL
+
     # Phase B: memory token-optimization flags (S49–S53 + S3 GC).
     # All default to "true" so the new code paths run by default; toggle
     # individually to bisect token-regression reports without redeploying.
