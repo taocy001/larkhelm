@@ -177,19 +177,44 @@ class FailureCardConsumerRoundTripTests(unittest.TestCase):
     def test_breakpoint_timeout_renders_cancelled_phase(self):
         """``emit_breakpoint_timeout`` flips ``state.phase`` to
         "cancelled". _build_card must then render the orange-cancelled
-        title — proving the state-mutation→card-render pipeline closes."""
+        title — proving the state-mutation→card-render pipeline closes.
+
+        We use MagicMock (not lambda no-op) for send_card so we can
+        ALSO assert the orange-banner contract (color="orange" + a
+        cancelled-flavored title). Round-1 reviewer (NH-02) noted the
+        original lambda silently masked any wrong-args regression.
+        """
+        from unittest.mock import MagicMock
         from larkhelm.crew._failure_card import emit_breakpoint_timeout
         from larkhelm.crew_card import _build_card
 
         state = _make_state(["pm"])
         state.breakpoint_agent_id = "pm"
+        send_card_mock = MagicMock()
         with patch("larkhelm.crew._failure_card._crew_update_card",
                    lambda s: None), \
              patch("larkhelm.crew._failure_card.send_card",
-                   lambda *a, **k: None):
+                   send_card_mock):
             emit_breakpoint_timeout(state)
 
         self.assertEqual(state.phase, "cancelled")
+
+        # Tightened: send_card must be called with color="orange" (the
+        # documented Phase C UX contract for breakpoint timeout) and
+        # a body that mentions the cancellation reason. Catches the
+        # over-mocked-pre-fba975a-fix regression class.
+        send_card_mock.assert_called_once()
+        kwargs = send_card_mock.call_args.kwargs
+        args = send_card_mock.call_args.args
+        # color kwarg → orange (per design.md §6.2 + REQ-13)
+        self.assertEqual(kwargs.get("color"), "orange",
+                         f"breakpoint timeout must use orange card; got {kwargs.get('color')!r}")
+        # Title or body mentions cancellation — combined text check.
+        joined = " ".join(str(a) for a in (*args, *kwargs.values()))
+        self.assertIn("超时", joined,
+                      "breakpoint timeout card must mention '超时' so the user "
+                      "knows why their interaction got auto-cancelled")
+
         card_json = _build_card(state)
         text = json.dumps(card_json, ensure_ascii=False)
         self.assertIn("已取消", text,
