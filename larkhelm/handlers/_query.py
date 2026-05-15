@@ -5,6 +5,11 @@ Contains:
   - _extract_feishu_urls()   Extract Feishu document URLs from a message
   - _inject_doc_context()    Auto-inject Feishu document content into prompt
   - _do_query()              Execute an AI query with streaming card updates
+
+The streaming-card state machine — render / push / tool tracking — lives
+in ``_query_card_state.QueryCardState``. Splitting it out lets that
+~280-line component get unit tested without spinning up the full chat
+lock / backend resolution / Feishu API stack (P1 #8 / S2).
 """
 import re
 import threading
@@ -29,6 +34,7 @@ from larkhelm.lark_client import (
 from larkhelm.card_builder import _make_card, _split_md, _fmt_elapsed
 from larkhelm.ai_runner import query_claude, query_gemini, query_kimi, query_deepseek, QueryCancelledError
 from larkhelm.chat_state import _get_cwd, _load_sid, _get_turn_count, _increment_turn_count
+from larkhelm.handlers._query_card_state import QueryCardState
 
 # ── Card UX parameters (from config) ────────────────────────────────
 TOOL_HISTORY_CAP   = _cfg.TOOL_HISTORY_CAP
@@ -435,173 +441,42 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
         if mid:
             _pin_task_card(chat_id, mid)
 
-        # ── Tool state ──────────────────────────────────────
-        active_tools: dict[str, dict] = {}
-        completed_tools: list[dict] = []
-        _tools_lock = threading.Lock()
+        # ── Card render / push / tool state machine ─────────────────────
+        # All scalar + tool state plus the render and push logic lives in
+        # QueryCardState (extracted per S2). The closures below are thin
+        # adapters that bind the state's callbacks to this query's
+        # ``log_entry`` invocation and supply the ``mid`` / cancel / stop
+        # gates that the state class deliberately doesn't own.
+        card_state = QueryCardState(chat_id=chat_id, model_name=m_name, start_time=start)
 
-        # ── Card push state ──────────────────────────────────
-        _dirty             = False
-        _cursor_idx        = 0
-        _current_text      = ""
-        _last_pushed_body  = ""
-        _last_heartbeat    = time.monotonic()
-        _in_background     = False
-
-        # Use nonlocal instead of single-element list
-        _state_lock_local = threading.Lock()
-        # Serialises _patch_card_raw calls between heartbeat and main thread.
-        # The main thread acquires this (without holding it) after _stop_hb.set()
-        # to wait for any in-flight heartbeat patch before writing the final card.
-        _card_patch_lock  = threading.Lock()
-
-        def _get_state():
-            with _state_lock_local:
-                return _dirty, _cursor_idx, _current_text, _last_pushed_body, _last_heartbeat, _in_background
-
-        def _set_dirty(v: bool):
-            nonlocal _dirty
-            with _state_lock_local:
-                _dirty = v
-
-        def _set_current_text(v: str):
-            nonlocal _current_text, _dirty
-            with _state_lock_local:
-                _current_text = v
-                _dirty = True
-
-        def _set_in_background(v: bool):
-            nonlocal _in_background, _dirty
-            with _state_lock_local:
-                _in_background = v
-                _dirty = True
-
-        def _tick_cursor():
-            nonlocal _cursor_idx
-            with _state_lock_local:
-                _cursor_idx = (_cursor_idx + 1) % len(CURSOR_FRAMES)
-
-        def _update_heartbeat():
-            nonlocal _last_heartbeat
-            with _state_lock_local:
-                _last_heartbeat = time.monotonic()
-
-        # ── Render card content ──────────────────────────────────
-        def _render_body() -> tuple[str, str | None, str]:
-            elapsed = _fmt_elapsed(time.time() - start)
-
-            with _tools_lock:
-                act = dict(active_tools)
-                comp = list(completed_tools)
-
-            with _state_lock_local:
-                cur_text = _current_text
-                cursor_i = _cursor_idx
-                in_bg    = _in_background
-
-            tool_parts: list[str] = []
-            n_hidden = max(0, len(comp) - TOOL_HISTORY_CAP)
-            if n_hidden > 0:
-                tool_parts.append(f"_+{n_hidden} 条更早记录已隐藏_")
-
-            def _fmt_desc(d: str) -> str:
-                if not d:
-                    return ""
-                if "\n" in d:
-                    return f"\n```\n{d}\n```"
-                return f"  \n`{d}`"
-
-            for t in comp[-TOOL_HISTORY_CAP:]:
-                icon = "✗" if t["is_error"] else "✓"
-                desc_str = _fmt_desc(t.get("desc", ""))
-                tool_parts.append(
-                    f"{icon} **{t['name']}** ({_fmt_elapsed(t['elapsed'])}){desc_str}"
-                )
-            now_mono = time.monotonic()
-            for t in act.values():
-                tool_elapsed = now_mono - t["start"]
-                desc_str = _fmt_desc(t.get("desc", ""))
-                if tool_elapsed > STALL_THRESHOLD:
-                    tool_parts.append(f"🔧 **{t['name']}** ⚠️ 响应停滞 ({_fmt_elapsed(tool_elapsed)}){desc_str}")
-                else:
-                    tool_parts.append(f"🔧 **{t['name']}** ({_fmt_elapsed(tool_elapsed)})…{desc_str}")
-            tools_md = "\n\n".join(tool_parts) if tool_parts else None
-
-            if cur_text.strip():
-                cursor = CURSOR_FRAMES[cursor_i]
-                response_md = cur_text.strip() + cursor
-            elif not tool_parts:
-                response_md = "> 正在思考..."
-            else:
-                response_md = ""
-
-            bg_prefix = "后台·" if in_bg else ""
-            if act:
-                title = f"⚙️ {m_name} · {bg_prefix}工具调用中 ({elapsed})"
-            elif cur_text.strip():
-                title = f"✍️ {m_name} · {bg_prefix}回应中 ({elapsed})"
-            else:
-                title = f"⏳ {m_name} · {bg_prefix}思考中 ({elapsed})"
-
-            return title, tools_md, response_md
-
-        # ── Push card ─────────────────────────────────────
         def _push_if_needed(force: bool = False, include_cancel: bool = True):
-            nonlocal _last_pushed_body, _dirty
             if cancel_ev.is_set() or _stop_hb.is_set():
                 return
-            title, tools_md, response_md = _render_body()
-            combined = f"{title}||{tools_md}||{response_md}"
-            with _state_lock_local:
-                need_push = force or _dirty or combined != _last_pushed_body
+            rendered = card_state.render_body()
+            need_push, combined = card_state.should_push(rendered, force=force)
             if need_push:
                 btns = [("🛑 取消", f"cancel:{chat_id}")] if include_cancel else None
-                card_json = _make_card(title, response_md, color="grey",
-                                       tools_md=tools_md, tools_expanded=True,
+                card_json = _make_card(rendered.title, rendered.response_md, color="grey",
+                                       tools_md=rendered.tools_md, tools_expanded=True,
                                        buttons=btns)
-                with _card_patch_lock:
+                with card_state.card_patch_lock:
                     # Re-check inside the lock: if the main thread already set _stop_hb
                     # and drained this lock, don't overwrite the final card.
                     if cancel_ev.is_set() or _stop_hb.is_set():
                         return
                     _patch_card_raw(mid, card_json)
-                with _state_lock_local:
-                    _last_pushed_body = combined
-                    _dirty = False
+                card_state.mark_pushed(combined)
 
-        # ── Callback: tool invocation ────────────────────────────────
+        # ── Callbacks: thin shims that add per-query logging on top of
+        #    the state's pure callbacks. ``on_tool`` is the only one that
+        #    actually needs a wrapper (for log_entry); the others bind
+        #    directly to ``card_state.on_*``.
         def on_tool(name: str, desc: str, tool_id: str = ""):
-            with _tools_lock:
-                now_mono = time.monotonic()
-                for tid, t in list(active_tools.items()):
-                    elapsed = now_mono - t["start"]
-                    completed_tools.append({
-                        "name": t["name"], "desc": t["desc"],
-                        "result": "", "is_error": False, "elapsed": elapsed,
-                    })
-                active_tools.clear()
-                active_tools[tool_id] = {"name": name, "desc": desc, "start": now_mono}
-            _set_dirty(True)
+            card_state.on_tool(name, desc, tool_id)
             log_entry(chat_id, "tool", f"{name}: {desc}", model=model, trace_id=trace_id)
 
-        # ── Callback: tool result ────────────────────────────────
-        def on_tool_result(tool_id: str, result: str, is_error: bool, elapsed: float):
-            with _tools_lock:
-                info = active_tools.pop(tool_id, None)
-                if info:
-                    completed_tools.append({
-                        "name":      info["name"],
-                        "desc":      info["desc"],
-                        "result":    result,
-                        "full_result": result[:5000] if len(result) > 200 else "",
-                        "is_error":  is_error,
-                        "elapsed":   elapsed,
-                    })
-            _set_dirty(True)
-
-        # ── Callback: streaming text ────────────────────────────────
-        def on_text(text: str, status: str = "typing"):
-            _set_current_text(text)
+        on_tool_result = card_state.on_tool_result
+        on_text = card_state.on_text
 
         # ── Soft-timeout callback ────────────────────────────────
         def _on_soft_timeout():
@@ -610,7 +485,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 return
             elapsed_now = _fmt_elapsed(time.time() - start)
             _debug_log(f"[{trace_id}][DoQuery] soft timeout ({elapsed_now}), lock released, continuing in background")
-            _set_in_background(True)
+            card_state.set_in_background(True)
             # Heartbeat keeps running in background (shows "后台·" prefix, hides cancel button).
             # It is stopped by the success/error finally block when the AI finishes.
             try:
@@ -635,18 +510,18 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
         def _heartbeat_loop():
             while not _stop_hb.is_set():
                 try:
-                    _tick_cursor()
+                    card_state.tick_cursor()
                     now = time.monotonic()
-                    with _state_lock_local:
-                        last_hb = _last_heartbeat
-                        dirty_now = _dirty
-                        in_bg = _in_background
+                    # Snapshot the three render-affecting flags atomically
+                    # so the heartbeat decision is consistent.
+                    _, _, _, _, last_hb, in_bg = card_state.get_state_snapshot()
+                    dirty_now = card_state.dirty
                     # After soft timeout the task runs in background; cancel button
                     # is no longer wired to the new cancel event, so hide it.
                     show_cancel = not in_bg
                     if now - last_hb >= CARD_PUSH_INTERVAL:
                         _push_if_needed(force=True, include_cancel=show_cancel)
-                        _update_heartbeat()
+                        card_state.update_heartbeat()
                     elif dirty_now:
                         _push_if_needed(force=False, include_cancel=show_cancel)
                 except Exception as e:
@@ -740,10 +615,11 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             try:
                 primary_spec = resolve_backend(chat_id, message, bool(images), has_doc_urls, force_backend_id)
                 m_name = primary_spec.display_name
+                card_state.update_model_name(m_name)
             except LockedBackendUnavailableError as _lbe:
                 # User explicitly locked this backend; show error card, do not silently re-route
                 _stop_hb.set()
-                with _card_patch_lock:   # drain any in-flight heartbeat patch before overwriting
+                with card_state.card_patch_lock:   # drain any in-flight heartbeat patch before overwriting
                     pass
                 hb_thread.join(timeout=0.5)
                 if user_msg_id and _eyes_reaction_id[0]:
@@ -815,6 +691,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 for attempt_spec in chain:
                     try:
                         m_name = attempt_spec.display_name
+                        card_state.update_model_name(m_name)
                         if worker_specs:
                             output = _do_query_with_delegation(
                                 chat_id, message, attempt_spec, worker_specs,
@@ -841,7 +718,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                         # Show brief failover notice to user if more backends remain
                         remaining = [s for s in chain if s.healthy and s.id != attempt_spec.id]
                         if remaining:
-                            _set_current_text(
+                            card_state.set_current_text(
                                 f"> ⚠️ {attempt_spec.display_name} 不可用，切换至 {remaining[0].display_name}..."
                             )
 
@@ -866,21 +743,26 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             # because Feishu API calls can exceed 2 s; the lock drain is the real
             # guarantee — the join is just cleanup.
             _stop_hb.set()
-            with _card_patch_lock:   # blocks until any in-flight heartbeat patch finishes
+            with card_state.card_patch_lock:   # blocks until any in-flight heartbeat patch finishes
                 pass
             hb_thread.join(timeout=0.5)
 
-            with _tools_lock:
-                now_mono = time.monotonic()
-                for tid, t in list(active_tools.items()):
-                    completed_tools.append({
-                        "name": t["name"], "desc": t["desc"],
-                        "result": "", "is_error": False,
-                        "elapsed": now_mono - t["start"],
-                    })
-                active_tools.clear()
-                n_tools = len(completed_tools)
-                final_tools = list(completed_tools)
+            # Flush any still-in-flight tools into the completed list so the
+            # final card / tools_list payload accurately reports them. The
+            # serialised payload (sent to ``_make_card``) uses dict form for
+            # back-compat with the card builder schema.
+            card_state.snapshot_active_tools_as_completed()
+            final_tool_records = card_state.snapshot_completed_tools()
+            n_tools = len(final_tool_records)
+            final_tools = [
+                {
+                    "name": t.name, "desc": t.desc,
+                    "result": t.result,
+                    "full_result": t.full_result,
+                    "is_error": t.is_error, "elapsed": t.elapsed,
+                }
+                for t in final_tool_records
+            ]
 
             note = (f"使用了 {n_tools} 次工具 · " if n_tools else "") + f"耗时 {elapsed}"
 
@@ -944,7 +826,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
 
         except QueryCancelledError:
             _stop_hb.set()
-            with _card_patch_lock: pass   # drain any in-flight heartbeat patch first
+            with card_state.card_patch_lock: pass   # drain any in-flight heartbeat patch first
             elapsed = _fmt_elapsed(time.time() - start)
             # The card was synchronously updated to "cancelling" in the cancel callback response;
             # here we just patch with the final elapsed time; patch failure is safe (no stale cancel button)
@@ -954,7 +836,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 _eyes_reaction_id[0] = None
         except TimeoutError as e:
             _stop_hb.set()
-            with _card_patch_lock: pass   # drain any in-flight heartbeat patch first
+            with card_state.card_patch_lock: pass   # drain any in-flight heartbeat patch first
             elapsed = _fmt_elapsed(time.time() - start)
             log_entry(chat_id, "error", str(e), model=model, trace_id=trace_id)
             # Show the actual exception message rather than a hard-coded
@@ -977,7 +859,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 _eyes_reaction_id[0] = None
         except Exception as e:
             _stop_hb.set()
-            with _card_patch_lock: pass   # drain any in-flight heartbeat patch first
+            with card_state.card_patch_lock: pass   # drain any in-flight heartbeat patch first
             import sys
             print(traceback.format_exc(), file=sys.stderr)
             _debug_log(f"[{trace_id}][DoQuery] exception: {e}\n{traceback.format_exc()}")
