@@ -81,12 +81,14 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e '.[dev]'
 
-      - name: "Ruff (rules F821, F811, E712)"
+      - name: "Ruff (bug-detector ruleset)"
         # Starts narrow — F821 (undefined name) caught 3 real bugs in
-        # the initial pass. Style rules (F401 unused, E402 imports,
-        # etc.) are deferred to a future "lint-strict" pass once the
-        # 280+ style violations are cleaned up. Configuration lives in
-        # pyproject.toml [tool.ruff.lint].
+        # the initial pass. Current ruleset is the 6 bug-detector
+        # rules locked in via pyproject.toml [tool.ruff.lint]:
+        # F821 / F811 / E711 / E712 / E714 / F632.
+        # Style rules (F401 unused, E402 imports, F541 empty f-strings)
+        # are deferred to a future "lint-strict" pass once the 280+
+        # style violations are cleaned up.
         run: python -m ruff check larkhelm/ tests/
 
   typecheck:
