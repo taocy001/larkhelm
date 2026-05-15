@@ -391,12 +391,23 @@ class BackendRegistry:
             except Exception as e:
                 _debug_log(f"[BackendRegistry] recover_check error for {spec.id}: {e}")
 
-    def set_probe_result(self, spec_id: str, ok: bool, error: str = "") -> None:
+    def set_probe_result(self, spec_id: str, ok: bool | None, error: str = "") -> None:
         """Update healthy/last_error/last_probed_at for a spec after a probe completes.
 
         Called by both the startup probe (``model_probe.run_probes_async``) and
         the unified health-tick loop in ``config._start_recover_thread``.
         Thread-safe.
+
+        ``ok`` semantics:
+          * True — probe confirmed reachable: flip ``healthy=True``, clear error.
+          * False — probe failed clearly: flip ``healthy=False``, record error.
+          * None — probe result indeterminate (e.g. subprocess timeout). Do
+            NOT mutate ``healthy``. Real-traffic ``record_call_failure`` is
+            the authoritative health signal for these cases; the probe just
+            updates ``last_probed_at`` so the staleness check knows the
+            tick ran. Added to fix the Gemini/Claude probe false-positive
+            where ``subprocess.TimeoutExpired`` returned ``True`` ("slow
+            start = model exists") and silently masked real outages.
 
         Note: does NOT clear ``failure_window``. A successful probe only proves
         the backend's auth+connectivity work right now — it does not prove the
@@ -408,6 +419,15 @@ class BackendRegistry:
         with self._lock:
             spec = self._specs.get(spec_id)
             if spec is None:
+                return
+            if ok is None:
+                # Indeterminate — bookkeeping only, no healthy flip. Tag the
+                # error string so /status shows the timeout reason next to
+                # the last-probed timestamp.
+                spec.last_probed_at = _time.time()
+                spec.last_probed_mono = _time.monotonic()
+                if error:
+                    spec.last_error = f"probe indeterminate: {error}"
                 return
             spec.healthy = ok
             spec.last_error = error if not ok else None

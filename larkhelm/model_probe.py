@@ -13,13 +13,26 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from larkhelm.log import _debug_log
 
-PROBE_TIMEOUT = 12  # seconds per probe; timeout = model exists but slow → treat as available
+PROBE_TIMEOUT = 12  # seconds per probe
 _MAX_WORKERS   = 4  # concurrent probes
+
+# Sentinel returned by CLI probes when the subprocess times out — meaning
+# we could neither confirm health (False) nor confirm reachability (True).
+# ``BackendRegistry.set_probe_result`` accepts ``ok=None`` and does NOT
+# mutate ``healthy`` — only updates last_probed_at. Real-traffic
+# ``record_call_failure`` becomes the authoritative health signal for
+# this backend until the next probe tick succeeds or fails definitively.
+#
+# Pre-fix (the bug this constant exists to prevent): timeout returned
+# ``True`` with rationale "slow start = model exists" — a Gemini API
+# outage causing the CLI to hang indefinitely was silently relabeled as
+# "healthy".
+PROBE_INDETERMINATE_TIMEOUT = (None, "subprocess timeout")
 
 
 # ── Per-provider probe functions ─────────────────────────────────────────────
 
-def _probe_gemini(spec) -> tuple[bool, str]:
+def _probe_gemini(spec) -> tuple[bool | None, str]:
     cmd = [spec.command or "gemini"]
     if spec.model:
         cmd += ["-m", spec.model]
@@ -40,12 +53,14 @@ def _probe_gemini(spec) -> tuple[bool, str]:
             return False, f"model not found: {spec.model or '(default)'}"
         return False, err
     except subprocess.TimeoutExpired:
-        return True, ""  # slow start = model exists
+        # Indeterminate — see PROBE_INDETERMINATE_TIMEOUT comment for why
+        # this is None and not True.
+        return PROBE_INDETERMINATE_TIMEOUT
     except Exception as e:
         return False, str(e)[:200]
 
 
-def _probe_claude(spec) -> tuple[bool, str]:
+def _probe_claude(spec) -> tuple[bool | None, str]:
     cmd = [spec.command or "claude", "--print", "--verbose", "--output-format", "stream-json"]
     if spec.model:
         cmd += ["--model", spec.model]
@@ -66,12 +81,12 @@ def _probe_claude(spec) -> tuple[bool, str]:
             return False, f"model not available: {spec.model or '(default)'}"
         return False, err
     except subprocess.TimeoutExpired:
-        return True, ""
+        return PROBE_INDETERMINATE_TIMEOUT
     except Exception as e:
         return False, str(e)[:200]
 
 
-def _probe_kimi(spec) -> tuple[bool, str]:
+def _probe_kimi(spec) -> tuple[bool | None, str]:
     cmd = [spec.command or "kimi",
            "--print", "--output-format", "stream-json", "--input-format", "stream-json"]
     if spec.model:
@@ -113,7 +128,7 @@ def _probe_kimi(spec) -> tuple[bool, str]:
         err = r.stderr[:200].strip() or r.stdout[:200].strip() or f"rc={r.returncode}"
         return False, err
     except subprocess.TimeoutExpired:
-        return True, ""
+        return PROBE_INDETERMINATE_TIMEOUT
     except Exception as e:
         return False, str(e)[:200]
 
@@ -291,8 +306,16 @@ def _probe_deepseek_real(spec) -> tuple[bool, str]:
 
 # ── Dispatcher ────────────────────────────────────────────────────────────────
 
-def probe_spec(spec) -> tuple[bool, str]:
+def probe_spec(spec) -> tuple[bool | None, str]:
     """Run availability probe for a single BackendSpec. Returns (ok, error_msg).
+
+    Return-type semantics:
+      * (True, "")             — probe confirmed reachable.
+      * (False, "<reason>")    — probe failed clearly (auth / quota / not-found / etc).
+      * (None, "<reason>")     — INDETERMINATE (CLI subprocess timeout).
+        ``set_probe_result`` interprets None as "do not mutate healthy".
+        Real-traffic ``record_call_failure`` becomes the authoritative
+        health signal until the next definitive probe result.
 
     For API backends, dispatch based on ``_cfg.BACKEND_PROBE_API_REAL_CALL``:
     when True (default), make a real 1-token call to validate auth + model;
