@@ -154,6 +154,68 @@ def _parse_audit_summary_duration(spec: str | None):
         return timedelta(hours=1)
 
 
+def _compute_llm_router_summary(records: list) -> dict | None:
+    """Aggregate Stage C (LLM-router) telemetry from Phase 3 audit records.
+
+    Returns ``None`` when **no** record in the window carries any
+    ``llm_router_*`` field — meaning Stage C gate didn't fire in this
+    window, so the operator sees a clean Phase-2-shaped summary instead
+    of a section full of zeroes.
+
+    When at least one record has the fields, returns a dict with:
+
+      * ``gate_fired_count``    — records that reached the Stage C gate
+        (the dispatcher set ``llm_router_diag`` on them)
+      * ``invoked_count``       — subset that actually called the cheap
+        LLM (no cache, no rate-limit, no skip)
+      * ``cache_hit_count``     — subset that reused a cached verdict
+      * ``cache_hit_rate``      — hits / (hits + invokes); 0.0 when both 0
+      * ``avg_selected_n``      — avg LLM-selected slice count, among
+        invokes that returned a selection (cache hits + skips excluded)
+      * ``skipped_breakdown``   — Counter dict of non-empty
+        ``llm_router_skipped`` reasons (rate_limit, no_cheap_caller,
+        caller_exception, parse_failed, empty_response, ...)
+
+    All counts are operator-facing — they answer "is Stage C alive,
+    is it cheap, is the LLM picking anything useful?".
+    """
+    # A record was considered by Stage C iff it carries any llm_router_* key.
+    # ``llm_router_invoked`` is the canonical sentinel; the dispatcher
+    # writes it on every Stage C path (invoke / cache-hit / skip).
+    gate_fired = [r for r in records if "llm_router_invoked" in r]
+    if not gate_fired:
+        return None
+    invoked = [r for r in gate_fired if r.get("llm_router_invoked")]
+    cache_hits = [r for r in gate_fired if r.get("llm_router_cache_hit")]
+    # Skipped records carry a non-empty ``llm_router_skipped`` reason.
+    # Note: a record can have skipped="rate_limit" with invoked=False —
+    # those count as "skipped" not "invoked", and are not double-counted.
+    skipped_counter: dict[str, int] = {}
+    for r in gate_fired:
+        reason = str(r.get("llm_router_skipped") or "")
+        if reason:
+            skipped_counter[reason] = skipped_counter.get(reason, 0) + 1
+
+    # avg_selected_n only meaningful for actual invokes (cache hits and
+    # skips report 0 / N/A respectively). Compute over invokes only.
+    selected_total = sum(int(r.get("llm_router_selected_n", 0) or 0) for r in invoked)
+    avg_selected = (selected_total / len(invoked)) if invoked else 0.0
+
+    n_inv = len(invoked)
+    n_hit = len(cache_hits)
+    cache_denom = n_inv + n_hit
+    cache_rate = (n_hit / cache_denom) if cache_denom else 0.0
+
+    return {
+        "gate_fired_count": len(gate_fired),
+        "invoked_count":    n_inv,
+        "cache_hit_count":  n_hit,
+        "cache_hit_rate":   cache_rate,
+        "avg_selected_n":   avg_selected,
+        "skipped_breakdown": skipped_counter,
+    }
+
+
 def _compute_audit_summary(records: list, delta) -> dict:
     """Aggregate a list of audit records into the JSON contract dict (design.md §3.7)."""
     from datetime import datetime, timezone
@@ -196,7 +258,7 @@ def _compute_audit_summary(records: list, delta) -> dict:
     total = len(records)
     avg_selected_chars = sum(int(r.get("selected_token_chars", 0)) for r in records) / total
     avg_slice_count = sum(len(r.get("selected_slice_ids", []) or []) for r in records) / total
-    return {
+    out = {
         "schema_version": "2",
         "since": since.isoformat(timespec="seconds"),
         "until": until.isoformat(timespec="seconds"),
@@ -209,6 +271,14 @@ def _compute_audit_summary(records: list, delta) -> dict:
         "avg_selected_slice_count": avg_slice_count,
         "by_agent_type": by_agent_summary,
     }
+    # Phase 3 — Stage C LLM-router telemetry. Only emitted when at least
+    # one record in the window has llm_router_* fields, so the summary
+    # stays Phase-2-shaped for installations that haven't rolled out
+    # Stage C yet (avoids confusing zero-noise in the JSON contract).
+    llm_router_summary = _compute_llm_router_summary(records)
+    if llm_router_summary is not None:
+        out["llm_router"] = llm_router_summary
+    return out
 
 
 def _render_audit_summary_text(d: dict) -> str:
@@ -231,6 +301,27 @@ def _render_audit_summary_text(d: dict) -> str:
                 f"  {agent:<8} n={st['count']:<4} p95={st['p95_elapsed_ms']:.0f}ms"
                 f" fail-open={st['fail_open_rate']:.2%}"
             )
+    # Phase 3 — Stage C LLM-router section. Only rendered when the
+    # ``llm_router`` key is present (i.e. at least one record in the
+    # window passed the Stage C gate). Layout mirrors the existing
+    # "per agent" block so operators reading the text output get
+    # consistent spacing.
+    llm_r = d.get("llm_router")
+    if llm_r:
+        lines.append("llm router :")
+        gate    = int(llm_r.get("gate_fired_count", 0))
+        invoked = int(llm_r.get("invoked_count", 0))
+        hits    = int(llm_r.get("cache_hit_count", 0))
+        rate    = float(llm_r.get("cache_hit_rate", 0.0))
+        avg_n   = float(llm_r.get("avg_selected_n", 0.0))
+        lines.append(
+            f"  gate-fired={gate} invoked={invoked} cache-hit={hits}"
+            f" cache-rate={rate:.2%} avg-selected={avg_n:.1f}"
+        )
+        breakdown = llm_r.get("skipped_breakdown") or {}
+        if breakdown:
+            parts = ", ".join(f"{k}={v}" for k, v in sorted(breakdown.items()))
+            lines.append(f"  skipped: {parts}")
     return "\n".join(lines)
 
 
