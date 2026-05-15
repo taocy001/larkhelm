@@ -230,6 +230,29 @@ def _build_card(state: CrewState) -> str:
         if running_previews:
             body_parts.append("---\n\n" + "\n\n---\n\n".join(running_previews))
 
+        # Failed-agent details — surface ``a.error`` during the running
+        # phase too. Without this, the user sees an ❌ icon on the agent
+        # line but no reason; the rich "Agent 详情" block that DOES
+        # include error text only fires for terminal phases (line 257+).
+        # PRD §G2 promised "Agent 失败时收到明确的 ⚠️ 卡片（含失败
+        # Agent ID、阶段、原因摘要）" — without this section, the
+        # promise is only kept after the whole crew finishes, not at
+        # the moment of failure. Caught by
+        # ``test_phase_c_failure_card_roundtrip``.
+        failure_blocks: list[str] = []
+        for spec in plan.agents:
+            a = agents.get(spec.id)
+            if not a or a.status != AgentStatus.FAILED or not a.error:
+                continue
+            t_str = ""
+            if a.start_time and a.end_time:
+                t_str = f" · {_fmt_elapsed(a.end_time - a.start_time)}"
+            failure_blocks.append(
+                f"**❌ {spec.role} 失败**{t_str}\n\n{a.error[:400]}"
+            )
+        if failure_blocks:
+            body_parts.append("---\n\n" + "\n\n---\n\n".join(failure_blocks))
+
         # Breakpoint: PRD preview + confirm/cancel buttons on the main card
         if phase == "breakpoint":
             from pathlib import Path as _Path
