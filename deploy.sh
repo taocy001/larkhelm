@@ -18,8 +18,31 @@
 set -euo pipefail
 
 UNIT="larkhelm.service"
-VENV_PYTHON="$HOME/.local/pipx/venvs/larkhelm/bin/python"
 SRC="$(cd "$(dirname "$0")" && pwd)"
+
+# Locate the pipx venv python. pipx layout changed over versions:
+#   * pipx >= 1.4 (current): $HOME/.local/share/pipx/venvs/larkhelm/    (XDG)
+#   * pipx <  1.4 (legacy):  $HOME/.local/pipx/venvs/larkhelm/
+# Prefer `pipx environment` if available (works across versions); fall
+# back to probing the two known paths.
+_resolve_venv_python() {
+    if command -v pipx >/dev/null 2>&1; then
+        local venvs_dir
+        venvs_dir=$(pipx environment --value PIPX_LOCAL_VENVS 2>/dev/null || true)
+        if [ -n "$venvs_dir" ] && [ -x "$venvs_dir/larkhelm/bin/python" ]; then
+            echo "$venvs_dir/larkhelm/bin/python"; return 0
+        fi
+    fi
+    for candidate in \
+        "$HOME/.local/share/pipx/venvs/larkhelm/bin/python" \
+        "$HOME/.local/pipx/venvs/larkhelm/bin/python"; do
+        if [ -x "$candidate" ]; then
+            echo "$candidate"; return 0
+        fi
+    done
+    return 1
+}
+VENV_PYTHON=$(_resolve_venv_python || true)
 
 # Mode is exclusive: default | with-deps | skip-install. Track the selection
 # explicitly so we can reject conflicting flags instead of silently last-wins.
@@ -72,16 +95,21 @@ fi
 
 # 2) Install (skipped when --skip-install was passed)
 if [ "$MODE" != "skip-install" ]; then
-    if [ ! -x "$VENV_PYTHON" ]; then
-        echo "[deploy] ERROR: pipx venv python not found at $VENV_PYTHON" >&2
-        echo "[deploy] Run 'pipx install -e $SRC' first." >&2
+    if [ -z "$VENV_PYTHON" ] || [ ! -x "$VENV_PYTHON" ]; then
+        echo "[deploy] ERROR: pipx venv for 'larkhelm' not found." >&2
+        echo "[deploy] Searched:" >&2
+        echo "[deploy]   * \$(pipx environment --value PIPX_LOCAL_VENVS)/larkhelm/bin/python" >&2
+        echo "[deploy]   * \$HOME/.local/share/pipx/venvs/larkhelm/bin/python" >&2
+        echo "[deploy]   * \$HOME/.local/pipx/venvs/larkhelm/bin/python" >&2
+        echo "[deploy] Run 'pipx install -e $SRC' first, or pass --skip-install if" >&2
+        echo "[deploy] you've already installed and just want to restart the service." >&2
         exit 1
     fi
     if [ "$MODE" = "with-deps" ]; then
-        echo "[deploy] Installing from $SRC (re-resolving deps)..."
+        echo "[deploy] Installing from $SRC into $VENV_PYTHON (re-resolving deps)..."
         "$VENV_PYTHON" -m pip install -q "$SRC"
     else
-        echo "[deploy] Installing from $SRC (--no-deps; pass --with-deps to re-resolve)..."
+        echo "[deploy] Installing from $SRC into $VENV_PYTHON (--no-deps; pass --with-deps to re-resolve)..."
         "$VENV_PYTHON" -m pip install --no-deps -q "$SRC"
     fi
 fi
