@@ -44,8 +44,16 @@ class OnText(Protocol):
     """Streaming text callback signature.
 
     Implementations must accept the positional ``text`` and tolerate a
-    ``status`` keyword (used to distinguish ``"typing"`` mid-stream
-    frames from the ``"done"`` final frame).
+    ``status`` keyword used as a free-form sentinel distinguishing the
+    runner's current phase. Sentinels observed across the runners:
+
+      * ``"typing"`` — mid-stream incremental text (default)
+      * ``"done"``   — final frame
+      * ``"thinking"`` — DeepSeek extended-thinking phase
+      * ``"init"``   — initial connection / hello frame
+      * ``"error"``  — Claude CLI's error-text frame
+
+    Implementations should treat unknown sentinels as ``"typing"``.
     """
     def __call__(self, text: str, status: str = "typing") -> None: ...
 
@@ -94,6 +102,15 @@ seconds) elapses but the subprocess is still alive. The query thread
 releases the chat lock and promotes the task to "background" so the
 heartbeat card keeps updating while the user can start a new query."""
 
-OnStart: TypeAlias = Callable[[int], None]
-"""Fires once with the subprocess pid right after ``Popen`` returns.
-Used by tests and by ``crew/_runner.py`` for slot-acquisition timing."""
+OnStart: TypeAlias = Callable[[], None]
+"""Fires once right after the runner acquires its semaphore slot and
+spawns the subprocess (or, for DeepSeek, opens the HTTP request).
+
+Takes **no arguments**. The original v1 of this alias declared
+``Callable[[int], None]`` claiming it received the subprocess pid, but
+every call site in runner_base / runner_deepseek / crew/_runner invokes
+it with zero args — so the v1 type signature was a lie that would have
+broken any caller defining ``def cb(pid): ...`` trusting the type.
+
+Crew uses it to flip the agent's status to RUNNING and start its
+timeout countdown only after the slot is held."""

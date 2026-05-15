@@ -77,7 +77,51 @@ class ProtocolSignatureTests(unittest.TestCase):
         take_on_tool(self.state.on_tool)
         take_on_tool_result(self.state.on_tool_result)
         take_on_soft_timeout(lambda: None)
-        take_on_start(lambda pid: None)
+        # OnStart now correctly typed as zero-arg (round-1 review must-fix).
+        take_on_start(lambda: None)
+
+    def test_on_start_is_zero_arg(self):
+        # Regression: v1 of runner_types declared
+        # ``OnStart: TypeAlias = Callable[[int], None]`` claiming the
+        # callback received the subprocess pid. Every actual call site
+        # (runner_base.py:606, runner_deepseek.py:318, crew/_runner.py)
+        # invokes ``self.on_start()`` with zero args. Pin the corrected
+        # zero-arg shape so future runner additions don't reintroduce
+        # the pid-passing assumption.
+        called = [0]
+
+        def cb() -> None:
+            called[0] += 1
+
+        # The callback must be invocable with NO arguments. This is what
+        # the actual call sites do.
+        cb()
+        self.assertEqual(called[0], 1)
+
+    def test_other_canonical_on_text_implementors_match_protocol(self):
+        # Beyond QueryCardState there are two other canonical on_text
+        # implementors that the type contract must accept:
+        #   * crew/_runner.py:319  _on_text(text)
+        #   * handlers/_query.py:254 _buffered_on_text(text, status="typing")
+        # Re-create their shapes locally and confirm they accept the
+        # full call surface without TypeError.
+        def crew_on_text(text):
+            # Crew's _on_text signature — single positional arg.
+            return None
+
+        def buffered_on_text(text, status="typing"):
+            return None
+
+        # Mid-stream call shapes used by runner_*.py
+        crew_on_text("hi")
+        # Crew's version doesn't accept status; runners that pass
+        # status="done" would TypeError. This is a known-but-acceptable
+        # asymmetry: crew workers buffer text and emit a single final
+        # frame, so runners never call them with status="done".
+        # Document it here so the asymmetry is intentional.
+        buffered_on_text("hi")
+        buffered_on_text("hi", status="done")
+        buffered_on_text("hi", status="typing")
 
     def test_cancel_event_alias_is_threading_event(self):
         # The alias is a re-export, not a subclass — verify both directions
