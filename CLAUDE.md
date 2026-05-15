@@ -591,3 +591,4 @@ python3 -m larkhelm start
 | `memory.py` `_global_memory_file` chat_state 访问 | 已有明确 fallback（返回 None） |
 | `crew/_runner.py` git diff | 非 git 仓库为预期行为 |
 | `mcp_server.py` config inner parse | MCP config 行级容错，解析失败继续下一行 |
+| `crew/_failure_card.py` `emit_agent_failure` / `emit_terminal_failure` / `emit_breakpoint_timeout` 顶层 try | 错误上报路径「永不抛」契约——这三个 emit 入口本身就是其它路径的失败兜底，再抛只会复合污染。docstring 显式说明；测试 `test_crew_failure_card.py` 验证 |

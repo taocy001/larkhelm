@@ -126,14 +126,14 @@ class TestContextAugmentation(unittest.TestCase):
     def test_passthrough_when_no_context_available(self):
         """With both helpers returning empty, requirement must be unchanged."""
         with patch("larkhelm.log._get_recent_turns", return_value=""), \
-             patch("larkhelm.memory.get_memory_context", return_value=""):
+             patch("larkhelm.memory.get_memory_context_v2", return_value=("", [])):
             out = _augment_requirement_with_context("实现 X", "oc_test", "/tmp")
         self.assertEqual(out, "实现 X")
 
     def test_chat_only_injection(self):
         with patch("larkhelm.log._get_recent_turns",
                    return_value="User: 我们要做 Y\nAssistant: 好的"), \
-             patch("larkhelm.memory.get_memory_context", return_value=""):
+             patch("larkhelm.memory.get_memory_context_v2", return_value=("", [])):
             out = _augment_requirement_with_context("实现 X", "oc_test", "/tmp")
         self.assertTrue(out.startswith("实现 X"),
                         "user-typed requirement must come FIRST so PM/title both see it")
@@ -143,8 +143,8 @@ class TestContextAugmentation(unittest.TestCase):
 
     def test_memory_only_injection(self):
         with patch("larkhelm.log._get_recent_turns", return_value=""), \
-             patch("larkhelm.memory.get_memory_context",
-                   return_value="[GLOBAL MEMORY]\n用户偏好中文输出\n[/GLOBAL MEMORY]"):
+             patch("larkhelm.memory.get_memory_context_v2",
+                   return_value=("[GLOBAL MEMORY]\n用户偏好中文输出\n[/GLOBAL MEMORY]", [])):
             out = _augment_requirement_with_context("实现 X", "oc_test", "/tmp")
         self.assertTrue(out.startswith("实现 X"))
         self.assertIn("长期记忆", out)
@@ -154,8 +154,8 @@ class TestContextAugmentation(unittest.TestCase):
     def test_both_injected(self):
         with patch("larkhelm.log._get_recent_turns",
                    return_value="User: 我们要做 Y"), \
-             patch("larkhelm.memory.get_memory_context",
-                   return_value="[PROJECT MEMORY]\n用 PascalCase\n[/PROJECT MEMORY]"):
+             patch("larkhelm.memory.get_memory_context_v2",
+                   return_value=("[PROJECT MEMORY]\n用 PascalCase\n[/PROJECT MEMORY]", [])):
             out = _augment_requirement_with_context("实现 X", "oc_test", "/tmp")
         self.assertIn("长期记忆", out)
         self.assertIn("最近对话", out)
@@ -166,7 +166,7 @@ class TestContextAugmentation(unittest.TestCase):
     def test_memory_truncated_when_oversized(self):
         big_memory = "x" * 10_000  # > _DEV_CTX_MEMORY_CHARS (2000)
         with patch("larkhelm.log._get_recent_turns", return_value=""), \
-             patch("larkhelm.memory.get_memory_context", return_value=big_memory):
+             patch("larkhelm.memory.get_memory_context_v2", return_value=(big_memory, [])):
             out = _augment_requirement_with_context("实现 X", "oc_test", "/tmp")
         self.assertIn("(truncated)", out)
         # Memory body capped; the rest of the augmented prompt must still fit.
@@ -177,7 +177,7 @@ class TestContextAugmentation(unittest.TestCase):
         usable string (degraded, not crashed)."""
         with patch("larkhelm.log._get_recent_turns",
                    side_effect=RuntimeError("log dir missing")), \
-             patch("larkhelm.memory.get_memory_context",
+             patch("larkhelm.memory.get_memory_context_v2",
                    side_effect=OSError("no permission")):
             out = _augment_requirement_with_context("实现 X", "oc_test", "/tmp")
         # Both helpers failed → context empty → requirement unchanged.
@@ -187,7 +187,7 @@ class TestContextAugmentation(unittest.TestCase):
         """The augmented prompt must remind the LLM that the trailing context
         is BACKGROUND only, not the new requirement."""
         with patch("larkhelm.log._get_recent_turns", return_value="User: hi"), \
-             patch("larkhelm.memory.get_memory_context", return_value=""):
+             patch("larkhelm.memory.get_memory_context_v2", return_value=("", [])):
             out = _augment_requirement_with_context("实现 X", "oc_test", "/tmp")
         self.assertIn("仅供 PM 阶段理解需求", out)
         self.assertIn("以需求为准", out)
@@ -208,7 +208,7 @@ class TestTaskKeyHashStability(unittest.TestCase):
         # Simulate two different chat-history snapshots.
         for chat_text in ("", "user A turn", "much longer\nmulti\nline\nhistory"):
             with patch("larkhelm.log._get_recent_turns", return_value=chat_text), \
-                 patch("larkhelm.memory.get_memory_context", return_value=""):
+                 patch("larkhelm.memory.get_memory_context_v2", return_value=("", [])):
                 aug = _augment_requirement_with_context(requirement, "oc_test", "/tmp")
             # The CALLER hashes the ORIGINAL literal, not the augmented form —
             # this test pins that contract.
@@ -226,7 +226,7 @@ class TestTaskKeyHashStability(unittest.TestCase):
         from larkhelm.crew._pipeline import _make_dev_pipeline
         long_user_req = "实现 LarkHelm 统一日志方案 Phase 1+2+3"
         with patch("larkhelm.log._get_recent_turns", return_value="User: t"), \
-             patch("larkhelm.memory.get_memory_context", return_value=""):
+             patch("larkhelm.memory.get_memory_context_v2", return_value=("", [])):
             aug = _augment_requirement_with_context(long_user_req, "oc_test", "/tmp")
         # ``_make_dev_pipeline`` reads ``_cfg.RESPONSE_TIMEOUT`` which only
         # exists after ``_init_runtime`` runs; stub it for this offline test.
@@ -242,7 +242,7 @@ class TestTaskKeyHashStability(unittest.TestCase):
         from larkhelm.crew._pipeline import _make_dev_pipeline
         short_req = "X 实现"  # 4 chars; aug[:30] would have leaked separator
         with patch("larkhelm.log._get_recent_turns", return_value="User: t"), \
-             patch("larkhelm.memory.get_memory_context", return_value=""):
+             patch("larkhelm.memory.get_memory_context_v2", return_value=("", [])):
             aug = _augment_requirement_with_context(short_req, "oc_test", "/tmp")
         with patch("larkhelm.config.RESPONSE_TIMEOUT", 60, create=True):
             plan = _make_dev_pipeline(aug, "/tmp", no_confirm=True)

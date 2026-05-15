@@ -462,10 +462,14 @@ def _auto_plan(requirement: str, chat_id: str,
             )
 
     # Inject memory context so the planner is aware of global/project preferences.
+    # Phase C wrap-up (REQ-22 symmetry): use v2 with ``requirement`` as
+    # the gating query so lazy global / project conditional can decide
+    # whether each layer actually adds value for this plan — same change
+    # as crew/_commands.py:_augment_requirement_with_context.
     _mem_ctx = ""
     try:
-        from larkhelm.memory import get_memory_context
-        _mem_ctx = get_memory_context(chat_id, cwd=cwd)
+        from larkhelm.memory import get_memory_context_v2
+        _mem_ctx, _ = get_memory_context_v2(chat_id, cwd=cwd, query=requirement)
     except Exception as e:
         _debug_log(f"[Plan] memory load failed: {e}")
     _mem_prefix = f"\n\n[Background Context from Memory]\n{_mem_ctx}" if _mem_ctx else ""

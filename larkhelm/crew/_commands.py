@@ -76,8 +76,18 @@ def _augment_requirement_with_context(requirement: str, chat_id: str, cwd: str) 
 
     mem_ctx = ""
     try:
-        from larkhelm.memory import get_memory_context
-        mem_ctx = get_memory_context(chat_id, cwd=cwd) or ""
+        # REQ-22 (Phase C wrap-up): switch to v2 so the layered injection
+        # logic (S50 lazy global / S51 project conditional) gets a real
+        # ``query`` to gate on — previously the no-arg call hit the
+        # fail-open branches and pulled in everything regardless of
+        # whether the requirement actually needs global preferences or
+        # project memory. ``requirement`` is the user-typed /dev <X>
+        # text, which is the right ``query`` here. ``recent_turns`` is
+        # intentionally omitted: the PM-context path keeps chat history
+        # and memory cleanly separated below, so cross-layer dedup
+        # would only complicate the prompt shape without saving tokens.
+        from larkhelm.memory import get_memory_context_v2
+        mem_ctx, _ = get_memory_context_v2(chat_id, cwd=cwd, query=requirement)
         if len(mem_ctx) > _DEV_CTX_MEMORY_CHARS:
             mem_ctx = mem_ctx[: _DEV_CTX_MEMORY_CHARS] + "\n…(truncated)"
     except Exception as e:

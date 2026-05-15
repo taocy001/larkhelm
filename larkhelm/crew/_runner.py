@@ -292,9 +292,15 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
         effect if this outer wall-clock kill doesn't preempt it first.
         Forwarding cancel_ev + logging soft is the only remaining job.
         """
-        # Phase 1: wait for process slot while monitoring crew-level cancellation
+        # Phase 1: wait for process slot while monitoring crew-level cancellation.
+        # Also honours ``agent_cancel`` — set by the finally block of
+        # _run_agent_wrapper when the agent body exits early (e.g.
+        # NoBackendAvailableError before any subprocess starts). Without
+        # this check the watcher would self-spin for the full sem-wait
+        # window after each failed agent, accumulating one daemon thread
+        # per failure until the crew completes. Cheap fix per review OBS-01.
         while not _slot_ready.is_set():
-            if cancel_ev.is_set():
+            if cancel_ev.is_set() or agent_cancel.is_set():
                 agent_cancel.set()
                 return
             time.sleep(0.3)
@@ -405,8 +411,13 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
                 use_session=False,
                 record_under=state.chat_id,
             )
-        elif _disp_kind.startswith("hermes_") or (resolved.provider == "hermes"):
-            # Hermes multi-agent orchestrator modes: race, split, review
+        elif _disp_kind.startswith("hermes_"):
+            # Hermes multi-agent orchestrator modes: race, split, review.
+            # ``provider == "hermes"`` was previously checked here too,
+            # but ``_disp_kind`` is set to ``resolved.id`` exactly when
+            # ``resolved.provider == "hermes"`` (line 356), and every
+            # hermes BackendSpec id begins with ``hermes_``, so the
+            # second clause was unreachable. Review §4 cleanup.
             _on_start()
             output = _run_hermes_orchestrator(
                 state=state,

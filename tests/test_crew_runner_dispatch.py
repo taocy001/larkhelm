@@ -628,3 +628,107 @@ def test_write_hermes_summary_creates_markdown(
     assert "split" in out
     assert "the result" in out
     assert state.plan.title in out
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  _run_agent_wrapper happy retry path (review §6 gap)
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_run_agent_wrapper_retries_then_succeeds(
+    init_test_config, fake_agent_spec, fake_card_sender, monkeypatch,
+):
+    """Review §6 noted that retry coverage was OOM-biased — the happy
+    path (first attempt raises a transient exception, second attempt
+    succeeds) was only exercised indirectly. Pin it: agent ends in
+    DONE state, result captured from the second call, no ⚠️ failure
+    card emitted.
+
+    Also asserts the inter-attempt backoff is the *short* 1s path
+    (non-OOM-class error) rather than the 8s OOM backoff — otherwise
+    a sleep-misclassification would silently double test runtime.
+    """
+    from larkhelm.crew_types import AgentStatus
+    from larkhelm.crew import _runner as cr
+
+    specs = [fake_agent_spec(id="impl", depends_on=[], task_profile="engineer")]
+    state = _make_state(specs)
+
+    # First call raises a generic (non-OOM) RuntimeError; second returns "OK".
+    call_log: list[str] = []
+    def fake_run_agent(s, aid):
+        call_log.append(aid)
+        if len(call_log) == 1:
+            raise RuntimeError("transient HTTP read error")
+        return "OK"
+    monkeypatch.setattr(cr, "_run_agent", fake_run_agent)
+
+    # _sync_output_file pokes the filesystem; stub to a no-op so tests
+    # stay hermetic.
+    monkeypatch.setattr(cr, "_sync_output_file", lambda st, aid: "")
+
+    # Track whether emit_agent_failure ever fires (it must NOT on the
+    # happy retry path). The fixture's fake_card_sender already mocks
+    # the card send paths so we just import and assert call count.
+    import larkhelm.crew._failure_card as _fc
+    fail_calls: list[tuple] = []
+    monkeypatch.setattr(
+        _fc, "emit_agent_failure",
+        lambda *a, **k: fail_calls.append((a, k)),
+    )
+
+    # Watch the actual backoff to confirm we hit the short (1s) branch.
+    sleeps: list[float] = []
+    monkeypatch.setattr(cr.time, "sleep", lambda s: sleeps.append(s))
+
+    cr._run_agent_wrapper(state, "impl")
+
+    assert call_log == ["impl", "impl"], (
+        f"expected exactly 2 _run_agent calls (initial + retry), got {call_log}"
+    )
+    assert state.agents["impl"].status == AgentStatus.DONE
+    assert state.agents["impl"].result == "OK"
+    assert fail_calls == [], (
+        "emit_agent_failure must not fire on the happy retry path — the "
+        "user shouldn't see a ⚠️ card when retry succeeded"
+    )
+    assert sleeps == [1], (
+        f"expected single 1s short-backoff sleep, got {sleeps} — an 8s "
+        "value would indicate _is_likely_oom_error misclassified a "
+        "non-OOM transient error and unfairly slowed retry"
+    )
+
+
+def test_run_agent_wrapper_oom_first_attempt_uses_8s_backoff(
+    init_test_config, fake_agent_spec, fake_card_sender, monkeypatch,
+):
+    """Counterpart to the happy retry test: when the first attempt
+    raises an OOM-shaped error, the wrapper must back off 8s (not 1s)
+    so the cgroup has a chance to reclaim memory before retry. The
+    second attempt then succeeds → DONE without a ⚠️ card."""
+    from larkhelm.crew_types import AgentStatus
+    from larkhelm.crew import _runner as cr
+
+    specs = [fake_agent_spec(id="impl", depends_on=[], task_profile="engineer")]
+    state = _make_state(specs)
+
+    call_log: list[str] = []
+    def fake_run_agent(s, aid):
+        call_log.append(aid)
+        if len(call_log) == 1:
+            raise RuntimeError("claude killed by OS (rc=-9, likely cgroup OOM)")
+        return "OK"
+    monkeypatch.setattr(cr, "_run_agent", fake_run_agent)
+    monkeypatch.setattr(cr, "_sync_output_file", lambda st, aid: "")
+    # _log_oom_diagnostics pokes /sys/fs/cgroup; stub to a no-op.
+    monkeypatch.setattr(cr, "_log_oom_diagnostics", lambda aid: None)
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(cr.time, "sleep", lambda s: sleeps.append(s))
+
+    cr._run_agent_wrapper(state, "impl")
+
+    assert state.agents["impl"].status == AgentStatus.DONE
+    assert state.agents["impl"].result == "OK"
+    assert sleeps == [8], (
+        f"OOM-class error must trigger the 8s backoff, got {sleeps}"
+    )
