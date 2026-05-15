@@ -160,6 +160,20 @@ class QueryCardState:
                 self._in_background,
             )
 
+    def get_heartbeat_snapshot(self) -> tuple[float, bool, bool]:
+        """Atomic read of the three flags the heartbeat thread inspects each tick.
+
+        Returns ``(last_heartbeat, in_background, dirty)``. The original
+        pre-S2 code did a single ``with _state_lock`` to read all three;
+        splitting the read across two ``@property`` accessors introduced
+        a small window where ``set_in_background(True)`` could fire
+        between them and produce one frame where the cancel button still
+        showed on a background-promoted task. This combined snapshot
+        closes that window.
+        """
+        with self._state_lock:
+            return self._last_heartbeat, self._in_background, self._dirty
+
     @property
     def dirty(self) -> bool:
         with self._state_lock:

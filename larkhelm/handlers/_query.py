@@ -37,12 +37,12 @@ from larkhelm.chat_state import _get_cwd, _load_sid, _get_turn_count, _increment
 from larkhelm.handlers._query_card_state import QueryCardState
 
 # ── Card UX parameters (from config) ────────────────────────────────
-TOOL_HISTORY_CAP   = _cfg.TOOL_HISTORY_CAP
-
+# TOOL_HISTORY_CAP / STALL_THRESHOLD / CURSOR_FRAMES moved into
+# ``_query_card_state.py`` along with the state machine that consumes
+# them. The two intervals below stay here because ``_heartbeat_loop``
+# (still in _do_query, not extracted) is the only consumer.
 CARD_PUSH_INTERVAL = _cfg.CARD_PUSH_INTERVAL
 CURSOR_INTERVAL    = _cfg.CURSOR_INTERVAL
-STALL_THRESHOLD    = _cfg.STALL_THRESHOLD
-CURSOR_FRAMES      = _cfg.CURSOR_FRAMES
 
 
 # ═══════════════════════════════════════════════════
@@ -513,9 +513,11 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                     card_state.tick_cursor()
                     now = time.monotonic()
                     # Snapshot the three render-affecting flags atomically
-                    # so the heartbeat decision is consistent.
-                    _, _, _, _, last_hb, in_bg = card_state.get_state_snapshot()
-                    dirty_now = card_state.dirty
+                    # in ONE lock acquisition so the heartbeat decision can't
+                    # observe a (in_bg=False, dirty=True) transient that
+                    # occurs when ``_on_soft_timeout`` fires between two
+                    # separate lock reads (see review of d4fbc7a, fix #1).
+                    last_hb, in_bg, dirty_now = card_state.get_heartbeat_snapshot()
                     # After soft timeout the task runs in background; cancel button
                     # is no longer wired to the new cancel event, so hide it.
                     show_cancel = not in_bg
