@@ -291,6 +291,7 @@ def handle_message(data: P2ImMessageReceiveV1):
                                           "正在下载并导入记忆数据…", color="grey")
             try:
                 import tempfile
+                from pathlib import Path
                 from larkhelm.memory_io import import_memory
                 from larkhelm.lark_client import download_file_by_key
                 _fd, _tmp = tempfile.mkstemp(suffix=".zip", prefix=f"larkhelm_import_{chat_id[:8]}_")

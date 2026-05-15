@@ -111,7 +111,7 @@ def record_token_usage(chat_id: str, model: str, usage: dict) -> None:
             print(f"[token_stats] JSONL write failed: {e}", file=__import__("sys").stderr)
 
 
-def get_token_stats(chat_id: str = None) -> dict:
+def get_token_stats(chat_id: str | None = None) -> dict:
     """Return token statistics for a specific chat, or aggregated across all chats.
     Note: in-memory stats are capped at the last _TOKEN_STATS_MAX chat_ids; use
     get_token_stats_persistent() for complete historical data.
@@ -132,7 +132,7 @@ def get_token_stats(chat_id: str = None) -> dict:
         return total
 
 
-def get_token_stats_persistent(chat_id: str, date_prefix: str = None) -> dict:
+def get_token_stats_persistent(chat_id: str, date_prefix: str | None = None) -> dict:
     """Read persistent token statistics from all.jsonl (survives restarts).
     date_prefix: e.g. "2026-04" to filter by month, "2026-04-06" by day, None for all.
     Returns {model: {input_tokens, output_tokens, cache_read, cache_create, cost_usd, calls}}

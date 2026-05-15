@@ -71,7 +71,7 @@ def _sid_file(chat_id: str, model: str) -> Path:
     return _cfg.SESSION_DIR / f"{prefix}{chat_id}.sid"
 
 
-def _load_sid(chat_id: str, model: str) -> str:
+def _load_sid(chat_id: str, model: str) -> str | None:
     try:
         v = _sid_file(chat_id, model).read_text().strip()
         return v or None
@@ -209,7 +209,7 @@ def set_pending_doc_write(chat_id: str, url: str, content: str, ref: object) -> 
         }
 
 
-def pop_pending_doc_write(chat_id: str) -> dict:
+def pop_pending_doc_write(chat_id: str) -> dict | None:
     """Pop and remove the pending write operation; returns None if expired or absent."""
     with _pending_doc_writes_lock:
         entry = _pending_doc_writes.pop(chat_id, None)

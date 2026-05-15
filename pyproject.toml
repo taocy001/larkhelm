@@ -75,3 +75,24 @@ check_untyped_defs = true
 [tool.ruff]
 line-length = 120
 target-version = "py313"
+# One-off test / probe scripts that aren't part of the regular suite.
+extend-exclude = [
+    "tests/repro_bug_*.py",
+    "tests/qa_verify.py",
+    "tests/verify_v21_ac.py",
+    "tests/ac0*_test.py",
+]
+
+[tool.ruff.lint]
+# CI starts with the BUG-DETECTOR subset only — rules that catch real
+# defects (undefined names, redefinitions, comparison antipatterns).
+# Style rules (F401 unused imports, F541 empty f-strings, E402 import
+# position, E701 multi-statement lines) are deferred to a future pass
+# so CI doesn't go red on day one over 280+ cosmetic violations.
+select = [
+    "F821",  # undefined name (real bugs; caught 3 in cmd_doc + _message)
+    "F811",  # redefinition of unused name
+    "E712",  # comparison to True/False with == (should use `is`)
+]
+# Per-file deviations: empty for now; expand as the ratchet tightens.
+[tool.ruff.lint.per-file-ignores]

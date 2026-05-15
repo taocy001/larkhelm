@@ -443,7 +443,7 @@ def _auto_plan(requirement: str, chat_id: str,
     from larkhelm.ai_runner import _spawn_claude_proc
     from larkhelm.chat_state import _get_cwd
     from larkhelm.perm import grant_yolo, revoke_yolo
-    from pathlib import Path
+    # Path already imported at module top — no need to re-import.
 
     cwd = _get_cwd(chat_id)
     ns  = f"{chat_id}__planner_{uuid.uuid4().hex[:8]}"

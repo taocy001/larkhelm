@@ -84,7 +84,7 @@ def _get_cancel_event(chat_id: str) -> threading.Event:
         if chat_id not in _cancel_events:
             # Enforce hard cap: evict oldest entry before inserting a new one
             if len(_cancel_events) >= _CANCEL_EVENTS_MAX:
-                oldest = min(_cancel_events_ts, key=_cancel_events_ts.get)
+                oldest = min(_cancel_events_ts, key=lambda k: _cancel_events_ts[k])
                 _cancel_events.pop(oldest, None)
                 _cancel_events_ts.pop(oldest, None)
             _cancel_events[chat_id] = threading.Event()
@@ -157,7 +157,7 @@ def get_busy_chat_ids() -> list[str]:
     return busy
 
 
-def _set_pending(chat_id: str, message: str, model: str, user_msg_id: str) -> str:
+def _set_pending(chat_id: str, message: str, model: str, user_msg_id: str) -> str | None:
     """Set a queued message. Replaces any existing queued message and returns the old queue card message_id (for patch)."""
     with _pending_meta:
         existing = _pending_msg.get(chat_id)

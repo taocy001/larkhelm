@@ -206,7 +206,7 @@ def _log_file(chat_id: str) -> Path:
 
 def log_entry(
     chat_id: str, role: str, content: str,
-    model: str = "claude", trace_id: str = None,
+    model: str = "claude", trace_id: str | None = None,
 ) -> None:
     global _jsonl_write_count
     now = datetime.now()
@@ -479,14 +479,14 @@ def _prune_content(content: Any, _depth: int = 0) -> Any:
                     return new_dict
         # Recurse into non-truncated dicts (tool_use, text, etc.). Identity
         # preserved when no nested replacement happens.
-        new_dict = None
+        recurse_dict: dict | None = None
         for k, v in content.items():
             new_v = _prune_content(v, _depth=_depth + 1)
             if new_v is not v:
-                if new_dict is None:
-                    new_dict = dict(content)
-                new_dict[k] = new_v
-        return new_dict if new_dict is not None else content
+                if recurse_dict is None:
+                    recurse_dict = dict(content)
+                recurse_dict[k] = new_v
+        return recurse_dict if recurse_dict is not None else content
 
     return content
 

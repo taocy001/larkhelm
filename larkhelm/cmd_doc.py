@@ -8,6 +8,7 @@ import threading
 import larkhelm.config as _cfg
 from larkhelm.chat_state import set_pending_doc_write, pop_pending_doc_write
 from larkhelm.lark_client import send_card, send_permission_guide
+from larkhelm.log import _debug_log
 
 
 # ═══════════════════════════════════════════════════
