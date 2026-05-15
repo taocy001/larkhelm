@@ -1,4 +1,6 @@
 """larkhelm · BaseProcessRunner — shared subprocess spawn/stream/cleanup logic."""
+from __future__ import annotations
+
 import abc
 import json
 import os
@@ -11,6 +13,9 @@ from pathlib import Path
 import larkhelm.config as _cfg
 from larkhelm.log import _debug_log
 from larkhelm.chat_state import _save_sid, _clear_sid
+from larkhelm.runner_types import (
+    OnText, OnTool, OnToolResult, OnSoftTimeout, OnStart, CancelEvent,
+)
 
 _MAX_STDERR_LINES = 100
 
@@ -320,12 +325,12 @@ class BaseProcessRunner(abc.ABC):
         sid: str | None,
         cwd: str,
         *,
-        cancel_ev: threading.Event | None = None,
-        on_text=None,
-        on_tool=None,
-        on_tool_result=None,
-        on_soft_timeout=None,
-        on_start=None,
+        cancel_ev: CancelEvent | None = None,
+        on_text: OnText | None = None,
+        on_tool: OnTool | None = None,
+        on_tool_result: OnToolResult | None = None,
+        on_soft_timeout: OnSoftTimeout | None = None,
+        on_start: OnStart | None = None,
         allow_retry: bool = False,
         images: list | None = None,
         session_namespace: str | None = None,
