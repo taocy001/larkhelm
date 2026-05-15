@@ -79,6 +79,29 @@ jobs:
           path: pytest-output.log
           retention-days: 7
 
+      - name: Crew test coverage (Phase C — baseline only)
+        # Phase C P2: collect crew/ coverage to track regressions; NOT a hard
+        # gate (PRD explicitly requires "先收集基线，不设硬门槛"). Runs only on
+        # 3.13 to avoid 4× duplicate artifacts; |true so a coverage hiccup
+        # never red-X the build.
+        if: matrix.python-version == '3.13'
+        continue-on-error: true
+        run: |
+          python -m pip install pytest-cov || true
+          python -m pytest tests/test_crew_*.py tests/test_redact_error.py \
+            --cov=larkhelm/crew --cov=larkhelm/log --cov=larkhelm/crew_types \
+            --cov-report=term-missing --cov-report=xml \
+            --tb=short || true
+
+      - name: Upload crew coverage XML
+        if: matrix.python-version == '3.13'
+        uses: actions/upload-artifact@v4
+        with:
+          name: crew-coverage-xml
+          path: coverage.xml
+          retention-days: 7
+          if-no-files-found: ignore
+
   lint:
     name: ruff (bug-detector subset)
     runs-on: ubuntu-latest

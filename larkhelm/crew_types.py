@@ -24,6 +24,22 @@ class HardFailError(Exception):
     """QA/critical agent final failure; does not proceed to synthesis phase."""
 
 
+class NoBackendAvailableError(Exception):
+    """Raised by ``_backend_resolver.resolve_backend`` when the agent's
+    ``task_profile`` rank query returns nothing AND the orchestrator
+    fallback is also unavailable.
+
+    Carries the requested ``task_profile`` and a short ``reason`` so the
+    failure card can render a targeted hint (e.g. "no QA-capable backend;
+    check /status for backend health").
+    """
+
+    def __init__(self, task_profile: str, reason: str):
+        self.task_profile = task_profile
+        self.reason       = reason
+        super().__init__(f"no backend for task_profile={task_profile!r}: {reason}")
+
+
 # ═══════════════════════════════════════════════════════════════
 #  Dataclasses
 # ═══════════════════════════════════════════════════════════════
@@ -70,6 +86,15 @@ class AgentSpec:
     retry_system:         str   = ""     # replacement system prompt on retry (engineer fixer mode)
     retry_prompt:         str   = ""     # replacement prompt on retry
     output_file:          str   = ""     # agent's primary output file (relative to cwd/.crew_workspace/)
+    # ── Phase C ────────────────────────────────────────────────────────────
+    # Resolver hint for ``crew/_backend_resolver.resolve_backend``:
+    #   "" (default) → fall back to the legacy ``model``-string dispatch path
+    #   one of {"planner","engineer","qa","reviewer","chat"} → query
+    #   ``BACKEND_REGISTRY.rank_for_task(TASK_PROFILES[task_profile])``
+    # New ``_pipeline.py`` agents only set ``task_profile``; legacy
+    # checkpoints / third-party plugins keep working because the field
+    # defaults to "" — see design.md §3.5.
+    task_profile:         str   = ""
 
 
 @dataclasses.dataclass

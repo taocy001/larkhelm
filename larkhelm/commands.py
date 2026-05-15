@@ -348,6 +348,25 @@ def _cmd_status(chat_id: str, msg_id: str = None):
     except Exception as e:
         _debug_log(f"[status] backend summary failed: {e}")
 
+    # Phase C: Crew Backend 调度预览 — show which backend each task_profile
+    # currently resolves to so operators can see at a glance whether a
+    # planner / engineer / qa task would route to the expected provider
+    # (or to ``<none>`` if no backend matches).
+    crew_backend_preview = ""
+    try:
+        from larkhelm.crew._backend_resolver import resolve_backend_preview
+        preview = resolve_backend_preview()
+        if preview:
+            preview_lines = [
+                f"  • **{name}** → `{bid}`"
+                for name, bid in preview.items()
+            ]
+            crew_backend_preview = (
+                "**Crew Backend 调度预览**\n" + "\n".join(preview_lines)
+            )
+    except Exception as e:
+        _debug_log(f"[status] crew backend preview failed: {e}")
+
     lines = [
         f"**模型** {model}　　**目录** {cwd}"
         + (f"　　**会话名** {_get_chat_state(chat_id).get('name', '').replace('**','').replace('`','')}"
@@ -362,6 +381,7 @@ def _cmd_status(chat_id: str, msg_id: str = None):
         *([ crew_info ] if crew_info else []),
         *([ f"**Token（本次启动）** {token_summary}" ] if token_summary else []),
         *([ backend_summary ] if backend_summary else []),
+        *([ crew_backend_preview ] if crew_backend_preview else []),
         "",
     ]
 

@@ -102,9 +102,21 @@ def _rebuild_state_from_checkpoint(data: dict) -> "CrewState":
     try:
         plan_data = data["plan"]
         specs = []
+        legacy_specs_seen = 0
         for s in plan_data["agents"]:
-            # Rebuild AgentSpec (retry_target is list[str])
+            # Phase C: pre-task_profile checkpoints lack the new field.
+            # AgentSpec(**s) handles it via the dataclass default ("") so
+            # the resolver auto-falls back to model-string dispatch — but
+            # we log once so operators investigating slow recovery can
+            # tell the schema is older.
+            if "task_profile" not in s:
+                legacy_specs_seen += 1
             specs.append(AgentSpec(**s))
+        if legacy_specs_seen:
+            _debug_log(
+                f"[Checkpoint] detected legacy checkpoint without task_profile "
+                f"({legacy_specs_seen} agent(s)), defaulting to ''"
+            )
 
         plan = CrewPlan(
             title=plan_data["title"],

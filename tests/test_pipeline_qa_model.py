@@ -63,32 +63,41 @@ class DevPipelineModelTests(unittest.TestCase):
             "needs gemini, they must explicitly enable it in config + "
             "we should fall back to claude when it's disabled.")
 
-    def test_qa_agent_uses_claude(self):
-        """Direct pin on the formerly-broken agent — make a future
-        regression noisy at the test level instead of in production."""
+    def test_qa_agent_uses_qa_task_profile(self):
+        """Phase C migrated qa from ``model="claude"`` to
+        ``task_profile="qa"`` so backend selection happens in
+        ``crew/_backend_resolver.resolve_backend`` (rank_for_task picks
+        the highest-scoring healthy+enabled backend). Pin the profile
+        choice so a future revert to model-string dispatch is loud."""
         qa = next((a for a in self.plan.agents if a.id == "qa"), None)
         self.assertIsNotNone(qa, "qa agent must exist in /dev pipeline")
-        self.assertEqual(qa.model, "claude",
-            "qa.model was 'gemini' (broken) — fix unified everyone on "
-            "'claude'; do not revert without enabling gemini in config "
-            "AND updating BackendRegistry.get_orchestrator fallback")
+        self.assertEqual(qa.task_profile, "qa",
+            "qa.task_profile was changed; Phase C requires task_profile-"
+            "driven backend selection. To revert to model-string dispatch, "
+            "ALSO update crew/_backend_resolver.resolve_backend's fallback "
+            "behaviour so claude-disabled hosts don't silently break.")
 
-    def test_all_six_agents_present_and_run_claude(self):
+    def test_all_six_agents_present_with_task_profile(self):
         """End-to-end check on the canonical /dev agent list. If the
         pipeline gains a new agent (test step, security audit, etc),
-        this test forces the author to decide its model explicitly
-        rather than copy-pasting one and forgetting."""
+        this test forces the author to decide its task_profile
+        explicitly rather than copy-pasting one and forgetting.
+
+        Phase C: agents must NOT hardcode ``model="claude"`` (that
+        bypasses the resolver and breaks claude-disabled fallback)."""
         expected = {"pm", "architect", "implementer", "fixer", "qa", "reviewer"}
         actual = {a.id for a in self.plan.agents}
         self.assertEqual(actual, expected,
             f"/dev pipeline shape changed: {actual ^ expected}. Update "
             "this test if intentional.")
         for a in self.plan.agents:
-            self.assertEqual(a.model, "claude",
-                f"agent {a.id!r} uses model={a.model!r}; the standard "
-                "config only ships claude / kimi / deepseek enabled. "
-                "If diversifying, update this test + verify the chosen "
-                "backend is healthy in production.")
+            self.assertNotEqual(a.model, "claude",
+                f"agent {a.id!r} hardcodes model='claude' — Phase C requires "
+                "task_profile-driven dispatch. Use task_profile= instead.")
+            self.assertNotEqual(a.task_profile, "",
+                f"agent {a.id!r} has empty task_profile; Phase C requires "
+                "explicit profile assignment so resolve_backend can route to "
+                "the right backend.")
 
 
 if __name__ == "__main__":

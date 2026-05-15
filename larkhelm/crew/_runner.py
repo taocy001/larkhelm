@@ -14,9 +14,14 @@ from larkhelm.log import _debug_log, log_entry
 from larkhelm.ai_runner import QueryCancelledError
 from larkhelm.crew_types import (
     HardFailError, AgentSpec, AgentState, AgentStatus, CrewState,
+    NoBackendAvailableError,
     CREW_RESULT_PREVIEW,
 )
 from larkhelm.crew_card import _crew_update_card, _start_heartbeat
+from larkhelm.crew._backend_resolver import resolve_backend
+from larkhelm.crew._failure_card import (
+    emit_agent_failure, emit_breakpoint_timeout,
+)
 
 
 def _workspace_dir(chat_id: str, crew_id: str) -> Path:
@@ -331,22 +336,34 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
     # Crew agents automatically grant all permissions (user authorized via /crew command)
     grant_yolo(crew_ns)
     try:
-        # Honor BackendRegistry enabled flag for direct-dispatch model strings.
-        # Without this, planner-assigned ``model="gemini"`` would invoke the CLI
-        # even when ``config.json`` set the backend to ``enabled: false``,
-        # because the gemini/kimi/deepseek branches below skip BackendRegistry
-        # lookup. Hermes modes are orchestrator macros (not single backends),
-        # so they don't need this gate.
-        if spec.model in ("gemini", "kimi", "deepseek"):
-            from larkhelm.backend_registry import BACKEND_REGISTRY as _reg_check
-            _disp_spec = _reg_check.get(spec.model)
-            if _disp_spec is not None and not _disp_spec.enabled:
-                raise RuntimeError(
-                    f"backend {spec.model!r} is disabled in config "
-                    f"(set enabled=true in probe_models or use a different model)"
-                )
+        # Resolve which backend should serve this agent BEFORE entering the
+        # dispatch branches. The resolver checks task_profile first
+        # (Phase C path), then falls back to legacy model-string handling
+        # for backward-compat. The resolved BackendSpec drives the branch
+        # selection below via its ``provider`` field.
+        try:
+            resolved = resolve_backend(spec)
+        except NoBackendAvailableError:
+            # Re-raise so the wrapper can record the failure and surface
+            # a "无可用 backend" card; not retried because this is a config
+            # / health issue, not a transient subprocess error.
+            raise
 
-        if spec.model == "gemini":
+        # Resolved hermes_* synthesizes a provider="hermes" BackendSpec —
+        # rebuild the dispatch decision around ``resolved.provider`` so
+        # existing branches stay intact.
+        if resolved.provider == "hermes":
+            _disp_kind = resolved.id        # e.g. "hermes_race"
+        elif resolved.provider == "gemini_cli":
+            _disp_kind = "gemini"
+        elif resolved.provider == "kimi_cli":
+            _disp_kind = "kimi"
+        elif resolved.provider == "deepseek_api":
+            _disp_kind = "deepseek"
+        else:
+            _disp_kind = "orchestrator"
+
+        if _disp_kind == "gemini":
             _on_start()   # Gemini has no semaphore callback; trigger directly
             _gemini_msg = (f"[System]\n{_crew_mem_ctx}\n\n[User Query]\n{full_prompt}"
                            if _crew_mem_ctx else full_prompt)
@@ -361,7 +378,7 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
                 use_session=False,          # No session reuse; prevents carrying history into retries
                 record_under=state.chat_id, # Token stats recorded under the real chat_id
             )
-        elif spec.model == "kimi":
+        elif _disp_kind == "kimi":
             _on_start()   # Kimi has no semaphore callback; trigger directly
             _kimi_msg = (f"[System]\n{_crew_mem_ctx}\n\n[User Query]\n{full_prompt}"
                          if _crew_mem_ctx else full_prompt)
@@ -374,7 +391,7 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
                 use_session=False,
                 record_under=state.chat_id,
             )
-        elif spec.model == "deepseek":
+        elif _disp_kind == "deepseek":
             from larkhelm.ai_runner import query_deepseek
             _on_start()   # DeepSeek has no semaphore callback; trigger directly
             _ds_msg = (f"[System]\n{_crew_mem_ctx}\n\n[User Query]\n{full_prompt}"
@@ -388,7 +405,7 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
                 use_session=False,
                 record_under=state.chat_id,
             )
-        elif spec.model.startswith("hermes_"):
+        elif _disp_kind.startswith("hermes_") or (resolved.provider == "hermes"):
             # Hermes multi-agent orchestrator modes: race, split, review
             _on_start()
             output = _run_hermes_orchestrator(
@@ -400,10 +417,12 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
             )
         else:
             from larkhelm.backend_cli import run_claude as _bc_run_claude, run_gemini as _bc_run_gemini, run_kimi as _bc_run_kimi
-            from larkhelm.backend_registry import BACKEND_REGISTRY as _reg
-            _spec = _reg.get_orchestrator()
-            if _spec is None:
-                raise RuntimeError("No orchestrator backend available for crew agent")
+            # ``resolved`` is whatever the backend resolver picked — could be
+            # the orchestrator default OR a task_profile-ranked candidate.
+            # Either way we hand off to one of the backend_cli / backend_api
+            # branches below based on its provider, so claude-disabled hosts
+            # naturally fall through to kimi/deepseek (PRD AC-06).
+            _spec = resolved
             _API_PROVIDERS = ("anthropic_api", "google_api", "openai_compat_api")
             _cli_msg = (f"[System]\n{_crew_mem_ctx}\n\n[User Query]\n{full_prompt}"
                         if _crew_mem_ctx else full_prompt)
@@ -569,6 +588,7 @@ def _run_agent_wrapper(state: CrewState, agent_id: str) -> None:
     from larkhelm.crew._state import _git_auto_commit
 
     last_exc: Exception = None
+    backend_select_failure: bool = False  # set when NoBackendAvailableError surfaces
 
     for proc_attempt in range(2):   # attempt 0 = first try, attempt 1 = retry
         try:
@@ -612,6 +632,15 @@ def _run_agent_wrapper(state: CrewState, agent_id: str) -> None:
             _crew_update_card(state)
             return
 
+        except NoBackendAvailableError as e:
+            # Config / health failure — retrying won't help, so skip the
+            # second attempt and fall straight to the failure card branch
+            # below. emit_agent_failure tags this as ``stage="backend_select"``
+            # so the user sees the targeted "无可用 backend" hint.
+            last_exc = e
+            backend_select_failure = True
+            break
+
         except Exception as e:
             last_exc = e
             if proc_attempt == 0:
@@ -642,13 +671,14 @@ def _run_agent_wrapper(state: CrewState, agent_id: str) -> None:
                     state.agents[agent_id].result     = ""
                 continue  # proceed to second attempt
 
-    # Both attempts failed
-    with state.lock:
-        state.agents[agent_id].status   = AgentStatus.FAILED
-        state.agents[agent_id].error    = str(last_exc)[:300] if last_exc else "unknown error"
-        state.agents[agent_id].end_time = time.time()
-    _debug_log(f"[Crew] {agent_id} permanently failed (both attempts failed): {last_exc}")
-    _crew_update_card(state)
+    # Both attempts failed (or first attempt was a non-retryable backend-select
+    # failure). Emit the user-facing ⚠️ card via _failure_card so the user
+    # actually sees what went wrong; the helper handles state mutation +
+    # heartbeat push internally and never raises.
+    stage = "backend_select" if backend_select_failure else "run"
+    if last_exc is None:
+        last_exc = RuntimeError("unknown error")
+    emit_agent_failure(state, agent_id, stage, last_exc)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -682,18 +712,38 @@ def _wait_for_breakpoint(state: CrewState, agent_id: str) -> bool:
         state.breakpoint_agent_id = agent_id
     _crew_update_card(state)
 
-    # Wait for user decision; poll to support /cancel interruption; max 60 minutes
-    bp_deadline = time.time() + min(_cfg.RESPONSE_TIMEOUT * 2, 3600)
+    # Wait for user decision; poll to support /cancel interruption.
+    # Phase C: the deadline is sourced from ``_cfg.CREW_BREAKPOINT_TIMEOUT_SEC``
+    # (default 1800s, configurable via crew_breakpoint_timeout_sec) instead of
+    # the previous hardcoded ``min(RESPONSE_TIMEOUT*2, 3600)``. On timeout we
+    # both set ``cancel_ev`` (so the executor breaks out of its wave loop) and
+    # emit a dedicated breakpoint-timeout card (so the user sees why the task
+    # ended).
+    # Trust whatever ``_cfg.CREW_BREAKPOINT_TIMEOUT_SEC`` resolves to —
+    # ``_init_runtime`` already floors the configured value at 60s, and
+    # tests need to monkeypatch lower for fast assertions.
+    bp_timeout = int(getattr(_cfg, "CREW_BREAKPOINT_TIMEOUT_SEC", 1800))
+    bp_deadline = time.time() + bp_timeout
+    timed_out = False
     while time.time() < bp_deadline:
         if state.cancel_ev.is_set():
-            _debug_log(f"[Crew] breakpoint wait interrupted by /cancel")
+            _debug_log("[Crew] breakpoint wait interrupted by /cancel")
             break
         if bp_ev.wait(timeout=2.0):   # wait returns True when the user has clicked
             break
+    else:
+        # Loop exited via condition (no break) — that's the timeout branch.
+        timed_out = True
 
     with _breakpoint_meta:
         confirmed = _breakpoint_results.pop(crew_id, False)
         _breakpoint_events.pop(crew_id, None)
+
+    if timed_out and not confirmed:
+        _debug_log(f"[Crew] breakpoint timeout after {bp_timeout}s, auto-cancelling")
+        state.cancel_ev.set()
+        emit_breakpoint_timeout(state)
+        return False
 
     return confirmed
 

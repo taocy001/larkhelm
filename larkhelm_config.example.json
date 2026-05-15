@@ -46,6 +46,9 @@
   "memory_session_gc_enabled":     true,
   "memory_session_gc_max_age_days": 7,
 
+  "_comment_crew_phase_c": "Phase C crew enhancements. crew_breakpoint_timeout_sec controls how long /dev waits for the user to click 继续/取消 before auto-cancelling (default 1800s = 30 min). task_profiles are referenced by larkhelm/crew/_backend_resolver.py — the in-code defaults are authoritative; this comment lists them for operator awareness: planner / engineer / qa / reviewer / chat. To override per-profile capability weights in the future, populate task_profiles[<name>] with required_capabilities / latency_pref / require_tools.",
+  "crew_breakpoint_timeout_sec":   1800,
+
   "_comment_probe_models": "Optional. If omitted, installed CLIs are auto-discovered from PATH (no model pinning or capabilities). Uncomment and customize to pin models and enable orchestrator routing hints.",
   "probe_models": [
     {

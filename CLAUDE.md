@@ -322,6 +322,49 @@ cat updated.md | larkhelm doc write "https://feishu.cn/docx/xxxx"
 
 `/crew` 任务支持在执行过程中插入人工确认节点（`_breakpoint_events`）。当 Agent 到达断点时，飞书卡片上会出现「继续」/「取消」按钮，支持人工审核后再决定是否继续执行。
 
+**Phase C 超时**：等待时长由 `crew_breakpoint_timeout_sec`（默认 1800s）控制；
+超时后自动 `state.cancel_ev.set()` 并通过 `_failure_card.emit_breakpoint_timeout`
+推送橙色提示卡片，已完成阶段保留 checkpoint，用户可重启续跑。
+
+### 为 Crew 新增 Agent 时如何挑 task_profile
+
+`AgentSpec.task_profile` 是 Phase C 引入的字段；它**取代**了之前 `model="claude"`
+硬编码的 dispatch 决策，让 backend 选择由 `crew/_backend_resolver.py` 根据
+`BACKEND_REGISTRY.rank_for_task` 动态决定。规则：
+
+| 选 profile | 何时使用 | 实际权重（design.md §3.3） |
+|---|---|---|
+| `planner` | PRD / 需求分解 / 架构设计 / 长链推理 | reasoning=1.0, long_context=0.6 |
+| `engineer` | 代码实现 / 修复 / 重构（必须能调用 Write/Edit/Bash 工具） | coding=1.0, tools=0.8, require_tools=True |
+| `qa` | 测试编写 / 静态检查 / 验收（需要工具，但偏中等复杂度） | coding=0.6, reasoning=0.8, tools=0.8, require_tools=True |
+| `reviewer` | 代码审查 / 8 项 checklist / 长上下文阅读 | reasoning=1.0, long_context=0.5 |
+| `chat` | 单轮闲聊 / 简单问答 / 摘要类 fast 任务 | chat=1.0, latency_pref="fast" |
+
+**写入新 AgentSpec 时**：
+
+```python
+AgentSpec(
+    id="my_new_agent",
+    role="...",
+    model="",                  # ← 留空，让 resolver 走 task_profile 路径
+    task_profile="engineer",   # ← 选上方 5 个之一
+    system="...",
+    prompt="...",
+    depends_on=[...],
+    timeout=...,
+)
+```
+
+**留空 / 兼容性路径**：`task_profile=""` 时 resolver 退到 `model` 字符串路径
+（`gemini` / `kimi` / `deepseek` / `hermes_*` 直接 dispatch；其他值或空字符串
+退到 `BACKEND_REGISTRY.get_orchestrator()`）。这条路径专门为旧 checkpoint 与
+第三方 plugin 保留，**新 agent 不要走这条路径**。
+
+**没有 backend 可用时**：resolver 抛 `NoBackendAvailableError`，
+`_run_agent_wrapper` 捕获后调 `_failure_card.emit_agent_failure(stage="backend_select")`
+推送 ⚠️ 卡片，提示用户检查 `/status`。**不会**重试 — 这是 config / 健康问题，
+不是瞬时失败。
+
 ### Dev 模式 Git 快照（Auto Git Commit）
 
 `/dev` 流水线在每个关键阶段完成后，会通过 `_git_auto_commit()` 自动提交变更作为快照，便于查看每步的 diff 和在出错后回滚。

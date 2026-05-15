@@ -78,6 +78,7 @@ class _RuntimeConfig:
     VOICE_MAX_MERGE:         int
     VOICE_KEEP_AUDIO:        bool
     MEMORY_LIMIT_MB:         int
+    CREW_BREAKPOINT_TIMEOUT_SEC: int
 
 # ── Runtime config (assigned by _init_runtime()) ────────────────────────
 CONFIG_PATH: Path
@@ -153,6 +154,7 @@ VOICE_MERGE_WINDOW_SEC:  int   # 0 = disable merge
 VOICE_MAX_MERGE:         int
 VOICE_KEEP_AUDIO:        bool
 MEMORY_LIMIT_MB:         int   # RSS hard limit in MB; auto-detected on first run
+CREW_BREAKPOINT_TIMEOUT_SEC: int   # Phase C: max wait for human confirmation in /dev (default 1800s)
 # Single source of truth for accepted voice languages — referenced by both
 # config validation (_init_runtime) and the /voice command handler.
 _VOICE_LANG_WHITELIST: "frozenset[str]" = frozenset({"zh", "en", "auto"})
@@ -619,6 +621,15 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     config.setdefault("memory_session_gc_enabled", True)
     config.setdefault("memory_session_gc_max_age_days", 7)
 
+    # Phase C: max seconds to wait for the user to click 继续/取消 at a
+    # crew breakpoint. Default 1800s (30 min); see crew/_runner.py
+    # _wait_for_breakpoint and _failure_card.emit_breakpoint_timeout.
+    global CREW_BREAKPOINT_TIMEOUT_SEC
+    try:
+        CREW_BREAKPOINT_TIMEOUT_SEC = max(60, int(config.get("crew_breakpoint_timeout_sec", 1800)))
+    except (TypeError, ValueError):
+        CREW_BREAKPOINT_TIMEOUT_SEC = 1800
+
     # ── OAuth user_access_token (see oauth_user.py) ──────────────────────
     # The token file is loaded lazily by oauth_user.get_user_token(); this
     # block only reads the cached ``open_id`` to populate LOGGED_IN_OPEN_ID
@@ -722,6 +733,7 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         VOICE_DEFAULT_LANG=VOICE_DEFAULT_LANG, VOICE_MERGE_WINDOW_SEC=VOICE_MERGE_WINDOW_SEC,
         VOICE_MAX_MERGE=VOICE_MAX_MERGE, VOICE_KEEP_AUDIO=VOICE_KEEP_AUDIO,
         MEMORY_LIMIT_MB=MEMORY_LIMIT_MB,
+        CREW_BREAKPOINT_TIMEOUT_SEC=CREW_BREAKPOINT_TIMEOUT_SEC,
     )
 
 

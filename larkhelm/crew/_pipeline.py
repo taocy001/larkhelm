@@ -18,7 +18,7 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
 
     agents = [
         AgentSpec(
-            id="pm", role="产品经理", model="claude",
+            id="pm", role="产品经理", model="", task_profile="planner",
             system=(
                 "你是一个资深产品经理。根据用户需求，在当前项目目录深入了解现有代码后，"
                 "输出结构化 PRD，保存到 .crew_workspace/prd.md。\n\n"
@@ -45,7 +45,7 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
             output_file="prd.md",
         ),
         AgentSpec(
-            id="architect", role="架构师", model="claude",
+            id="architect", role="架构师", model="", task_profile="planner",
             system=(
                 "你是一个资深软件架构师。读取 .crew_workspace/prd.md，"
                 "结合现有代码设计实现方案，输出到 .crew_workspace/design.md。\n\n"
@@ -74,7 +74,7 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
             output_file="design.md",
         ),
         AgentSpec(
-            id="implementer", role="工程师", model="claude",
+            id="implementer", role="工程师", model="", task_profile="engineer",
             system=(
                 "你是一个资深工程师。按以下步骤实现功能：\n\n"
                 "## 准备阶段\n"
@@ -97,7 +97,7 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
             output_file="changes.md",
         ),
         AgentSpec(
-            id="fixer", role="工程师（修复）", model="claude",
+            id="fixer", role="工程师（修复）", model="", task_profile="engineer",
             system=(
                 "你是一个资深工程师，专注于修复测试失败和审查反馈中发现的问题。\n\n"
                 "## 工作步骤\n"
@@ -116,7 +116,7 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
             output_file="changes.md",
         ),
         AgentSpec(
-            id="qa", role="测试工程师", model="claude",
+            id="qa", role="测试工程师", model="", task_profile="qa",
             system=(
                 "你是一个测试工程师。工作分两个阶段：\n\n"
                 "## 阶段一：环境准备（测试前必须完成）\n"
@@ -162,7 +162,7 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
             output_file="qa_report.md",
         ),
         AgentSpec(
-            id="reviewer", role="代码审查员", model="claude",
+            id="reviewer", role="代码审查员", model="", task_profile="reviewer",
             system=(
                 "你是一个严格的代码审查员。审查所有本次改动的代码。\n\n"
                 "**必须逐条检查以下 8 项，每项给出 ✅ 或 ❌ 及说明：**\n"

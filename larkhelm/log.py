@@ -4,6 +4,7 @@ from __future__ import annotations
 import enum
 import json
 import os
+import re
 import sys
 import threading
 from collections import deque
@@ -21,7 +22,51 @@ __all__ = [
     "info", "warn", "error",
     "Level", "current_log_level",
     "rotate_jsonl_if_needed", "rotate_debug_log_if_needed",
+    "redact_error",
 ]
+
+
+# ── Secret redaction (used by crew failure cards before exception text is shown to users) ──
+#
+# Three shapes covered. The 20+ char floor on ``sk-…`` matches real Anthropic / OpenAI
+# key shapes (typically 40+ chars) without false-positiving on stage names like
+# ``sk-stage-001``. ``api_key=`` and ``Authorization:`` use word-boundary anchors so
+# they only match the actual credential prefix, not a substring inside an unrelated
+# identifier.
+_SECRET_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(r"(?i)(api[_-]?key\s*[=:]\s*)[^\s,;'\")]+"), r"\1***"),
+    (re.compile(r"(?i)(Authorization\s*:\s*Bearer\s+)\S+"), r"\1***"),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"), "sk-***"),
+)
+
+
+def redact_error(text: str) -> str:
+    """Redact common secret shapes from an error message.
+
+    Patterns matched (case-insensitive where sensible):
+
+      * ``api_key=xxx`` / ``api_key: xxx`` → ``api_key=***``
+      * ``Authorization: Bearer xxx`` → ``Authorization: Bearer ***``
+      * ``sk-[A-Za-z0-9_-]{20,}`` → ``sk-***`` (Anthropic / OpenAI style keys)
+
+    Always returns a string; never raises. Idempotent. Safe to apply to
+    any value — non-string inputs are coerced via ``str()``.
+    """
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        try:
+            text = str(text)
+        except Exception:
+            return ""
+    out = text
+    for pat, repl in _SECRET_PATTERNS:
+        try:
+            out = pat.sub(repl, out)
+        except Exception:
+            # Defensive: a pathological input shouldn't crash error handling.
+            continue
+    return out
 
 
 # ── Level filter (LARKHELM_LOG_LEVEL env var) ─────────────────────────────
