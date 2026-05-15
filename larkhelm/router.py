@@ -49,8 +49,16 @@ _TOOL_NEED_RE = re.compile(
     # ``_PATH_RE`` so chat-side capability detection and memory
     # injection use the same code-flavour signal.
     r"\.(?:py|md|json|toml|sh|ts|tsx|js|yml|yaml|go|rs|java|cpp|c|h|sql)\b"
-    # Filesystem paths: ``/etc/foo`` ``~/.config/...``
-    r"|(?<![A-Za-z0-9])/[\w\-/.]+"
+    # Filesystem paths: ``/etc/foo`` ``~/.config/...``.
+    # Lookbehind excludes ``[A-Za-z0-9:/]`` — round-1 review #4 fix v2.
+    # The bug was URL paths like ``https://example.com/foo`` matching
+    # because the SECOND ``/`` in ``://`` had the FIRST ``/`` before
+    # it (not ``:``); ``:``-only exclusion didn't help. Adding ``/``
+    # to the exclusion ensures the second ``/`` of ``//`` is also
+    # disqualified. Net effect: a path triggers iff preceded by
+    # whitespace / start-of-string / a non-URL boundary character.
+    # Feishu doc URLs are still handled via has_doc_urls / Rule 2.
+    r"|(?<![A-Za-z0-9:/])/[\w\-/.]+"
     # Shell commands. **Deliberately conservative** — only verbs that
     # almost never appear in casual prose. Excluded: ``python``,
     # ``node``, ``bash``, ``npm`` (all appear in language-discussion

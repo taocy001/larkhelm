@@ -75,8 +75,21 @@ class LikelyNeedsToolsTests(unittest.TestCase):
         "讲个笑话",
         "我喜欢用 PascalCase 命名",
         "明天上午开会",
-        # 边缘但合理：用户在闲聊"使用 Python"——不引用具体文件
+        # Edge but plausible: user mentions a language as a noun — must
+        # NOT trigger tools routing because no specific file/command.
         "推荐一个 Python 学习路径",
+        # Round-1 review #5: freeze-pins for tool names mentioned
+        # casually. These curated to keep the heuristic from drifting
+        # toward false positives the next time someone extends the
+        # command list.
+        "Node 生态怎么样",                     # node mentioned conceptually
+        "Bash 比 zsh 好用",                    # bash mentioned conceptually
+        "学习 npm 还是 yarn",                  # npm mentioned conceptually
+        # Round-1 review #4: URL must NOT trigger require_tools (Feishu
+        # docs already handled by has_doc_urls / Rule 2; arbitrary URLs
+        # are out of scope for tools detection).
+        "看看 https://example.com/foo 这个",
+        "https://github.com/example/x 这个项目怎么样",
         # Empty input
         "",
         "   \t  ",
@@ -195,9 +208,12 @@ class ResolveBackendRequireToolsTests(unittest.TestCase):
         """User pinned /model deepseek but then asks 'grep foo' — the
         pin must be IGNORED (falling through to default/orchestrator)
         rather than handing the tools-query to DeepSeek anyway."""
-        # Simulate user-preference via the chat_state.
-        from larkhelm.chat_state import _set_chat_field
+        # Simulate user-preference via the chat_state. Cleanup via
+        # addCleanup so a later test (or a re-run) doesn't inherit the
+        # pinned backend_id — round-1 review #6.
+        from larkhelm.chat_state import _set_chat_field, _chat_state_store
         _set_chat_field("oc_pref_test", "backend_id", "deepseek-chat")
+        self.addCleanup(_chat_state_store.pop, "oc_pref_test", None)
 
         spec = resolve_backend(
             chat_id="oc_pref_test",

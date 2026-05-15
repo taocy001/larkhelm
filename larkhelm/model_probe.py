@@ -121,10 +121,16 @@ def _probe_kimi(spec) -> tuple[bool | None, str]:
             snippet = combined.strip().splitlines()[0][:200] if combined.strip() else cat.lower()
             return False, f"{cat.lower()}: {snippet}"
 
-        # Step 3 — no event, no recognizable error, exited cleanly. Mirror
-        # the original behavior (assume the binary at least exists and ran).
+        # Step 3 — no event, no recognizable error, exited cleanly.
+        # Same bug class as the TimeoutExpired path (round-1 review #2):
+        # "rc=0 with no stream-json output" doesn't prove the upstream
+        # API works, only that the CLI exited without an error. A
+        # kimi-cli that hangs internally then quits cleanly would land
+        # here and be silently marked healthy under the pre-fix policy.
+        # Return INDETERMINATE so real-traffic record_call_failure is
+        # the authoritative signal.
         if r.returncode == 0:
-            return True, ""
+            return None, "rc=0 but no stream-json event observed"
         err = r.stderr[:200].strip() or r.stdout[:200].strip() or f"rc={r.returncode}"
         return False, err
     except subprocess.TimeoutExpired:
@@ -167,7 +173,13 @@ def _with_thread_deadline(fn, timeout_sec: float):
         try:
             return fut.result(timeout=timeout_sec)
         except FuturesTimeout:
-            return False, f"probe timeout (>{int(timeout_sec)}s)"
+            # Round-1 review #3: align API SDK probe timeout policy with CLI.
+            # Pre-fix returned ``(False, ...)`` here, immediately flipping
+            # healthy=False — asymmetric vs the CLI policy which returns
+            # ``(None, ...)`` as INDETERMINATE. Real-traffic
+            # record_call_failure (3-strike threshold) is the authoritative
+            # signal in both cases now.
+            return None, f"probe timeout (>{int(timeout_sec)}s)"
     finally:
         # Critical: do NOT wait. A hung SDK call would block us indefinitely.
         # The worker thread continues running in the background until the SDK
@@ -176,7 +188,40 @@ def _with_thread_deadline(fn, timeout_sec: float):
         pool.shutdown(wait=False, cancel_futures=True)
 
 
-def _probe_anthropic_real(spec) -> tuple[bool, str]:
+def _classify_api_exception(exc: Exception) -> tuple[bool | None, str]:
+    """Map an API SDK exception to a probe result.
+
+    Symmetric with the CLI policy (round-1 review #3): exceptions that
+    indicate the network couldn't deliver a verdict (timeouts, connection
+    refused, DNS) return ``None`` — INDETERMINATE. Definitive errors
+    (auth, quota, model-not-found, schema mismatch) return ``False`` so
+    the registry flips healthy=False immediately and stops sending
+    traffic at a backend with a known config error.
+
+    Heuristic on exception class name + message text. Tolerates absent
+    SDK imports — we never need to ``isinstance(exc, anthropic.APITimeoutError)``,
+    just inspect the str.
+    """
+    name = type(exc).__name__.lower()
+    msg = str(exc)[:300].lower()
+    # Timeout family.
+    timeout_markers = ("timeout", "timedout", "timed out", "deadline")
+    if any(m in name for m in timeout_markers) or any(m in msg for m in timeout_markers):
+        return None, f"probe timeout: {type(exc).__name__}"
+    # Network unreachable / TLS handshake family — also indeterminate
+    # (the backend isn't proven unhealthy; we just can't get there).
+    netfail_markers = (
+        "connection refused", "connectionrefused", "connecterror",
+        "name or service not known", "nameresolution",
+        "remote end closed", "ssl",
+    )
+    if any(m in name for m in netfail_markers) or any(m in msg for m in netfail_markers):
+        return None, f"probe network: {type(exc).__name__}"
+    # Everything else (auth, quota, schema, etc.) is definitive.
+    return False, str(exc)[:200]
+
+
+def _probe_anthropic_real(spec) -> tuple[bool | None, str]:
     """Real probe: 1-token messages.create call. Catches AUTH/QUOTA/MODEL_NOT_FOUND.
 
     Passes ``timeout=PROBE_TIMEOUT`` to the SDK client so a hung TLS handshake
@@ -200,10 +245,10 @@ def _probe_anthropic_real(spec) -> tuple[bool, str]:
         )
         return True, ""
     except Exception as e:
-        return False, str(e)[:200]
+        return _classify_api_exception(e)
 
 
-def _probe_google_real(spec) -> tuple[bool, str]:
+def _probe_google_real(spec) -> tuple[bool | None, str]:
     """google-genai's per-call timeout knobs vary by SDK version, so we wrap
     the SDK invocation with our own thread-deadline guard. Belt-and-suspenders:
     set ``http_options.timeout`` if the SDK accepts it; in any case bail at
@@ -233,12 +278,12 @@ def _probe_google_real(spec) -> tuple[bool, str]:
             )
             return True, ""
         except Exception as e:
-            return False, str(e)[:200]
+            return _classify_api_exception(e)
 
     return _with_thread_deadline(_do_call, PROBE_TIMEOUT)
 
 
-def _probe_openai_compat_real(spec) -> tuple[bool, str]:
+def _probe_openai_compat_real(spec) -> tuple[bool | None, str]:
     """Real probe for openai_compat_api provider — uses the openai SDK with an
     explicit per-request timeout."""
     if not spec.api_key or "${" in spec.api_key:
@@ -259,10 +304,10 @@ def _probe_openai_compat_real(spec) -> tuple[bool, str]:
         )
         return True, ""
     except Exception as e:
-        return False, str(e)[:200]
+        return _classify_api_exception(e)
 
 
-def _probe_deepseek_real(spec) -> tuple[bool, str]:
+def _probe_deepseek_real(spec) -> tuple[bool | None, str]:
     """Real probe for deepseek_api provider — uses ``requests`` directly to mirror
     ``runner_deepseek.DeepSeekRunner._stream_chat`` (which avoids the openai SDK
     dependency). Hits ``/chat/completions`` with max_tokens=1.
@@ -288,7 +333,10 @@ def _probe_deepseek_real(spec) -> tuple[bool, str]:
     try:
         r = requests.post(url, headers=headers, json=body, timeout=PROBE_TIMEOUT)
     except requests.RequestException as e:
-        return False, str(e)[:200]
+        # Round-1 review #3: network-level failure (timeout, conn refused,
+        # DNS, TLS) is INDETERMINATE — backend health unknown. Auth/quota/
+        # model errors arrive via r.status_code below and stay definitive.
+        return _classify_api_exception(e)
     if r.status_code == 200:
         return True, ""
     # Map common HTTP errors to classify_error-friendly text so the registry
@@ -376,7 +424,13 @@ def run_probes_async(specs: list, registry) -> None:
                 except Exception as e:
                     ok, err = False, str(e)[:200]
                 registry.set_probe_result(spec.id, ok, err)
-                icon = "✓" if ok else "✗"
+                # Three-state icon (round-1 review #1): ✓ True / ✗ False / ? None.
+                if ok is True:
+                    icon = "✓"
+                elif ok is False:
+                    icon = "✗"
+                else:
+                    icon = "?"
                 suffix = f": {err}" if err else ""
                 _debug_log(f"[ModelProbe] {icon} {spec.id}"
                            f" ({spec.model or 'default'}){suffix}")

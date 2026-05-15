@@ -305,9 +305,20 @@ def _start_recover_thread() -> None:
                     BACKEND_REGISTRY.set_probe_result(spec.id, ok, err)
                 except Exception as e:
                     _dlog(f"[BackendRegistry] tick set_probe_result failed for {spec.id}: {e}")
-                icon = "✓" if ok else "✗"
+                # Three-state icon: ✓ confirmed reachable, ✗ confirmed failed,
+                # ? indeterminate (ok=None — e.g. subprocess timeout, no
+                # healthy mutation, real-traffic record_call_failure decides).
+                # Round-1 review #1: original ``"✓" if ok else "✗"`` flagged
+                # None as failure visually, misleading operators reading
+                # ``/status`` or the journal.
+                if ok is True:
+                    icon = "✓"
+                elif ok is False:
+                    icon = "✗"
+                else:
+                    icon = "?"
                 # Recompute reason post-hoc: a "retry" that succeeded is a "recover"
-                if reason == "retry" and ok:
+                if reason == "retry" and ok is True:
                     reason = "recover"
                 suffix = f" ({err})" if err else ""
                 _dlog(f"[BackendRegistry] tick {reason} {icon} {spec.id}{suffix}")
