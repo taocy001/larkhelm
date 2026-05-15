@@ -1021,13 +1021,12 @@ def _should_wrap_with_llm_router(
 
     Decision table:
       * ``memory_llm_router_enabled=false`` → never
-      * Underlying actual mode is not in ``{"keyword", "hybrid"}`` → never
-        (no point routing pure embedding output)
-      * Policy declared ``retrieval_mode != "llm_router"`` AND the per-
-        chat traffic gate misses → never
-      * ``request.complexity != "high"`` AND ``request.agent_type`` not in
-        ``{"crew", "dev"}`` → never (PRD §7.3 explicitly limits Phase 3
-        rollout to `/crew` and `/dev` complex tasks)
+      * ``request.agent_type`` not in ``{"crew", "dev"}`` → never
+        (PRD §7.3 limits Phase 3 rollout to ``/crew`` and ``/dev``)
+      * ``request.complexity != "complex"`` → never (the cheap-LLM
+        round-trip only justifies its cost on genuinely complex
+        tasks; ``simple`` / ``medium`` stay on keyword / hybrid)
+      * Per-chat traffic gate misses → never
       * Otherwise → True
 
     Salted hash-bucket gating (matches Stage A/B style) on
@@ -1044,10 +1043,15 @@ def _should_wrap_with_llm_router(
     if request.agent_type not in ("crew", "dev"):
         return False
 
-    # Complexity gate: only "high" complexity benefits from the extra
-    # round-trip. "low"/"medium" tasks usually have small slice pools
-    # where keyword/hybrid already pick the right ones.
-    if (request.complexity or "medium") != "high":
+    # Complexity gate: only fully complex tasks benefit from the extra
+    # round-trip. The Complexity literal is "simple" | "medium" |
+    # "complex" (agent_hub/intent_types.py:15) — production NEVER emits
+    # "high". Initial v1 of this gate used "high" which made the entire
+    # feature dead-code in production (review MF-01). Accept the legacy
+    # "high" alias too for forward-compat with any third-party plugin
+    # that might still ship "high".
+    cx = (request.complexity or "medium").lower()
+    if cx not in ("complex", "high"):
         return False
 
     # Traffic gate (per-chat hash bucket; salted independently from

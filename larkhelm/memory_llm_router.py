@@ -131,12 +131,18 @@ def _cache_key(query: str, candidate_ids: Iterable[str]) -> tuple[str, str]:
     Cache hits require BOTH the query AND the candidate set to match —
     different candidate sets imply different relevant data, so reusing the
     verdict would be wrong.
+
+    Idempotent under duplicate ids: passing ``["a", "a", "b"]`` yields the
+    same key as ``["a", "b"]`` (set-semantics — review SF-02). Without
+    this normalisation, a caller that drifts from passing a set to passing
+    a list would silently cache-miss every time.
     """
     q_hash = hashlib.md5((query or "").encode("utf-8")).hexdigest()[:16]
-    # Sort to make the hash insensitive to the underlying retriever's
-    # ordering — what matters is the SET of candidates, not their order.
+    # Dedup + sort to make the hash insensitive to the underlying
+    # retriever's ordering AND to duplicate-id input — what matters is
+    # the SET of candidates, not their order or multiplicity.
     set_hash = hashlib.md5(
-        ",".join(sorted(candidate_ids)).encode("utf-8")
+        ",".join(sorted(set(candidate_ids))).encode("utf-8")
     ).hexdigest()[:16]
     return (q_hash, set_hash)
 

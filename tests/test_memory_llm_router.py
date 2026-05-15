@@ -86,7 +86,10 @@ def _policy(*, top_k: int = 3, agent_type: str = "dev") -> InjectionPolicy:
 
 
 def _request(query: str = "alpha", *, chat_id: str = "c-test",
-             complexity: str = "high", agent_type: str = "dev") -> RetrievalRequest:
+             complexity: str = "complex", agent_type: str = "dev") -> RetrievalRequest:
+    # ``complexity="complex"`` matches the production Complexity literal
+    # (agent_hub/intent_types.py:15). Initial v1 used "high" which is not
+    # in the Complexity union — review MF-01 fixed.
     return RetrievalRequest(
         chat_id=chat_id, query=query, agent_type=agent_type,
         complexity=complexity,
@@ -117,6 +120,17 @@ class CacheTests(unittest.TestCase):
         a = _cache_key("hello", ["sid-1", "sid-2", "sid-3"])
         b = _cache_key("hello", ["sid-3", "sid-1", "sid-2"])
         self.assertEqual(a, b, "candidate-id order should not affect key")
+
+    def test_cache_key_dedupes_duplicate_ids(self):
+        """Regression SF-02: passing the same candidate id repeatedly
+        must collapse to a single bucket. Without ``set(...)`` the
+        key changed every time multiplicity drifted (e.g. caller
+        accidentally passed a list instead of a set)."""
+        a = _cache_key("q", ["sid-1", "sid-2"])
+        b = _cache_key("q", ["sid-1", "sid-1", "sid-2", "sid-2"])
+        c = _cache_key("q", ["sid-2", "sid-1", "sid-1", "sid-2"])
+        self.assertEqual(a, b)
+        self.assertEqual(a, c)
 
     def test_cache_hit_within_ttl(self):
         key = _cache_key("q", ["a", "b"])
@@ -166,6 +180,27 @@ class RateLimitTests(unittest.TestCase):
         for _ in range(1000):
             self.assertTrue(_rate_check_and_record("c-unlim", 0))
         self.assertEqual(_rate_remaining("c-unlim", 0), -1)
+
+    def test_rate_limit_concurrent_no_overshoot(self):
+        """NH-03 regression: under 100-thread concurrent access against
+        a 5/min limit, at most 5 calls succeed. Without the lock guard
+        ``len(window) < limit`` would race against ``window.append``
+        and let 6+ slots through."""
+        import threading
+        results: list[bool] = []
+        results_lock = threading.Lock()
+
+        def attempt():
+            allowed = _rate_check_and_record("concurrent-chat", 5)
+            with results_lock:
+                results.append(allowed)
+
+        threads = [threading.Thread(target=attempt) for _ in range(100)]
+        for t in threads: t.start()
+        for t in threads: t.join()
+
+        ok = sum(1 for r in results if r)
+        self.assertEqual(ok, 5, f"expected exactly 5 successes, got {ok}")
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -428,17 +463,31 @@ class GateTests(unittest.TestCase):
             _request(agent_type="chat"), self.policy, "chat-1", cfg,
         ))
 
-    def test_complexity_not_high_filtered_out(self):
+    def test_complexity_not_complex_filtered_out(self):
+        # The production Complexity literal is "simple"|"medium"|"complex"
+        # (agent_hub/intent_types.py:15). The gate must reject every
+        # value except "complex" (with "high" still tolerated as alias).
         cfg = {"memory_llm_router_enabled": True, "memory_llm_router_traffic": 1.0}
-        for c in ("low", "medium", ""):
+        for c in ("simple", "medium", "low", ""):
             self.assertFalse(_should_wrap_with_llm_router(
                 _request(complexity=c), self.policy, "chat-1", cfg,
             ), f"complexity={c!r} must not gate in")
 
-    def test_full_gate_open(self):
+    def test_full_gate_open_complex(self):
+        """Regression MF-01: 'complex' is the production literal —
+        v1 of this gate checked 'high' which made the entire feature
+        unreachable in production."""
         cfg = {"memory_llm_router_enabled": True, "memory_llm_router_traffic": 1.0}
         self.assertTrue(_should_wrap_with_llm_router(
-            _request(complexity="high", agent_type="crew"), self.policy, "chat-x", cfg,
+            _request(complexity="complex", agent_type="crew"), self.policy, "chat-x", cfg,
+        ), "production 'complex' must be accepted")
+
+    def test_high_alias_still_accepted(self):
+        """Keep the 'high' alias working so any third-party plugin
+        that pre-dates Phase 3 doesn't silently lose routing."""
+        cfg = {"memory_llm_router_enabled": True, "memory_llm_router_traffic": 1.0}
+        self.assertTrue(_should_wrap_with_llm_router(
+            _request(complexity="high", agent_type="dev"), self.policy, "chat-1", cfg,
         ))
 
 
