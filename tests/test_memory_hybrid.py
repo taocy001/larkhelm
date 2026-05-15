@@ -122,6 +122,53 @@ def test_stale_decay_in_hybrid():
     assert any(",stale" in s.reason for s in out)
 
 
+def test_stale_decay_in_hybrid_applied_exactly_once(monkeypatch):
+    """SF-02 regression: pin that hybrid path applies stale-decay exactly
+    once (not twice).
+
+    Pre-NIT-04, the keyword path had already multiplied
+    ``relevance_score *= decay`` for stale slices, and then the hybrid
+    path multiplied again — net 0.25× instead of the intended 0.5×.
+    The NIT-04 fix undoes the keyword decay, fuses on raw values, and
+    re-applies decay once at the boundary.
+
+    This test was previously written with ``alpha=0.0`` which collapses
+    hybrid to pure keyword path → the double-decay bug would still pass
+    ordering checks. We now use ``alpha=0.5`` so cosine is non-trivially
+    weighted in, and assert the NUMERIC magnitude of final relevance
+    matches single-decay (within float tolerance).
+    """
+    from larkhelm.memory_retriever import _stale_decay_factor
+
+    decay = _stale_decay_factor()
+    # Sanity: feature must be on for this test to be meaningful.
+    assert 0.0 < decay < 1.0, f"unexpected decay={decay}"
+
+    stale = _slice("stale", "stale", "alpha alpha alpha alpha", stale=True)
+    request = RetrievalRequest(chat_id="c", query="alpha")
+    hybrid = HybridRetriever(KeywordRetriever(), EmbeddingRetriever(StubEmbedding()))
+    out = hybrid.retrieve(request, _policy(top_k=1, alpha=0.5), [stale])
+    assert out, "hybrid returned empty pool"
+    final_relevance = out[0].relevance_score
+
+    # Build a non-stale version of the same slice and re-run; final
+    # relevance should be exactly ``final_relevance / decay`` since the
+    # only delta is the single decay multiplication.
+    fresh = _slice("fresh", "fresh", "alpha alpha alpha alpha", stale=False)
+    out_fresh = hybrid.retrieve(request, _policy(top_k=1, alpha=0.5), [fresh])
+    assert out_fresh, "fresh retrieval returned empty pool"
+    fresh_relevance = out_fresh[0].relevance_score
+
+    # If decay was applied twice, we'd see ``final_relevance ≈ fresh * decay^2``.
+    # If applied once, ``final_relevance ≈ fresh * decay``.
+    ratio = final_relevance / fresh_relevance if fresh_relevance > 0 else 0
+    assert abs(ratio - decay) < 0.01, (
+        f"stale-decay applied {ratio / decay if decay > 0 else 'inf'} times, "
+        f"expected exactly once. ratio={ratio:.4f}, decay={decay:.4f} "
+        f"(double-decay bug would give ratio={decay*decay:.4f})"
+    )
+
+
 def test_resolve_actual_mode_with_traffic(monkeypatch):
     """When embedding traffic is 100% and backend!=none → hybrid; backend=none → keyword."""
     policy = POLICY_TABLE["chat"]  # declared retrieval_mode="keyword"

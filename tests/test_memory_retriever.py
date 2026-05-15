@@ -246,24 +246,77 @@ def test_compose_budget_trim_uses_smart_truncate():
 
 # ── 7. Gating consistency with intent_router (AC-05) ───────────────────────
 
-def test_traffic_split_consistent_with_intent_router(monkeypatch):
-    """`_retriever_active` and the intent_router gating must agree on the
-    same chat_id at the same traffic % (NFR-DEPLOY-1)."""
-    # Save and restore config to keep the test hermetic.
+def test_traffic_split_deterministic_within_rollout(monkeypatch):
+    """Per-rollout determinism: same chat_id + same traffic_key → same
+    answer across repeated calls. This is the actual NFR-DEPLOY-1
+    contract for gating (NOT cross-rollout coupling).
+
+    The earlier ``test_traffic_split_consistent_with_intent_router``
+    asserted equality across intent_router and memory_retriever
+    rollouts — that was pinning a bug (unsalted hash → same bucket
+    across both rollouts) as a feature. SF-01 fix salts the digest
+    with the traffic_key name so the two rollouts are independent,
+    matching the config comment ``orthogonal to memory_retriever_traffic``.
+    """
     orig = getattr(_cfg, "config", {})
     new_cfg = dict(orig)
     new_cfg.update({
-        "intent_router_enabled":   True,
-        "intent_router_traffic":   0.5,
         "memory_retriever_enabled": True,
         "memory_retriever_traffic": 0.5,
     })
     monkeypatch.setattr(_cfg, "config", new_cfg, raising=False)
     chats = [f"oc_{i:03d}" for i in range(100)]
     for c in chats:
-        a = hash_traffic_active(c, "intent_router_enabled", "intent_router_traffic")
-        b = _retriever_active(c)
-        assert a == b, f"divergence at {c}: ir={a} mr={b}"
+        first = _retriever_active(c)
+        second = _retriever_active(c)
+        third = _retriever_active(c)
+        assert first == second == third, (
+            f"determinism broken at {c}: {first} {second} {third}"
+        )
+
+
+def test_traffic_split_stage_a_and_stage_b_independent(monkeypatch):
+    """SF-01 regression: Stage A (memory_retriever_traffic) and Stage B
+    (embedding_traffic) buckets must be **independent**, not the
+    same bucket.
+
+    Algorithm: with both at 0.5, if they shared the bucket then
+    100% of chats would land in identical Stage A/B states (both T
+    or both F). Independent buckets give ~50% agreement = chi-square
+    test. We use a less strict check (≥10% disagreement out of 200
+    chats) which is far above the noise threshold for the bug case
+    (0% disagreement when buckets are shared).
+    """
+    orig = getattr(_cfg, "config", {})
+    new_cfg = dict(orig)
+    new_cfg.update({
+        "memory_retriever_enabled": True,
+        "memory_retriever_traffic": 0.5,
+        # Stage B independent gate uses the same hash_traffic_active
+        # helper with a different traffic_key — verifies the salt.
+    })
+    monkeypatch.setattr(_cfg, "config", new_cfg, raising=False)
+
+    chats = [f"oc_indep_{i:04d}" for i in range(200)]
+    disagree_count = 0
+    for c in chats:
+        a = hash_traffic_active(c, "memory_retriever_enabled", "memory_retriever_traffic")
+        # Stage B uses a different traffic_key string; with salting,
+        # this gives a different bucket per chat. Simulate it via
+        # ``embedding_traffic`` rather than re-implementing the digest.
+        new_cfg["embedding_traffic"] = 0.5
+        new_cfg["embedding_enabled"] = True
+        b = hash_traffic_active(c, "embedding_enabled", "embedding_traffic")
+        if a != b:
+            disagree_count += 1
+
+    # With shared buckets disagree_count is 0; with independent
+    # buckets at 0.5/0.5 it's ~100/200 = 50%. We bar at >= 10% to
+    # leave room for hash quirks but still catch the bug.
+    assert disagree_count >= 20, (
+        f"Stage A/B appear to share the bucket — disagree={disagree_count}/200, "
+        "expected ≥20. SF-01 (digest salting) regression suspected."
+    )
 
 
 def test_traffic_split_extremes(monkeypatch):

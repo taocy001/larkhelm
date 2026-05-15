@@ -960,9 +960,14 @@ def resolve_actual_mode(
             if traffic >= 1.0:
                 active = True
             elif traffic > 0.0:
-                # hashlib is imported at module top (line 26); no local
-                # alias needed — review NIT-01 cleanup.
-                digest = hashlib.md5(str(chat_id).encode("utf-8")).hexdigest()
+                # Salt the digest with the traffic-key name (matches
+                # ``_gating.hash_traffic_active``) so Stage A and Stage B
+                # land in **independent** buckets — without the salt,
+                # both stages used ``md5(chat_id)[:8]`` and ended up in
+                # the same bucket, silently nesting Stage B inside
+                # Stage A instead of being orthogonal (review SF-01).
+                salted = f"embedding_traffic:{chat_id}".encode("utf-8")
+                digest = hashlib.md5(salted).hexdigest()
                 bucket = int(digest[:8], 16) % 10000
                 active = bucket < int(traffic * 10000)
             if active:

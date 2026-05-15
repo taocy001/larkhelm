@@ -8,7 +8,15 @@ Algorithm:
   - If the ``enabled_key`` config flag is falsy → False.
   - Else read ``traffic_key`` as a float in [0, 1].
   - traffic <= 0 → False; traffic >= 1 → True.
-  - Otherwise: ``int(md5(chat_id)[:8], 16) % 10000 < traffic * 10000``.
+  - Otherwise: ``int(md5(salt + ":" + chat_id)[:8], 16) % 10000 < traffic * 10000``.
+
+The digest is **salted with the traffic_key name** so two independent
+rollouts (e.g. Phase D Stage A memory_retriever_traffic and Stage B
+embedding_traffic) sit in statistically independent buckets — review
+SF-01 follow-up. Without the salt, the same chat_id had the same bucket
+under both rollouts, which silently made Stage B nested inside Stage A
+instead of orthogonal. Now Stage A=0.3 ∩ Stage B=0.7 ≈ 0.21 (as the
+PRD's "orthogonal" wording promises) rather than 0.30.
 
 Stdlib + ``larkhelm.config`` only — keep this module side-effect free."""
 from __future__ import annotations
@@ -28,7 +36,12 @@ def hash_traffic_active(
     ``enabled_key`` / ``traffic_key`` in ``larkhelm.config.config``.
 
     Fails closed (returns False) on any lookup or parse error so a config
-    typo cannot accidentally turn a rollout on for 100% of users."""
+    typo cannot accidentally turn a rollout on for 100% of users.
+
+    Bucket independence: the md5 digest is salted with ``traffic_key`` so
+    that distinct rollouts (e.g. memory_retriever_traffic vs
+    embedding_traffic) fall into independent buckets. See module docstring.
+    """
     try:
         import larkhelm.config as _cfg
         cfg = getattr(_cfg, "config", {}) or {}
@@ -49,7 +62,8 @@ def hash_traffic_active(
         return True
 
     try:
-        digest = hashlib.md5(chat_id.encode("utf-8")).hexdigest()
+        salted = f"{traffic_key}:{chat_id}".encode("utf-8")
+        digest = hashlib.md5(salted).hexdigest()
         bucket = int(digest[:8], 16) % 10000
     except Exception:
         return False
