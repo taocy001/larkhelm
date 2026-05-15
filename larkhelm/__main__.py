@@ -166,15 +166,32 @@ def _compute_llm_router_summary(records: list) -> dict | None:
 
       * ``gate_fired_count``    — records that reached the Stage C gate
         (the dispatcher set ``llm_router_diag`` on them)
-      * ``invoked_count``       — subset that actually called the cheap
-        LLM (no cache, no rate-limit, no skip)
+      * ``invoked_count``       — successful invokes ONLY (LLM call
+        completed AND response parsed AND a non-empty selection was
+        used). Excludes invoke-then-failed records, which are counted
+        in ``skipped_breakdown`` instead — see disjointness note below.
       * ``cache_hit_count``     — subset that reused a cached verdict
       * ``cache_hit_rate``      — hits / (hits + invokes); 0.0 when both 0
-      * ``avg_selected_n``      — avg LLM-selected slice count, among
-        invokes that returned a selection (cache hits + skips excluded)
+      * ``avg_selected_n``      — avg LLM-selected slice count among
+        successful invokes
       * ``skipped_breakdown``   — Counter dict of non-empty
         ``llm_router_skipped`` reasons (rate_limit, no_cheap_caller,
-        caller_exception, parse_failed, empty_response, ...)
+        caller_exception, parse_failed, empty_response,
+        underlying_failure, ...)
+
+    Disjointness invariant
+    ----------------------
+    The three buckets ``invoked_count`` + ``cache_hit_count`` +
+    ``sum(skipped_breakdown.values())`` must equal ``gate_fired_count``.
+
+    The producer (``memory_llm_router.py``) sets ``diag.invoked = True``
+    *before* calling the LLM as a debug trail, then sets a
+    ``skipped_reason`` on post-call failures (``parse_failed`` /
+    ``empty_response`` / ``caller_exception``) without flipping
+    ``invoked`` back. This aggregator restores disjointness by
+    treating ``invoked=True AND skipped_reason!=""`` as **skipped only**.
+    Without that filter ``avg_selected_n`` got poisoned by failed
+    invokes (always selected_n=0) — review MF-01 round-2.
 
     All counts are operator-facing — they answer "is Stage C alive,
     is it cheap, is the LLM picking anything useful?".
@@ -185,23 +202,43 @@ def _compute_llm_router_summary(records: list) -> dict | None:
     gate_fired = [r for r in records if "llm_router_invoked" in r]
     if not gate_fired:
         return None
-    invoked = [r for r in gate_fired if r.get("llm_router_invoked")]
+
+    def _skipped(r: dict) -> str:
+        return str(r.get("llm_router_skipped") or "")
+
+    # Disjoint buckets (review MF-01 round-2): a record with
+    # ``invoked=True`` AND ``skipped_reason`` non-empty is the
+    # "tried LLM, post-call failure" case — count it as skipped,
+    # NOT as a successful invoke.
+    successful_invokes = [
+        r for r in gate_fired
+        if r.get("llm_router_invoked") and not _skipped(r)
+    ]
     cache_hits = [r for r in gate_fired if r.get("llm_router_cache_hit")]
-    # Skipped records carry a non-empty ``llm_router_skipped`` reason.
-    # Note: a record can have skipped="rate_limit" with invoked=False —
-    # those count as "skipped" not "invoked", and are not double-counted.
     skipped_counter: dict[str, int] = {}
     for r in gate_fired:
-        reason = str(r.get("llm_router_skipped") or "")
+        reason = _skipped(r)
         if reason:
             skipped_counter[reason] = skipped_counter.get(reason, 0) + 1
 
-    # avg_selected_n only meaningful for actual invokes (cache hits and
-    # skips report 0 / N/A respectively). Compute over invokes only.
-    selected_total = sum(int(r.get("llm_router_selected_n", 0) or 0) for r in invoked)
-    avg_selected = (selected_total / len(invoked)) if invoked else 0.0
+    def _safe_int(v: object, default: int = 0) -> int:
+        """Tolerate malformed ``selected_n`` (string / None / non-numeric)
+        without crashing the whole audit-summary CLI — review SF-02
+        round-2."""
+        try:
+            return int(v) if v is not None else default
+        except (TypeError, ValueError):
+            return default
 
-    n_inv = len(invoked)
+    selected_total = sum(
+        _safe_int(r.get("llm_router_selected_n")) for r in successful_invokes
+    )
+    avg_selected = (
+        selected_total / len(successful_invokes)
+        if successful_invokes else 0.0
+    )
+
+    n_inv = len(successful_invokes)
     n_hit = len(cache_hits)
     cache_denom = n_inv + n_hit
     cache_rate = (n_hit / cache_denom) if cache_denom else 0.0

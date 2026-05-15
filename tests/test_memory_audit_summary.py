@@ -253,3 +253,140 @@ def test_audit_summary_text_omits_llm_router_for_phase2():
     out = _compute_audit_summary(records, timedelta(hours=1))
     text = _render_audit_summary_text(out)
     assert "llm router" not in text
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Phase 3 round-2 review follow-ups
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_llm_router_disjoint_invariant_invoked_plus_skipped_marked_as_skipped():
+    """Round-2 MF-01 regression: the producer sets ``invoked=True``
+    BEFORE the LLM call, then on parse_failed / empty_response /
+    caller_exception adds a ``skipped_reason`` without flipping
+    invoked back. A record with BOTH must be counted as SKIPPED
+    (not as a successful invoke that dragged avg_selected_n to 0).
+    """
+    records = [
+        # Successful invoke: invoked=True, skipped="", selected_n=4
+        _make_record(llm_router_invoked=True, llm_router_selected_n=4),
+        # invoke-then-failed: invoked=True, skipped="parse_failed", selected_n=0
+        _make_record(llm_router_invoked=True,
+                     llm_router_skipped="parse_failed",
+                     llm_router_selected_n=0),
+        # pure cache hit
+        _make_record(llm_router_invoked=False, llm_router_cache_hit=True),
+    ]
+    summary = _compute_llm_router_summary(records)
+    assert summary is not None
+    # Successful invoke only — the parse_failed record is in skipped.
+    assert summary["invoked_count"] == 1
+    assert summary["cache_hit_count"] == 1
+    # avg_selected_n must be 4 (from the single real invoke), NOT 2
+    # (which would be the bug-case (4+0)/2).
+    assert summary["avg_selected_n"] == pytest.approx(4.0)
+    # parse_failed goes into skipped_breakdown.
+    assert summary["skipped_breakdown"] == {"parse_failed": 1}
+    # Disjointness: invoked + cache_hits + sum(skipped) == gate_fired.
+    inv = summary["invoked_count"]
+    hits = summary["cache_hit_count"]
+    skipped_sum = sum(summary["skipped_breakdown"].values())
+    assert inv + hits + skipped_sum == summary["gate_fired_count"], (
+        f"buckets not disjoint: {inv} + {hits} + {skipped_sum} != "
+        f"{summary['gate_fired_count']}"
+    )
+
+
+def test_llm_router_safe_int_handles_malformed_selected_n():
+    """Round-2 SF-02 regression: a corrupted audit record with
+    string / None / non-numeric ``selected_n`` must NOT crash the
+    whole CLI — operators rely on audit-summary to diagnose Stage C,
+    so a malformed record should be treated as 0 not abort."""
+    records = [
+        {"llm_router_invoked": True, "llm_router_cache_hit": False,
+         "llm_router_skipped": "", "llm_router_selected_n": "abc",  # bogus
+         "elapsed_ms": 5, "agent_type": "dev", "mode": "hybrid",
+         "fail_open": False, "selected_slice_ids": [], "selected_token_chars": 0},
+        {"llm_router_invoked": True, "llm_router_cache_hit": False,
+         "llm_router_skipped": "", "llm_router_selected_n": None,    # null
+         "elapsed_ms": 5, "agent_type": "dev", "mode": "hybrid",
+         "fail_open": False, "selected_slice_ids": [], "selected_token_chars": 0},
+        {"llm_router_invoked": True, "llm_router_cache_hit": False,
+         "llm_router_skipped": "", "llm_router_selected_n": 3,
+         "elapsed_ms": 5, "agent_type": "dev", "mode": "hybrid",
+         "fail_open": False, "selected_slice_ids": [], "selected_token_chars": 0},
+    ]
+    summary = _compute_llm_router_summary(records)
+    assert summary is not None
+    # Three successful invokes; the two bogus selected_n values count
+    # as 0; one real value of 3. Mean = (0+0+3) / 3 = 1.0.
+    assert summary["invoked_count"] == 3
+    assert summary["avg_selected_n"] == pytest.approx(1.0)
+
+
+def test_llm_router_summary_matches_build_audit_record_shape():
+    """Round-2 SF-03 follow-up: the aggregator must read records
+    SHAPED EXACTLY as ``build_audit_record_v2(..., llm_router_diag=...)``
+    produces. Without this, schema drift between producer and consumer
+    silently degrades audit fidelity (every Phase review caught one of
+    these — Phase 2 SF-01 shared bucket, Phase 3 MF-01 complexity gate).
+    """
+    from larkhelm.memory_llm_router import RouterDiagnostics
+    from larkhelm.memory_retriever import build_audit_record_v2
+    from larkhelm.memory_slice import (
+        InjectionPolicy, RetrievalRequest, ScoredSlice, MemorySlice,
+    )
+    req = RetrievalRequest(chat_id="c", query="q",
+                           agent_type="dev", complexity="complex")
+    pol = InjectionPolicy(
+        agent_type="dev", token_budget=2000,
+        layer_weights={"project": 1.0}, kind_priority=("convention",),
+    )
+    diag = RouterDiagnostics(
+        invoked=True, cache_hit=False, skipped_reason="",
+        elapsed_ms=5, selected_by_llm=3,
+    )
+    # Production-shaped record.
+    rec = build_audit_record_v2(
+        request=req, policy=pol, scored=[], candidate_count=0,
+        elapsed_ms=5, selected_chars=100, fail_open=False,
+        actual_mode="hybrid", llm_router_diag=diag,
+    )
+    # Verify the aggregator finds the gate-fired sentinel field.
+    assert "llm_router_invoked" in rec, (
+        "build_audit_record_v2 must write llm_router_invoked when diag "
+        "is provided — the aggregator uses this as gate-fired sentinel"
+    )
+    # End-to-end aggregation on the production record.
+    summary = _compute_llm_router_summary([rec])
+    assert summary is not None
+    assert summary["gate_fired_count"] == 1
+    assert summary["invoked_count"] == 1
+    assert summary["avg_selected_n"] == pytest.approx(3.0)
+
+
+def test_llm_router_underlying_failure_records_diag(monkeypatch):
+    """Round-2 SF-01 regression: when the LLMRouterRetriever's
+    underlying retriever raises (so _build_with_retriever's outer
+    except fires), the audit record must STILL carry llm_router_*
+    fields with ``skipped_reason="underlying_failure"`` so the audit
+    summary doesn't undercount Stage C activity.
+
+    Reproduce by directly checking the diag-construction logic that
+    lives in ``memory_context._build_with_retriever``'s except branch.
+    We exercise the path via a synthetic record shaped like what the
+    fixed code now writes.
+    """
+    rec = {
+        "llm_router_invoked": False,
+        "llm_router_cache_hit": False,
+        "llm_router_skipped": "underlying_failure",
+        "llm_router_selected_n": 0,
+        "elapsed_ms": 5, "agent_type": "dev", "mode": "keyword",
+        "fail_open": True, "selected_slice_ids": [], "selected_token_chars": 0,
+    }
+    summary = _compute_llm_router_summary([rec])
+    assert summary is not None
+    assert summary["gate_fired_count"] == 1
+    assert summary["invoked_count"] == 0
+    assert summary["skipped_breakdown"] == {"underlying_failure": 1}

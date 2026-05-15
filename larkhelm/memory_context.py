@@ -565,7 +565,20 @@ class MemoryContextBuilder:
             fail_open = True
             actual_mode = "keyword"
             scored = KeywordRetriever().retrieve(request, policy, slices)
-            llm_router_diag = None
+            # Preserve the gate-fired signal even when the underlying
+            # retriever raised inside the LLMRouter wrap — otherwise the
+            # audit summary undercounts Stage C activity (review SF-01
+            # round-2). We synthesise a diag that records "the gate did
+            # fire, but the underlying blew up".
+            if wrap_with_llm:
+                from larkhelm.memory_llm_router import RouterDiagnostics
+                llm_router_diag = RouterDiagnostics(
+                    invoked=False, cache_hit=False,
+                    skipped_reason="underlying_failure",
+                    elapsed_ms=0, selected_by_llm=0,
+                )
+            else:
+                llm_router_diag = None
 
         composed = compose_slices_to_context(scored, policy, cwd=self.cwd)
         elapsed_ms = int((_time.perf_counter() - t0) * 1000)
