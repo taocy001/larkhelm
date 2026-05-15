@@ -92,7 +92,10 @@ extend-exclude = [
 select = [
     "F821",  # undefined name (real bugs; caught 3 in cmd_doc + _message)
     "F811",  # redefinition of unused name
-    "E712",  # comparison to True/False with == (should use `is`)
+    "E711",  # comparison to None with == / != (should use `is` / `is not`)
+    "E712",  # comparison to True/False with ==
+    "E714",  # ``not foo is bar`` instead of ``foo is not bar``
+    "F632",  # ``is`` comparison with a string/int/tuple literal
 ]
 # Per-file deviations: empty for now; expand as the ratchet tightens.
 [tool.ruff.lint.per-file-ignores]
