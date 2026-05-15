@@ -1249,10 +1249,18 @@ def _cmd_btw(chat_id: str, question: str, user_msg_id: str):
                         _patch_card_raw(mid, _make_card("💬", text.strip() or "> 正在思考...", color="grey"))
 
                 # Inject memory context (L2)
+                # N-1 follow-up: migrate to v2 with ``query=question`` so
+                # the S50 lazy global / S51 project conditional gating
+                # actually fires on /btw side-questions (which are often
+                # casual or domain-unrelated to the current project).
+                # Closes the last v1 user-facing entry point — chat / dev /
+                # crew / plan / btw now all share the same memory contract.
                 _btw_mem_ctx = ""
                 try:
-                    from larkhelm.memory import get_memory_context as _get_mem_ctx
-                    _btw_mem_ctx = _get_mem_ctx(chat_id, cwd=cwd)
+                    from larkhelm.memory import get_memory_context_v2
+                    _btw_mem_ctx, _ = get_memory_context_v2(
+                        chat_id, cwd=cwd, query=question,
+                    )
                 except Exception as e:
                     _debug_log(f"[btw] memory load failed: {e}")
 
