@@ -1,5 +1,7 @@
 # LarkHelm
 
+[![CI](https://github.com/taocy001/larkhelm/actions/workflows/ci.yml/badge.svg)](https://github.com/taocy001/larkhelm/actions/workflows/ci.yml)
+
 **中文** | [English](#english)
 
 > 本项目所有代码与文档均由 [Claude Code](https://claude.ai/code) 生成。  
