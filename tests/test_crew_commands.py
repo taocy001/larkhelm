@@ -96,3 +96,93 @@ def test_generic_terminal_failure_wrapper_catches(
         pass
     sends = [c for c in fake_card_sender if c["kind"] == "send_card"]
     assert any(c["color"] == "red" for c in sends)
+
+
+def test_dev_clears_stale_cancel_event_from_prev_crew(
+    init_test_config, fake_card_sender, fake_backend_registry, monkeypatch,
+):
+    """Regression: a previous crew's ``state.cancel_ev.set()`` (e.g. from a
+    breakpoint auto-cancel) leaks into the per-chat ``_cancel_events`` map.
+    The next /dev must clear it before ``_run_crew`` runs, otherwise the new
+    crew immediately raises QueryCancelledError on the first wave check and
+    looks like it was instantly cancelled from the user's perspective.
+    """
+    from larkhelm.concurrency import _get_cancel_event
+    import larkhelm.crew._commands as _c
+
+    chat = "test_chat_stale_cancel"
+    # Simulate the leftover state from a previous crew that auto-cancelled.
+    prev_ev = _get_cancel_event(chat)
+    prev_ev.set()
+    assert prev_ev.is_set()
+
+    captured: dict = {}
+    def _fake_run_crew(state, total_timeout):
+        captured["cancel_set_at_run_crew"] = state.cancel_ev.is_set()
+
+    # Stub deeper crew machinery so the test stays at the cmd-level.
+    monkeypatch.setattr("larkhelm.crew._runner._run_crew", _fake_run_crew)
+    monkeypatch.setattr(_c, "_augment_requirement_with_context",
+                        lambda req, *_a, **_kw: req)
+    # ``_pin_task_card`` is imported inside the function — patch at its
+    # canonical module so the late ``from ... import`` picks up the stub.
+    monkeypatch.setattr("larkhelm.lark_client._pin_task_card",
+                        lambda *a, **kw: None)
+    monkeypatch.setattr("larkhelm.lark_client._reply_card_raw",
+                        lambda *a, **kw: "mid_fake")
+    monkeypatch.setattr("larkhelm.lark_client._send_card_raw",
+                        lambda *a, **kw: "mid_fake")
+
+    # Drive the dev entry impl directly to bypass thread plumbing.
+    _c._run_dev_crew_inner_impl(
+        chat, "regression req", user_msg_id=None,
+        no_confirm=True, crew_id="cid_stale", force_replan=True,
+    )
+
+    # The newly-started crew must NOT inherit the stale cancel signal.
+    assert captured.get("cancel_set_at_run_crew") is False, (
+        "stale cancel_ev from previous crew leaked into new /dev — "
+        "regression of breakpoint-timeout cross-contamination bug"
+    )
+    # And the per-chat event itself must be cleared (defensive cross-check).
+    assert _get_cancel_event(chat).is_set() is False
+
+
+def test_generic_crew_clears_stale_cancel_event(
+    init_test_config, fake_card_sender, fake_backend_registry, monkeypatch,
+):
+    """Same regression for /crew (generic) entry — they share the bug class."""
+    from larkhelm.concurrency import _get_cancel_event
+    import larkhelm.crew._commands as _c
+
+    chat = "test_chat_stale_cancel_generic"
+    _get_cancel_event(chat).set()
+
+    captured: dict = {}
+    def _fake_run_crew(state, total_timeout):
+        captured["cancel_set_at_run_crew"] = state.cancel_ev.is_set()
+    monkeypatch.setattr("larkhelm.crew._runner._run_crew", _fake_run_crew)
+    monkeypatch.setattr("larkhelm.lark_client._pin_task_card",
+                        lambda *a, **kw: None)
+    monkeypatch.setattr("larkhelm.lark_client._reply_card_raw",
+                        lambda *a, **kw: "mid_fake")
+    monkeypatch.setattr("larkhelm.lark_client._send_card_raw",
+                        lambda *a, **kw: "mid_fake")
+    monkeypatch.setattr("larkhelm.lark_client._patch_card_raw",
+                        lambda *a, **kw: None)
+    # Stub Manager planning to a trivial 1-agent plan so we reach _run_crew.
+    from larkhelm.crew_types import CrewPlan, AgentSpec
+    monkeypatch.setattr(_c, "_crew_plan", lambda *a, **kw: CrewPlan(
+        title="x", agents=[AgentSpec(
+            id="a", role="r", model="claude", system="", prompt="p",
+            depends_on=[], timeout=60,
+        )], synthesis_prompt="",
+    ))
+
+    _c._run_generic_crew_inner_impl(
+        chat, "regression req", max_agents=1, total_timeout=60,
+        user_msg_id=None, crew_id="cid_stale_g",
+    )
+
+    assert captured.get("cancel_set_at_run_crew") is False
+    assert _get_cancel_event(chat).is_set() is False

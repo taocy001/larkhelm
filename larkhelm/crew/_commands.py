@@ -722,6 +722,14 @@ def _run_generic_crew_inner_impl(chat_id: str, requirement: str,
                       color="orange")
             return
         _active_crew[chat_id] = crew_id
+        # Clear any stale cancel signal carried over from the *previous*
+        # crew on this chat. Abnormal exits (breakpoint timeout, hard fail,
+        # SIGTERM) call ``state.cancel_ev.set()`` but the finally cleanup
+        # below never clears the per-chat Event — so the next /crew or /dev
+        # inherits the set state and ``_execute`` raises QueryCancelledError
+        # on the very first wave check, masquerading as an instant cancel.
+        # We hold the active_crew slot, so no concurrent crew can race here.
+        cancel_ev.clear()
 
     log_entry(chat_id, "user", requirement, model="crew")
     clear_recent_crew_context(chat_id)
@@ -867,6 +875,14 @@ def _run_dev_crew_inner_impl(chat_id: str, requirement: str, user_msg_id: str,
                       color="orange")
             return
         _active_crew[chat_id] = crew_id
+        # Clear any stale cancel signal carried over from the *previous*
+        # crew on this chat. Abnormal exits (breakpoint timeout, hard fail,
+        # SIGTERM) call ``state.cancel_ev.set()`` but the finally cleanup
+        # below never clears the per-chat Event — so the next /dev or /crew
+        # inherits the set state and ``_execute`` raises QueryCancelledError
+        # on the very first wave check, masquerading as an instant cancel.
+        # We hold the active_crew slot, so no concurrent crew can race here.
+        cancel_ev.clear()
 
     log_entry(chat_id, "user", requirement, model="crew")
     clear_recent_crew_context(chat_id)
