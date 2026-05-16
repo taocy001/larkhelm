@@ -194,11 +194,11 @@ class AnthropicCacheControlTests(unittest.TestCase):
         spec = MagicMock(id="anthropic_test", model="claude-sonnet-4-6",
                          api_key="x", base_url="")
         fake_mod, captured = self._patched_anthropic()
-        with patch.dict("sys.modules", {"anthropic": fake_mod}):
-            bapi.run_anthropic(
-                spec=spec, chat_id="chat1", message="hi",
-                history=[], extra_system="some-memory-blob",
-            )
+        bapi.run_anthropic(
+            spec=spec, chat_id="chat1", message="hi",
+            history=[], extra_system="some-memory-blob",
+            _anthropic_module=fake_mod,
+        )
         sys_field = captured["kwargs"]["system"]
         # Must be a list (cache_control requires list form), not a string.
         self.assertIsInstance(sys_field, list)
@@ -215,11 +215,11 @@ class AnthropicCacheControlTests(unittest.TestCase):
         spec = MagicMock(id="anthropic_test", model="claude-sonnet-4-6",
                          api_key="x", base_url="")
         fake_mod, captured = self._patched_anthropic()
-        with patch.dict("sys.modules", {"anthropic": fake_mod}):
-            bapi.run_anthropic(
-                spec=spec, chat_id="chat1", message="hi",
-                history=[], extra_system="",
-            )
+        bapi.run_anthropic(
+            spec=spec, chat_id="chat1", message="hi",
+            history=[], extra_system="",
+            _anthropic_module=fake_mod,
+        )
         self.assertNotIn("system", captured["kwargs"])
 
 

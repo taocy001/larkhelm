@@ -10,110 +10,102 @@ import threading
 import unittest
 from unittest.mock import MagicMock, patch, call
 
+import pytest
 
-class TestCmdResetApiClearFailed(unittest.TestCase):
-    """REQ-02: _cmd_reset must show ⚠️ card when clear_history raises."""
 
-    def setUp(self):
-        # Minimal stubs so imports don't fail in CI without full environment
-        self._patches = []
+class TestCmdResetApiClearFailed:
+    """REQ-02: _cmd_reset must show ⚠️ card when clear_history raises.
 
-        def _p(target, **kw):
-            p = patch(target, **kw)
-            self._patches.append(p)
-            return p.start()
+    Migrated to pytest function style so the ``inject_module`` fixture (REQ-09)
+    can be requested directly. The four legacy sys.modules-patching blocks
+    are gone — each test now calls ``inject_module(name, MagicMock(...))``
+    once per fake module, and ``monkeypatch``'s teardown restores the original
+    entries automatically.
+    """
 
-        _p("larkhelm.commands._get_cwd", return_value="/tmp")
-        _p("larkhelm.commands._clear_sid")
-        _p("larkhelm.commands.log_entry")
-        _p("larkhelm.commands.maybe_auto_update", create=True)
-
-        self.mock_send = _p("larkhelm.commands.send_card_reply")
-        self.mock_debug = _p("larkhelm.commands._debug_log")
-
-    def tearDown(self):
-        for p in self._patches:
-            p.stop()
+    @pytest.fixture(autouse=True)
+    def _stub_commands_deps(self, monkeypatch):
+        # Stub out the production helpers that ``_cmd_reset`` reaches into so
+        # the test doesn't need a real config / Feishu client.
+        monkeypatch.setattr("larkhelm.commands._get_cwd", lambda *_a, **_k: "/tmp")
+        monkeypatch.setattr("larkhelm.commands._clear_sid", MagicMock())
+        monkeypatch.setattr("larkhelm.commands.log_entry", MagicMock())
+        monkeypatch.setattr("larkhelm.commands.maybe_auto_update", MagicMock(),
+                            raising=False)
+        self.mock_send = MagicMock()
+        monkeypatch.setattr("larkhelm.commands.send_card_reply", self.mock_send)
+        self.mock_debug = MagicMock()
+        monkeypatch.setattr("larkhelm.commands._debug_log", self.mock_debug)
 
     def _run_reset(self, which):
         from larkhelm.commands import _cmd_reset
         _cmd_reset("chat_123", which=which, msg_id="msg_1")
 
-    def _make_clear_history_raises(self):
-        """Patch api_session.clear_history to raise, and BACKEND_REGISTRY to return a spec."""
+    def test_reset_all_success_shows_green_card(self, inject_module):
+        inject_module(
+            "larkhelm.api_session",
+            MagicMock(clear_history=MagicMock()),
+        )
+        inject_module(
+            "larkhelm.backend_registry",
+            MagicMock(BACKEND_REGISTRY=MagicMock(all_enabled=lambda: [])),
+        )
+        self._run_reset(None)
+
+        call_args = self.mock_send.call_args
+        assert "green" in str(call_args)
+        assert "⚠️" not in str(call_args)
+
+    def test_reset_all_failure_shows_warning_card(self, inject_module):
         spec = MagicMock()
         spec.provider = "anthropic_api"
         mock_reg = MagicMock()
         mock_reg.all_enabled.return_value = [spec]
 
-        patch("larkhelm.commands.maybe_auto_update", create=True).start()
-
-        with patch.dict("sys.modules", {
-            "larkhelm.api_session": MagicMock(clear_history=MagicMock(side_effect=RuntimeError("DB down"))),
-            "larkhelm.backend_registry": MagicMock(BACKEND_REGISTRY=mock_reg),
-        }):
-            yield
-
-    def test_reset_all_success_shows_green_card(self):
-        with patch("larkhelm.commands.maybe_auto_update", create=True), \
-             patch.dict("sys.modules", {
-                 "larkhelm.api_session": MagicMock(clear_history=MagicMock()),
-                 "larkhelm.backend_registry": MagicMock(BACKEND_REGISTRY=MagicMock(all_enabled=lambda: [])),
-             }):
-            self._run_reset(None)
+        inject_module(
+            "larkhelm.api_session",
+            MagicMock(clear_history=MagicMock(side_effect=RuntimeError("DB down"))),
+        )
+        inject_module(
+            "larkhelm.backend_registry",
+            MagicMock(BACKEND_REGISTRY=mock_reg),
+        )
+        self._run_reset(None)
 
         call_args = self.mock_send.call_args
-        self.assertIn("green", str(call_args))
-        self.assertNotIn("⚠️", str(call_args))
+        assert "orange" in str(call_args)
+        assert "⚠️" in str(call_args)
 
-    def test_reset_all_failure_shows_warning_card(self):
-        spec = MagicMock()
-        spec.provider = "anthropic_api"
-        mock_reg = MagicMock()
-        mock_reg.all_enabled.return_value = [spec]
-
-        with patch.dict("sys.modules", {
-            "larkhelm.api_session": MagicMock(
-                clear_history=MagicMock(side_effect=RuntimeError("DB down"))
-            ),
-            "larkhelm.backend_registry": MagicMock(BACKEND_REGISTRY=mock_reg),
-        }):
-            self._run_reset(None)
-
-        call_args = self.mock_send.call_args
-        self.assertIn("orange", str(call_args))
-        self.assertIn("⚠️", str(call_args))
-
-    def test_reset_claude_failure_logs_and_shows_warning(self):
-        with patch.dict("sys.modules", {
-            "larkhelm.api_session": MagicMock(
-                clear_history=MagicMock(side_effect=ConnectionError("timeout"))
-            ),
-        }):
-            self._run_reset("claude")
+    def test_reset_claude_failure_logs_and_shows_warning(self, inject_module):
+        inject_module(
+            "larkhelm.api_session",
+            MagicMock(clear_history=MagicMock(side_effect=ConnectionError("timeout"))),
+        )
+        self._run_reset("claude")
 
         self.mock_debug.assert_called()
         logged = " ".join(str(a) for a in self.mock_debug.call_args_list)
-        self.assertIn("[reset] clear_history failed", logged)
+        assert "[reset] clear_history failed" in logged
 
         call_args = self.mock_send.call_args
-        self.assertIn("orange", str(call_args))
+        assert "orange" in str(call_args)
 
-    def test_reset_memory_failure_logs_but_no_warning_card(self):
-        with patch.dict("sys.modules", {
-            "larkhelm.memory": MagicMock(
+    def test_reset_memory_failure_logs_but_no_warning_card(self, inject_module):
+        inject_module(
+            "larkhelm.memory",
+            MagicMock(
                 _session_memory_file=MagicMock(return_value=MagicMock(
                     unlink=MagicMock(side_effect=PermissionError("no write"))
                 ))
             ),
-        }):
-            self._run_reset("memory")
+        )
+        self._run_reset("memory")
 
         self.mock_debug.assert_called()
         logged = " ".join(str(a) for a in self.mock_debug.call_args_list)
-        self.assertIn("[reset] memory unlink failed", logged)
+        assert "[reset] memory unlink failed" in logged
         call_args = self.mock_send.call_args
-        self.assertIn("green", str(call_args))
+        assert "green" in str(call_args)
 
 
 class TestAiRunnerTokenStatsFails(unittest.TestCase):
@@ -196,11 +188,11 @@ class TestBackendApiOnTextCallback(unittest.TestCase):
         def failing_on_text(text, status):
             raise ValueError("card update failed")
 
-        with patch("larkhelm.backend_api._debug_log", side_effect=logged.append), \
-             patch.dict("sys.modules", {"anthropic": mock_anthropic_module}):
+        with patch("larkhelm.backend_api._debug_log", side_effect=logged.append):
             from larkhelm.backend_api import run_anthropic
             result, _ = run_anthropic(
-                self._make_spec(), "chat1", "hello", [], on_text=failing_on_text
+                self._make_spec(), "chat1", "hello", [], on_text=failing_on_text,
+                _anthropic_module=mock_anthropic_module,
             )
 
         self.assertEqual(result, "hello world")
@@ -216,23 +208,24 @@ class TestBackendApiOnTextCallback(unittest.TestCase):
         mock_api_client = MagicMock()
         mock_api_client.models.generate_content_stream.return_value = iter([mock_chunk])
 
+        # ``run_google`` expects ``_google_module.genai`` and
+        # ``_google_module.genai_types`` to mirror the live
+        # ``from google import genai`` / ``from google.genai import types``
+        # surface. Build a single namespace that exposes both attributes.
         mock_genai = MagicMock()
         mock_genai.Client.return_value = mock_api_client
-        mock_google_pkg = MagicMock()
-        mock_google_pkg.genai = mock_genai
+        mock_google_module = MagicMock()
+        mock_google_module.genai = mock_genai
+        mock_google_module.genai_types = MagicMock()
 
         def failing_on_text(text, status):
             raise RuntimeError("render error")
 
-        with patch("larkhelm.backend_api._debug_log", side_effect=logged.append), \
-             patch.dict("sys.modules", {
-                 "google": mock_google_pkg,
-                 "google.genai": mock_genai,
-                 "google.genai.types": MagicMock(),
-             }):
+        with patch("larkhelm.backend_api._debug_log", side_effect=logged.append):
             from larkhelm.backend_api import run_google
             result, _ = run_google(
-                self._make_spec("google_api"), "chat1", "hello", [], on_text=failing_on_text
+                self._make_spec("google_api"), "chat1", "hello", [], on_text=failing_on_text,
+                _google_module=mock_google_module,
             )
 
         self.assertEqual(result, "hi")

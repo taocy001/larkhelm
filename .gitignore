@@ -9,6 +9,10 @@ __pycache__/
 *.pyo
 .crew_workspace/
 analysis_report.md
+analysis_report_full.md
+.coverage
+coverage.xml
+htmlcov/
 .data/
 config.json
 config_old*.json

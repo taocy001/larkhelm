@@ -40,6 +40,7 @@
   "memory_lazy_global":            true,
   "memory_project_conditional":    true,
   "memory_session_layered":        true,
+  "_comment_memory_recent_turns_dedup": "P0-3 已接通真实 dedup 路径（之前仅占位）：log._get_recent_turns 接收 dedup_prefix=session.work_context，命中前 60 字符匹配的 turn 会被跳过。",
   "memory_recent_turns_dedup":     true,
   "memory_cascade_shortcircuit":   true,
   "memory_cascade_max_concurrent": 4,

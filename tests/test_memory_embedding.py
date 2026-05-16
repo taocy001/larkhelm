@@ -41,25 +41,26 @@ def test_stub_deterministic():
     assert np.allclose(a, b)
 
 
-def test_local_missing_onnx_raises(tmp_path):
+def test_local_missing_onnx_raises(tmp_path, unload_module):
     """When onnxruntime is missing, _lazy_init raises EmbeddingError."""
     p = tmp_path / "fake.onnx"
     p.write_bytes(b"")  # exists but won't load
     backend = LocalONNXEmbedding(model_path=str(p), dim=8)
-    # We can't reliably remove onnxruntime if it's installed; instead patch the
-    # import to fail. Use the dynamic import inside _lazy_init.
-    with mock.patch.dict(sys.modules, {"onnxruntime": None}):
-        with pytest.raises(EmbeddingError):
-            backend.embed(["hi"])
+    # Make ``import onnxruntime`` fail (ModuleNotFoundError) for this test only.
+    # Migrated off the legacy sys.modules-mocking idiom — see REQ-09 of the
+    # P0 PRD.
+    unload_module("onnxruntime")
+    with pytest.raises(EmbeddingError):
+        backend.embed(["hi"])
 
 
-def test_local_lazy_warm_does_not_raise(tmp_path):
+def test_local_lazy_warm_does_not_raise(tmp_path, unload_module):
     """warm() must never raise — silent failure contract."""
     p = tmp_path / "nope.onnx"
     backend = LocalONNXEmbedding(model_path=str(p), dim=8)
     # Should NOT raise even with no file and no onnxruntime.
-    with mock.patch.dict(sys.modules, {"onnxruntime": None}):
-        backend.warm()
+    unload_module("onnxruntime")
+    backend.warm()
 
 
 def test_http_circuit_breaker_opens_after_5_failures(monkeypatch):

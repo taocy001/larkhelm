@@ -556,13 +556,68 @@ def _stringify_for_display(value: Any) -> str:
 _PLACEHOLDER_MARKER = "[tool_result truncated —"
 
 
-def _get_recent_turns(chat_id: str, max_turns: int = 6, max_chars: int = 2000) -> str:
+def _should_dedup(prefix: str | None) -> bool:
+    """Return True iff recent-turn dedup should run for the given prefix.
+
+    Centralised so the flag-check + empty-prefix guard cannot drift between
+    callers. ``cfg.memory_recent_turns_dedup`` (default True) gates the
+    feature globally; an empty / None ``prefix`` short-circuits because we
+    have nothing to match against.
+    """
+    if not prefix:
+        return False
+    try:
+        cfg = getattr(_cfg, "config", None) or {}
+        return bool(cfg.get("memory_recent_turns_dedup", True))
+    except Exception:
+        return False
+
+
+def _turn_body_prefix(content: str, n: int = 60) -> str:
+    """Return the first ``n`` characters of ``content`` after a ``.strip()``.
+
+    Used as the dedup ``probe``: short enough to tolerate minor
+    re-summarisation drift, long enough to make false positives rare.
+    """
+    if not content:
+        return ""
+    try:
+        return content.strip()[:n]
+    except Exception:
+        return ""
+
+
+def _match_dedup_prefix(turn_prefix: str, dedup_prefix: str) -> bool:
+    """Return True iff ``turn_prefix`` appears verbatim inside ``dedup_prefix``.
+
+    Skips trivially short probes (<10 chars) for the same reason
+    :func:`memory_context.dedup_recent_turns` does — a 2-char string would
+    match almost any session body and accidentally drop fresh turns.
+    """
+    if not turn_prefix or not dedup_prefix:
+        return False
+    if len(turn_prefix) < 10:
+        return False
+    return turn_prefix in dedup_prefix
+
+
+def _get_recent_turns(
+    chat_id: str, max_turns: int = 6, max_chars: int = 2000,
+    *, dedup_prefix: str | None = None,
+) -> str:
     """Return last N user/assistant turns as compact context for orchestrator injection.
 
     Reads the tail of all.jsonl (100 KB) to avoid scanning the full file.
     Skips tool/error/shell entries — only user and assistant text. Per
     record, large ``tool_result`` block bodies are replaced with a
     placeholder before the 400-char dialog cap (design v1.0).
+
+    When ``dedup_prefix`` is non-empty AND ``cfg.memory_recent_turns_dedup``
+    is on, turns whose first 60 chars appear inside ``dedup_prefix`` are
+    skipped — this lets the caller (e.g. ``_query.py``) hand in the
+    session-memory work_context slot to avoid double-injecting summarised
+    content. ``dedup_prefix=None`` or flag-off keeps PR-prior byte-level
+    behaviour.
     """
     TAIL_BYTES = 100 * 1024
     jsonl_path = _cfg.LOG_DIR / "all.jsonl"
@@ -592,6 +647,31 @@ def _get_recent_turns(chat_id: str, max_turns: int = 6, max_chars: int = 2000) -
     turns = turns[-(max_turns * 2):]
     if not turns:
         return ""
+
+    # Optional dedup against an externally supplied prefix (e.g. session
+    # memory's Work Context slot). Filter happens AFTER the tail-window
+    # cap so the dedup_prefix=None / flag-off paths stay byte-identical
+    # to the legacy behaviour.
+    dedup_on = _should_dedup(dedup_prefix)
+    if dedup_on:
+        kept: list[dict] = []
+        skipped = 0
+        for r in turns:
+            probe = _turn_body_prefix(str(r.get("content", "") or ""))
+            if _match_dedup_prefix(probe, dedup_prefix or ""):
+                skipped += 1
+                continue
+            kept.append(r)
+        if skipped:
+            try:
+                _debug_log(
+                    f"[Memory] recent_turns dedup skipped chat={chat_id[:8]} n={skipped}"
+                )
+            except Exception:
+                pass
+        turns = kept
+        if not turns:
+            return ""
 
     total_before = 0
     total_after = 0

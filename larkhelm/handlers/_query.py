@@ -579,7 +579,26 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             recent_turns_list: list[str] = []
             try:
                 from larkhelm.log import _get_recent_turns
-                _raw_recent = _get_recent_turns(chat_id) or ""
+                # Compute a dedup_prefix from the session memory's Work
+                # Context slot so summarised content doesn't double-inject
+                # into the orchestrator. Any failure (memory not loaded,
+                # parse miss) cleanly degrades to ``dedup_prefix=None`` →
+                # byte-compatible with the PR-prior behaviour.
+                _dedup_prefix: str | None = None
+                try:
+                    from larkhelm.memory import load_memory
+                    from larkhelm.memory_context import extract_work_context
+                    _session_raw = load_memory(chat_id)
+                    _wc = extract_work_context(_session_raw)
+                    _dedup_prefix = _wc or None
+                except Exception as _wc_err:
+                    _debug_log(f"[{trace_id}][DoQuery] work_context extract error: {_wc_err}")
+                    _dedup_prefix = None
+                try:
+                    _raw_recent = _get_recent_turns(chat_id, dedup_prefix=_dedup_prefix) or ""
+                except Exception as _rt_err:
+                    _debug_log(f"[{trace_id}][DoQuery] dedup recent_turns error: {_rt_err}, retrying without prefix")
+                    _raw_recent = _get_recent_turns(chat_id) or ""
                 if _raw_recent:
                     recent_turns_list = [
                         ln for ln in _raw_recent.splitlines() if ln.strip()

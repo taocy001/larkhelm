@@ -6,14 +6,13 @@ tests; this module fills that gap.
 """
 from __future__ import annotations
 
-import sys
 import types
 import unittest
 from typing import Any
 from unittest.mock import patch
 
 from larkhelm.agent_hub import plugin_loader
-from larkhelm.agent_hub.agent_base import AGENT_REGISTRY, AgentExecutor, AgentRegistry
+from larkhelm.agent_hub.agent_base import AgentExecutor, AgentRegistry
 from larkhelm.agent_hub.intent_types import AgentContext, AgentResult, IntentResult
 
 
@@ -143,28 +142,18 @@ class TestLoadFromEntryPoints(unittest.TestCase):
     def tearDown(self):
         self.patcher.stop()
 
-    def _patch_entry_points(self, eps_obj):
-        # Inject a stub importlib.metadata module into sys.modules so the
-        # late `from importlib.metadata import entry_points` inside the
-        # loader picks up our fake instead of the real one.
-        fake_mod = types.ModuleType("importlib.metadata")
-        fake_mod.entry_points = lambda: eps_obj  # type: ignore[attr-defined]
-        return patch.dict(sys.modules, {"importlib.metadata": fake_mod})
-
     def test_modern_select_api(self):
         eps = _FakeEntryPointsModern([
             _FakeEntryPoint("ok", _OkPlugin),
         ])
-        with self._patch_entry_points(eps):
-            count = plugin_loader._load_from_entry_points()
+        count = plugin_loader._load_from_entry_points(_entry_points_fn=lambda: eps)
         self.assertEqual(count, 1)
         self.assertIsNotNone(self.registry.get("ok_plugin"))
 
     def test_legacy_dict_api(self):
         eps = _FakeEntryPointsDict()
         eps["larkhelm.agents"] = [_FakeEntryPoint("ok", _OkPlugin)]
-        with self._patch_entry_points(eps):
-            count = plugin_loader._load_from_entry_points()
+        count = plugin_loader._load_from_entry_points(_entry_points_fn=lambda: eps)
         self.assertEqual(count, 1)
         self.assertIsNotNone(self.registry.get("ok_plugin"))
 
@@ -174,24 +163,19 @@ class TestLoadFromEntryPoints(unittest.TestCase):
             _FakeEntryPoint("bad", RuntimeError("import boom")),
             _FakeEntryPoint("ok", _OkPlugin),
         ])
-        with self._patch_entry_points(eps), \
-             patch.object(plugin_loader, "_safe_log") as log:
-            count = plugin_loader._load_from_entry_points()
+        with patch.object(plugin_loader, "_safe_log") as log:
+            count = plugin_loader._load_from_entry_points(_entry_points_fn=lambda: eps)
         self.assertEqual(count, 1)
         self.assertIsNotNone(self.registry.get("ok_plugin"))
         log.assert_called()
 
     def test_entry_points_scan_failure_returns_zero(self):
         """If entry_points() itself blows up the loader returns 0, never raises."""
-        bad_mod = types.ModuleType("importlib.metadata")
-
         def _boom():
             raise RuntimeError("scan failed")
 
-        bad_mod.entry_points = _boom  # type: ignore[attr-defined]
-        with patch.dict(sys.modules, {"importlib.metadata": bad_mod}), \
-             patch.object(plugin_loader, "_safe_log") as log:
-            count = plugin_loader._load_from_entry_points()
+        with patch.object(plugin_loader, "_safe_log") as log:
+            count = plugin_loader._load_from_entry_points(_entry_points_fn=_boom)
         self.assertEqual(count, 0)
         log.assert_called()
 
@@ -206,23 +190,36 @@ class TestLoadFromConfig(unittest.TestCase):
     def tearDown(self):
         self.patcher.stop()
 
-    def _stub_module(self, name: str, **attrs: Any):
+    def _stub_module_factory(self, name: str, **attrs: Any):
+        """Build a ``(module_name, fake_importer)`` pair to pass as
+        ``_import_module_fn=fake_importer`` so the loader uses the synthetic
+        module without polluting ``sys.modules``."""
         mod = types.ModuleType(name)
         for k, v in attrs.items():
             setattr(mod, k, v)
-        return patch.dict(sys.modules, {name: mod})
+
+        def _fake_import(req_name: str):
+            if req_name == name:
+                return mod
+            raise ModuleNotFoundError(req_name)
+
+        return _fake_import
 
     def test_module_attr_form(self):
-        with self._stub_module("test_pkg_a", MyAgent=_OkPlugin):
-            count = plugin_loader._load_from_config(
-                {"agent_plugins": ["test_pkg_a:MyAgent"]})
+        importer = self._stub_module_factory("test_pkg_a", MyAgent=_OkPlugin)
+        count = plugin_loader._load_from_config(
+            {"agent_plugins": ["test_pkg_a:MyAgent"]},
+            _import_module_fn=importer,
+        )
         self.assertEqual(count, 1)
         self.assertIsNotNone(self.registry.get("ok_plugin"))
 
     def test_dotted_form(self):
-        with self._stub_module("test_pkg_b", MyAgent=_OkPlugin):
-            count = plugin_loader._load_from_config(
-                {"agent_plugins": ["test_pkg_b.MyAgent"]})
+        importer = self._stub_module_factory("test_pkg_b", MyAgent=_OkPlugin)
+        count = plugin_loader._load_from_config(
+            {"agent_plugins": ["test_pkg_b.MyAgent"]},
+            _import_module_fn=importer,
+        )
         self.assertEqual(count, 1)
         self.assertIsNotNone(self.registry.get("ok_plugin"))
 
@@ -235,24 +232,33 @@ class TestLoadFromConfig(unittest.TestCase):
         log.assert_called()
 
     def test_import_failure(self):
+        def _boom(_name: str):
+            raise ModuleNotFoundError("non_existent_module_xyz_123")
+
         with patch.object(plugin_loader, "_safe_log") as log:
             count = plugin_loader._load_from_config(
-                {"agent_plugins": ["non_existent_module_xyz_123:Foo"]})
+                {"agent_plugins": ["non_existent_module_xyz_123:Foo"]},
+                _import_module_fn=_boom,
+            )
         self.assertEqual(count, 0)
         log.assert_called()
 
     def test_attr_missing(self):
-        with self._stub_module("test_pkg_c"):  # no MyAgent attr
-            with patch.object(plugin_loader, "_safe_log") as log:
-                count = plugin_loader._load_from_config(
-                    {"agent_plugins": ["test_pkg_c:MyAgent"]})
+        importer = self._stub_module_factory("test_pkg_c")  # no MyAgent attr
+        with patch.object(plugin_loader, "_safe_log") as log:
+            count = plugin_loader._load_from_config(
+                {"agent_plugins": ["test_pkg_c:MyAgent"]},
+                _import_module_fn=importer,
+            )
         self.assertEqual(count, 0)
         log.assert_called()
 
     def test_factory_returns_wrong_type(self):
-        with self._stub_module("test_pkg_d", make_agent=_wrong_type_factory):
-            count = plugin_loader._load_from_config(
-                {"agent_plugins": ["test_pkg_d:make_agent"]})
+        importer = self._stub_module_factory("test_pkg_d", make_agent=_wrong_type_factory)
+        count = plugin_loader._load_from_config(
+            {"agent_plugins": ["test_pkg_d:make_agent"]},
+            _import_module_fn=importer,
+        )
         self.assertEqual(count, 0)
 
     def test_non_list_plugins_returns_zero(self):

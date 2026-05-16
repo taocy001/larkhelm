@@ -25,6 +25,8 @@ Repository = "https://github.com/taocy001/larkhelm"
 dev = [
     "pytest>=8.0",
     "pytest-timeout>=2.3",
+    "pytest-cov>=5",
+    "pytest-asyncio>=0.23",
     "mypy>=1.10",
     "ruff>=0.4",
 ]
@@ -74,7 +76,18 @@ packages = ["larkhelm"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 timeout = 60
-addopts = "-v --tb=short"
+asyncio_mode = "auto"
+# NOTE: ``--cov*`` flags are deliberately NOT in ``addopts``: forcing them on
+# every pytest invocation breaks single-file iteration (one file's coverage is
+# always ~2-5%, immediately tripping ``--cov-fail-under=55``). CI invokes
+# coverage explicitly via ``pytest --cov=larkhelm --cov-fail-under=55``;
+# developers run plain ``pytest tests/test_X.py`` and get instant feedback.
+addopts = "-ra --strict-markers -v --tb=short"
+filterwarnings = [
+    "error::DeprecationWarning:larkhelm.*",
+    "ignore::DeprecationWarning",
+    "ignore::pytest.PytestUnraisableExceptionWarning",
+]
 
 [tool.mypy]
 python_version = "3.13"

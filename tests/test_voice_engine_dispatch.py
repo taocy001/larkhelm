@@ -144,11 +144,12 @@ def test_dashscope_no_key_returns_clear_error():
     assert r["error"] == "dashscope_no_api_key"
 
 
-def test_dashscope_sdk_missing_returns_clear_error():
+def test_dashscope_sdk_missing_returns_clear_error(unload_module):
     _cfg.VOICE_API_KEY = "sk-fake"
-    # Make `import dashscope` raise ImportError
-    with patch.dict(sys.modules, {"dashscope": None}):
-        r = ds_mod.transcribe_via_dashscope("/tmp/x.opus", lang="zh")
+    # Make `import dashscope` raise ModuleNotFoundError via the conftest
+    # fixture (REQ-09 migration).
+    unload_module("dashscope")
+    r = ds_mod.transcribe_via_dashscope("/tmp/x.opus", lang="zh")
     assert r["ok"] is False
     assert r["error"].startswith("dashscope_sdk_missing")
 
@@ -179,12 +180,11 @@ def test_dashscope_happy_path_with_mocked_sdk():
         api_key="", audio=fake_audio, __version__="1.20.0",
     )
 
-    with patch.dict(sys.modules, {
-        "dashscope": fake_dashscope,
-        "dashscope.audio": fake_audio,
-        "dashscope.audio.asr": fake_asr,
-    }):
-        r = ds_mod.transcribe_via_dashscope("/tmp/test.opus", lang="zh")
+    r = ds_mod.transcribe_via_dashscope(
+        "/tmp/test.opus", lang="zh",
+        _dashscope_module=fake_dashscope,
+        _recognition_cls=fake_recognition,
+    )
     assert r["ok"] is True, f"unexpected: {r}"
     assert r["text"] == "你好世界"
     assert r["lang"] == "zh"
@@ -203,12 +203,11 @@ def test_dashscope_non_200_status():
     fake_audio = SimpleNamespace(asr=fake_asr)
     fake_dashscope = SimpleNamespace(api_key="", audio=fake_audio, __version__="1.20.0")
 
-    with patch.dict(sys.modules, {
-        "dashscope": fake_dashscope,
-        "dashscope.audio": fake_audio,
-        "dashscope.audio.asr": fake_asr,
-    }):
-        r = ds_mod.transcribe_via_dashscope("/tmp/x.opus", lang="zh")
+    r = ds_mod.transcribe_via_dashscope(
+        "/tmp/x.opus", lang="zh",
+        _dashscope_module=fake_dashscope,
+        _recognition_cls=_FakeRecognition,
+    )
     assert r["ok"] is False
     assert r["error"].startswith("dashscope_status_401")
     assert "Invalid Authentication" in r["error"]
@@ -225,12 +224,11 @@ def test_dashscope_empty_result_text():
     fake_audio = SimpleNamespace(asr=fake_asr)
     fake_dashscope = SimpleNamespace(api_key="", audio=fake_audio, __version__="1.20.0")
 
-    with patch.dict(sys.modules, {
-        "dashscope": fake_dashscope,
-        "dashscope.audio": fake_audio,
-        "dashscope.audio.asr": fake_asr,
-    }):
-        r = ds_mod.transcribe_via_dashscope("/tmp/x.opus", lang="zh")
+    r = ds_mod.transcribe_via_dashscope(
+        "/tmp/x.opus", lang="zh",
+        _dashscope_module=fake_dashscope,
+        _recognition_cls=_FakeRecognition,
+    )
     assert r["ok"] is False
     assert r["error"] == "dashscope_empty_result"
 
@@ -246,12 +244,11 @@ def test_dashscope_call_raises():
     fake_audio = SimpleNamespace(asr=fake_asr)
     fake_dashscope = SimpleNamespace(api_key="", audio=fake_audio, __version__="1.20.0")
 
-    with patch.dict(sys.modules, {
-        "dashscope": fake_dashscope,
-        "dashscope.audio": fake_audio,
-        "dashscope.audio.asr": fake_asr,
-    }):
-        r = ds_mod.transcribe_via_dashscope("/tmp/x.opus", lang="zh")
+    r = ds_mod.transcribe_via_dashscope(
+        "/tmp/x.opus", lang="zh",
+        _dashscope_module=fake_dashscope,
+        _recognition_cls=_FakeRecognition,
+    )
     assert r["ok"] is False
     assert r["error"].startswith("dashscope_call_failed:ConnectionError")
 

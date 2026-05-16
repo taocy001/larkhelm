@@ -309,6 +309,25 @@ def split_session_slots(raw: str) -> SessionSlots:
     )
 
 
+def extract_work_context(raw: str | None) -> str:
+    """Return ``slots.work_context`` from a parsed session body.
+
+    Returns the empty string when ``raw`` is empty, when ``split_session_slots``
+    failed to parse the H2 layout (``parsed=False``), or when the
+    work_context slot itself is blank. Never raises — the caller treats the
+    empty string as "no dedup prefix available, fall back to legacy path".
+    """
+    if not raw:
+        return ""
+    try:
+        slots = split_session_slots(raw)
+    except Exception:
+        return ""
+    if not slots.parsed:
+        return ""
+    return slots.work_context or ""
+
+
 def dedup_recent_turns(recent: list[str], session_body: str) -> list[str]:
     """Drop ``recent`` entries already represented in ``session_body``.
 

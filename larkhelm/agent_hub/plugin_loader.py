@@ -11,6 +11,7 @@ cannot prevent larkhelm from starting (NFR-SEC-02).
 from __future__ import annotations
 
 import importlib
+from typing import Any, Callable
 
 from larkhelm.agent_hub.agent_base import AGENT_REGISTRY, AgentExecutor
 # Centralized helper; previously re-defined locally.
@@ -38,19 +39,30 @@ def _instantiate(target) -> AgentExecutor | None:
     return None
 
 
-def _load_from_entry_points() -> int:
+def _load_from_entry_points(
+    *, _entry_points_fn: "Callable[..., Any] | None" = None,
+) -> int:
+    """Scan ``importlib.metadata.entry_points`` for ``larkhelm.agents`` plugins.
+
+    ``_entry_points_fn`` is a test hook: production callers leave it ``None``
+    so the live ``from importlib.metadata import entry_points`` runs; tests
+    pass ``lambda: fake_eps`` to inject a synthetic entry-point set without
+    touching ``sys.modules``.
+    """
     count = 0
+    if _entry_points_fn is None:
+        try:
+            from importlib.metadata import entry_points as _live_entry_points
+            _entry_points_fn = _live_entry_points
+        except Exception:
+            return 0
     try:
-        from importlib.metadata import entry_points
-    except Exception:
-        return 0
-    try:
-        eps = entry_points()
+        eps: Any = _entry_points_fn()
         # Python 3.10+: select() is the new API, .get() for older.
         if hasattr(eps, "select"):
             agent_eps = eps.select(group="larkhelm.agents")
         else:
-            agent_eps = eps.get("larkhelm.agents", [])  # type: ignore[attr-defined]
+            agent_eps = eps.get("larkhelm.agents", [])
     except Exception as e:
         _safe_log(f"[plugin_loader] entry_points scan failed: {e}")
         return 0
@@ -72,8 +84,20 @@ def _load_from_entry_points() -> int:
     return count
 
 
-def _load_from_config(config: dict) -> int:
+def _load_from_config(
+    config: dict,
+    *, _import_module_fn: "Callable[..., Any] | None" = None,
+) -> int:
+    """Load plugins listed under ``config['agent_plugins']``.
+
+    ``_import_module_fn`` is a test hook: production callers leave it
+    ``None`` so ``importlib.import_module`` runs; tests pass
+    ``lambda name: fake_mod`` to inject a synthetic module without
+    touching ``sys.modules``.
+    """
     count = 0
+    if _import_module_fn is None:
+        _import_module_fn = importlib.import_module
     plugins = config.get("agent_plugins") or []
     if not isinstance(plugins, list):
         return 0
@@ -89,7 +113,7 @@ def _load_from_config(config: dict) -> int:
             _safe_log(f"[plugin_loader] invalid plugin spec: {plugin!r}")
             continue
         try:
-            module = importlib.import_module(module_name)
+            module = _import_module_fn(module_name)
             target = getattr(module, attr)
         except Exception as e:
             _safe_log(f"[plugin_loader] import {plugin!r} failed: {e}")

@@ -1,6 +1,5 @@
 
-import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from larkhelm.backend_registry import BackendSpec
 from larkhelm.backend_api import run_anthropic
 
@@ -20,8 +19,10 @@ def test_run_anthropic_mock():
     message = "Hello API"
     history = []
 
-    # anthropic may not be installed; inject a mock module so the dynamic
-    # `import anthropic` inside run_anthropic() succeeds under test.
+    # anthropic may not be installed; pass a fake module through the
+    # ``_anthropic_module`` test hook (REQ-10 / P0 PRD) so the dynamic
+    # ``import anthropic`` inside run_anthropic() is short-circuited
+    # without touching ``sys.modules``.
     mock_anthropic = MagicMock()
     mock_client = MagicMock()
     mock_anthropic.Anthropic.return_value = mock_client
@@ -34,10 +35,10 @@ def test_run_anthropic_mock():
     def on_text(text, status):
         on_text_calls.append(text)
 
-    with patch.dict(sys.modules, {"anthropic": mock_anthropic}):
-        output, updated_history = run_anthropic(
-            spec, chat_id, message, history, on_text=on_text
-        )
+    output, updated_history = run_anthropic(
+        spec, chat_id, message, history, on_text=on_text,
+        _anthropic_module=mock_anthropic,
+    )
 
     assert output == "Hello from mock API"
     assert len(updated_history) == 2

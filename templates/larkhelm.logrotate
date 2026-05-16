@@ -1,0 +1,18 @@
+LOG_DIR_PLACEHOLDER/debug.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    copytruncate
+    missingok
+    notifempty
+}
+
+LOG_DIR_PLACEHOLDER/all.jsonl {
+    size 32M
+    rotate 7
+    compress
+    copytruncate
+    missingok
+    notifempty
+}

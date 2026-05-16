@@ -10,6 +10,12 @@ RestartSec=5
 StandardOutput=append:LOG_DIR_PLACEHOLDER/larkhelm.log
 StandardError=append:LOG_DIR_PLACEHOLDER/larkhelm.log
 Environment=PYTHONUNBUFFERED=1
+MemoryMax=4G
+MemoryHigh=3G
+CPUQuota=200%
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
 
 [Install]
 WantedBy=default.target

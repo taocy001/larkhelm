@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import larkhelm.config as _cfg
 from larkhelm import log as _log
@@ -63,6 +63,8 @@ def transcribe_via_dashscope(
     audio_path: str,
     *,
     lang: str = "zh",
+    _dashscope_module: "Any | None" = None,
+    _recognition_cls: "type | None" = None,
 ) -> "TranscribeResult":
     """Run DashScope Paraformer ASR on a local audio file.
 
@@ -71,6 +73,11 @@ def transcribe_via_dashscope(
     this on the same ``ThreadPoolExecutor`` worker that the
     faster-whisper path uses, so concurrency limits stay identical
     across engines.
+
+    ``_dashscope_module`` / ``_recognition_cls`` are test hooks: production
+    callers leave them at ``None`` so the live ``import dashscope`` and
+    ``from dashscope.audio.asr import Recognition`` paths run. Tests pass
+    fakes to short-circuit the imports without touching ``sys.modules``.
     """
     if not _cfg.VOICE_API_KEY:
         return _make_result(
@@ -78,25 +85,31 @@ def transcribe_via_dashscope(
         )
 
     # Lazy import — SDK is in [voice-cloud] extras, may not be installed.
-    try:
-        import dashscope
-    except ImportError as e:
-        _log.warn(
-            "[Voice] dashscope SDK missing; "
-            "run: pipx runpip larkhelm install dashscope"
-        )
-        return _make_result(
-            False, lang=lang, error=f"dashscope_sdk_missing:{e}",
-        )
+    if _dashscope_module is None:
+        try:
+            import dashscope
+        except ImportError as e:
+            _log.warn(
+                "[Voice] dashscope SDK missing; "
+                "run: pipx runpip larkhelm install dashscope"
+            )
+            return _make_result(
+                False, lang=lang, error=f"dashscope_sdk_missing:{e}",
+            )
+    else:
+        dashscope = _dashscope_module
 
-    try:
-        from dashscope.audio.asr import Recognition  # type: ignore[import-not-found]
-    except ImportError as e:
-        _ver = getattr(dashscope, "__version__", "?")
-        return _make_result(
-            False, lang=lang,
-            error=f"dashscope_sdk_missing:Recognition not in {_ver}: {e}",
-        )
+    if _recognition_cls is None:
+        try:
+            from dashscope.audio.asr import Recognition  # type: ignore[import-not-found]
+        except ImportError as e:
+            _ver = getattr(dashscope, "__version__", "?")
+            return _make_result(
+                False, lang=lang,
+                error=f"dashscope_sdk_missing:Recognition not in {_ver}: {e}",
+            )
+    else:
+        Recognition = _recognition_cls
 
     # SDK reads api_key from module-level attribute on each call. Setting
     # every call costs nothing and means a key rotation just needs a

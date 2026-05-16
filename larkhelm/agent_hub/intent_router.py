@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Any, Callable
 
 from larkhelm.agent_hub.intent_types import IntentResult
 
@@ -175,21 +176,31 @@ def _resolve_l2(text: str) -> IntentResult:
     )
 
 
-def _call_cheap_backend(spec, system_prompt: str, text: str) -> str | None:
-    """Invoke the cheap backend via :mod:`backend_api` if available."""
-    try:
-        from larkhelm.backend_api import call_backend_oneshot  # type: ignore
-    except Exception:
-        call_backend_oneshot = None  # type: ignore[assignment]
+def _call_cheap_backend(
+    spec, system_prompt: str, text: str,
+    *, _backend_call: "Callable[..., Any] | None" = None,
+) -> str | None:
+    """Invoke the cheap backend via :mod:`backend_api` if available.
 
-    if call_backend_oneshot is not None:
+    ``_backend_call`` is a test hook: production callers leave it ``None``
+    so ``call_backend_oneshot`` is resolved by import; tests pass a fake
+    callable to short-circuit ``sys.modules`` patching. When the import
+    itself fails (and no hook is supplied) the function returns ``None`` —
+    same as the legacy behaviour.
+    """
+    if _backend_call is None:
         try:
-            return call_backend_oneshot(spec, system_prompt, text, max_tokens=256, timeout=15.0)
-        except Exception as e:
-            from larkhelm.log import lazy_debug_log
-            lazy_debug_log(f"[IntentRouter] cheap backend call failed: {e}")
+            from larkhelm.backend_api import call_backend_oneshot as _live_backend_call
+            _backend_call = _live_backend_call
+        except Exception:
             return None
-    return None
+
+    try:
+        return _backend_call(spec, system_prompt, text, max_tokens=256, timeout=15.0)
+    except Exception as e:
+        from larkhelm.log import lazy_debug_log
+        lazy_debug_log(f"[IntentRouter] cheap backend call failed: {e}")
+        return None
 
 
 def _fallback(text: str) -> IntentResult:

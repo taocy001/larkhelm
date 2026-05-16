@@ -8,6 +8,7 @@ they can be skipped on test files that don't use them.
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import uuid
 from pathlib import Path
@@ -253,3 +254,38 @@ def mock_run_agent(monkeypatch):
         monkeypatch.setattr(_runner_mod, "_run_agent", callable_)
 
     return _install
+
+
+# ── sys.modules injection fixtures (P0-3 REQ-09/10) ─────────────────
+# Replace the legacy sys.modules-mocking test idiom with monkeypatch-backed
+# fixtures. Auto-teardown is guaranteed by pytests monkeypatch lifecycle.
+
+@pytest.fixture
+def inject_module(monkeypatch):
+    """Inject a fake module into ``sys.modules`` with automatic teardown.
+
+    Usage::
+
+        def test_x(inject_module):
+            inject_module("anthropic", fake_mod)
+            inject_module("anthropic.types", fake_types)
+    """
+    def _inject(name: str, module: object) -> None:
+        monkeypatch.setitem(sys.modules, name, module)
+    return _inject
+
+
+@pytest.fixture
+def unload_module(monkeypatch):
+    """Make ``import <name>`` raise ImportError with automatic teardown.
+
+    Setting ``sys.modules[name] = None`` is the documented way to make the
+    import system refuse to (re)import a module — Python raises
+    ``ModuleNotFoundError`` on the next ``import name`` statement. Reserved
+    for tests that intentionally exercise the import-failure branch (e.g.
+    ``onnxruntime`` missing, ``larkhelm.backend_api`` not available during
+    agent_hub bootstrap).
+    """
+    def _unload(name: str) -> None:
+        monkeypatch.setitem(sys.modules, name, None)
+    return _unload

@@ -12,10 +12,10 @@ review.md §6 backlog: "_call_cheap_backend import failure / call failure" and
 """
 from __future__ import annotations
 
-import sys
-import types
 import unittest
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from larkhelm.agent_hub import intent_router
 from larkhelm.agent_hub.intent_types import IntentResult
@@ -88,52 +88,43 @@ class TestParseL2Json(unittest.TestCase):
         self.assertIsNone(intent_router._parse_l2_json("definitely not json"))
 
 
-class TestCallCheapBackend(unittest.TestCase):
+class TestCallCheapBackend:
+    """Migrated off the legacy sys.modules-mocking idiom per REQ-09.
 
-    def setUp(self):
-        # Snapshot any pre-imported larkhelm.backend_api so we can restore it.
-        self._saved = sys.modules.get("larkhelm.backend_api")
+    The import-failure branch now uses the conftest ``unload_module`` fixture;
+    the call-raises / call-succeeds branches inject a fake callable directly
+    via the new ``_backend_call`` kwarg on ``_call_cheap_backend``.
+    """
 
-    def tearDown(self):
-        if self._saved is not None:
-            sys.modules["larkhelm.backend_api"] = self._saved
-        else:
-            sys.modules.pop("larkhelm.backend_api", None)
-
-    def test_import_failure_returns_none(self):
+    def test_import_failure_returns_none(self, unload_module):
         """If ``larkhelm.backend_api`` cannot be imported we must return None
         without raising — required for NFR-SEC-02 graceful degradation.
         """
-        # Inject a stub module that raises ImportError on access to call_backend_oneshot
-        bad_mod = types.ModuleType("larkhelm.backend_api")
-        # Make `from larkhelm.backend_api import call_backend_oneshot` fail with AttributeError
-        # (which is caught by the loader's bare except).
-        with patch.dict(sys.modules, {"larkhelm.backend_api": bad_mod}):
-            out = intent_router._call_cheap_backend(MagicMock(), "sys", "text")
-        self.assertIsNone(out)
+        unload_module("larkhelm.backend_api")
+        out = intent_router._call_cheap_backend(MagicMock(), "sys", "text")
+        assert out is None
 
     def test_call_raises_returns_none_and_logs(self):
-        fake_mod = types.ModuleType("larkhelm.backend_api")
-
         def _boom(*a, **kw):
             raise RuntimeError("network unreachable")
 
-        fake_mod.call_backend_oneshot = _boom  # type: ignore[attr-defined]
-        with patch.dict(sys.modules, {"larkhelm.backend_api": fake_mod}), \
-             patch("larkhelm.log._debug_log") as dbg:
-            out = intent_router._call_cheap_backend(MagicMock(), "sys", "text")
-        self.assertIsNone(out)
+        with patch("larkhelm.log._debug_log") as dbg:
+            out = intent_router._call_cheap_backend(
+                MagicMock(), "sys", "text", _backend_call=_boom,
+            )
+        assert out is None
         # Logged with the [IntentRouter] prefix (PascalCase per CLAUDE.md
         # logging convention; previously [intent_router]).
-        self.assertTrue(any("[IntentRouter]" in str(c.args[0]) for c in dbg.call_args_list),
-                        f"expected [IntentRouter] log; got {dbg.call_args_list}")
+        assert any("[IntentRouter]" in str(c.args[0]) for c in dbg.call_args_list), (
+            f"expected [IntentRouter] log; got {dbg.call_args_list}"
+        )
 
     def test_call_succeeds_returns_raw(self):
-        fake_mod = types.ModuleType("larkhelm.backend_api")
-        fake_mod.call_backend_oneshot = lambda *a, **kw: '{"intent":"dev"}'  # type: ignore[attr-defined]
-        with patch.dict(sys.modules, {"larkhelm.backend_api": fake_mod}):
-            out = intent_router._call_cheap_backend(MagicMock(), "sys", "text")
-        self.assertEqual(out, '{"intent":"dev"}')
+        out = intent_router._call_cheap_backend(
+            MagicMock(), "sys", "text",
+            _backend_call=lambda *a, **kw: '{"intent":"dev"}',
+        )
+        assert out == '{"intent":"dev"}'
 
 
 class TestResolveL2Failures(unittest.TestCase):

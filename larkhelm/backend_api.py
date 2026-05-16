@@ -9,7 +9,7 @@ SDKs are optional: if not installed, health_check marks the backend unhealthy.
 from __future__ import annotations
 
 import os
-from typing import Callable
+from typing import Any, Callable
 
 from larkhelm.backend_registry import BackendSpec, BACKEND_REGISTRY
 from larkhelm.log import _debug_log, safe_log
@@ -54,16 +54,27 @@ def run_anthropic(
     chat_id: str,
     message: str,
     history: list[dict],
-    cancel_ev: "object | None" = None,
+    cancel_ev: "Any | None" = None,
     on_text: Callable | None = None,
     extra_system: str = "",
+    *,
+    _anthropic_module: "Any | None" = None,
 ) -> tuple[str, list[dict]]:
-    """Stream via Anthropic SDK. Returns (response_text, updated_history)."""
+    """Stream via Anthropic SDK. Returns (response_text, updated_history).
+
+    ``_anthropic_module`` is a test hook: production callers leave it at
+    ``None`` so the live ``import anthropic`` path runs; tests pass a fake
+    module to short-circuit the import and exercise streaming branches
+    without touching ``sys.modules``.
+    """
     from larkhelm.ai_runner import QueryCancelledError
-    try:
-        import anthropic
-    except ImportError:
-        raise RuntimeError("anthropic SDK not installed; run: pip install anthropic")
+    if _anthropic_module is None:
+        try:
+            import anthropic
+        except ImportError:
+            raise RuntimeError("anthropic SDK not installed; run: pip install anthropic")
+    else:
+        anthropic = _anthropic_module
 
     api_key = spec.api_key or os.environ.get("ANTHROPIC_API_KEY", "")
     client_kwargs: dict = {"api_key": api_key}
@@ -137,17 +148,31 @@ def run_google(
     chat_id: str,
     message: str,
     history: list[dict],
-    cancel_ev: "object | None" = None,
+    cancel_ev: "Any | None" = None,
     on_text: Callable | None = None,
     extra_system: str = "",
+    *,
+    _google_module: "Any | None" = None,
 ) -> tuple[str, list[dict]]:
-    """Stream via google-genai SDK. Returns (response_text, updated_history)."""
+    """Stream via google-genai SDK. Returns (response_text, updated_history).
+
+    ``_google_module`` is a test hook: when provided, the function expects
+    the object to expose ``genai`` and ``genai_types`` attributes (mirroring
+    the live ``from google import genai`` / ``from google.genai import types``
+    layout). Production callers leave this at ``None``. Annotated as
+    ``Any | None`` (rather than a Protocol) so attribute access doesn't trip
+    ``mypy --strict`` while still permitting any module-shaped stub.
+    """
     from larkhelm.ai_runner import QueryCancelledError
-    try:
-        from google import genai
-        from google.genai import types as genai_types
-    except ImportError:
-        raise RuntimeError("google-genai SDK not installed; run: pip install google-genai")
+    if _google_module is None:
+        try:
+            from google import genai
+            from google.genai import types as genai_types
+        except ImportError:
+            raise RuntimeError("google-genai SDK not installed; run: pip install google-genai")
+    else:
+        genai = _google_module.genai
+        genai_types = _google_module.genai_types
 
     api_key = spec.api_key or os.environ.get("GOOGLE_API_KEY", "")
     client = genai.Client(api_key=api_key)
@@ -207,7 +232,7 @@ def run_openai_compat(
     chat_id: str,
     message: str,
     history: list[dict],
-    cancel_ev: "object | None" = None,
+    cancel_ev: "Any | None" = None,
     on_text: Callable | None = None,
     extra_system: str = "",
 ) -> tuple[str, list[dict]]:

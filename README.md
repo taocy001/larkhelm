@@ -361,6 +361,42 @@ launchctl list | grep larkhelm
 tail -f ~/Library/Logs/larkhelm/larkhelm.log
 ```
 
+### 日志轮转
+
+larkhelm 在 `$LOG_DIR/` 下写两份关键日志：`debug.log`（运维诊断、~50 MB/天）
+与 `all.jsonl`（结构化对话日志、~5–10 MB/天）。两个平台都需要轮转，否则磁盘
+最终会被填满。
+
+**Linux（推荐用 logrotate）**：仓库自带 `templates/larkhelm.logrotate`，覆盖
+`debug.log` 与 `all.jsonl` 两个 stanza，配置为 `copytruncate` 模式（零停机、
+不需要 SIGHUP）。安装步骤：
+
+```bash
+# 1) 复制模板到 /etc/logrotate.d/
+sudo cp templates/larkhelm.logrotate /etc/logrotate.d/larkhelm
+
+# 2) 把模板里的 LOG_DIR_PLACEHOLDER 替换为实际 LOG_DIR
+sudo sed -i "s|LOG_DIR_PLACEHOLDER|$LOG_DIR|g" /etc/logrotate.d/larkhelm
+
+# 3) dry-run 验证：应该输出 "rotating pattern" 而非语法错误
+sudo logrotate -d /etc/logrotate.d/larkhelm
+```
+
+`install.sh` 也会在 daemon-reload 后打印该提示，方便复制。
+
+**macOS**：larkhelm 进程内置 `rotate_jsonl_if_needed` + `rotate_debug_log_if_needed`
+（在 `larkhelm/log.py`）作为兜底——`all.jsonl` 超 100 MB / `debug.log` 超 50 MB
+时进程自轮换并保留 `.1` 备份。若希望 OS 层再加一层 newsyslog 守护，最小示例：
+
+```text
+# /etc/newsyslog.d/larkhelm.conf
+# logfilename                                                [owner:group]    mode count size when  flags
+$HOME/Library/Logs/larkhelm/debug.log                        ${USER}:staff    644  7     50000 *     J
+$HOME/Library/Logs/larkhelm/all.jsonl                        ${USER}:staff    644  7     50000 *     J
+```
+
+> Owner / group 写入时把 `${USER}` 换成实际用户名（newsyslog 不展开 shell 变量）。
+
 ### 从源码构建
 
 ```bash

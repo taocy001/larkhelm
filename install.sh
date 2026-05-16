@@ -317,4 +317,11 @@ else
 fi
 
 echo ""
+# Single source of truth for the logrotate hint — emitted after both
+# system / user branches (and macOS, which is a no-op since logrotate
+# is a Linux package). Was duplicated in both Linux branches; consolidated
+# here so the operator sees it exactly once regardless of install mode.
+if [[ "$OS_TYPE" == "Linux" ]]; then
+    info "提示：运行 sudo cp templates/larkhelm.logrotate /etc/logrotate.d/larkhelm 并把 LOG_DIR_PLACEHOLDER 替换为 $LOG_DIR 以启用日志轮转"
+fi
 info "安装完成！飞书 AI 桥接服务已在后台运行。"
