@@ -1206,6 +1206,16 @@ def _run_crew(state: CrewState, total_timeout: int):
             with state.lock:
                 state.phase = "cancelled"
             _crew_update_card(state)
+            # Clear checkpoint so the next bridge restart doesn't auto-resume
+            # a crew the user already gave up on (e.g. breakpoint timeout,
+            # /cancel button, /cancel text command). Exception: during a
+            # SIGTERM shutdown, ``cancel_all_crews`` deliberately re-saved
+            # the checkpoint with ``phase="running"`` *immediately before*
+            # setting ``cancel_ev``, precisely so ``resume_interrupted_crews``
+            # can pick up where we left off after the restart. Preserve that.
+            from larkhelm.concurrency import is_shutting_down
+            if not is_shutting_down():
+                _clear_checkpoint(state.chat_id)
             return
         except HardFailError as e:
             with state.lock:
@@ -1213,12 +1223,17 @@ def _run_crew(state: CrewState, total_timeout: int):
                 state.final_output = f"❌ Pipeline hard failure: {e}"
             _crew_update_card(state)
             log_entry(state.chat_id, "error", str(e), model="crew")
+            # Hard-fail is terminal — never resume.
+            _clear_checkpoint(state.chat_id)
             return
 
         if state.cancel_ev.is_set():
             with state.lock:
                 state.phase = "cancelled"
             _crew_update_card(state)
+            from larkhelm.concurrency import is_shutting_down
+            if not is_shutting_down():
+                _clear_checkpoint(state.chat_id)
             return
 
         # ── Synthesis ────────────────────────────────────
