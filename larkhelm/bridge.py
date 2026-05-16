@@ -193,6 +193,14 @@ def main(config_path: str = None, data_dir: str = None) -> None:
         _debug_log("[Shutdown] 收到 SIGTERM，通知所有 crew 取消...")
         set_shutting_down()
 
+        # P1-3: stop health server early so the orchestrator stops routing
+        # traffic before we wait on in-flight queries.
+        try:
+            from larkhelm.health_server import stop_health_server
+            stop_health_server()
+        except Exception as _hs_err:
+            _debug_log(f"[HealthServer] stop failed (continuing): {_hs_err}")
+
         # First cancel all in-progress crews and update their cards
         from larkhelm.crew import cancel_all_crews, wait_crews_done
         cancel_all_crews(reason="服务即将重启")
@@ -210,6 +218,18 @@ def main(config_path: str = None, data_dir: str = None) -> None:
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    # P1-3: optional HTTP /health /ready /metrics endpoint.
+    # Default health_endpoint_port=0 → no-op; flip the port in config.json
+    # to expose Prometheus-compatible metrics on 127.0.0.1.
+    try:
+        from larkhelm.health_server import start_health_server
+        start_health_server(
+            getattr(_cfg, "HEALTH_ENDPOINT_PORT", 0) or 0,
+            getattr(_cfg, "HEALTH_BIND_ADDR", "127.0.0.1") or "127.0.0.1",
+        )
+    except Exception as _hs_err:
+        _debug_log(f"[HealthServer] start failed (continuing): {_hs_err}")
 
     _start_cron_scheduler()
     _start_gc_thread()

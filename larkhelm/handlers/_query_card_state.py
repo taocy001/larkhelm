@@ -372,6 +372,59 @@ class QueryCardState:
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Diagnostics (P1-3 attachment for /metrics)
+# ─────────────────────────────────────────────────────────────────────
+#
+# A bounded ring of recent query elapsed times so /metrics can surface
+# a single-process p50 / average without dragging in a histogram lib.
+# Bounded list (max 256 entries) — newest pushed to the right, oldest
+# evicted automatically. Guarded by a module-level lock; reads return a
+# fresh dict, never an internal reference.
+
+import collections as _diag_collections
+
+_DIAG_RING: _diag_collections.deque = _diag_collections.deque(maxlen=256)
+_DIAG_LOCK = threading.Lock()
+_DIAG_ACTIVE = 0
+
+
+def record_query_start() -> None:
+    """Record that a query started (increments active counter)."""
+    global _DIAG_ACTIVE
+    with _DIAG_LOCK:
+        _DIAG_ACTIVE += 1
+
+
+def record_query_end(elapsed_sec: float) -> None:
+    """Record that a query ended; appends elapsed to the ring."""
+    global _DIAG_ACTIVE
+    with _DIAG_LOCK:
+        if _DIAG_ACTIVE > 0:
+            _DIAG_ACTIVE -= 1
+        try:
+            _DIAG_RING.append(float(elapsed_sec))
+        except Exception:
+            pass
+
+
+def get_diagnostics() -> dict:
+    """Return a snapshot dict for /metrics consumers.
+
+    Keys: ``active_queries`` (int), ``recent_count`` (int),
+    ``avg_elapsed_sec`` (float). Always safe to call; never raises.
+    """
+    with _DIAG_LOCK:
+        vals = list(_DIAG_RING)
+        active = _DIAG_ACTIVE
+    avg = (sum(vals) / len(vals)) if vals else 0.0
+    return {
+        "active_queries": int(active),
+        "recent_count": len(vals),
+        "avg_elapsed_sec": float(avg),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Module-level helpers
 # ─────────────────────────────────────────────────────────────────────
 

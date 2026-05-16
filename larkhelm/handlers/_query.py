@@ -342,6 +342,20 @@ def _post_query_memory_hook(chat_id: str, trace_id: str) -> None:
 def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
               images: list = None, parent_id: str | None = None,
               force_backend_id: str | None = None):
+    # P1-1 PR2: opt-in dispatch to the QuerySession rewrite. Default OFF
+    # so existing behaviour is byte-identical until the flag flips.
+    try:
+        if _cfg.config.get("query_session_v2_enabled"):
+            from larkhelm.handlers._query_session import QuerySession
+            QuerySession(
+                chat_id=chat_id, message=message, model=model,
+                user_msg_id=user_msg_id, images=images,
+                parent_id=parent_id, force_backend_id=force_backend_id,
+            ).run()
+            return
+    except Exception as _v2_err:
+        _debug_log(f"[DoQuery] QuerySession v2 dispatch failed, falling back: {_v2_err}")
+
     trace_id = uuid.uuid4().hex[:12]
 
     chat_lock = _get_chat_lock(chat_id)
@@ -414,6 +428,13 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
         _eyes_reaction_id[0] = react_to_message(user_msg_id, EMOJI_PROCESSING)
 
     lock_released = False   # Set to True when the soft-timeout releases the lock early, preventing double-release in finally
+
+    # P1-3: bump the diagnostic active counter so /metrics surfaces it.
+    try:
+        from larkhelm.handlers._query_card_state import record_query_start
+        record_query_start()
+    except Exception:
+        pass
 
     try:
         cwd = _get_cwd(chat_id)
@@ -912,6 +933,11 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             hb_thread.join(timeout=1.0)
 
     finally:
+        try:
+            from larkhelm.handlers._query_card_state import record_query_end
+            record_query_end(time.time() - start)
+        except Exception:
+            pass
         try:
             chat_lock.release()
         except RuntimeError:

@@ -783,7 +783,8 @@ def _dispatch_one_shot(spec, ns: str, prompt: str, on_text) -> str:
             _debug_log(f"[Memory] clear_sid failed: {e}")
 
 
-def _run_one_shot(prompt: str, ns: str, prefer_cheap: bool = False) -> str:
+def _run_one_shot(prompt: str, ns: str, prefer_cheap: bool = False,
+                  cancel_ev: "threading.Event | None" = None) -> str:
     """Run a single stateless LLM prompt and return the text output.
 
     Backend selection:
@@ -814,7 +815,15 @@ def _run_one_shot(prompt: str, ns: str, prefer_cheap: bool = False) -> str:
 
     collected: list[str] = []
 
+    # P1-5: if a cancel_ev is supplied and midflight cancel is enabled,
+    # wire the check into _on_text so the LLM stream aborts as soon as
+    # the next chat-turn arrives, instead of waiting for the call to
+    # complete.
+    _midflight_check = _cascade_midflight_on_text(cancel_ev)
+
     def _on_text(text: str, status: str = "typing") -> None:
+        if _midflight_check is not None:
+            _midflight_check(text, status)
         collected.clear()
         collected.append(text)
 
@@ -991,6 +1000,91 @@ def _config_flag(key: str, default: bool = True) -> bool:
 # spawn an unbounded number of daemon threads (token-blackhole risk). Default
 # 4 mirrors typical orchestrator concurrency.
 
+
+# ── Cascade observability counters (P1-5) ────────────────────────────
+#
+# Lightweight process-wide counters surfaced through
+# :func:`get_cascade_stats` for the ``/metrics`` endpoint. These are
+# advisory: they don't gate any behaviour and are intentionally not
+# persisted across restarts.
+
+from dataclasses import dataclass as _cs_dataclass
+
+
+@_cs_dataclass
+class CascadeStats:
+    active: int = 0
+    dropped_total: int = 0
+    midflight_cancelled_total: int = 0
+
+
+_cascade_stats = CascadeStats()
+_cascade_stats_lock = threading.Lock()
+
+
+def get_cascade_stats() -> dict[str, int]:
+    """Return a thread-safe snapshot of cascade counters (P1-5)."""
+    with _cascade_stats_lock:
+        return {
+            "active": _cascade_stats.active,
+            "dropped_total": _cascade_stats.dropped_total,
+            "midflight_cancelled_total": _cascade_stats.midflight_cancelled_total,
+        }
+
+
+def _cascade_inc_active() -> None:
+    with _cascade_stats_lock:
+        _cascade_stats.active += 1
+
+
+def _cascade_dec_active() -> None:
+    with _cascade_stats_lock:
+        if _cascade_stats.active > 0:
+            _cascade_stats.active -= 1
+
+
+def _cascade_inc_dropped() -> None:
+    with _cascade_stats_lock:
+        _cascade_stats.dropped_total += 1
+
+
+def _cascade_inc_midflight_cancelled() -> None:
+    with _cascade_stats_lock:
+        _cascade_stats.midflight_cancelled_total += 1
+
+
+def _cascade_midflight_cancel_enabled() -> bool:
+    """Whether ``on_text`` callbacks should poll ``cancel_ev`` (P1-5).
+
+    Default ``True``; set ``memory_cascade_midflight_cancel=false`` to
+    fall back to post-LLM cancel only (legacy behaviour).
+    """
+    try:
+        cfg = getattr(_cfg, "config", None) or {}
+    except Exception:
+        cfg = {}
+    return bool(cfg.get("memory_cascade_midflight_cancel", True))
+
+
+def _cascade_midflight_on_text(cancel_ev: "threading.Event | None"):
+    """Build the ``on_text`` callback shipped into ``_run_one_shot``.
+
+    When ``cancel_ev`` is set during the LLM stream, raise
+    :class:`QueryCancelledError` so the worker can abort before
+    consuming more tokens / writing to disk.
+    """
+    if cancel_ev is None or not _cascade_midflight_cancel_enabled():
+        return None
+
+    from larkhelm.ai_runner import QueryCancelledError
+
+    def _on_text(text: str, status: str = "typing") -> None:  # noqa: ARG001
+        if cancel_ev.is_set():
+            raise QueryCancelledError("cascade midflight cancelled")
+
+    return _on_text
+
+
 def _cascade_max_concurrent() -> int:
     try:
         cfg = getattr(_cfg, "config", None) or {}
@@ -1051,7 +1145,7 @@ def _try_extract_project(session_content: str, cwd: str,
         # 80%+ of these calls return ``UNCHANGED`` so we're predominantly
         # paying for input tokens we don't act on; using a cheap model
         # multiplies that "wasted input" by ~30× less per token.
-        result = _run_one_shot(prompt, ns=ns, prefer_cheap=True)
+        result = _run_one_shot(prompt, ns=ns, prefer_cheap=True, cancel_ev=cancel_ev)
         # Post-LLM cancel re-check: a newer cascade may have arrived during
         # the LLM call. Without this guard the old worker still writes its
         # (now-stale) session_hash into project frontmatter AFTER the new
@@ -1073,6 +1167,11 @@ def _try_extract_project(session_content: str, cwd: str,
         })
         _debug_log(f"[Memory] project layer auto-updated from session cascade ({len(result)} chars)")
     except Exception as e:
+        # P1-5: bubble up midflight cancellation so _coordinated can
+        # bump the dedicated counter. Other exceptions stay quarantined.
+        from larkhelm.ai_runner import QueryCancelledError
+        if isinstance(e, QueryCancelledError):
+            raise
         _debug_log(f"[Memory] extract_project error for {cwd!r}: {e}")
 
 
@@ -1103,7 +1202,7 @@ def _try_extract_global(session_content: str, chat_id: str,
             _debug_log(f"[Memory] global extract cancelled pre-LLM for {chat_id[:8]}")
             return
         # Same reasoning as project extract (including post-LLM cancel re-check).
-        result = _run_one_shot(prompt, ns=ns, prefer_cheap=True)
+        result = _run_one_shot(prompt, ns=ns, prefer_cheap=True, cancel_ev=cancel_ev)
         if cancel_ev is not None and cancel_ev.is_set():
             _debug_log(f"[Memory] global extract cancelled post-LLM for {chat_id[:8]} (discarding result)")
             return
@@ -1119,6 +1218,11 @@ def _try_extract_global(session_content: str, chat_id: str,
         })
         _debug_log(f"[Memory] global layer auto-updated from session cascade ({len(result)} chars)")
     except Exception as e:
+        # P1-5: bubble up midflight cancellation so _coordinated can
+        # bump the dedicated counter. Other exceptions stay quarantined.
+        from larkhelm.ai_runner import QueryCancelledError
+        if isinstance(e, QueryCancelledError):
+            raise
         _debug_log(f"[Memory] extract_global error for {chat_id[:8]}: {e}")
 
 
@@ -1156,10 +1260,27 @@ def _cascade_extract(session_content: str, chat_id: str) -> None:
             _debug_log(
                 f"[Memory] cascade sem busy ({label}), abandoning extract for {chat_id[:8]}"
             )
+            _cascade_inc_dropped()
             return
+        _cascade_inc_active()
         try:
-            target(*args, cancel_ev=new_ev)
+            try:
+                target(*args, cancel_ev=new_ev)
+            except Exception as _ce:
+                # P1-5: midflight cancel raises QueryCancelledError out of
+                # _run_one_shot's on_text. Map it to the dedicated counter;
+                # other exceptions are already logged inside the extract
+                # functions, but we still record them as drops.
+                from larkhelm.ai_runner import QueryCancelledError
+                if isinstance(_ce, QueryCancelledError):
+                    _cascade_inc_midflight_cancelled()
+                    _debug_log(
+                        f"[Memory] cascade midflight cancelled ({label}) for {chat_id[:8]}"
+                    )
+                else:
+                    _debug_log(f"[Memory] cascade {label} unexpected error: {_ce}")
         finally:
+            _cascade_dec_active()
             try:
                 sem.release()
             except ValueError:

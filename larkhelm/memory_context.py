@@ -702,6 +702,16 @@ class MemoryContextBuilder:
         slots = split_session_slots(raw)
         if not slots.parsed:
             return raw
+        # P1-6: when memory_session_layer_smart=True (default), each
+        # parsed section is independently truncated by smart_truncate
+        # according to SESSION_LAYER_BUDGETS. The legacy fixed-cap
+        # behaviour is preserved when the flag is off.
+        if _config_flag("memory_session_layer_smart", True):
+            return _layer_session_smart(
+                slots, self.query,
+                force_project=self.force_project,
+                force_global=self.force_global,
+            )
         # Lean view: Work Context always; Decisions only when query mentions
         # decision-flavoured words (or when forced). History is kept when the
         # body fits well under the cap.
@@ -719,3 +729,98 @@ class MemoryContextBuilder:
         if not sections:
             return raw
         return "\n\n".join(sections)
+
+
+# ── P1-6 section-wise smart truncation ────────────────────────────────────
+
+# Priority list used when the total budget is blown — sections lower in the
+# list are dropped first so work_context survives longest.
+_SESSION_LAYER_PRIORITY: tuple[str, ...] = ("work_context", "decisions", "history")
+
+
+def _resolve_session_budgets(budgets: "dict[str, int] | None" = None) -> dict[str, int]:
+    """Pick the budgets to use: explicit > _cfg.SESSION_LAYER_BUDGETS > defaults."""
+    if budgets:
+        return {
+            "work_context": int(budgets.get("work_context", 1200)),
+            "decisions":    int(budgets.get("decisions", 800)),
+            "history":      int(budgets.get("history", 600)),
+        }
+    cfg = getattr(_cfg, "SESSION_LAYER_BUDGETS", None)
+    if isinstance(cfg, dict):
+        return {
+            "work_context": int(cfg.get("work_context", 1200)),
+            "decisions":    int(cfg.get("decisions", 800)),
+            "history":      int(cfg.get("history", 600)),
+        }
+    return {"work_context": 1200, "decisions": 800, "history": 600}
+
+
+def _layer_session_smart(
+    slots: "SessionSlots",
+    query: str,
+    force_project: bool = False,
+    force_global: bool = False,
+    budgets: "dict[str, int] | None" = None,
+) -> str:
+    """Independent smart_truncate per section, with priority degradation.
+
+    Each parsed section is truncated to its own budget via
+    :func:`smart_truncate` so the cut hits a paragraph / sentence boundary
+    instead of mid-character. The decision section is opt-in (mirrors the
+    legacy behaviour) — included only when the query has decision-flavoured
+    words or the caller forces it.
+
+    Priority degradation: if the combined truncated output overflows the
+    sum of all three budgets (rare, but possible when one section is short
+    and another consumes its slack), drop sections in reverse priority
+    (``history`` → ``decisions`` → ``work_context``) until the total fits.
+    """
+    if not slots or not slots.parsed:
+        return slots.raw if slots else ""
+
+    b = _resolve_session_budgets(budgets)
+    # +3 per section to allow for the "…" / "\n…" ellipsis appended by
+    # smart_truncate when a section is at or just over its budget.
+    total_budget = b["work_context"] + b["decisions"] + b["history"] + 9
+
+    ql = (query or "").lower()
+    decision_kw = (
+        "decision", "decid", "决定", "决策", "选择", "应该", "should",
+        "why", "为什么",
+    )
+    include_decisions = bool(slots.decisions) and (
+        any(k in ql for k in decision_kw) or force_project or force_global
+    )
+
+    trimmed: dict[str, str] = {}
+    if slots.work_context:
+        trimmed["work_context"] = smart_truncate(slots.work_context, b["work_context"])
+    if include_decisions:
+        trimmed["decisions"] = smart_truncate(slots.decisions, b["decisions"])
+    if slots.history:
+        trimmed["history"] = smart_truncate(slots.history, b["history"])
+
+    # Priority degradation: drop low-priority sections until we fit total_budget.
+    # work_context first, decisions second, history last in _SESSION_LAYER_PRIORITY;
+    # drop in reverse.
+    def _current_total() -> int:
+        return sum(len(v) for v in trimmed.values())
+
+    for key in reversed(_SESSION_LAYER_PRIORITY):
+        if _current_total() <= total_budget:
+            break
+        if key in trimmed:
+            trimmed.pop(key, None)
+
+    sections: list[str] = []
+    if "work_context" in trimmed and trimmed["work_context"]:
+        sections.append("## Work Context\n" + trimmed["work_context"])
+    if "decisions" in trimmed and trimmed["decisions"]:
+        sections.append("## Key Decisions & Facts\n" + trimmed["decisions"])
+    if "history" in trimmed and trimmed["history"]:
+        sections.append("## Next Steps\n" + trimmed["history"])
+
+    if not sections:
+        return slots.raw
+    return "\n\n".join(sections)

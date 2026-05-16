@@ -155,6 +155,22 @@ VOICE_MAX_MERGE:         int
 VOICE_KEEP_AUDIO:        bool
 MEMORY_LIMIT_MB:         int   # RSS hard limit in MB; auto-detected on first run
 CREW_BREAKPOINT_TIMEOUT_SEC: int   # Phase C: max wait for human confirmation in /dev (default 1800s)
+
+# ── P1-3 / P1-5 / P1-6 globals ──────────────────────────────────────────────
+# All default to "feature off" so byte-compat with master holds when the
+# operator hasn't opted in. Reads come through ``getattr(_cfg, NAME, default)``
+# so an unmigrated process (e.g. a worker spawned before _init_runtime) sees
+# the safe fallback rather than an AttributeError.
+HEALTH_ENDPOINT_PORT: int = 0
+HEALTH_BIND_ADDR: str = "127.0.0.1"
+SESSION_LAYER_BUDGETS: dict = {
+    "work_context": 1200,
+    "decisions":     800,
+    "history":       600,
+}
+MEMORY_CASCADE_MIDFLIGHT_CANCEL: bool = True
+QUERY_SESSION_V2_ENABLED: bool = False
+MEMORY_SESSION_LAYER_SMART: bool = True
 # Single source of truth for accepted voice languages — referenced by both
 # config validation (_init_runtime) and the /voice command handler.
 _VOICE_LANG_WHITELIST: "frozenset[str]" = frozenset({"zh", "en", "auto"})
@@ -344,26 +360,14 @@ def _start_recover_thread() -> None:
     t.start()
 
 
-def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
-    """Initialise paths and configuration.
+def _init_paths(config_path: "str | None", data_dir: "str | None") -> None:
+    """P1-2: Phase 1 of bootstrap — resolve config / data paths and mkdir.
 
-    Priority: CLI argument > environment variable > system paths (/etc / /var) > XDG user paths
+    Sets the module globals CONFIG_PATH, DATA_DIR, SESSION_DIR, LOG_DIR,
+    STATE_FILE, DEBUG_LOG. Safe to call multiple times; later calls
+    overwrite earlier values. Has NO side effect on config.json content.
     """
     global CONFIG_PATH, DATA_DIR, SESSION_DIR, LOG_DIR, STATE_FILE, DEBUG_LOG
-    global config, APP_ID, APP_SECRET, CLAUDE_CMD, GEMINI_CMD, KIMI_CMD
-    global DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, DEFAULT_MODEL
-    global SKIP_PERMISSIONS, RESPONSE_TIMEOUT, HARD_TIMEOUT, MAX_CARD_LEN
-    global ALLOWED_CHATS, GEMINI_IDLE_TTL, DEFAULT_CWD, CRON_TIMEZONE
-    global MAX_AI_PROCS_CONFIG, MAX_AI_PROCS
-    global PERM_HOOK_SCRIPT, PERM_SOCKET_PATH
-    global DOC_AUTO_INJECT, DOC_INJECT_MAX_CHARS, DOC_INJECT_MAX_DOCS
-    global DOC_READ_MAX_CHARS, DEFAULT_DRIVE_FOLDER, DOC_WRITE_CONFIRM, DOC_WRITE_BACKEND
-    global DEFAULT_WIKI_SPACE_ID, DEFAULT_WIKI_PARENT_TOKEN, DEFAULT_OWNER_OPEN_ID
-    global BACKEND_REGISTRY
-    global VOICE_ENABLED, VOICE_ENGINE, VOICE_API_KEY
-    global VOICE_MODEL_SIZE, VOICE_COMPUTE_TYPE, VOICE_MAX_DURATION_MS
-    global VOICE_DEFAULT_LANG, VOICE_MERGE_WINDOW_SEC, VOICE_MAX_MERGE, VOICE_KEEP_AUDIO
-    global MEMORY_LIMIT_MB
 
     _sys_cfg  = Path("/etc/larkhelm/config.json")
     _sys_data = Path("/var/lib/larkhelm")
@@ -398,6 +402,31 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
 
     for _d in (SESSION_DIR, LOG_DIR):
         _d.mkdir(parents=True, exist_ok=True)
+
+
+def _init_app_config() -> None:
+    """P1-2: Phase 2 of bootstrap — load CONFIG_PATH and set all app globals.
+
+    Pre-conditions: ``_init_paths`` has populated CONFIG_PATH / DATA_DIR.
+    Side effects: loads config.json, validates fields, populates every
+    module-level scalar global used by handlers / runners.
+    """
+    global config, APP_ID, APP_SECRET, CLAUDE_CMD, GEMINI_CMD, KIMI_CMD
+    global DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, DEFAULT_MODEL
+    global SKIP_PERMISSIONS, RESPONSE_TIMEOUT, HARD_TIMEOUT, MAX_CARD_LEN
+    global ALLOWED_CHATS, GEMINI_IDLE_TTL, DEFAULT_CWD, CRON_TIMEZONE
+    global MAX_AI_PROCS_CONFIG, MAX_AI_PROCS
+    global PERM_HOOK_SCRIPT, PERM_SOCKET_PATH
+    global DOC_AUTO_INJECT, DOC_INJECT_MAX_CHARS, DOC_INJECT_MAX_DOCS
+    global DOC_READ_MAX_CHARS, DEFAULT_DRIVE_FOLDER, DOC_WRITE_CONFIRM, DOC_WRITE_BACKEND
+    global DEFAULT_WIKI_SPACE_ID, DEFAULT_WIKI_PARENT_TOKEN, DEFAULT_OWNER_OPEN_ID
+    global VOICE_ENABLED, VOICE_ENGINE, VOICE_API_KEY
+    global VOICE_MODEL_SIZE, VOICE_COMPUTE_TYPE, VOICE_MAX_DURATION_MS
+    global VOICE_DEFAULT_LANG, VOICE_MERGE_WINDOW_SEC, VOICE_MAX_MERGE, VOICE_KEEP_AUDIO
+    global MEMORY_LIMIT_MB
+    global HEALTH_ENDPOINT_PORT, HEALTH_BIND_ADDR
+    global SESSION_LAYER_BUDGETS, MEMORY_CASCADE_MIDFLIGHT_CANCEL
+    global QUERY_SESSION_V2_ENABLED, MEMORY_SESSION_LAYER_SMART
 
     try:
         config = json.loads(CONFIG_PATH.read_text())
@@ -709,7 +738,42 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     else:
         SOURCE_DIR = Path(__file__).parent  # fall back to package directory for non-editable installs
 
-    # Initialize BackendRegistry from config (must happen after all globals are set)
+    # ── P1-3 / P1-5 / P1-6 / P1-8 new keys ─────────────────────────────────
+    # All default to "feature off" so byte-compat with master holds when the
+    # operator hasn't opted in. setdefault here keeps overridden values
+    # untouched; reads later use _cfg.HEALTH_* etc. as well as config[...].
+    config.setdefault("health_endpoint_port", 0)
+    config.setdefault("health_bind_addr", "127.0.0.1")
+    config.setdefault("query_session_v2_enabled", False)
+    config.setdefault("memory_session_layer_smart", True)
+    config.setdefault("memory_session_layer_budgets", {
+        "work_context": 1200, "decisions": 800, "history": 600,
+    })
+    config.setdefault("memory_cascade_midflight_cancel", True)
+
+    try:
+        HEALTH_ENDPOINT_PORT = int(config.get("health_endpoint_port", 0) or 0)
+    except (TypeError, ValueError):
+        HEALTH_ENDPOINT_PORT = 0
+    HEALTH_BIND_ADDR = str(config.get("health_bind_addr", "127.0.0.1") or "127.0.0.1")
+    QUERY_SESSION_V2_ENABLED = bool(config.get("query_session_v2_enabled", False))
+    MEMORY_SESSION_LAYER_SMART = bool(config.get("memory_session_layer_smart", True))
+    MEMORY_CASCADE_MIDFLIGHT_CANCEL = bool(config.get("memory_cascade_midflight_cancel", True))
+
+    _budgets = config.get("memory_session_layer_budgets") or {}
+    try:
+        SESSION_LAYER_BUDGETS = {
+            "work_context": int(_budgets.get("work_context", 1200) or 1200),
+            "decisions":    int(_budgets.get("decisions",     800) or 800),
+            "history":      int(_budgets.get("history",       600) or 600),
+        }
+    except (TypeError, ValueError):
+        SESSION_LAYER_BUDGETS = {"work_context": 1200, "decisions": 800, "history": 600}
+
+
+def _init_backends() -> None:
+    """P1-2: Phase 3 of bootstrap — BackendRegistry + health checks / probes."""
+    global BACKEND_REGISTRY
     from larkhelm.backend_registry import BackendRegistry
     BACKEND_REGISTRY = BackendRegistry()
     _backends_list = _migrate_legacy_backends(config)
@@ -718,39 +782,50 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     import larkhelm.backend_registry as _br_mod
     _br_mod.BACKEND_REGISTRY = BACKEND_REGISTRY
 
-    # ``LARKHELM_TEST_MODE`` (non-empty) skips network probes / daemon threads /
-    # plugin discovery so pytest --co stays fast and tests don't hit live APIs.
-    # Runtime behaviour (bridge start) is unchanged when the env is unset.
     _test_mode = bool(os.environ.get("LARKHELM_TEST_MODE", "").strip())
+    if _test_mode:
+        return
 
-    if not _test_mode:
-        BACKEND_REGISTRY.health_check()
+    BACKEND_REGISTRY.health_check()
+    from larkhelm.model_probe import run_probes_async
+    run_probes_async(BACKEND_REGISTRY.all_enabled(), BACKEND_REGISTRY)
+    _start_recover_thread()
 
-        from larkhelm.model_probe import run_probes_async
-        run_probes_async(BACKEND_REGISTRY.all_enabled(), BACKEND_REGISTRY)
 
-        _start_recover_thread()
+def _init_plugins() -> None:
+    """P1-2: Phase 4 of bootstrap — agent plugins + memory_gc daemon."""
+    _test_mode = bool(os.environ.get("LARKHELM_TEST_MODE", "").strip())
+    if _test_mode:
+        return
 
-        # Phase 5: load third-party agent plugins. Built-in agents register
-        # themselves via ``larkhelm.agent_hub.builtin`` import side-effects.
-        try:
-            from larkhelm.agent_hub.plugin_loader import load_plugins
-            load_plugins(config)
-        except Exception as e:
-            # Plugin discovery runs during startup, when ``larkhelm.log`` may not
-            # be wired up yet — ``lazy_debug_log`` is the bootstrap-safe variant.
-            from larkhelm.log import lazy_debug_log
-            lazy_debug_log(f"[Config] agent plugin load failed: {e}")
+    try:
+        from larkhelm.agent_hub.plugin_loader import load_plugins
+        load_plugins(config)
+    except Exception as e:
+        from larkhelm.log import lazy_debug_log
+        lazy_debug_log(f"[Config] agent plugin load failed: {e}")
 
-        # Phase B: spin up the session-memory GC daemon (S3). Lazy import
-        # avoids dragging memory.py into the bootstrap path before its own
-        # config-dependent constants are needed.
-        try:
-            from larkhelm.memory_gc import start_memory_gc_thread
-            start_memory_gc_thread()
-        except Exception as e:
-            from larkhelm.log import lazy_debug_log
-            lazy_debug_log(f"[Config] memory_gc start failed: {e}")
+    try:
+        from larkhelm.memory_gc import start_memory_gc_thread
+        start_memory_gc_thread()
+    except Exception as e:
+        from larkhelm.log import lazy_debug_log
+        lazy_debug_log(f"[Config] memory_gc start failed: {e}")
+
+
+def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
+    """Initialise paths and configuration (P1-2 facade).
+
+    Delegates in order to ``_init_paths`` → ``_init_app_config`` →
+    ``_init_backends`` → ``_init_plugins``, then builds the typed
+    :class:`_RuntimeConfig` snapshot.
+
+    Priority: CLI argument > environment variable > system paths (/etc / /var) > XDG user paths.
+    """
+    _init_paths(config_path, data_dir)
+    _init_app_config()
+    _init_backends()
+    _init_plugins()
 
     # Build the typed config object (for mypy etc.; module-level globals remain for backward compat)
     global _runtime
