@@ -518,6 +518,51 @@ larkhelm memory unstale --slice-id <12hex>
 | `memory_audit_rotate_max_mb` | `32` | 单文件 rotate 阈值 |
 | `memory_audit_retain_days` | `30` | rotated 文件保留天数 |
 
+### 监控集成（Prometheus）
+
+P2 REQ-01 引入 `larkhelm.metrics` 注册中心，把所有 `larkhelm_*` Prometheus
+指标集中管理。装可选 extras 后 `/metrics` 自动走 prometheus-client 渲染：
+
+```bash
+pipx install -e ".[metrics]"     # 安装 prometheus-client
+# 编辑 config.json：
+#   "health_endpoint_port": 9300,
+#   "health_bind_addr":     "127.0.0.1"
+# 重启 bridge
+systemctl --user restart larkhelm
+```
+
+抓取配置示例：
+
+```yaml
+# /etc/prometheus/scrape_configs.yml
+- job_name: larkhelm
+  static_configs:
+    - targets: ['127.0.0.1:9300']
+  scrape_interval: 15s
+```
+
+回滚开关：`config.json` 设 `metrics_text_legacy: true` → 强制走 P1 手写
+文本路径（byte-compat 旧 scraper）。卸装 prometheus-client 也会自动 fallback。
+完整指标清单见 `CLAUDE.md → 监控集成（Prometheus，P2 REQ-01）`。
+
+### 本地开发（make 入口）
+
+P2 REQ-11 引入统一 make 入口，本地 + CI 共享 `scripts/check.sh`：
+
+```bash
+make test                            # 跑 pytest 全套
+make lint                            # ruff 跑 bug-detector 子集
+make type                            # mypy 跑严格白名单 6 模块
+make all                             # 上面三个
+make ci                              # alias of make all（GitHub Actions 调用）
+make test ARGS="-k pure -x"          # 转发额外参数
+```
+
+`scripts/check.sh` 是真正的命令位置（pytest / ruff / mypy 调用都在那）；
+`Makefile` 只做命名转发。可在没有 `make` 的环境（windows / IDE）直接跑
+`./scripts/check.sh test`。
+
 ---
 
 ## English <a name="english"></a>

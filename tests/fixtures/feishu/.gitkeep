@@ -1,0 +1,3 @@
+# P2 REQ-12 placeholder: Feishu API recording fixtures
+# (im.message.create / im.message.update / docx.document.get / ...).
+# Empty for now — populated during P3 when FeishuRecorder lands.

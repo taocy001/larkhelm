@@ -1,0 +1,368 @@
+"""larkhelm · backend API streaming template (P2 REQ-09 / AC-04).
+
+Extracts the common scaffolding around the three HTTP backends
+(Anthropic, Google Gen-AI, OpenAI-compatible) into a single
+``_run_streaming_api()`` template that:
+
+  * spins up the SDK client via the adapter,
+  * builds the request payload via the adapter,
+  * iterates the streaming text chunks,
+  * checks ``cancel_ev`` between chunks,
+  * fans ``on_text`` updates to the caller,
+  * always records the outcome (success/failure/cancel) to BackendRegistry.
+
+Each ``StreamingAPIAdapter`` implementation is a small wrapper around the
+SDK-specific glue, keeping the public ``run_*`` functions in
+``backend_api.py`` ≤ 30 lines as required by PRD AC-04.
+
+Public ``run_anthropic`` / ``run_google`` / ``run_openai_compat`` signatures
+in ``backend_api.py`` are NOT changed — third-party plugins import those by
+name. The template + adapter classes are internal but importable for tests.
+"""
+from __future__ import annotations
+
+import os
+from typing import Any, Callable, Iterator, Protocol
+
+from larkhelm.backend_registry import BackendSpec, BACKEND_REGISTRY
+from larkhelm.log import _debug_log, safe_log
+
+
+# ── Outcome recording (moved verbatim from backend_api.py) ────────────────
+
+
+def _record_outcome(spec_id: str, exc: Exception | None) -> None:
+    """Push call-outcome to BackendRegistry. Cancellation does NOT update health.
+
+    Mirrors ``backend_cli._record_outcome``; kept as a sibling helper so the
+    two dispatch families (CLI / API) stay parallel and either can be moved
+    to a shared module later without one waiting on the other.
+    """
+    # Local import keeps the cycle out of module import time.
+    from larkhelm.ai_runner import QueryCancelledError
+    try:
+        if exc is None:
+            BACKEND_REGISTRY.record_call_success(spec_id)
+            return
+        if isinstance(exc, QueryCancelledError):
+            return  # user-initiated, not a backend fault
+        try:
+            from larkhelm import config as _cfg
+            window = float(getattr(_cfg, "BACKEND_TRANSIENT_WINDOW_SEC", 600.0))
+            threshold = int(getattr(_cfg, "BACKEND_TRANSIENT_THRESHOLD", 3))
+        except Exception:
+            window, threshold = 600.0, 3
+        BACKEND_REGISTRY.record_call_failure(
+            spec_id, str(exc),
+            transient_window_sec=window,
+            transient_threshold=threshold,
+        )
+    except Exception:
+        safe_log(f"[BackendRegistry] _record_outcome failed for {spec_id}")
+
+
+# ── Adapter protocol ──────────────────────────────────────────────────────
+
+
+class StreamingAPIAdapter(Protocol):
+    """Four-hook contract used by :func:`_run_streaming_api`.
+
+    Implementations sit in this module so the template can be inspected
+    without crossing module boundaries. Each ``run_*`` function in
+    ``backend_api.py`` instantiates an adapter and forwards to the
+    template — no Protocol method is called by anything but the template.
+    """
+    provider_label: str
+
+    def build_client(self, spec: BackendSpec) -> Any: ...
+
+    def prepare_request(
+        self, spec: BackendSpec, history: list[dict],
+        message: str, extra_system: str,
+    ) -> dict: ...
+
+    def iter_text_chunks(self, client: Any, request: dict) -> Iterator[str]: ...
+
+    def format_history(
+        self, history: list[dict], message: str, response_text: str,
+    ) -> list[dict]: ...
+
+
+# ── Adapter implementations ───────────────────────────────────────────────
+
+
+class AnthropicAdapter:
+    """Streaming adapter for the official Anthropic Python SDK."""
+    provider_label = "anthropic_api"
+
+    def __init__(self, anthropic_module: Any | None = None) -> None:
+        # Production callers leave the module ``None``; ``run_anthropic``'s
+        # ``_anthropic_module`` test hook is forwarded here so the import
+        # of ``anthropic`` can be short-circuited in unit tests.
+        if anthropic_module is None:
+            try:
+                import anthropic  # type: ignore[import-not-found]
+            except ImportError as e:
+                raise RuntimeError(
+                    "anthropic SDK not installed; run: pip install anthropic"
+                ) from e
+            self._anthropic = anthropic
+        else:
+            self._anthropic = anthropic_module
+
+    def build_client(self, spec: BackendSpec) -> Any:
+        api_key = spec.api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        client_kwargs: dict = {"api_key": api_key}
+        if spec.base_url:
+            client_kwargs["base_url"] = spec.base_url
+        return self._anthropic.Anthropic(**client_kwargs)
+
+    def prepare_request(
+        self, spec: BackendSpec, history: list[dict],
+        message: str, extra_system: str,
+    ) -> dict:
+        # Anthropic disallows ``role=system`` inside ``messages``; lift it
+        # into a separate ``system`` channel. Caller-supplied ``extra_system``
+        # always wins (prepended) so per-query context injection survives.
+        system_parts = [h["content"] for h in history if h["role"] == "system"]
+        if extra_system:
+            system_parts.insert(0, extra_system)
+        messages = [h for h in history if h["role"] != "system"]
+        messages.append({"role": "user", "content": message})
+
+        kwargs: dict = dict(
+            model=spec.model or "claude-sonnet-4-6",
+            max_tokens=8192,
+            messages=messages,
+        )
+        if system_parts:
+            # Prompt caching: ``cache_control: ephemeral`` enables ~10%
+            # input pricing on the next call within the 5-min TTL. The
+            # 4500-char three-tier memory_ctx is the typical prefix
+            # (stable across turns); break-even is 2 reads.
+            system_text = "\n\n".join(system_parts)
+            kwargs["system"] = [{
+                "type":          "text",
+                "text":          system_text,
+                "cache_control": {"type": "ephemeral"},
+            }]
+        return kwargs
+
+    def iter_text_chunks(self, client: Any, request: dict) -> Iterator[str]:
+        with client.messages.stream(**request) as stream:
+            for chunk in stream.text_stream:
+                yield chunk
+
+    def format_history(
+        self, history: list[dict], message: str, response_text: str,
+    ) -> list[dict]:
+        return list(history) + [
+            {"role": "user", "content": message},
+            {"role": "assistant", "content": response_text},
+        ]
+
+
+class GoogleGenaiAdapter:
+    """Streaming adapter for ``google-genai``."""
+    provider_label = "google_api"
+
+    def __init__(self, google_module: Any | None = None) -> None:
+        # ``google_module`` is the legacy test hook: when provided, the
+        # object exposes ``.genai`` and ``.genai_types`` attributes
+        # (mirroring ``from google import genai`` / ``from google.genai
+        # import types``). Live callers leave it None.
+        if google_module is None:
+            try:
+                from google import genai  # type: ignore[import-not-found]
+                from google.genai import types as genai_types  # type: ignore[import-not-found]
+            except ImportError as e:
+                raise RuntimeError(
+                    "google-genai SDK not installed; run: pip install google-genai"
+                ) from e
+            self._genai = genai
+            self._types = genai_types
+        else:
+            self._genai = google_module.genai
+            self._types = google_module.genai_types
+
+    def build_client(self, spec: BackendSpec) -> Any:
+        api_key = spec.api_key or os.environ.get("GOOGLE_API_KEY", "")
+        return self._genai.Client(api_key=api_key)
+
+    def prepare_request(
+        self, spec: BackendSpec, history: list[dict],
+        message: str, extra_system: str,
+    ) -> dict:
+        types = self._types
+        system_texts: list[str] = []
+        if extra_system:
+            system_texts.append(extra_system)
+        contents = []
+        for h in history:
+            role = "user" if h["role"] == "user" else "model"
+            contents.append(types.Content(role=role, parts=[types.Part(text=h["content"])]))
+        contents.append(types.Content(role="user", parts=[types.Part(text=message)]))
+
+        gen_config = None
+        if system_texts:
+            gen_config = types.GenerateContentConfig(
+                system_instruction="\n\n".join(system_texts)
+            )
+        return {
+            "model":    spec.model or "gemini-2.0-flash",
+            "contents": contents,
+            "config":   gen_config,
+        }
+
+    def iter_text_chunks(self, client: Any, request: dict) -> Iterator[str]:
+        stream = client.models.generate_content_stream(
+            model=request["model"], contents=request["contents"], config=request["config"],
+        )
+        for chunk in stream:
+            yield chunk.text or ""
+
+    def format_history(
+        self, history: list[dict], message: str, response_text: str,
+    ) -> list[dict]:
+        return list(history) + [
+            {"role": "user", "content": message},
+            {"role": "assistant", "content": response_text},
+        ]
+
+
+class OpenAICompatAdapter:
+    """Streaming adapter for OpenAI-style chat-completions APIs (DeepSeek etc.)."""
+    provider_label = "openai_compat_api"
+
+    def __init__(self, openai_module: Any | None = None) -> None:
+        if openai_module is None:
+            try:
+                import openai  # type: ignore[import-not-found]
+            except ImportError as e:
+                raise RuntimeError(
+                    "openai SDK not installed; run: pip install openai"
+                ) from e
+            self._openai = openai
+        else:
+            self._openai = openai_module
+
+    def build_client(self, spec: BackendSpec) -> Any:
+        api_key = spec.api_key or os.environ.get("OPENAI_API_KEY", "")
+        kwargs: dict = {"api_key": api_key}
+        if spec.base_url:
+            kwargs["base_url"] = spec.base_url
+        return self._openai.OpenAI(**kwargs)
+
+    def prepare_request(
+        self, spec: BackendSpec, history: list[dict],
+        message: str, extra_system: str,
+    ) -> dict:
+        messages = list(history)
+        if extra_system:
+            messages.insert(0, {"role": "system", "content": extra_system})
+        messages.append({"role": "user", "content": message})
+        return {
+            "model":    spec.model or "gpt-4o",
+            "messages": messages,
+            "stream":   True,
+        }
+
+    def iter_text_chunks(self, client: Any, request: dict) -> Iterator[str]:
+        with client.chat.completions.create(**request) as stream:
+            for chunk in stream:
+                # Streaming chunks may have empty ``choices`` (heartbeat
+                # frames); skip silently.
+                delta = chunk.choices[0].delta.content if chunk.choices else None
+                if delta:
+                    yield delta
+
+    def format_history(
+        self, history: list[dict], message: str, response_text: str,
+    ) -> list[dict]:
+        return list(history) + [
+            {"role": "user", "content": message},
+            {"role": "assistant", "content": response_text},
+        ]
+
+
+# ── Common streaming template ─────────────────────────────────────────────
+
+
+def _run_streaming_api(
+    adapter: StreamingAPIAdapter,
+    spec: BackendSpec,
+    chat_id: str,
+    message: str,
+    history: list[dict],
+    cancel_ev: Any | None = None,
+    on_text: Callable | None = None,
+    extra_system: str = "",
+) -> tuple[str, list[dict]]:
+    """Run a streaming API turn through the supplied adapter.
+
+    Common to all three providers. Always reports outcome to
+    BackendRegistry — success on a clean return, failure on a raised
+    exception (other than QueryCancelledError), and silently on cancel.
+    """
+    from larkhelm.ai_runner import QueryCancelledError
+
+    client = adapter.build_client(spec)
+    request = adapter.prepare_request(spec, history, message, extra_system)
+    _debug_log(
+        f"[{adapter.provider_label}] {spec.id} "
+        f"model={request.get('model', spec.model)} chat={chat_id}"
+    )
+
+    result_text = ""
+    try:
+        for chunk in adapter.iter_text_chunks(client, request):
+            if cancel_ev and cancel_ev.is_set():
+                # Drop out of the loop; the post-loop cancel check below
+                # raises QueryCancelledError uniformly across adapters.
+                break
+            if not chunk:
+                continue
+            result_text += chunk
+            if on_text:
+                try:
+                    on_text(result_text, status="typing")
+                except Exception as cb_err:
+                    # Swallow on_text errors — a buggy UI callback must
+                    # not break the streaming loop. The diagnostic still
+                    # makes it to debug log for later investigation.
+                    # Route through ``backend_api._debug_log`` (re-exported)
+                    # so existing tests that monkey-patch the public
+                    # ``backend_api`` module's name see the log entries.
+                    try:
+                        from larkhelm import backend_api as _bapi
+                        _bapi._debug_log(
+                            f"[{adapter.provider_label}] on_text callback failed: {cb_err}"
+                        )
+                    except Exception:
+                        _debug_log(
+                            f"[{adapter.provider_label}] on_text callback failed: {cb_err}"
+                        )
+    except Exception as e:
+        _debug_log(f"[{adapter.provider_label}] {spec.id} error: {e}")
+        _record_outcome(spec.id, e)
+        raise
+
+    if cancel_ev and cancel_ev.is_set():
+        # Cancel is user-initiated; do NOT touch backend health.
+        raise QueryCancelledError(
+            f"Query cancelled during {adapter.provider_label} streaming"
+        )
+
+    updated_history = adapter.format_history(history, message, result_text)
+    _record_outcome(spec.id, None)
+    return result_text.strip(), updated_history
+
+
+__all__ = [
+    "StreamingAPIAdapter",
+    "AnthropicAdapter",
+    "GoogleGenaiAdapter",
+    "OpenAICompatAdapter",
+    "_record_outcome",
+    "_run_streaming_api",
+]

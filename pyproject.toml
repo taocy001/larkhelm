@@ -1,5 +1,11 @@
 [build-system]
-requires = ["hatchling"]
+# hatch-vcs (P2 AC-08) injects the wheel version from the git tag at build
+# time. At runtime, ``larkhelm/__init__.py`` falls back to
+# ``importlib.metadata.version('larkhelm')`` and finally to
+# ``"0.0.0+unknown"`` if no install metadata is available — so a missing
+# hatch-vcs in a stripped build env (e.g. third-party rebuild) degrades to a
+# valid but explicitly-unknown string instead of crashing import.
+requires = ["hatchling", "hatch-vcs>=0.4"]
 build-backend = "hatchling.build"
 
 [project]
@@ -60,6 +66,16 @@ memory-embedding = [
     "onnxruntime>=1.18",
     "numpy>=1.26",
 ]
+metrics = [
+    # P2 REQ-01 — Prometheus exposition for /metrics. Optional: when not
+    # installed, ``larkhelm.metrics.render_exposition()`` raises
+    # ``PrometheusNotInstalled`` and ``health_server._handle_metrics`` falls
+    # back to the P1 hand-written text exposition (byte-compatible with
+    # master). Flip the operator preference via ``metrics_text_legacy=true``
+    # in config.json to force the legacy text path even when prometheus-client
+    # IS installed.
+    "prometheus-client>=0.20",
+]
 
 [project.entry-points."larkhelm.embedding_backends"]
 # Third-party embedding backends register here. Example:
@@ -67,8 +83,26 @@ memory-embedding = [
 # Placeholder — no built-in entry points; the bundled `local` / `http` / `stub`
 # backends are resolved directly by `get_embedding_backend`.
 
+# P2 AC-08: hatch-vcs reads the version from the latest git tag
+# (e.g. ``2026.5.0`` → ``2026.5.0``). On a dirty editable tree the
+# version becomes ``2026.5.0.dev<N>+g<sha>.dirty`` so operators can
+# tell whether a deployed bridge was built from a clean tag or from
+# uncommitted work. The runtime fallback lives in
+# ``larkhelm/__init__.py``.
 [tool.hatch.version]
-path = "larkhelm/__init__.py"
+source = "vcs"
+fallback-version = "0.0.0+unknown"
+
+[tool.hatch.version.raw-options]
+# Match PEP 440 + the historical YYYY.MAJOR.MINOR scheme already in use.
+version_scheme = "guess-next-dev"
+local_scheme = "node-and-date"
+
+[tool.hatch.build.hooks.vcs]
+# Persist the resolved version into a generated file the package can
+# read at runtime when ``importlib.metadata`` is unavailable (e.g.
+# vendored copies, source-only checkouts).
+version-file = "larkhelm/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["larkhelm"]

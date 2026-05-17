@@ -16,6 +16,14 @@ from lark_oapi.api.im.v1 import P2ImMessageReceiveV1, P2ImMessageReactionCreated
 import larkhelm.config as _cfg
 from larkhelm.log import _debug_log, log_entry
 from larkhelm.dedup import _is_duplicate
+# P2 REQ-03: pure-fn helpers (no Feishu SDK dependency, unit-testable).
+# Imported but only used at one branch below — handle_message is too
+# entangled with SDK objects to convert wholesale, so the helpers are
+# kept on the side and reused only where it doesn't change behaviour.
+from larkhelm._message_pure import (
+    extract_allowed_chat_decision as _pure_allow,
+    parse_doc_urls as _pure_parse_doc_urls,
+)
 from larkhelm.chat_state import (
     _get_chat_model, _get_cwd, _is_btw_reply, _register_btw_msg, _set_chat_field,
     _get_voice_lang, _get_chat_state,
@@ -131,6 +139,7 @@ def handle_message(data: P2ImMessageReceiveV1):
             return
 
         # Track the sender's open_id so doc creation can add them as collaborator
+        sender_open_id = ""
         try:
             sender_open_id = data.event.sender.sender_id.open_id if (
                 data.event.sender and data.event.sender.sender_id
@@ -144,8 +153,11 @@ def handle_message(data: P2ImMessageReceiveV1):
             send_card(chat_id, '⏳ 服务升级中', '正在重启，请稍后重试。', color='orange')
             return
 
-        if _cfg.ALLOWED_CHATS and chat_id not in _cfg.ALLOWED_CHATS:
-            _debug_log(f"[ACL] rejected chat_id={chat_id}")
+        # P2 REQ-03: ACL decision via the pure helper so the same logic is
+        # unit-testable without spinning up a fake Feishu event object.
+        _allow = _pure_allow(chat_id, _cfg.ALLOWED_CHATS, sender_open_id)
+        if not _allow.allowed:
+            _debug_log(f"[ACL] rejected chat_id={chat_id} reason={_allow.reason}")
             return
 
         # Group chat @mention filter: only respond when the bot itself is mentioned.

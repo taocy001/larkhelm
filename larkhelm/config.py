@@ -79,6 +79,12 @@ class _RuntimeConfig:
     VOICE_KEEP_AUDIO:        bool
     MEMORY_LIMIT_MB:         int
     CREW_BREAKPOINT_TIMEOUT_SEC: int
+    # P2 toggles
+    METRICS_TEXT_LEGACY:                bool = False
+    MEMORY_EXTRACT_BUFFER_WINDOW_SEC:   int = 0
+    MEMORY_SESSION_SMART_COMPRESS:      bool = False
+    MEMORY_GLOBAL_PROFILE_SLOT_ENABLED: bool = False
+    MEMORY_PROJECT_SECTION_ENABLED:     bool = False
 
 # ── Runtime config (assigned by _init_runtime()) ────────────────────────
 CONFIG_PATH: Path
@@ -171,6 +177,17 @@ SESSION_LAYER_BUDGETS: dict = {
 MEMORY_CASCADE_MIDFLIGHT_CANCEL: bool = True
 QUERY_SESSION_V2_ENABLED: bool = False
 MEMORY_SESSION_LAYER_SMART: bool = True
+
+# ── P2 globals (REQ-01 / 05 / 06 / 07) ─────────────────────────────────────
+# All P2 toggles default to "feature off" so byte-compatibility with P1 holds
+# when the operator hasn't opted in. Reads through ``getattr(_cfg, NAME, default)``
+# so an unmigrated process (worker spawned before _init_runtime) sees the safe
+# fallback rather than an AttributeError.
+METRICS_TEXT_LEGACY: bool = False
+MEMORY_EXTRACT_BUFFER_WINDOW_SEC: int = 0
+MEMORY_SESSION_SMART_COMPRESS: bool = False
+MEMORY_GLOBAL_PROFILE_SLOT_ENABLED: bool = False
+MEMORY_PROJECT_SECTION_ENABLED: bool = False
 # Single source of truth for accepted voice languages — referenced by both
 # config validation (_init_runtime) and the /voice command handler.
 _VOICE_LANG_WHITELIST: "frozenset[str]" = frozenset({"zh", "en", "auto"})
@@ -427,6 +444,9 @@ def _init_app_config() -> None:
     global HEALTH_ENDPOINT_PORT, HEALTH_BIND_ADDR
     global SESSION_LAYER_BUDGETS, MEMORY_CASCADE_MIDFLIGHT_CANCEL
     global QUERY_SESSION_V2_ENABLED, MEMORY_SESSION_LAYER_SMART
+    global METRICS_TEXT_LEGACY, MEMORY_EXTRACT_BUFFER_WINDOW_SEC
+    global MEMORY_SESSION_SMART_COMPRESS
+    global MEMORY_GLOBAL_PROFILE_SLOT_ENABLED, MEMORY_PROJECT_SECTION_ENABLED
 
     try:
         config = json.loads(CONFIG_PATH.read_text())
@@ -760,6 +780,33 @@ def _init_app_config() -> None:
     MEMORY_SESSION_LAYER_SMART = bool(config.get("memory_session_layer_smart", True))
     MEMORY_CASCADE_MIDFLIGHT_CANCEL = bool(config.get("memory_cascade_midflight_cancel", True))
 
+    # ── P2 new keys (REQ-01 / 05 / 06 / 07) ────────────────────────────────
+    # All five default to "feature off" so the bridge stays byte-compatible
+    # with P1 unless an operator explicitly opens the gate. ``setdefault``
+    # preserves any operator override already in config.json.
+    config.setdefault("metrics_text_legacy", False)
+    config.setdefault("memory_extract_buffer_window_sec", 0)
+    config.setdefault("memory_session_smart_compress", False)
+    config.setdefault("memory_global_profile_slot_enabled", False)
+    config.setdefault("memory_project_section_enabled", False)
+
+    METRICS_TEXT_LEGACY = bool(config.get("metrics_text_legacy", False))
+    try:
+        MEMORY_EXTRACT_BUFFER_WINDOW_SEC = max(
+            0, int(config.get("memory_extract_buffer_window_sec", 0) or 0),
+        )
+    except (TypeError, ValueError):
+        MEMORY_EXTRACT_BUFFER_WINDOW_SEC = 0
+    MEMORY_SESSION_SMART_COMPRESS = bool(
+        config.get("memory_session_smart_compress", False)
+    )
+    MEMORY_GLOBAL_PROFILE_SLOT_ENABLED = bool(
+        config.get("memory_global_profile_slot_enabled", False)
+    )
+    MEMORY_PROJECT_SECTION_ENABLED = bool(
+        config.get("memory_project_section_enabled", False)
+    )
+
     _budgets = config.get("memory_session_layer_budgets") or {}
     try:
         SESSION_LAYER_BUDGETS = {
@@ -862,6 +909,11 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         VOICE_MAX_MERGE=VOICE_MAX_MERGE, VOICE_KEEP_AUDIO=VOICE_KEEP_AUDIO,
         MEMORY_LIMIT_MB=MEMORY_LIMIT_MB,
         CREW_BREAKPOINT_TIMEOUT_SEC=CREW_BREAKPOINT_TIMEOUT_SEC,
+        METRICS_TEXT_LEGACY=METRICS_TEXT_LEGACY,
+        MEMORY_EXTRACT_BUFFER_WINDOW_SEC=MEMORY_EXTRACT_BUFFER_WINDOW_SEC,
+        MEMORY_SESSION_SMART_COMPRESS=MEMORY_SESSION_SMART_COMPRESS,
+        MEMORY_GLOBAL_PROFILE_SLOT_ENABLED=MEMORY_GLOBAL_PROFILE_SLOT_ENABLED,
+        MEMORY_PROJECT_SECTION_ENABLED=MEMORY_PROJECT_SECTION_ENABLED,
     )
 
 

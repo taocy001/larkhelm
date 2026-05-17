@@ -1,52 +1,43 @@
-"""larkhelm · API key backends (Anthropic / Google / OpenAI-compat)
+"""larkhelm · API key backends (Anthropic / Google / OpenAI-compat).
 
-Each run_* function streams responses via on_text callback and returns
-(response_text, updated_history). History is NOT saved here — callers
-use api_session.save_history() after getting the result.
+Each ``run_*`` function streams responses via ``on_text`` and returns
+``(response_text, updated_history)``. History is NOT saved here —
+callers use ``api_session.save_history()`` after getting the result.
 
-SDKs are optional: if not installed, health_check marks the backend unhealthy.
+SDKs are optional: if not installed, the adapter raises RuntimeError and
+``health_check`` marks the backend unhealthy.
+
+P2 REQ-09: the streaming scaffolding now lives in
+``backend_api_streaming.py`` (template + three Adapter classes). The
+``run_*`` functions below are thin shims that build an Adapter and forward
+to ``_run_streaming_api`` — keeping their public signatures unchanged so
+third-party plugins importing them by name continue to work.
 """
 from __future__ import annotations
 
-import os
 from typing import Any, Callable
 
-from larkhelm.backend_registry import BackendSpec, BACKEND_REGISTRY
-from larkhelm.log import _debug_log, safe_log
-# Direct top-level import — symmetric with backend_cli._record_outcome (which
-# also imports QueryCancelledError at module level). The previous defensive
-# try/except ImportError was dead code: by the time _record_outcome runs, every
-# run_* function has already imported ai_runner at its own top so the module
-# is fully loaded.
-from larkhelm.ai_runner import QueryCancelledError
+from larkhelm.backend_registry import BackendSpec
+from larkhelm.backend_api_streaming import (
+    AnthropicAdapter,
+    GoogleGenaiAdapter,
+    OpenAICompatAdapter,
+    _record_outcome,
+    _run_streaming_api,
+)
+# Re-exported for backward compatibility with any caller that patched
+# ``backend_api._debug_log`` (tests/test_exception_handling.py does this).
+# The streaming template hooks the on_text-callback log through the
+# module-level binding here so monkey-patching this attribute redirects
+# the debug output as expected.
+from larkhelm.log import _debug_log  # noqa: F401  (re-exported)
 
-
-def _record_outcome(spec_id: str, exc: Exception | None) -> None:
-    """Push call-outcome to BackendRegistry. Cancellation does NOT update health.
-
-    Mirrors ``backend_cli._record_outcome``; kept as a sibling helper so the
-    two dispatch families (CLI / API) stay parallel and either can be moved
-    to a shared module later without one waiting on the other.
-    """
-    try:
-        if exc is None:
-            BACKEND_REGISTRY.record_call_success(spec_id)
-            return
-        if isinstance(exc, QueryCancelledError):
-            return  # user-initiated, not a backend fault
-        try:
-            from larkhelm import config as _cfg
-            window = float(getattr(_cfg, "BACKEND_TRANSIENT_WINDOW_SEC", 600.0))
-            threshold = int(getattr(_cfg, "BACKEND_TRANSIENT_THRESHOLD", 3))
-        except Exception:
-            window, threshold = 600.0, 3
-        BACKEND_REGISTRY.record_call_failure(
-            spec_id, str(exc),
-            transient_window_sec=window,
-            transient_threshold=threshold,
-        )
-    except Exception:
-        safe_log(f"[BackendRegistry] _record_outcome failed for {spec_id}")
+# Re-exported for backward compatibility with any caller that imported
+# ``backend_api._record_outcome`` directly (tests do this).
+__all__ = [
+    "_record_outcome", "_debug_log",
+    "run_anthropic", "run_google", "run_openai_compat",
+]
 
 
 def run_anthropic(
@@ -60,87 +51,17 @@ def run_anthropic(
     *,
     _anthropic_module: "Any | None" = None,
 ) -> tuple[str, list[dict]]:
-    """Stream via Anthropic SDK. Returns (response_text, updated_history).
+    """Stream via Anthropic SDK. See ``backend_api_streaming.AnthropicAdapter``.
 
-    ``_anthropic_module`` is a test hook: production callers leave it at
+    ``_anthropic_module`` is a test hook: production callers leave it
     ``None`` so the live ``import anthropic`` path runs; tests pass a fake
-    module to short-circuit the import and exercise streaming branches
-    without touching ``sys.modules``.
+    module to short-circuit the import.
     """
-    from larkhelm.ai_runner import QueryCancelledError
-    if _anthropic_module is None:
-        try:
-            import anthropic
-        except ImportError:
-            raise RuntimeError("anthropic SDK not installed; run: pip install anthropic")
-    else:
-        anthropic = _anthropic_module
-
-    api_key = spec.api_key or os.environ.get("ANTHROPIC_API_KEY", "")
-    client_kwargs: dict = {"api_key": api_key}
-    if spec.base_url:
-        client_kwargs["base_url"] = spec.base_url
-    client = anthropic.Anthropic(**client_kwargs)
-
-    # Anthropic only allows user/assistant roles in messages; extract system separately.
-    # extra_system (per-query injection) takes highest priority → prepended before history systems.
-    system_parts = [h["content"] for h in history if h["role"] == "system"]
-    if extra_system:
-        system_parts.insert(0, extra_system)
-    messages = [h for h in history if h["role"] != "system"]
-    messages.append({"role": "user", "content": message})
-
-    result_text = ""
-    kwargs: dict = dict(
-        model=spec.model or "claude-sonnet-4-6",
-        max_tokens=8192,
-        messages=messages,
+    adapter = AnthropicAdapter(anthropic_module=_anthropic_module)
+    return _run_streaming_api(
+        adapter, spec, chat_id, message, history,
+        cancel_ev=cancel_ev, on_text=on_text, extra_system=extra_system,
     )
-    if system_parts:
-        # Prompt caching: send the system channel as a single block with
-        # ``cache_control: ephemeral`` so the same prefix on the next request
-        # within ~5 min is read at ~10% input price. The dominant component
-        # is the 4500-char three-tier memory_ctx — typically stable across
-        # turns. Cache-write costs ~25% more than uncached input, so the
-        # break-even is 2 reads within the TTL; any active chat with >2
-        # turns / 5 min wins. Below the minimum cacheable size (~1024 tokens
-        # for Sonnet, ~2048 for Haiku) Anthropic silently skips caching, so
-        # the marker is a free hint in small-system cases.
-        system_text = "\n\n".join(system_parts)
-        kwargs["system"] = [{
-            "type":          "text",
-            "text":          system_text,
-            "cache_control": {"type": "ephemeral"},
-        }]
-
-    _debug_log(f"[anthropic_api] {spec.id} model={kwargs['model']} chat={chat_id}")
-
-    try:
-        with client.messages.stream(**kwargs) as stream:
-            for text_chunk in stream.text_stream:
-                if cancel_ev and cancel_ev.is_set():
-                    break
-                result_text += text_chunk
-                if on_text:
-                    try:
-                        on_text(result_text, status="typing")
-                    except Exception as e:
-                        _debug_log(f"[anthropic_api] on_text callback failed: {e}")
-    except Exception as e:
-        _debug_log(f"[anthropic_api] {spec.id} error: {e}")
-        _record_outcome(spec.id, e)
-        raise
-
-    if cancel_ev and cancel_ev.is_set():
-        # Cancel is user-initiated → don't update health
-        raise QueryCancelledError("Query cancelled during anthropic_api streaming")
-
-    updated_history = list(history) + [
-        {"role": "user", "content": message},
-        {"role": "assistant", "content": result_text},
-    ]
-    _record_outcome(spec.id, None)
-    return result_text.strip(), updated_history
 
 
 def run_google(
@@ -154,77 +75,16 @@ def run_google(
     *,
     _google_module: "Any | None" = None,
 ) -> tuple[str, list[dict]]:
-    """Stream via google-genai SDK. Returns (response_text, updated_history).
+    """Stream via google-genai SDK. See ``backend_api_streaming.GoogleGenaiAdapter``.
 
-    ``_google_module`` is a test hook: when provided, the function expects
-    the object to expose ``genai`` and ``genai_types`` attributes (mirroring
-    the live ``from google import genai`` / ``from google.genai import types``
-    layout). Production callers leave this at ``None``. Annotated as
-    ``Any | None`` (rather than a Protocol) so attribute access doesn't trip
-    ``mypy --strict`` while still permitting any module-shaped stub.
+    ``_google_module`` test hook: provide an object exposing ``.genai`` and
+    ``.genai_types`` to short-circuit the live import.
     """
-    from larkhelm.ai_runner import QueryCancelledError
-    if _google_module is None:
-        try:
-            from google import genai
-            from google.genai import types as genai_types
-        except ImportError:
-            raise RuntimeError("google-genai SDK not installed; run: pip install google-genai")
-    else:
-        genai = _google_module.genai
-        genai_types = _google_module.genai_types
-
-    api_key = spec.api_key or os.environ.get("GOOGLE_API_KEY", "")
-    client = genai.Client(api_key=api_key)
-
-    # extra_system takes highest priority; history should not contain system-role messages
-    # (api_session only stores user/assistant turns), but guard defensively.
-    system_texts: list[str] = []
-    if extra_system:
-        system_texts.append(extra_system)
-    contents = []
-    for h in history:
-        role = "user" if h["role"] == "user" else "model"
-        contents.append(genai_types.Content(role=role, parts=[genai_types.Part(text=h["content"])]))
-    contents.append(genai_types.Content(role="user", parts=[genai_types.Part(text=message)]))
-
-    model_name = spec.model or "gemini-2.0-flash"
-    _debug_log(f"[google_api] {spec.id} model={model_name} chat={chat_id}")
-
-    gen_config = None
-    if system_texts:
-        gen_config = genai_types.GenerateContentConfig(
-            system_instruction="\n\n".join(system_texts)
-        )
-
-    result_text = ""
-    try:
-        for chunk in client.models.generate_content_stream(
-            model=model_name, contents=contents, config=gen_config
-        ):
-            if cancel_ev and cancel_ev.is_set():
-                break
-            chunk_text = chunk.text or ""
-            result_text += chunk_text
-            if on_text and chunk_text:
-                try:
-                    on_text(result_text, status="typing")
-                except Exception as e:
-                    _debug_log(f"[google_api] on_text callback failed: {e}")
-    except Exception as e:
-        _debug_log(f"[google_api] {spec.id} error: {e}")
-        _record_outcome(spec.id, e)
-        raise
-
-    if cancel_ev and cancel_ev.is_set():
-        raise QueryCancelledError("Query cancelled during google_api streaming")
-
-    updated_history = list(history) + [
-        {"role": "user", "content": message},
-        {"role": "assistant", "content": result_text},
-    ]
-    _record_outcome(spec.id, None)
-    return result_text.strip(), updated_history
+    adapter = GoogleGenaiAdapter(google_module=_google_module)
+    return _run_streaming_api(
+        adapter, spec, chat_id, message, history,
+        cancel_ev=cancel_ev, on_text=on_text, extra_system=extra_system,
+    )
 
 
 def run_openai_compat(
@@ -236,57 +96,12 @@ def run_openai_compat(
     on_text: Callable | None = None,
     extra_system: str = "",
 ) -> tuple[str, list[dict]]:
-    """Stream via OpenAI-compat SDK (DeepSeek etc.). Returns (response_text, updated_history)."""
-    from larkhelm.ai_runner import QueryCancelledError
-    try:
-        import openai
-    except ImportError:
-        raise RuntimeError("openai SDK not installed; run: pip install openai")
+    """Stream via OpenAI-compat SDK (DeepSeek etc.).
 
-    api_key = spec.api_key or os.environ.get("OPENAI_API_KEY", "")
-    kwargs = dict(api_key=api_key)
-    if spec.base_url:
-        kwargs["base_url"] = spec.base_url
-    client = openai.OpenAI(**kwargs)
-
-    messages = list(history)
-    if extra_system:
-        messages.insert(0, {"role": "system", "content": extra_system})
-    messages.append({"role": "user", "content": message})
-
-    model_name = spec.model or "gpt-4o"
-    _debug_log(f"[openai_compat_api] {spec.id} model={model_name} chat={chat_id}")
-
-    result_text = ""
-    try:
-        with client.chat.completions.create(
-            model=model_name,
-            messages=messages,
-            stream=True,
-        ) as stream:
-            for chunk in stream:
-                if cancel_ev and cancel_ev.is_set():
-                    break
-                delta = chunk.choices[0].delta.content if chunk.choices else None
-                if delta:
-                    result_text += delta
-                    if on_text:
-                        try:
-                            on_text(result_text, status="typing")
-                        except Exception as e:
-                            _debug_log(f"[openai_compat_api] on_text callback failed: {e}")
-    except Exception as e:
-        _debug_log(f"[openai_compat_api] {spec.id} error: {e}")
-        _record_outcome(spec.id, e)
-        raise
-
-    if cancel_ev and cancel_ev.is_set():
-        raise QueryCancelledError("Query cancelled during openai_compat_api streaming")
-
-    updated_history = list(history) + [
-        {"role": "user", "content": message},
-        {"role": "assistant", "content": result_text},
-    ]
-    # Record success last — matches placement in run_anthropic / run_google
-    _record_outcome(spec.id, None)
-    return result_text.strip(), updated_history
+    See ``backend_api_streaming.OpenAICompatAdapter``.
+    """
+    adapter = OpenAICompatAdapter()
+    return _run_streaming_api(
+        adapter, spec, chat_id, message, history,
+        cancel_ev=cancel_ev, on_text=on_text, extra_system=extra_system,
+    )

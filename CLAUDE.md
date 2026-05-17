@@ -72,6 +72,11 @@ CLI --data-dir > LARKHELM_DATA_DIR env > /var/lib/larkhelm > ~/.local/share/lark
 | `voice_merge_window_sec` | 多条语音消息合并窗口秒数，floor `0`（`0` = 禁用合并；默认 `0`） |
 | `voice_max_merge` | 单次最多合并几条语音，floor `1`（默认 `5`） |
 | `voice_keep_audio` | 转录后是否保留原音频文件（默认 `false`，即转录完即删） |
+| `metrics_text_legacy` | P2 REQ-01：强制 `/metrics` 走 P1 手写文本路径，即使 prometheus-client 已装。默认 `false`；翻 `true` 用于 bisect 指标回归 |
+| `memory_extract_buffer_window_sec` | P2 REQ-06：session→cascade buffer 合并窗口（秒）；默认 `0` = 禁用 buffer，每次 update 立即 cascade（P1 byte-compat），>0 合并 |
+| `memory_session_smart_compress` | P2 REQ-07：session-layer 走句子级评分 + top-K（确定性，无 LLM），默认 `false` = P1 尾截断 |
+| `memory_global_profile_slot_enabled` | P2 REQ-05.1：global memory 按 style/format/domain/expertise 4 槽位写入（每槽 ≤200 chars），默认 `false` = 整段文本 |
+| `memory_project_section_enabled` | P2 REQ-05.2：project memory 按 TechStack/Conventions/Architecture/Constraints 4 段写入，默认 `false` = 整段文本 |
 
 > **超时层级说明**：
 > - `response_timeout`（软超时）：AI 响应无更新超过此时长，释放主锁但后台继续运行，默认 300s
@@ -96,6 +101,13 @@ larkhelm/
 ├── chat_state.py       (165 行)  - Per-chat 状态持久化（cwd/model/crons）
 ├── concurrency.py      (135 行)  - 并发原语（per-chat 锁、取消事件、信号量）
 ├── dedup.py            (34 行)   - 消息去重（OrderedDict 缓存）
+├── _message_pure.py    (200 行)  - P2 REQ-03：5 个纯函数（dedup/ACL/doc-url/分类/路由），无飞书 SDK 依赖，可单测
+├── metrics.py          (350 行)  - P2 REQ-01：Prometheus 注册中心（4 核心 Gauge + 5 Counter + 1 Histogram），可选 prometheus-client
+├── memory_global_slots.py     (~200 行) - P2 REQ-05.1：global memory 4 槽位读写（style/format/domain/expertise）
+├── memory_project_sections.py (~170 行) - P2 REQ-05.2：project memory 4 段读写（TechStack/Conventions/Architecture/Constraints）
+├── memory_session_compress.py (~250 行) - P2 REQ-07：句子级 score + top-K 压缩，确定性、无 LLM
+├── memory_extract_buffer.py   (~230 行) - P2 REQ-06：进程内 session-cascade buffer，timer/capacity/shutdown 三触发
+├── backend_api_streaming.py   (~290 行) - P2 REQ-09：StreamingAPIAdapter Protocol + 3 实现 + 通用模板
 ├── log.py              (89 行)   - 对话日志读写（.md + all.jsonl）
 ├── token_stats.py      (146 行)  - Token 使用量统计与持久化
 ├── lark_client.py      (1021 行) - 飞书 API 调用封装、卡片操作、权限引导卡片
@@ -456,6 +468,40 @@ if tl.startswith("/new_cmd"):
 | Card layout | card_builder.py | Modify `_make_card()` |
 | State fields | chat_state.py | Add to `_chat_state_store` data structure |
 | Permission rules | perm.py | Add new permission check logic |
+
+## 监控集成（Prometheus，P2 REQ-01）
+
+`health_endpoint_port > 0` 时，`larkhelm.health_server` 暴露三个端点：
+`/health`、`/ready`、`/metrics`。`/metrics` 默认走 prometheus-client
+渲染（需安装 `pip install -e ".[metrics]"`），缺装或 `metrics_text_legacy=true`
+时自动回退到 P1 手写文本路径（byte-compat）。
+
+核心指标列表（前缀 `larkhelm_`）：
+
+| 名称 | 类型 | label | 含义 |
+|---|---|---|---|
+| `larkhelm_backend_healthy` | Gauge | `name` | 1=健康 / 0=失败 |
+| `larkhelm_active_queries` | Gauge | — | 当前 `_do_query` 并发数 |
+| `larkhelm_memory_rss_bytes` | Gauge | — | 进程 RSS（bytes） |
+| `larkhelm_cascade_active` | Gauge | — | 在飞 cascade extract 数 |
+| `larkhelm_cascade_extract_total` | Counter | `kind`,`outcome` | kind∈{project,global}, outcome∈{success,unchanged,rejected,cancelled,error} |
+| `larkhelm_cascade_dropped_total` | Counter | — | 因 sem 满或 cancel 被丢的 cascade |
+| `larkhelm_cascade_midflight_cancelled_total` | Counter | — | mid-LLM 取消的 cascade |
+| `larkhelm_query_duration_seconds` | Histogram | — | query 端到端延时（buckets: 0.5/1/2/5/10/30/60/120/300/600） |
+| `larkhelm_extract_buffer_flushes_total` | Counter | `trigger` | trigger∈{timer,capacity,manual,shutdown} |
+
+Prometheus scrape 配置示例：
+
+```yaml
+scrape_configs:
+  - job_name: larkhelm
+    static_configs:
+      - targets: ['127.0.0.1:9300']
+    scrape_interval: 15s
+```
+
+**⚠️ 安全提示**：`health_bind_addr` 默认 `127.0.0.1`；不要直接 bind `0.0.0.0`，
+经身份验证的反向代理（nginx/Caddy）才暴露给 scraper。
 
 ### 6. 状态模块导入指南
 

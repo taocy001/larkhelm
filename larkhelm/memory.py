@@ -90,6 +90,24 @@ MEMORY_GENERATION_TIMEOUT = 120  # seconds before abandoning a slow generate cal
 _EXTRACT_TIMEOUT          = 60   # shorter timeout for cascade extraction calls
 
 
+# P2 REQ-01: cascade outcome → Prometheus counter bridge. Lives here (not
+# in metrics.py) so memory.py owns the outcome→label mapping in one place;
+# the metrics module just provides the inc helper.
+def record_extract_outcome(kind: str, outcome: str) -> None:
+    """Bump ``larkhelm_cascade_extract_total{kind, outcome}``.
+
+    ``kind`` ∈ {project, global}; ``outcome`` ∈
+    {success, unchanged, rejected, cancelled, error}. Best-effort: a
+    failure to import the metrics module is silently ignored so the
+    cascade itself never fails on observability code.
+    """
+    try:
+        from larkhelm import metrics as _met
+        _met.inc_cascade_extract(kind, outcome)
+    except Exception:
+        pass
+
+
 def _should_auto_update(turn_count: int) -> bool:
     """True iff a non-forced auto-update should fire at this ``turn_count``.
 
@@ -1135,6 +1153,7 @@ def _try_extract_project(session_content: str, cwd: str,
     try:
         if cancel_ev is not None and cancel_ev.is_set():
             _debug_log(f"[Memory] project extract cancelled before start for {cwd!r}")
+            record_extract_outcome("project", "cancelled")
             return
         proj_path = _project_memory_file(cwd)
         prev_fm = _load_md_frontmatter(proj_path)
@@ -1142,6 +1161,7 @@ def _try_extract_project(session_content: str, cwd: str,
             _debug_log(
                 f"[Memory] project cascade shortcircuit (hash match) for {cwd!r}"
             )
+            record_extract_outcome("project", "unchanged")
             return
         existing = load_project_memory(cwd) or "(empty)"
         prompt = _EXTRACT_PROJECT_PROMPT.format(
@@ -1166,25 +1186,31 @@ def _try_extract_project(session_content: str, cwd: str,
         # would suppress legitimate re-extracts until the next session turn.
         if cancel_ev is not None and cancel_ev.is_set():
             _debug_log(f"[Memory] project extract cancelled post-LLM for {cwd!r} (discarding result)")
+            record_extract_outcome("project", "cancelled")
             return
         result = (result or "").strip()
         if not result or result.upper() == "UNCHANGED":
+            record_extract_outcome("project", "unchanged")
             return
         if not _is_useful_summary(result):
             _debug_log(f"[Memory] project extract rejected non-useful output for {cwd!r}")
+            record_extract_outcome("project", "rejected")
             return
         save_project_memory(cwd, result, extra_fm_pairs={
             "last_extracted_session_hash": _session_hash(session_content),
             "last_extracted_session_len":  str(len(session_content)),
         })
         _debug_log(f"[Memory] project layer auto-updated from session cascade ({len(result)} chars)")
+        record_extract_outcome("project", "success")
     except Exception as e:
         # P1-5: bubble up midflight cancellation so _coordinated can
         # bump the dedicated counter. Other exceptions stay quarantined.
         from larkhelm.ai_runner import QueryCancelledError
         if isinstance(e, QueryCancelledError):
+            record_extract_outcome("project", "cancelled")
             raise
         _debug_log(f"[Memory] extract_project error for {cwd!r}: {e}")
+        record_extract_outcome("project", "error")
 
 
 def _try_extract_global(session_content: str, chat_id: str,
@@ -1193,6 +1219,7 @@ def _try_extract_global(session_content: str, chat_id: str,
     try:
         if cancel_ev is not None and cancel_ev.is_set():
             _debug_log(f"[Memory] global extract cancelled before start for {chat_id[:8]}")
+            record_extract_outcome("global", "cancelled")
             return
         g_path = _global_memory_file(chat_id)
         if g_path is None:
@@ -1202,6 +1229,7 @@ def _try_extract_global(session_content: str, chat_id: str,
             _debug_log(
                 f"[Memory] global cascade shortcircuit (hash match) for {chat_id[:8]}"
             )
+            record_extract_outcome("global", "unchanged")
             return
         existing = _load_md_body(g_path) or "(empty)"
         prompt = _EXTRACT_GLOBAL_PROMPT.format(
@@ -1212,30 +1240,37 @@ def _try_extract_global(session_content: str, chat_id: str,
         ns = f"_glob_{chat_id[:8]}"
         if cancel_ev is not None and cancel_ev.is_set():
             _debug_log(f"[Memory] global extract cancelled pre-LLM for {chat_id[:8]}")
+            record_extract_outcome("global", "cancelled")
             return
         # Same reasoning as project extract (including post-LLM cancel re-check).
         result = _run_one_shot(prompt, ns=ns, prefer_cheap=True, cancel_ev=cancel_ev)
         if cancel_ev is not None and cancel_ev.is_set():
             _debug_log(f"[Memory] global extract cancelled post-LLM for {chat_id[:8]} (discarding result)")
+            record_extract_outcome("global", "cancelled")
             return
         result = (result or "").strip()
         if not result or result.upper() == "UNCHANGED":
+            record_extract_outcome("global", "unchanged")
             return
         if not _is_useful_summary(result):
             _debug_log(f"[Memory] global extract rejected non-useful output for {chat_id[:8]}")
+            record_extract_outcome("global", "rejected")
             return
         save_global_memory(result, chat_id=chat_id, extra_fm_pairs={
             "last_extracted_session_hash": _session_hash(session_content),
             "last_extracted_session_len":  str(len(session_content)),
         })
         _debug_log(f"[Memory] global layer auto-updated from session cascade ({len(result)} chars)")
+        record_extract_outcome("global", "success")
     except Exception as e:
         # P1-5: bubble up midflight cancellation so _coordinated can
         # bump the dedicated counter. Other exceptions stay quarantined.
         from larkhelm.ai_runner import QueryCancelledError
         if isinstance(e, QueryCancelledError):
+            record_extract_outcome("global", "cancelled")
             raise
         _debug_log(f"[Memory] extract_global error for {chat_id[:8]}: {e}")
+        record_extract_outcome("global", "error")
 
 
 def _cascade_extract(session_content: str, chat_id: str) -> None:
@@ -1409,9 +1444,21 @@ def maybe_auto_update(chat_id: str, force: bool = False,
             save_memory(chat_id, result[0])
             _notify(True, result[0], None)
 
-            # Cascade: auto-extract project and global facts from the fresh session summary.
-            # Runs in separate daemon threads — does not block the caller or the on_done callback.
-            _cascade_extract(result[0], chat_id)
+            # P2 REQ-06: route through ExtractBuffer so a burst of session
+            # updates within ``memory_extract_buffer_window_sec`` triggers
+            # exactly one cascade. window=0 (default) calls _cascade_extract
+            # synchronously → byte-compat with P1. The buffer is the
+            # *only* code path that invokes _cascade_extract now; tests
+            # pin this contract via test_buffer_disabled_byte_compatible.
+            try:
+                from larkhelm import memory_extract_buffer as _meb
+                _meb.record_session_update(chat_id, result[0])
+            except Exception as _eb_err:
+                # Fail-open: if the buffer machinery itself errors, fall
+                # back to the legacy direct cascade so we don't silently
+                # drop the update.
+                _debug_log(f"[Memory] extract buffer failed, falling back: {_eb_err}")
+                _cascade_extract(result[0], chat_id)
 
         except Exception as e:
             _debug_log(f"[Memory] maybe_auto_update error {chat_id}: {e}")

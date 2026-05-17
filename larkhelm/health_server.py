@@ -188,6 +188,23 @@ class HealthRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_metrics(self) -> None:
         snap = current_snapshot()
+
+        # P2 REQ-01 / AC-01: prefer the prometheus-client renderer; fall back
+        # to the legacy hand-written text path when the SDK is missing OR the
+        # operator forced ``metrics_text_legacy=true``. The fall-back path
+        # below is byte-compatible with master so existing scrapers keep
+        # parsing during a half-rolled-out deployment.
+        try:
+            from larkhelm import metrics as _met
+            _met.update_health_gauges(snap)
+            body = _met.render_exposition()
+            self._write_text(200, body)
+            return
+        except Exception:
+            # Either prometheus-client not installed, legacy flag set, or
+            # rendering blew up — fall through to the P1 text path.
+            pass
+
         lines: list[str] = []
         lines.append("# HELP larkhelm_backend_healthy 1 if backend is healthy else 0")
         lines.append("# TYPE larkhelm_backend_healthy gauge")

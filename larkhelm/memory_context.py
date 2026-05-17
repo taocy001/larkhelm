@@ -671,6 +671,20 @@ class MemoryContextBuilder:
             return True
 
     def _layer_global(self) -> str | None:
+        # P2 REQ-05.1: when the slot flag is on AND the file parses into
+        # one or more non-empty slots, render via memory_global_slots so
+        # the LLM prompt sees structured headings. Empty-slot dict + flag
+        # on still falls back to the legacy free-form body so a not-yet-
+        # migrated chat doesn't suddenly inject empty memory.
+        try:
+            from larkhelm import memory_global_slots as _mgs
+            if _mgs.is_enabled():
+                slots = _mgs.load_global_slots(self.chat_id)
+                rendered = _mgs.render_for_context(slots)
+                if rendered:
+                    return rendered
+        except Exception as e:
+            _debug_log(f"[Memory] _layer_global slot path failed (falling back): {e}")
         try:
             from larkhelm.memory import load_global_memory
             return load_global_memory(self.chat_id)
@@ -681,6 +695,19 @@ class MemoryContextBuilder:
     def _layer_project(self) -> str | None:
         if not self.cwd:
             return None
+        # P2 REQ-05.2: section-rendered body when the flag is on AND at
+        # least one section is populated; otherwise fall through to the
+        # legacy load_project_memory (which preserves cwd-mismatch
+        # checks).
+        try:
+            from larkhelm import memory_project_sections as _mps
+            if _mps.is_enabled():
+                sections = _mps.load_project_sections(self.cwd)
+                rendered = _mps.render_for_context(sections)
+                if rendered:
+                    return rendered
+        except Exception as e:
+            _debug_log(f"[Memory] _layer_project section path failed (falling back): {e}")
         try:
             from larkhelm.memory import load_project_memory
             return load_project_memory(self.cwd)
@@ -778,6 +805,34 @@ def _layer_session_smart(
     """
     if not slots or not slots.parsed:
         return slots.raw if slots else ""
+
+    # P2 REQ-07: when the smart-compress flag is on, pre-trim each section
+    # via smart_compress(query=...) BEFORE the existing smart_truncate
+    # priority degradation. smart_compress is deterministic and LLM-free;
+    # smart_truncate then enforces the final byte budget. Flag off → both
+    # paths fall through to the legacy truncation only.
+    try:
+        from larkhelm import memory_session_compress as _msc
+        if _msc.is_enabled():
+            new_work = _msc.smart_compress(slots.work_context or "",
+                                           _resolve_session_budgets(budgets)["work_context"],
+                                           query)
+            new_dec  = _msc.smart_compress(slots.decisions or "",
+                                           _resolve_session_budgets(budgets)["decisions"],
+                                           query)
+            new_hist = _msc.smart_compress(slots.history or "",
+                                           _resolve_session_budgets(budgets)["history"],
+                                           query)
+            # Re-pack into a fresh SessionSlots so downstream code keeps
+            # the same dataclass shape.
+            slots = SessionSlots(
+                raw=slots.raw, parsed=True,
+                work_context=new_work,
+                decisions=new_dec,
+                history=new_hist,
+            )
+    except Exception as e:
+        _debug_log(f"[Memory] smart_compress pre-trim failed (falling back): {e}")
 
     b = _resolve_session_budgets(budgets)
     # +3 per section to allow for the "…" / "\n…" ellipsis appended by

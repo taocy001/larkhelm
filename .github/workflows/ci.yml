@@ -52,29 +52,20 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e '.[dev]'
 
-      - name: Run pytest
+      - name: Run pytest (via make ci)
         # test_idle_timeout.py has a pre-existing hang under mock proc
-        # (see project memory). Excluded here to keep CI green until
-        # the underlying mock issue is fixed. Treat any other failure
-        # as a regression.
+        # (see project memory). The exclusion lives in scripts/check.sh
+        # so local ``make test`` and CI share the same surface.
         #
-        # The first CI run (commit 1b8cd48) failed on all 4 Python
-        # versions while a local fresh venv with the same install steps
-        # produced 1260 passed — the failure is GitHub-runner-specific.
-        # We run with -v so individual test names appear in the live
-        # log and tee the entire stream to a file uploaded as an
-        # artifact below; the artifact survives the job's `exit 1`
-        # so we can diagnose without admin log access.
+        # P2 REQ-11 / AC-07: ``make ci`` runs test+lint+type. We invoke
+        # it from CI directly so the local ``make all`` command is the
+        # authoritative entry point — a green local run implies green CI.
+        # ``--cov*`` flags are appended via ARGS so single-file local
+        # iteration doesn't trip the 55% floor; CI enforces it here.
         run: |
           set -o pipefail
-          # ``--cov*`` flags live here (not in pyproject ``addopts``) so
-          # developers running ``pytest tests/test_X.py`` for a single
-          # file don't have one-file coverage trip the 55% floor every
-          # time. CI enforces the gate on the full-suite run.
-          python -m pytest tests/ \
-            --ignore=tests/test_idle_timeout.py \
-            --cov=larkhelm --cov-report=term-missing --cov-fail-under=55 \
-            -v --tb=long 2>&1 | tee pytest-output.log
+          make test ARGS="--cov=larkhelm --cov-report=term-missing --cov-fail-under=55 -v --tb=long" \
+            2>&1 | tee pytest-output.log
 
       - name: Upload pytest output (on failure or success)
         if: always()
@@ -153,24 +144,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e '.[dev]'
 
-      - name: Mypy (strict modules only)
-        # The `[[tool.mypy.overrides]]` block in pyproject.toml marks
-        # 6 modules as strict: crew_types / dedup / concurrency / log /
-        # token_stats / chat_state. We verify those stay clean. The
-        # remaining 70+ modules currently have ~200 PEP 484 violations
-        # (mostly implicit-Optional); CI ratchets them up gradually
-        # rather than failing the build today.
-        #
-        # `--follow-imports=silent` scopes the strict check to only the
-        # six listed modules (otherwise mypy transitively checks every
-        # `import` target with the same strictness and explodes to
-        # 200+ errors). The targeted files re-state the override list
-        # because mypy needs to know exactly which sources to read.
-        run: |
-          python -m mypy --follow-imports=silent \
-            larkhelm/crew_types.py \
-            larkhelm/dedup.py \
-            larkhelm/concurrency.py \
-            larkhelm/log.py \
-            larkhelm/token_stats.py \
-            larkhelm/chat_state.py
+      - name: Mypy (via make type)
+        # P2 REQ-11 / AC-07: the strict-module list and ``--follow-imports``
+        # incantation live in ``scripts/check.sh`` so local ``make type``
+        # and CI share the same surface. See that script for the rationale
+        # on `--follow-imports=silent`.
+        run: make type
