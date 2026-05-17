@@ -1,10 +1,13 @@
 [build-system]
 # hatch-vcs (P2 AC-08) injects the wheel version from the git tag at build
-# time. At runtime, ``larkhelm/__init__.py`` falls back to
-# ``importlib.metadata.version('larkhelm')`` and finally to
-# ``"0.0.0+unknown"`` if no install metadata is available — so a missing
-# hatch-vcs in a stripped build env (e.g. third-party rebuild) degrades to a
-# valid but explicitly-unknown string instead of crashing import.
+# time. At runtime, ``larkhelm/__init__.py`` walks 4 tiers:
+#   1. ``larkhelm._version`` (hatch-vcs-generated, present after ``pip install -e .``)
+#   2. ``importlib.metadata.version('larkhelm')`` (installed package metadata)
+#   3. ``git describe --tags --always --dirty`` (source-tree checkout)
+#   4. ``"0.0.0+unknown"`` (no git, no install — vendored / tarball)
+# Tier 3 was added after independent P2 review caught that source-tree
+# runs without ``pip install`` skipped straight to tier 4. The new tier
+# also satisfies AC-08's ``\.dirty`` regex on a dirty working tree.
 requires = ["hatchling", "hatch-vcs>=0.4"]
 build-backend = "hatchling.build"
 

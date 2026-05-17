@@ -57,9 +57,14 @@ def test_release_tag_pattern_when_no_dirty_suffix():
     v = larkhelm.__version__
     # Strip optional ``+local`` (which hatch-vcs adds on dirty installs)
     base = v.split("+", 1)[0]
+    # The tier-3 git-describe fallback (see ``larkhelm/__init__.py``) returns
+    # ``0.0.0+gSHA`` on a clean source-tree run with no tag — base becomes
+    # ``"0.0.0"`` which historically slipped past the dev-marker set and
+    # falsely tripped the YYYY.X.Y assertion below. Recognise ``0.0.0`` as
+    # a non-release sentinel explicitly.
     has_dev_marker = (
         ".dev" in base or ".post" in base or ".dirty" in v or "rc" in base
-        or v == "0.0.0+unknown"
+        or v == "0.0.0+unknown" or base == "0.0.0"
     )
     if not has_dev_marker:
         # Treat as a clean release; year-based scheme starts at 2026.

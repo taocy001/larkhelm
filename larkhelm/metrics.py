@@ -28,9 +28,14 @@ from __future__ import annotations
 import threading
 from typing import TYPE_CHECKING, Any
 
-# ``safe_log`` is the project's never-raise diagnostic helper (see CLAUDE.md
-# §异常处理规范). Imported lazily inside the silent-except branches so a
-# circular import during very early startup can't break metric calls.
+# Module-level safe_log import: putting this inside the except handlers (as
+# the earlier version did) made the "never raise on metrics" contract worse
+# — every silent path would re-trigger the import on each miss, and an
+# ImportError (transient partial install / circular import) would propagate
+# OUT of the metric call. Loading once at module load time pays the import
+# cost up front and removes that failure surface. larkhelm.log has no
+# circular dependency on metrics, so this is safe.
+from larkhelm.log import safe_log
 
 if TYPE_CHECKING:
     from larkhelm.health_server import HealthSnapshot
@@ -255,7 +260,6 @@ def inc_cascade_extract(kind: str, outcome: str) -> None:
     try:
         reg.cascade_extract_total.labels(kind=kind, outcome=outcome).inc()
     except Exception as e:
-        from larkhelm.log import safe_log
         safe_log(f"[Metrics] inc_cascade_extract failed (kind={kind}, outcome={outcome}): {e}")
 
 
@@ -267,7 +271,6 @@ def observe_query_duration(seconds: float) -> None:
     try:
         reg.query_duration_seconds.observe(float(seconds))
     except Exception as e:
-        from larkhelm.log import safe_log
         safe_log(f"[Metrics] observe_query_duration failed (seconds={seconds!r}): {e}")
 
 
@@ -282,7 +285,6 @@ def inc_extract_buffer_flush(trigger: str) -> None:
     try:
         reg.extract_buffer_flushes_total.labels(trigger=trigger).inc()
     except Exception as e:
-        from larkhelm.log import safe_log
         safe_log(f"[Metrics] inc_extract_buffer_flush failed (trigger={trigger}): {e}")
 
 
@@ -326,7 +328,6 @@ def update_health_gauges(snapshot: "HealthSnapshot") -> None:
     except Exception as e:
         # Never raise on render path — a metrics bug must not 503 /metrics —
         # but log so silent gauge stalls don't go undiagnosed.
-        from larkhelm.log import safe_log
         safe_log(f"[Metrics] update_health_gauges failed: {e}")
 
 
@@ -351,7 +352,6 @@ def _maybe_inc_counter(counter: Any, snapshot_total: int) -> None:
         try:
             counter.inc(delta)
         except Exception as e:
-            from larkhelm.log import safe_log
             safe_log(f"[Metrics] _maybe_inc_counter failed (delta={delta}): {e}")
             return
     # On regression (delta < 0) we DON'T set the counter back — the next
