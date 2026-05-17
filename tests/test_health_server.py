@@ -106,13 +106,34 @@ def test_current_snapshot_returns_dataclass():
     assert callable(snap.is_healthy)
 
 
-def test_active_query_counter_increments():
+def test_active_query_counter_tracks_record_start_end():
+    """Wiring regression test.
+
+    P1 review caught that ``health_server.increment_active_query`` /
+    ``decrement_active_query`` were never called from production code,
+    so the ``/metrics`` ``larkhelm_active_queries`` gauge was permanently
+    flat-zero. The fix routes ``_get_active_queries`` through
+    ``_query_card_state.get_diagnostics`` — the SAME counter that both
+    legacy ``_do_query`` and ``QuerySession.run`` already write via
+    ``record_query_start`` / ``record_query_end``.
+
+    This test exercises that wiring end-to-end: drive the production
+    bookkeeping API and assert the metric reflects it.
+    """
+    from larkhelm.handlers._query_card_state import (
+        record_query_start, record_query_end,
+    )
     snap_a = health_server.current_snapshot()
-    health_server.increment_active_query()
-    snap_b = health_server.current_snapshot()
-    health_server.decrement_active_query()
+    record_query_start()
+    try:
+        snap_b = health_server.current_snapshot()
+        assert snap_b.active_queries == snap_a.active_queries + 1, (
+            "active_queries gauge did not see record_query_start — "
+            "metric is back to flat-zero (P1 review regression)"
+        )
+    finally:
+        record_query_end(elapsed_sec=0.0)
     snap_c = health_server.current_snapshot()
-    assert snap_b.active_queries == snap_a.active_queries + 1
     assert snap_c.active_queries == snap_a.active_queries
 
 

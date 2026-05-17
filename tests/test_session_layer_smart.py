@@ -89,29 +89,81 @@ def test_layer_session_smart_returns_raw_when_unparsed():
     assert out == "raw body"
 
 
-def test_layer_session_smart_priority_degradation_drops_history_first():
-    # All sections fully consume their budgets; total stays bounded by sum
-    # of budgets, so no degradation in the normal case. Force degradation
-    # by setting budgets that don't actually constrain individual sections,
-    # then verify drop order via a synthetic scenario.
+def test_layer_session_smart_priority_degradation_drops_history_first(monkeypatch):
+    """P1 review noted the priority-degradation branch was untested.
+
+    Under normal inputs the branch is dead code: ``smart_truncate`` honours
+    its budget (output ≤ budget + 1), and ``total_budget`` includes a +9
+    ellipsis slack, so the ``_current_total > total_budget`` check never
+    fires. To exercise the branch we monkey-patch ``smart_truncate`` to
+    return strings that exceed their budget — simulating a future helper
+    that doesn't clip — and assert sections are dropped in REVERSE priority
+    (``history`` first, then ``decisions``, finally ``work_context``)
+    until the total fits ``total_budget``.
+
+    This pins both the drop ORDER and the existence of the branch so a
+    future ``smart_truncate`` change that violates the budget contract
+    can't silently make the safety net disappear.
+    """
+    import larkhelm.memory_context as mc
+
+    # Each "truncated" section returns 80 chars. With budgets 50/40/30 →
+    # ``total_budget`` = sum + 9 = 129. Initial combined = 240 (> 129).
+    # Drop ``history`` → 160 (still > 129). Drop ``decisions`` → 80 (≤ 129)
+    # → stop. ``work_context`` (highest priority) must survive.
+    def _bloated_truncate(text, budget, *, slack_pct=0.15):
+        return "X" * 80
+    monkeypatch.setattr(mc, "smart_truncate", _bloated_truncate)
+
     slots = SessionSlots(
         work_context="W" * 100,
         history="H" * 100,
         decisions="D" * 100,
         raw="", parsed=True,
     )
-    # Total budget = sum(50,40,30)=120; each section 100 chars (no truncation
-    # because smart_truncate keeps strings <= budget). After "trim", total is 300.
-    # Budget priority drops history first → decisions → … until ≤ 120.
+    out = _layer_session_smart(
+        slots, query="decision",   # decision-flavoured → include_decisions=True
+        budgets={"work_context": 50, "decisions": 40, "history": 30},
+    )
+
+    assert "## Work Context" in out, (
+        "highest-priority section must survive the degradation cascade"
+    )
+    assert "## Next Steps" not in out, (
+        "history is lowest priority → dropped first"
+    )
+    assert "## Key Decisions" not in out, (
+        "decisions is second-lowest → dropped second"
+    )
+
+
+def test_layer_session_smart_degradation_drops_history_only_when_decisions_fit(
+    monkeypatch,
+):
+    """Drop-order regression: when dropping only ``history`` already brings
+    the total below ``total_budget``, ``decisions`` must NOT be dropped."""
+    import larkhelm.memory_context as mc
+
+    # Make each "truncated" output exactly 60 chars. With budgets 50/40/30
+    # → total_budget=129; combined = 60+60+60 = 180 (> 129). After dropping
+    # ``history`` (60), combined = 120 (≤ 129) → stop. decisions stays.
+    def _moderate_truncate(text, budget, *, slack_pct=0.15):
+        return "Y" * 60
+    monkeypatch.setattr(mc, "smart_truncate", _moderate_truncate)
+
+    slots = SessionSlots(
+        work_context="W" * 100, history="H" * 100, decisions="D" * 100,
+        raw="", parsed=True,
+    )
     out = _layer_session_smart(
         slots, query="decision",
-        budgets={"work_context": 200, "decisions": 200, "history": 200},
+        budgets={"work_context": 50, "decisions": 40, "history": 30},
     )
-    # With 200 budgets each, none gets truncated and total = 300+overhead; that
-    # fits within sum=600 budget — so all three sections present.
     assert "## Work Context" in out
-    assert "## Key Decisions" in out
-    assert "## Next Steps" in out
+    assert "## Key Decisions" in out, (
+        "decisions section was dropped despite history alone freeing enough budget"
+    )
+    assert "## Next Steps" not in out, "history is the lowest priority and should drop"
 
 
 def test_layer_session_smart_empty_sections_yield_raw():

@@ -429,6 +429,14 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
 
     lock_released = False   # Set to True when the soft-timeout releases the lock early, preventing double-release in finally
 
+    # ``start`` is captured BEFORE record_query_start so the finally block's
+    # ``time.time() - start`` is never UnboundLocal — even if
+    # ``record_query_start`` itself raises. (P1 review regression: previously
+    # ``start = time.time()`` lived inside the outer try, so any exception
+    # before that line would crash the finally's elapsed-time math AND leak
+    # the ``_DIAG_ACTIVE`` increment that record_query_start had just done.)
+    start = time.time()
+
     # P1-3: bump the diagnostic active counter so /metrics surfaces it.
     try:
         from larkhelm.handlers._query_card_state import record_query_start
@@ -438,7 +446,6 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
 
     try:
         cwd = _get_cwd(chat_id)
-        start = time.time()
 
         # Resolve backend early (pure registry lookup, no network) so the initial card
         # shows the correct model name instead of the legacy default_model value.

@@ -152,13 +152,16 @@ class QuerySession:
             "claude": "Claude", "gemini": "Gemini", "kimi": "Kimi", "deepseek": "DeepSeek",
         }.get(self.model, self.model.capitalize())
         try:
+            # ``resolve_backend`` reads BACKEND_REGISTRY internally — we don't
+            # need to import it again here. The earlier
+            # ``from larkhelm.backend_registry import BACKEND_REGISTRY as _registry``
+            # was unused dead weight ("mirror legacy import order" was a
+            # cargo-cult justification flagged by P1 review).
             from larkhelm.router import resolve_backend as _resolve
-            from larkhelm.backend_registry import BACKEND_REGISTRY as _registry
             has_docs = bool(_query_pure.extract_feishu_urls(self.message))
             spec = _resolve(self.chat_id, self.message, bool(self.images), has_docs,
                             self.force_backend_id)
             self.m_name = spec.display_name
-            del _registry  # silence linter; only used to mirror legacy import order
         except Exception:
             pass
 

@@ -135,6 +135,19 @@ cd larkhelm
 | `mcp_config_file` | MCP 配置文件路径（可选） | — |
 | `timezone` | 定时任务时区 | `Asia/Shanghai` |
 
+> **P1 迭代默认变更**（v0.8）：
+> - `memory_session_layer_smart=true` —— session 记忆三段（工作上下文 / 决策 /
+>   历史）现在分别做语义 truncate，并在总预算紧张时按优先级降级（drop history → decisions → work_context）；
+>   行为差异肉眼可见但内容含义不变。如需回滚到旧的整段 `[:budget]` 截断，
+>   设为 `false`。
+> - `memory_cascade_midflight_cancel=true` —— 级联抽取在流式 LLM 调用进行中
+>   也会响应 `cancel_ev`，避免 60s 超时后 daemon 线程继续花 token。回滚设为 `false`。
+> - `health_endpoint_port=0`（默认禁用）—— 开启后 stdlib HTTP server 暴露
+>   `/health` / `/ready` / `/metrics`（Prometheus 纯文本），绑 `127.0.0.1`，
+>   常用值 `8080`。
+> - `query_session_v2_enabled=false` —— `_do_query` 的 `QuerySession` 类化
+>   重构灰度开关；默认关，启用前请先观察 1 周。
+
 ### 启用语音功能
 
 LarkHelm 支持将飞书语音消息转写为文字，转写结果作为普通查询发送给 AI。提供两个引擎，**根据机器实力选择**：

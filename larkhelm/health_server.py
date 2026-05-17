@@ -49,27 +49,23 @@ class HealthSnapshot:
         )
 
 
-# ── Active-query counter (process-wide) ─────────────────────────────────
-_active_query_count = 0
-_active_query_lock = threading.Lock()
-
-
-def increment_active_query() -> None:
-    global _active_query_count
-    with _active_query_lock:
-        _active_query_count += 1
-
-
-def decrement_active_query() -> None:
-    global _active_query_count
-    with _active_query_lock:
-        if _active_query_count > 0:
-            _active_query_count -= 1
-
-
+# ── Active-query counter ────────────────────────────────────────────────
+#
+# Single source of truth: ``_query_card_state._DIAG_ACTIVE``, mutated by
+# ``record_query_start`` / ``record_query_end`` which BOTH legacy
+# ``_do_query`` and ``QuerySession.run`` already call (see
+# ``_query.py:435/938`` and ``_query_session.py:97/140``). The earlier
+# ``increment_active_query`` / ``decrement_active_query`` pair lived here
+# but was never wired to production code — independent P1 review caught
+# that ``/metrics``'s ``larkhelm_active_queries`` gauge was permanently
+# flat-zero. Routing the read through ``get_diagnostics()`` removes the
+# second counter entirely so the metric reflects reality.
 def _get_active_queries() -> int:
-    with _active_query_lock:
-        return _active_query_count
+    try:
+        from larkhelm.handlers._query_card_state import get_diagnostics
+        return int(get_diagnostics().get("active_queries", 0))
+    except Exception:
+        return 0
 
 
 # ── Snapshot collector ──────────────────────────────────────────────────
@@ -326,8 +322,6 @@ __all__ = [
     "HealthRequestHandler",
     "start_health_server",
     "stop_health_server",
-    "increment_active_query",
-    "decrement_active_query",
     "current_snapshot",
     "is_running",
 ]
