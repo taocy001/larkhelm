@@ -394,14 +394,27 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 color="orange",
                 buttons=[("❌ 取消排队", f"cancel_queue:{chat_id}")]
             )
-            if existing_mid:
-                _patch_card_raw(existing_mid, crew_queue_card)
-            else:
-                if user_msg_id:
-                    _mid = _reply_card_raw(user_msg_id, crew_queue_card, in_thread=False)
+            # Pending state is already written; if card emission fails
+            # (Feishu 5xx / network), the user has no visible queue card
+            # AND no way to cancel — roll back so the next message can
+            # re-queue cleanly. Same fix lives in QuerySession (P1 round-3
+            # follow-up); kept in sync here.
+            try:
+                if existing_mid:
+                    _patch_card_raw(existing_mid, crew_queue_card)
                 else:
-                    _mid = _send_card_raw(chat_id, crew_queue_card)
-                _update_pending_card_mid(chat_id, _mid)
+                    if user_msg_id:
+                        _mid = _reply_card_raw(user_msg_id, crew_queue_card, in_thread=False)
+                    else:
+                        _mid = _send_card_raw(chat_id, crew_queue_card)
+                    _update_pending_card_mid(chat_id, _mid)
+            except Exception as _card_err:
+                _debug_log(
+                    f"[DoQuery] queue card emission failed, rolling back "
+                    f"pending state: {_card_err}"
+                )
+                _pop_pending(chat_id)
+                return
 
             # subscribe_crew_done is race-safe: if crew ended between is_crew_running
             # and here, it returns a pre-set event so the watcher fires immediately.
@@ -434,14 +447,24 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             color="orange",
             buttons=[("❌ 取消排队", f"cancel_queue:{chat_id}")]
         )
-        if existing_mid:
-            _patch_card_raw(existing_mid, queue_card)
-        else:
-            if user_msg_id:
-                mid = _reply_card_raw(user_msg_id, queue_card, in_thread=False)
+        # Same pending-rollback pattern as the crew-queue branch above:
+        # if card emission fails, the user has no visible queue indicator
+        # and no cancel button → roll back so the next message can re-queue.
+        try:
+            if existing_mid:
+                _patch_card_raw(existing_mid, queue_card)
             else:
-                mid = _send_card_raw(chat_id, queue_card)
-            _update_pending_card_mid(chat_id, mid)
+                if user_msg_id:
+                    mid = _reply_card_raw(user_msg_id, queue_card, in_thread=False)
+                else:
+                    mid = _send_card_raw(chat_id, queue_card)
+                _update_pending_card_mid(chat_id, mid)
+        except Exception as _card_err:
+            _debug_log(
+                f"[{trace_id}][DoQuery] queue card emission failed, rolling back "
+                f"pending state: {_card_err}"
+            )
+            _pop_pending(chat_id)
         return
 
     _eyes_reaction_id: list[str | None] = [None]

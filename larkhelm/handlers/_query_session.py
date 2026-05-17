@@ -495,10 +495,18 @@ class QuerySession:
             self.eyes_reaction_id = None
 
     def on_error(self, err: Exception) -> None:
-        assert self.card_state is not None
+        # ``card_state`` may legitimately be None when the exception fires
+        # *before* ``run()`` reaches the ``QueryCardState(...)`` assignment
+        # at line 113 (e.g. ``_resolve_initial_model`` / ``emit_init_card``
+        # raised). Round-3 review flagged that the previous ``assert
+        # card_state is not None`` would itself raise AssertionError in
+        # that narrow window, leaving the user staring at a stuck init card
+        # with no error feedback. Gracefully skip the heartbeat-stop path
+        # in that case — there's nothing to flush.
         self.stop_hb.set()
-        with self.card_state.card_patch_lock:
-            pass
+        if self.card_state is not None:
+            with self.card_state.card_patch_lock:
+                pass
         import sys
         print(traceback.format_exc(), file=sys.stderr)
         _debug_log(
@@ -560,14 +568,27 @@ class QuerySession:
             color="orange",
             buttons=[("❌ 取消排队", f"cancel_queue:{self.chat_id}")],
         )
-        if existing_mid:
-            _patch_card_raw(existing_mid, card)
-        else:
-            if self.user_msg_id:
-                mid = _reply_card_raw(self.user_msg_id, card, in_thread=False)
+        # Pending state is already written; if card emission fails (Feishu
+        # 5xx, network), the user has no visible queue indicator AND no way
+        # to cancel — but the watcher above is waiting on the pending slot.
+        # Roll back so the next message can re-queue cleanly. Round-3
+        # review flagged this pre-existing leak.
+        try:
+            if existing_mid:
+                _patch_card_raw(existing_mid, card)
             else:
-                mid = _send_card_raw(self.chat_id, card)
-            _update_pending_card_mid(self.chat_id, mid)
+                if self.user_msg_id:
+                    mid = _reply_card_raw(self.user_msg_id, card, in_thread=False)
+                else:
+                    mid = _send_card_raw(self.chat_id, card)
+                _update_pending_card_mid(self.chat_id, mid)
+        except Exception as _card_err:
+            _debug_log(
+                f"[QuerySession] queue card emission failed, rolling back "
+                f"pending state: {_card_err}"
+            )
+            _pop_pending(self.chat_id)
+            return False
 
         try:
             from larkhelm.crew._state import subscribe_crew_done as _sub
@@ -601,14 +622,24 @@ class QuerySession:
             color="orange",
             buttons=[("❌ 取消排队", f"cancel_queue:{self.chat_id}")],
         )
-        if existing_mid:
-            _patch_card_raw(existing_mid, card)
-        else:
-            if self.user_msg_id:
-                mid = _reply_card_raw(self.user_msg_id, card, in_thread=False)
+        # Same rollback pattern as ``_maybe_queue_behind_crew`` — pending
+        # state is already written, so if card emission fails we leak a
+        # ghost queue entry with no consumer. Roll back on failure.
+        try:
+            if existing_mid:
+                _patch_card_raw(existing_mid, card)
             else:
-                mid = _send_card_raw(self.chat_id, card)
-            _update_pending_card_mid(self.chat_id, mid)
+                if self.user_msg_id:
+                    mid = _reply_card_raw(self.user_msg_id, card, in_thread=False)
+                else:
+                    mid = _send_card_raw(self.chat_id, card)
+                _update_pending_card_mid(self.chat_id, mid)
+        except Exception as _card_err:
+            _debug_log(
+                f"[QuerySession] queue card emission failed, rolling back "
+                f"pending state: {_card_err}"
+            )
+            _pop_pending(self.chat_id)
 
     def _inject_parent_context(self) -> None:
         if not self.parent_id:

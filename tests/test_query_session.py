@@ -147,12 +147,81 @@ def test_on_error_emits_error_card(monkeypatch):
     assert "错误" in captured.get("title", "")
 
 
+def test_on_error_handles_none_card_state(monkeypatch):
+    """Regression for round-3 NICE-TO-HAVE.
+
+    When ``QuerySession.run()`` raises BEFORE line 113 (where ``card_state``
+    is assigned) — e.g. ``_resolve_initial_model`` / ``emit_init_card``
+    raised — the old ``assert self.card_state is not None`` at the top
+    of ``on_error`` itself raised AssertionError, leaving the user with
+    a stuck init card and no error feedback.
+
+    Fixed by gracefully skipping the heartbeat-flush path when
+    ``card_state is None`` (nothing to flush). The error card itself
+    still gets emitted via ``reply_card``.
+    """
+    qs = QuerySession(chat_id="c1", message="hi", model="claude")
+    qs.start_time = time.time()
+    qs.mid = "mid-1"
+    qs.card_state = None   # ← the bug scenario: card_state never got assigned
+    captured = {}
+    monkeypatch.setattr(
+        "larkhelm.handlers._query_session.reply_card",
+        lambda chat_id, mid, title, body, color="red", note="": captured.update(
+            {"title": title, "color": color, "body": body},
+        ),
+    )
+    monkeypatch.setattr("larkhelm.handlers._query_session.log_entry", lambda *a, **kw: None)
+    # Must not raise AssertionError; must still surface the error to user.
+    qs.on_error(RuntimeError("v2 raised before card_state set"))
+    assert captured.get("color") == "red"
+    assert "错误" in captured.get("title", "")
+
+
 def test_run_v2_flag_off_no_op(monkeypatch, tmp_path):
     """When the v2 flag is off, _do_query won't call QuerySession.run."""
     import larkhelm.config as _cfg
     _cfg.config = {"query_session_v2_enabled": False}
     # Just verify the flag check is the gating point.
     assert not _cfg.config.get("query_session_v2_enabled")
+
+
+def test_queue_behind_running_query_rolls_back_pending_on_card_failure(monkeypatch):
+    """Regression for round-3 NICE-TO-HAVE pending-leak.
+
+    ``_queue_behind_running_query`` writes the pending slot FIRST, then
+    emits a Feishu card. If the card emission fails (5xx, network), the
+    pending state remained set with no consumer — the next user message
+    couldn't re-queue cleanly. Fix: catch + ``_pop_pending`` on rollback.
+    """
+    from larkhelm.concurrency import _pop_pending, _pending_msg
+    # Make sure no leftover state from earlier tests
+    _pop_pending("c_rollback")
+
+    qs = QuerySession(chat_id="c_rollback", message="hi", model="claude",
+                      user_msg_id="msg-abc")
+
+    def _boom_card(*a, **kw):
+        raise RuntimeError("Feishu 503 simulated")
+
+    monkeypatch.setattr(
+        "larkhelm.handlers._query_session._reply_card_raw", _boom_card,
+    )
+    monkeypatch.setattr(
+        "larkhelm.handlers._query_session._send_card_raw", _boom_card,
+    )
+    monkeypatch.setattr(
+        "larkhelm.handlers._query_session._patch_card_raw", _boom_card,
+    )
+
+    # Must not raise; the function silently rolls back.
+    qs._queue_behind_running_query()
+
+    # Pending slot must NOT remain set after a failed card emission.
+    assert "c_rollback" not in _pending_msg, (
+        "pending slot leaked after card emission failure — next message "
+        "will see a ghost queue with no consumer"
+    )
 
 
 def test_do_query_v2_raise_does_not_fall_back_to_legacy(monkeypatch):
