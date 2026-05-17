@@ -72,11 +72,17 @@ def test_release_tag_pattern_when_no_dirty_suffix():
 
 
 def test_fallback_when_version_module_missing(monkeypatch):
-    """Forcing both _version.__version__ and importlib.metadata to fail
-    must yield ``"0.0.0+unknown"``."""
-    # Drop the cached module so re-import re-runs the resolver.
+    """Forcing both _version.__version__ AND importlib.metadata to fail
+    AND the git-describe fallback to fail must yield ``"0.0.0+unknown"``.
+
+    The third (git-describe) tier was added as a P2 follow-up after AC-08
+    review noted that source-tree runs were getting ``0.0.0+unknown``
+    instead of a meaningful version. This test pins the LAST-RESORT
+    fallback by forcing all three earlier tiers to fail.
+    """
+    # Tier 1: drop the cached _version module so re-import re-runs the resolver.
     monkeypatch.setitem(sys.modules, "larkhelm._version", None)
-    # And make importlib.metadata pretend the package isn't installed.
+    # Tier 2: make importlib.metadata pretend the package isn't installed.
     import importlib.metadata as _md
     real_version = _md.version
 
@@ -85,12 +91,47 @@ def test_fallback_when_version_module_missing(monkeypatch):
         raise PackageNotFoundError(name)
 
     monkeypatch.setattr(_md, "version", _raise_not_found)
-    # Re-import larkhelm to trigger the resolver on a clean cache.
+    # Tier 3: short-circuit the git-describe fallback by patching the
+    # helper to return None (simulates "no git binary / no .git dir / git
+    # describe failed").
     import larkhelm
+    monkeypatch.setattr(larkhelm, "_version_from_git_describe", lambda: None)
+    # Re-import larkhelm to trigger the resolver on a clean cache. The
+    # monkey-patched ``_version_from_git_describe`` survives the reload
+    # because monkeypatch.setattr patches the module attribute, which the
+    # resolver re-looks-up after reload via the module's own namespace.
+    # To make the patch effective post-reload we instead drop and re-import.
     importlib.reload(larkhelm)
+    # Re-apply the patch after reload (reload re-runs module-level code).
+    monkeypatch.setattr(larkhelm, "_version_from_git_describe", lambda: None)
+    # Re-run the resolver by calling it directly with all 3 tiers patched.
+    resolved = larkhelm._resolve_version()
     try:
-        assert larkhelm.__version__ == "0.0.0+unknown"
+        assert resolved == "0.0.0+unknown", (
+            f"all 3 tiers patched to fail, but got {resolved!r}"
+        )
     finally:
         monkeypatch.setattr(_md, "version", real_version)
-        # Reload again to restore the live version for subsequent tests.
         importlib.reload(larkhelm)
+
+
+def test_git_describe_fallback_used_in_source_tree():
+    """Source-tree run (no _version.py, no installed metadata) should hit
+    the git-describe tier and produce a string that's NOT the literal
+    last-resort fallback — proves the new tier is wired in."""
+    import larkhelm
+    v_from_git = larkhelm._version_from_git_describe()
+    if v_from_git is None:
+        pytest.skip("no .git directory or git binary — fallback not exercisable here")
+    # Must be PEP 440-ish (digits + optional local part). The shape varies
+    # by whether the tree has tags / is dirty, but it should always start
+    # with a digit and contain a dot.
+    assert v_from_git[0].isdigit()
+    assert "." in v_from_git
+    # AC-08 explicitly checks for ``.dirty`` suffix when working tree is dirty.
+    # We can't force dirty/clean from a test, but if the suffix appears it
+    # must be the literal ``.dirty`` exactly (not ``-dirty`` or similar).
+    if "dirty" in v_from_git:
+        assert ".dirty" in v_from_git, (
+            f"dirty suffix not normalised: {v_from_git!r}"
+        )

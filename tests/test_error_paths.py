@@ -39,7 +39,7 @@ def isolated_state(monkeypatch, tmp_path: Path):
 # ── 1) Disk full → ENOSPC ────────────────────────────────────────────────
 
 
-def test_state_save_handles_enospc(monkeypatch, isolated_state):
+def test_disk_full(monkeypatch, isolated_state):
     import larkhelm.chat_state as _cs
 
     def _fake_write_text(self, *a, **kw):
@@ -54,7 +54,7 @@ def test_state_save_handles_enospc(monkeypatch, isolated_state):
 # ── 2) Permission denied on state file ───────────────────────────────────
 
 
-def test_state_save_handles_permission_error(monkeypatch, isolated_state):
+def test_permission_denied(monkeypatch, isolated_state):
     import larkhelm.chat_state as _cs
 
     def _raise_perm(*a, **kw):
@@ -67,7 +67,7 @@ def test_state_save_handles_permission_error(monkeypatch, isolated_state):
 # ── 3) Corrupt state.json → _load_global_state returns gracefully ────────
 
 
-def test_load_global_state_handles_corrupt_json(isolated_state):
+def test_json_decode(isolated_state):
     import larkhelm.chat_state as _cs
     isolated_state.write_text("{not valid json")
     _cs._load_global_state()
@@ -80,7 +80,7 @@ def test_load_global_state_handles_corrupt_json(isolated_state):
 # ── 4) Subprocess SIGKILL — fake the subprocess wait ─────────────────────
 
 
-def test_runner_base_handles_sigkilled_subprocess(monkeypatch):
+def test_subprocess_killed(monkeypatch):
     """When proc.kill() raises (e.g. process already gone), the runner's
     silent-cleanup paths must not propagate.
     """
@@ -119,7 +119,7 @@ def test_runner_base_handles_sigkilled_subprocess(monkeypatch):
 # ── 5) Concurrent writes to state.json (10 threads × 50 writes) ──────────
 
 
-def test_concurrent_state_writes_consistency(isolated_state):
+def test_concurrent_state_write(isolated_state):
     """10 threads, 50 writes each, all keys eventually visible."""
     import larkhelm.chat_state as _cs
 

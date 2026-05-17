@@ -28,6 +28,10 @@ from __future__ import annotations
 import threading
 from typing import TYPE_CHECKING, Any
 
+# ``safe_log`` is the project's never-raise diagnostic helper (see CLAUDE.md
+# §异常处理规范). Imported lazily inside the silent-except branches so a
+# circular import during very early startup can't break metric calls.
+
 if TYPE_CHECKING:
     from larkhelm.health_server import HealthSnapshot
 
@@ -250,8 +254,9 @@ def inc_cascade_extract(kind: str, outcome: str) -> None:
         return
     try:
         reg.cascade_extract_total.labels(kind=kind, outcome=outcome).inc()
-    except Exception:
-        pass
+    except Exception as e:
+        from larkhelm.log import safe_log
+        safe_log(f"[Metrics] inc_cascade_extract failed (kind={kind}, outcome={outcome}): {e}")
 
 
 def observe_query_duration(seconds: float) -> None:
@@ -261,8 +266,9 @@ def observe_query_duration(seconds: float) -> None:
         return
     try:
         reg.query_duration_seconds.observe(float(seconds))
-    except Exception:
-        pass
+    except Exception as e:
+        from larkhelm.log import safe_log
+        safe_log(f"[Metrics] observe_query_duration failed (seconds={seconds!r}): {e}")
 
 
 def inc_extract_buffer_flush(trigger: str) -> None:
@@ -275,8 +281,9 @@ def inc_extract_buffer_flush(trigger: str) -> None:
         return
     try:
         reg.extract_buffer_flushes_total.labels(trigger=trigger).inc()
-    except Exception:
-        pass
+    except Exception as e:
+        from larkhelm.log import safe_log
+        safe_log(f"[Metrics] inc_extract_buffer_flush failed (trigger={trigger}): {e}")
 
 
 def update_health_gauges(snapshot: "HealthSnapshot") -> None:
@@ -316,9 +323,11 @@ def update_health_gauges(snapshot: "HealthSnapshot") -> None:
                 reg.cascade_midflight_cancelled_total,
                 snapshot.cascade_midflight_cancelled_total,
             )
-    except Exception:
-        # Never raise on render path — a metrics bug must not 503 /metrics.
-        pass
+    except Exception as e:
+        # Never raise on render path — a metrics bug must not 503 /metrics —
+        # but log so silent gauge stalls don't go undiagnosed.
+        from larkhelm.log import safe_log
+        safe_log(f"[Metrics] update_health_gauges failed: {e}")
 
 
 # Per-counter watermark for the snapshot → Counter bridge above. Counters
@@ -341,7 +350,9 @@ def _maybe_inc_counter(counter: Any, snapshot_total: int) -> None:
     if delta > 0:
         try:
             counter.inc(delta)
-        except Exception:
+        except Exception as e:
+            from larkhelm.log import safe_log
+            safe_log(f"[Metrics] _maybe_inc_counter failed (delta={delta}): {e}")
             return
     # On regression (delta < 0) we DON'T set the counter back — the next
     # increase from this lower floor will simply add the diff above ``prev``
