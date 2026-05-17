@@ -342,19 +342,40 @@ def _post_query_memory_hook(chat_id: str, trace_id: str) -> None:
 def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
               images: list = None, parent_id: str | None = None,
               force_backend_id: str | None = None):
-    # P1-1 PR2: opt-in dispatch to the QuerySession rewrite. Default OFF
-    # so existing behaviour is byte-identical until the flag flips.
-    try:
-        if _cfg.config.get("query_session_v2_enabled"):
+    # P1-1 PR2: opt-in dispatch to the QuerySession rewrite. Default OFF so
+    # existing behaviour is byte-identical until the flag flips.
+    #
+    # Fallback semantics (P1 round-2 review): the only SAFE fall-back to
+    # legacy is when v2 hasn't committed any side effect yet — i.e. import
+    # or construction failed. Once ``QuerySession.run()`` is entered, IT
+    # owns the request: its internal try/except catches QueryCancelled /
+    # Timeout / Exception and surfaces them via on_cancel / on_timeout /
+    # on_error. Anything that *still* escapes is a v2 bug in unknown state
+    # — falling back to legacy at that point would acquire the chat lock
+    # a second time, emit a second init card, and run the LLM again. So we
+    # log the escape and return: fail loud, never double-process.
+    if _cfg.config.get("query_session_v2_enabled"):
+        try:
             from larkhelm.handlers._query_session import QuerySession
-            QuerySession(
+            _session = QuerySession(
                 chat_id=chat_id, message=message, model=model,
                 user_msg_id=user_msg_id, images=images,
                 parent_id=parent_id, force_backend_id=force_backend_id,
-            ).run()
-            return
-    except Exception as _v2_err:
-        _debug_log(f"[DoQuery] QuerySession v2 dispatch failed, falling back: {_v2_err}")
+            )
+        except Exception as _v2_setup_err:
+            # Pre-side-effect failure (import / __init__) → legacy fallback is safe.
+            _debug_log(
+                f"[DoQuery] QuerySession setup failed, using legacy: {_v2_setup_err}"
+            )
+        else:
+            try:
+                _session.run()
+            except Exception as _v2_run_err:
+                _debug_log(
+                    f"[DoQuery] QuerySession v2 raised post-setup; "
+                    f"NOT falling back to avoid double-processing: {_v2_run_err}"
+                )
+            return   # v2 owned this request — success or failure.
 
     trace_id = uuid.uuid4().hex[:12]
 
@@ -429,12 +450,13 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
 
     lock_released = False   # Set to True when the soft-timeout releases the lock early, preventing double-release in finally
 
-    # ``start`` is captured BEFORE record_query_start so the finally block's
-    # ``time.time() - start`` is never UnboundLocal — even if
-    # ``record_query_start`` itself raises. (P1 review regression: previously
-    # ``start = time.time()`` lived inside the outer try, so any exception
-    # before that line would crash the finally's elapsed-time math AND leak
-    # the ``_DIAG_ACTIVE`` increment that record_query_start had just done.)
+    # ``start`` is captured BEFORE the outer try so the finally block's
+    # ``time.time() - start`` is never UnboundLocal. Previously this line
+    # lived inside the try (`_get_cwd` could raise), so an exception there
+    # would crash the finally's elapsed-time math even though
+    # ``record_query_start`` (which IS try/except-wrapped) had already run.
+    # Hoisting the assignment also keeps semantics with the new
+    # ``QuerySession.run`` parity fix (see _query_session.py:97).
     start = time.time()
 
     # P1-3: bump the diagnostic active counter so /metrics surfaces it.

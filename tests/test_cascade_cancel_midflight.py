@@ -107,6 +107,72 @@ def test_cascade_midflight_counter_increments_via_extract(monkeypatch):
         _mem._try_extract_project(fake_session, "/tmp/some/path", cancel_ev=cancel_ev)
 
 
+def test_run_one_shot_does_not_fall_back_after_midflight_cancel(monkeypatch):
+    """Regression for round-2 review MUST-FIX (memory.py:833).
+
+    Bug: ``_run_one_shot``'s broad ``except Exception as cheap_err:``
+    swallowed ``QueryCancelledError`` raised by the midflight check and
+    routed the request to the orchestrator fallback path — defeating
+    P1-5's whole purpose (stop burning tokens after cancel).
+
+    Previous tests passed only because they returned the SAME spec for
+    ``get_by_tag(["cheap"])`` and ``get_orchestrator``; the id-collision
+    guard ``orch_spec.id == cheap_spec.id`` at line 854 re-raised. In
+    production with DISTINCT cheap and orchestrator backends, cancel
+    silently flipped to a fresh LLM call.
+
+    This test uses distinct specs and asserts:
+      • ``QueryCancelledError`` propagates from ``_run_one_shot``.
+      • The orchestrator dispatch is NEVER invoked after cancel.
+    """
+    import larkhelm.config as _cfg
+    _cfg.config = {"memory_cascade_midflight_cancel": True}
+
+    cancel_ev = threading.Event()
+    dispatch_calls: list[str] = []
+
+    def fake_dispatch(spec, ns, prompt, on_text):
+        dispatch_calls.append(spec.id)
+        # Simulate the cheap LLM emitting one chunk, then user/system
+        # cancel arriving before chunk 2. The midflight callback then
+        # raises QueryCancelledError when on_text is called.
+        cancel_ev.set()
+        on_text("partial chunk", "typing")
+        return "should-not-be-reached"
+
+    class CheapSpec:
+        id = "cheap-distinct"
+        provider = "deepseek_api"
+
+    class OrchSpec:
+        id = "orch-distinct"          # ← distinct from CheapSpec
+        provider = "anthropic_api"
+
+    class FakeRegistry:
+        def get_by_tag(self, tags):
+            return CheapSpec()
+        def get_orchestrator(self):
+            return OrchSpec()
+
+    monkeypatch.setattr(_mem, "_dispatch_one_shot", fake_dispatch)
+    monkeypatch.setattr(
+        "larkhelm.backend_registry.BACKEND_REGISTRY", FakeRegistry(),
+    )
+
+    with pytest.raises(QueryCancelledError):
+        _mem._run_one_shot(
+            prompt="anything", ns="t/ns",
+            prefer_cheap=True, cancel_ev=cancel_ev,
+        )
+
+    # Only the cheap backend got called — orchestrator must NOT be invoked
+    # after cancel. This is the bug round-2 review caught.
+    assert dispatch_calls == ["cheap-distinct"], (
+        f"orchestrator was invoked after cancel (calls={dispatch_calls}) — "
+        f"P1-5 midflight cancel is being silently undone by the fallback path"
+    )
+
+
 def test_cascade_no_write_when_cancelled_midflight(monkeypatch):
     """When midflight cancel fires, save_project_memory must NOT be called."""
     import larkhelm.config as _cfg

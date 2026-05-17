@@ -94,10 +94,19 @@ class QuerySession:
         if self.user_msg_id:
             self.eyes_reaction_id = react_to_message(self.user_msg_id, EMOJI_PROCESSING)
 
-        record_query_start()
+        # Capture start_time BEFORE record_query_start so a raise inside the
+        # diagnostic counter can't leave ``self.start_time`` unset (mirrors
+        # legacy ``_query.py`` after its UnboundLocal fix). Wrap the counter
+        # call itself in try/except so the bookkeeping API failing never
+        # aborts the whole query — same defensive posture as legacy.
+        self.start_time = time.time()
+        try:
+            record_query_start()
+        except Exception as _diag_err:
+            _debug_log(f"[QuerySession] record_query_start raised: {_diag_err}")
+
         try:
             cwd = _get_cwd(self.chat_id)
-            self.start_time = time.time()
             self._resolve_initial_model()
             self.mid = self.emit_init_card(cwd)
 

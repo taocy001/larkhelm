@@ -153,3 +153,106 @@ def test_run_v2_flag_off_no_op(monkeypatch, tmp_path):
     _cfg.config = {"query_session_v2_enabled": False}
     # Just verify the flag check is the gating point.
     assert not _cfg.config.get("query_session_v2_enabled")
+
+
+def test_do_query_v2_raise_does_not_fall_back_to_legacy(monkeypatch):
+    """Regression for round-2 review MUST-FIX (_query.py:347-357).
+
+    Bug: when ``query_session_v2_enabled=true`` and ``QuerySession.run()``
+    raised AFTER acquiring side effects (chat_lock / init card / heartbeat),
+    the catch-all ``except Exception`` fell through to the legacy
+    ``_do_query`` body, which would re-acquire the lock and emit a SECOND
+    init card + run the LLM AGAIN — double-processing the same query.
+
+    Fix narrowed the fallback to setup-time failures (import / __init__):
+    once ``run()`` is entered, v2 OWNS the request — any raise is logged
+    and we return, never re-entering legacy.
+
+    This test:
+      • Flips ``query_session_v2_enabled=true``.
+      • Makes ``QuerySession.run`` raise mid-execution (post-construction).
+      • Asserts the legacy ``_do_query`` body is NOT reached afterwards
+        (we instrument it via a sentinel side effect).
+    """
+    import larkhelm.config as _cfg
+    _cfg.config = {"query_session_v2_enabled": True}
+
+    legacy_reached: list[bool] = []
+    raise_payload = RuntimeError("v2 raised post-construction")
+
+    # Stub QuerySession.run to raise like the bug scenario.
+    class BoomSession:
+        def __init__(self, **_kwargs): pass
+        def run(self): raise raise_payload
+
+    monkeypatch.setattr(
+        "larkhelm.handlers._query_session.QuerySession", BoomSession,
+    )
+
+    # Sentinel hook just BELOW the v2 dispatch in _do_query — the line
+    # ``trace_id = uuid.uuid4().hex[:12]`` is the first thing the legacy
+    # body does. Patching uuid in that module catches re-entry.
+    import larkhelm.handlers._query as _q
+    import uuid
+
+    class _UUIDProbe:
+        @staticmethod
+        def uuid4():
+            legacy_reached.append(True)
+            return uuid.UUID(int=0)
+    monkeypatch.setattr(_q, "uuid", _UUIDProbe)
+
+    # Call should NOT raise (v2's run_err is logged) AND legacy must not run.
+    _q._do_query(
+        chat_id="t_chat", message="hi", model="claude",
+        user_msg_id=None, images=None, parent_id=None, force_backend_id=None,
+    )
+
+    assert legacy_reached == [], (
+        "Legacy _do_query body was re-entered after v2 raised — "
+        "this is the double-processing bug round-2 review caught"
+    )
+
+
+def test_do_query_v2_setup_failure_does_fall_back(monkeypatch):
+    """Inverse of the previous test: when v2 fails BEFORE side effects
+    (import / __init__), legacy fallback IS still the correct path —
+    that's what makes the flag safe to flip on."""
+    import larkhelm.config as _cfg
+    _cfg.config = {"query_session_v2_enabled": True}
+
+    legacy_reached: list[bool] = []
+
+    class BoomConstructor:
+        def __init__(self, **_kwargs):
+            raise RuntimeError("v2 __init__ failure (pre-side-effect)")
+        def run(self):  # pragma: no cover — never reached
+            raise AssertionError("run() should not be called")
+
+    monkeypatch.setattr(
+        "larkhelm.handlers._query_session.QuerySession", BoomConstructor,
+    )
+
+    import larkhelm.handlers._query as _q
+    import uuid
+
+    class _UUIDProbe:
+        @staticmethod
+        def uuid4():
+            legacy_reached.append(True)
+            # Raise after marking re-entry so we exit quickly — full legacy
+            # path needs a real Feishu setup we don't have here.
+            raise StopIteration("legacy reached, abort test setup")
+    monkeypatch.setattr(_q, "uuid", _UUIDProbe)
+
+    with pytest.raises(StopIteration):
+        _q._do_query(
+            chat_id="t_chat", message="hi", model="claude",
+            user_msg_id=None, images=None, parent_id=None,
+            force_backend_id=None,
+        )
+
+    assert legacy_reached == [True], (
+        "Legacy fallback should have been entered after v2 __init__ failed "
+        "(pre-side-effect = safe to retry); instead it was skipped"
+    )

@@ -831,6 +831,18 @@ def _run_one_shot(prompt: str, ns: str, prefer_cheap: bool = False,
         output = _dispatch_one_shot(spec, ns, prompt, _on_text)
         return output or "".join(collected)
     except Exception as cheap_err:
+        # Cancel is user/system intent — propagate, never fall back. Round-2
+        # review caught that the broad ``except Exception`` here was swallowing
+        # ``QueryCancelledError`` raised by ``_cascade_midflight_on_text``,
+        # triggering the orchestrator fallback path AFTER cancel had been
+        # signalled — defeating P1-5's whole purpose (stop burning tokens
+        # after cancel). The previous test only passed because the fake
+        # registry returned the same spec for cheap and orchestrator, hitting
+        # the id-collision re-raise. In production with distinct backends,
+        # cancel would silently be undone.
+        from larkhelm.ai_runner import QueryCancelledError
+        if isinstance(cheap_err, QueryCancelledError):
+            raise
         # Runtime fallback: cheap path failed (network, quota, model error).
         # Try orchestrator once. Only kicks in when cheap was actually used —
         # avoids hiding orchestrator-direct failures from callers.
