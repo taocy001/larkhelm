@@ -50,6 +50,13 @@ class AgentStatus(Enum):
     DONE      = "done"
     FAILED    = "failed"
     CANCELLED = "cancelled"
+    # SKIPPED: agent was intentionally not run. Used by the
+    # ``TASK_ALREADY_COMPLETE`` short-circuit when PM decides the codebase
+    # already satisfies the user request, and by the partial-delivery rule
+    # in the scheduler when an upstream FAILED agent already wrote its
+    # declared output_file. Distinguishes "we chose not to run this" from
+    # CANCELLED (user-initiated) and FAILED (ran but errored).
+    SKIPPED   = "skipped"
 
 
 class CrewPhase(Enum):
@@ -112,6 +119,13 @@ class AgentState:
     feedback:    str          = ""    # feedback injected when a downstream agent fails; prepended to prompt on next run
     feishu_doc_url: str       = ""    # Feishu document URL after output_file sync (empty = local only)
     tokens:      dict[str, int | float] = dataclasses.field(default_factory=dict)  # token stats (in-memory, not serialized)
+    # The backend id (e.g. ``claude``, ``kimi``, ``hermes_race``) chosen by
+    # ``resolve_backend(spec)`` at runtime — written once when the agent
+    # starts. Empty string means "not yet resolved" (PENDING / SKIPPED).
+    # Replaces the now-empty ``spec.model`` for crew-card display since
+    # the Phase-C ``task_profile`` migration left ``spec.model=""`` by
+    # default and the card was rendering "[] PM" instead of "[claude] PM".
+    actual_backend_id: str    = ""
 
 
 @dataclasses.dataclass

@@ -22,12 +22,39 @@ from larkhelm.lark_client import _patch_card_raw, _send_card_raw
 from larkhelm.log import _debug_log
 
 
+def _backend_label(spec, agent_state) -> str:
+    """Pick the most informative backend label for the card row.
+
+    Phase-C migration left ``spec.model=""`` for all dev-pipeline specs
+    (the resolver picks at runtime via ``spec.task_profile``), so the
+    pre-existing ``[{spec.model}]`` rendered as ``[]``. Order of
+    preference now:
+
+      1. ``agent_state.actual_backend_id`` — the resolved backend id
+         once the agent has started (most accurate).
+      2. ``spec.model`` — legacy /crew specs that still hard-code a
+         model string.
+      3. ``spec.task_profile`` — pre-run hint when neither above is set.
+
+    Returns ``""`` when nothing is known (very early PENDING with no
+    profile); callers omit the bracket entirely in that case.
+    """
+    if agent_state and getattr(agent_state, "actual_backend_id", ""):
+        return str(agent_state.actual_backend_id)
+    if getattr(spec, "model", ""):
+        return str(spec.model)
+    if getattr(spec, "task_profile", ""):
+        return str(spec.task_profile)
+    return ""
+
+
 _STATUS_ICON = {
     AgentStatus.PENDING:   "⏸",
     AgentStatus.RUNNING:   "🔄",
     AgentStatus.DONE:      "✅",
     AgentStatus.FAILED:    "❌",
     AgentStatus.CANCELLED: "🛑",
+    AgentStatus.SKIPPED:   "⏭",
 }
 
 
@@ -103,8 +130,10 @@ def _build_card(state: CrewState) -> str:
                 t_str = f" ({_fmt_elapsed(a.end_time - a.start_time)})"
             elif a and a.start_time and a.status == AgentStatus.RUNNING:
                 t_str = f" ({_fmt_elapsed(time.time() - a.start_time)}…)"
+            _backend = _backend_label(spec, a)
+            _backend_str = f" [{_backend}]" if _backend else ""
             agent_lines.append(
-                f"{icon} **{spec.id}** {spec.role} [{spec.model}]{dep}{t_str}"
+                f"{icon} **{spec.id}** {spec.role}{_backend_str}{dep}{t_str}"
             )
 
         elements.append({
@@ -214,7 +243,9 @@ def _build_card(state: CrewState) -> str:
                 t_str = f" ({_fmt_elapsed(a.end_time - a.start_time)})"
             elif a and a.start_time and a.status == AgentStatus.RUNNING:
                 t_str = f" ({_fmt_elapsed(time.time() - a.start_time)}…)"
-            status_lines.append(f"{icon} **{spec.id}** {spec.role} [{spec.model}]{dep}{t_str}")
+            _backend = _backend_label(spec, a)
+            _backend_str = f" [{_backend}]" if _backend else ""
+            status_lines.append(f"{icon} **{spec.id}** {spec.role}{_backend_str}{dep}{t_str}")
         if status_lines:
             body_parts.append("\n".join(status_lines))
 

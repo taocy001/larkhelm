@@ -80,6 +80,67 @@ def _ensure_crew_folder(state: CrewState) -> None:
         _debug_log(f"[Crew] 创建项目文件夹失败，将写入本地: {e}")
 
 
+def _persist_result_to_output_file_if_missing(
+    state: CrewState, agent_id: str, result: str,
+) -> None:
+    """Safety net: persist the in-memory ``result`` to the agent's declared
+    ``output_file`` when the agent forgot (or failed) to call the Write tool.
+
+    The agent prompt injection (in :func:`_run_agent`) tells the agent to
+    Write its full output to ``.crew_workspace/{spec.output_file}``, but in
+    practice ``state.agents[agent_id].result`` often holds only the LAST
+    streamed text chunk (a short closing acknowledgement after the Write
+    tool call). When the agent honours the contract, this is harmless —
+    the on-disk file is the source of truth, and ``result`` is just a
+    summary. When the agent skips the Write call (P3 PM did exactly this —
+    emitted a ~39 K token PRD that never landed on disk), the architect
+    downstream finds an empty / nonexistent file and falls back to
+    reverse-engineering from source.
+
+    Heuristic: write the fallback only when
+      • ``spec.output_file`` is set
+      • the file is missing OR materially smaller than ``result``
+      • ``result`` is substantial (≥ 200 chars; below that it's almost
+        certainly just a closing marker like "PRD written.")
+
+    Failures are logged and swallowed — the safety net must never raise.
+    """
+    spec = state.agents[agent_id].spec
+    if not spec.output_file:
+        return
+    if not result or len(result) < 200:
+        # Result is just a closing marker; the agent presumably called Write
+        # itself with the real payload. Don't risk overwriting a good file.
+        return
+    try:
+        from larkhelm.chat_state import _get_cwd
+        cwd = _get_cwd(state.chat_id)
+        out_path = Path(cwd) / ".crew_workspace" / spec.output_file
+        existing_size = 0
+        if out_path.exists():
+            try:
+                existing_size = out_path.stat().st_size
+            except OSError:
+                existing_size = 0
+        # If the on-disk file already covers ≥ 80% of result length, trust
+        # the agent's own write — closing summary mismatch is fine.
+        if existing_size >= int(len(result) * 0.8):
+            return
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        # Atomic write: ``tmp`` + ``replace`` so a concurrent reader never
+        # sees a torn file. Same pattern as ``memory_io.atomic_write``.
+        tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+        tmp.write_text(result, encoding="utf-8")
+        import os as _os
+        _os.replace(tmp, out_path)
+        _debug_log(
+            f"[Crew] {agent_id} output_file safety-net wrote {len(result)} chars "
+            f"to {spec.output_file} (agent skipped Write tool; existing={existing_size}b)"
+        )
+    except Exception as e:
+        _debug_log(f"[Crew] {agent_id} output_file safety-net failed: {e}")
+
+
 def _sync_output_file(state: CrewState, agent_id: str) -> str:
     """Sync an agent's output_file to Feishu, inside the per-project folder.
     Returns the Feishu document URL on success, empty string on failure/local-only.
@@ -386,6 +447,14 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
             # / health issue, not a transient subprocess error.
             raise
 
+        # Record the actual backend id picked by the resolver so the
+        # crew card can show "[claude] PM" / "[kimi] engineer" instead
+        # of the now-empty ``[spec.model]`` placeholder. Phase-C left
+        # ``spec.model=""`` and ``spec.task_profile="planner"/...`` so
+        # the model is only known after this resolve call.
+        with state.lock:
+            state.agents[agent_id].actual_backend_id = resolved.id
+
         # Resolved hermes_* synthesizes a provider="hermes" BackendSpec —
         # rebuild the dispatch decision around ``resolved.provider`` so
         # existing branches stay intact.
@@ -638,6 +707,22 @@ def _run_agent_wrapper(state: CrewState, agent_id: str) -> None:
             needs_retry = _detect_fail_marker(state.agents[agent_id].spec, result)
             if needs_retry:
                 _debug_log(f"[Crew] {agent_id} fail marker detected, pending retry")
+            # Output-file safety net: agents are instructed (via the prompt
+            # injection in _run_agent) to call the Write tool to persist
+            # their full output to ``.crew_workspace/{spec.output_file}``.
+            # Reality: some agents emit a short closing marker (the result
+            # field captures the last text chunk, often ≤100 chars) and
+            # rely on Write — but if the Write call was skipped, truncated,
+            # or wrote to the wrong path, the full PRD/design/etc. is gone
+            # and downstream agents read an empty / missing file. This
+            # observably bit P3 (PM emitted a 39196-token PRD that never
+            # landed on disk; architect had to reverse-engineer it from
+            # source + memory).
+            #
+            # Fallback: if the expected file is missing or too small AND
+            # the in-memory result is substantially longer, persist
+            # ``result`` to the expected path before the sync step runs.
+            _persist_result_to_output_file_if_missing(state, agent_id, result)
             # Sync output_file before updating state to avoid holding the lock during IO
             feishu_url = _sync_output_file(state, agent_id)
             # Auto-commit after code-modification agents succeed (when dev_auto_commit=true)
@@ -969,6 +1054,23 @@ def _execute(state: CrewState, total_timeout: int):
                              (AgentStatus.DONE, AgentStatus.FAILED)]
             _save_checkpoint(state, completed_ids)
 
+        # ── PM short-circuit: ``TASK_ALREADY_COMPLETE`` marker ─────────
+        # When PM (or any planner-tier first-wave agent) detects that the
+        # task's acceptance points are already met by the current codebase,
+        # it emits this single-line marker. Drain the remaining waves —
+        # downstream agents would just waste tokens and time re-discovering
+        # "nothing to do". The synthesis phase still runs so the user gets
+        # a nice "already complete" card with PM's reason.
+        if not retry_specs and _check_task_already_complete(state, wave):
+            with state.lock:
+                for _spec in state.plan.agents:
+                    _ag = state.agents.get(_spec.id)
+                    if _ag and _ag.status == AgentStatus.PENDING:
+                        _ag.status = AgentStatus.SKIPPED
+                        _ag.error = "TASK_ALREADY_COMPLETE — PM 判定任务已在代码中完成"
+            wave_queue.clear()
+            break
+
         # ── Phase 3.1: breakpoint — pause after an agent with breakpoint=True completes ──
         if not retry_specs:  # Only check breakpoints when there are no retries (skip during retry)
             for spec in wave:   # Iterate original wave; state guard ensures only DONE agents trigger
@@ -982,6 +1084,53 @@ def _execute(state: CrewState, total_timeout: int):
                         state.phase = "running"
                     _crew_update_card(state)
                     break
+
+
+# ── PM TASK_ALREADY_COMPLETE marker ─────────────────────────────────────
+
+_TASK_COMPLETE_MARKER = "TASK_ALREADY_COMPLETE"
+
+
+def _check_task_already_complete(state: CrewState, wave) -> bool:
+    """Return True iff a just-completed first-wave PM agent emitted the
+    ``TASK_ALREADY_COMPLETE: <reason>`` marker on the first line of its
+    result, signalling that the codebase already satisfies the user's
+    acceptance points.
+
+    Only fires when:
+      • the wave contains an agent with id ``"pm"`` (dev pipeline shape;
+        /crew dynamic plans are unaffected)
+      • that PM is DONE
+      • its result (or its on-disk output_file head) starts with the
+        marker token
+      • PM has not been retried (avoids accidentally short-circuiting a
+        re-run that the user explicitly asked for via /dev --no-confirm)
+
+    The check is read-only — the caller is responsible for marking the
+    remaining agents as SKIPPED.
+    """
+    has_pm_in_wave = any(s.id == "pm" for s in wave)
+    if not has_pm_in_wave:
+        return False
+    pm_state = state.agents.get("pm")
+    if not pm_state or pm_state.status != AgentStatus.DONE:
+        return False
+    if pm_state.retry_count > 0:
+        return False
+    # Primary source: in-memory result. Fallback: first line of prd.md
+    # (covers the case where the safety-net wrote the file but the in-
+    # memory result is a short closing summary).
+    head = (pm_state.result or "").lstrip()
+    if not head.startswith(_TASK_COMPLETE_MARKER):
+        try:
+            from larkhelm.chat_state import _get_cwd
+            cwd = _get_cwd(state.chat_id)
+            prd_path = Path(cwd) / ".crew_workspace" / "prd.md"
+            if prd_path.exists():
+                head = prd_path.read_text(encoding="utf-8").lstrip()
+        except Exception:
+            head = ""
+    return head.startswith(_TASK_COMPLETE_MARKER)
 
 
 def _execute_from(state: CrewState, total_timeout: int, skip_ids: set):
@@ -1090,6 +1239,26 @@ def _synthesize(state: CrewState) -> str:
 
     cancel_ev = state.cancel_ev
     cwd       = _get_cwd(state.chat_id)
+
+    # ── TASK_ALREADY_COMPLETE short-circuit ─────────────────────────────
+    # When PM short-circuited the pipeline (see ``_check_task_already_complete``)
+    # the downstream agents are SKIPPED — there's nothing meaningful to
+    # synthesise. Return a templated card body so the user sees a clean
+    # "已完成" message instead of a synthesis-LLM hallucinating about empty
+    # inputs.
+    pm_state = state.agents.get("pm")
+    if (pm_state and pm_state.status == AgentStatus.DONE
+            and (pm_state.result or "").lstrip().startswith(_TASK_COMPLETE_MARKER)):
+        reason_line = (pm_state.result or "").splitlines()[0].strip()
+        reason = reason_line.removeprefix(_TASK_COMPLETE_MARKER).lstrip(": ").strip()
+        skipped_ids = [s.id for s in state.plan.agents
+                       if state.agents[s.id].status == AgentStatus.SKIPPED]
+        return (
+            "**✅ 任务已经在代码中完成**\n\n"
+            f"PM 判定：{reason or '（PM 未给出详细说明）'}\n\n"
+            f"已跳过的阶段：{', '.join(skipped_ids) if skipped_ids else '（无）'}\n\n"
+            "若你认为这个判断不对，请用 `/dev --no-confirm <更具体的需求>` 强制重跑。"
+        )
 
     # No synthesis_prompt and only one agent → return its result directly
     plan = state.plan
