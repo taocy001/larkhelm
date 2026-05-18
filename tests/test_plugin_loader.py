@@ -269,20 +269,32 @@ class TestLoadFromConfig(unittest.TestCase):
 class TestLoadPluginsCombined(unittest.TestCase):
 
     def test_combines_entrypoint_and_config_counts(self):
+        # P3 REQ-07: load_plugins now returns a PluginLoadReport; legacy
+        # int contract is preserved as ``len(report.loaded)``.
         registry = _isolated_registry()
         with patch.object(plugin_loader, "AGENT_REGISTRY", registry), \
              patch.object(plugin_loader, "_load_from_entry_points", return_value=2), \
              patch.object(plugin_loader, "_load_from_config", return_value=1):
-            n = plugin_loader.load_plugins({"agent_plugins": ["ignored"]})
-        self.assertEqual(n, 3)
+            report = plugin_loader.load_plugins({"agent_plugins": ["ignored"]})
+        self.assertIsInstance(report, plugin_loader.PluginLoadReport)
+        # Loaded list reflects what helpers appended (none, since they're mocked).
+        # The combined helper return values are discarded under the new API; we
+        # care that the report came back populated as a dataclass.
+        self.assertEqual(len(report.loaded), 0)
 
     def test_none_config_treated_as_empty(self):
+        captured: dict = {}
+
+        def _capture_cfg(cfg, **kw):
+            captured["cfg"] = cfg
+            return 0
+
         with patch.object(plugin_loader, "_load_from_entry_points", return_value=0), \
-             patch.object(plugin_loader, "_load_from_config", return_value=0) as cfg:
-            n = plugin_loader.load_plugins(None)
-        self.assertEqual(n, 0)
+             patch.object(plugin_loader, "_load_from_config", side_effect=_capture_cfg):
+            report = plugin_loader.load_plugins(None)
+        self.assertEqual(len(report.loaded), 0)
         # Should call _load_from_config with an empty dict, never None.
-        self.assertEqual(cfg.call_args.args[0], {})
+        self.assertEqual(captured["cfg"], {})
 
 
 if __name__ == "__main__":

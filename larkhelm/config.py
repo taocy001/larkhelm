@@ -188,6 +188,21 @@ MEMORY_EXTRACT_BUFFER_WINDOW_SEC: int = 0
 MEMORY_SESSION_SMART_COMPRESS: bool = False
 MEMORY_GLOBAL_PROFILE_SLOT_ENABLED: bool = False
 MEMORY_PROJECT_SECTION_ENABLED: bool = False
+
+# ── P3 globals (REQ-02 / 03 / 04 / 05 / 06 / 07 / 08 / 09 / 10) ────────────
+# All eleven default to "feature off / status quo" so byte-compat with P2 holds.
+# Operators flip them in config.json; setdefault preserves their override.
+QUERY_SESSION_V2_TRAFFIC: float = 0.0
+INTENT_EMBEDDING_THRESHOLD: float = 0.30
+LLM_ROUTER_CIRCUIT_FAILURES: int = 5
+LLM_ROUTER_CIRCUIT_COOLDOWN_SEC: float = 30.0
+CASCADE_BACKOFF_MAX_ATTEMPTS: int = 3
+PLAN_RETRY_STRATEGY: str = "off"             # "now" | "manual" | "off"
+PLUGIN_REPORT_CARD_ENABLED: bool = False
+ADMIN_CHAT_ID: str = ""
+MEMORY_GC_INTERVAL_HOURS: float = 6.0
+CREW_CHECKPOINT_TTL_DAYS: float = 7.0
+DEV_STAGE_TIMEOUTS: "dict[str, int]" = {}
 # Single source of truth for accepted voice languages — referenced by both
 # config validation (_init_runtime) and the /voice command handler.
 _VOICE_LANG_WHITELIST: "frozenset[str]" = frozenset({"zh", "en", "auto"})
@@ -447,6 +462,11 @@ def _init_app_config() -> None:
     global METRICS_TEXT_LEGACY, MEMORY_EXTRACT_BUFFER_WINDOW_SEC
     global MEMORY_SESSION_SMART_COMPRESS
     global MEMORY_GLOBAL_PROFILE_SLOT_ENABLED, MEMORY_PROJECT_SECTION_ENABLED
+    global QUERY_SESSION_V2_TRAFFIC, INTENT_EMBEDDING_THRESHOLD
+    global LLM_ROUTER_CIRCUIT_FAILURES, LLM_ROUTER_CIRCUIT_COOLDOWN_SEC
+    global CASCADE_BACKOFF_MAX_ATTEMPTS, PLAN_RETRY_STRATEGY
+    global PLUGIN_REPORT_CARD_ENABLED, ADMIN_CHAT_ID
+    global MEMORY_GC_INTERVAL_HOURS, CREW_CHECKPOINT_TTL_DAYS, DEV_STAGE_TIMEOUTS
 
     try:
         config = json.loads(CONFIG_PATH.read_text())
@@ -816,6 +836,90 @@ def _init_app_config() -> None:
         }
     except (TypeError, ValueError):
         SESSION_LAYER_BUDGETS = {"work_context": 1200, "decisions": 800, "history": 600}
+
+    # ── P3 new keys (REQ-02 / 03 / 04 / 05 / 06 / 07 / 08 / 09 / 10) ──────
+    # All eleven flags default to "feature off / status quo" so prod operators
+    # have to opt in. setdefault preserves any operator override.
+    config.setdefault("query_session_v2_traffic", 0.0)
+    config.setdefault("intent_embedding_top_k_threshold", 0.30)
+    config.setdefault("llm_router_circuit_failures", 5)
+    config.setdefault("llm_router_circuit_cooldown_sec", 30.0)
+    config.setdefault("cascade_backoff_max_attempts", 3)
+    config.setdefault("plan_retry_strategy", "off")
+    config.setdefault("plugin_report_card_enabled", False)
+    config.setdefault("admin_chat_id", "")
+    config.setdefault("memory_gc_interval_hours", 6.0)
+    config.setdefault("crew_checkpoint_ttl_days", 7.0)
+    config.setdefault("dev_stage_timeouts", {})
+
+    try:
+        QUERY_SESSION_V2_TRAFFIC = max(
+            0.0, min(1.0, float(config.get("query_session_v2_traffic", 0.0) or 0.0)),
+        )
+    except (TypeError, ValueError):
+        QUERY_SESSION_V2_TRAFFIC = 0.0
+
+    try:
+        INTENT_EMBEDDING_THRESHOLD = max(
+            0.0, min(1.0, float(config.get("intent_embedding_top_k_threshold", 0.30) or 0.30)),
+        )
+    except (TypeError, ValueError):
+        INTENT_EMBEDDING_THRESHOLD = 0.30
+
+    try:
+        LLM_ROUTER_CIRCUIT_FAILURES = max(
+            1, int(config.get("llm_router_circuit_failures", 5) or 5),
+        )
+    except (TypeError, ValueError):
+        LLM_ROUTER_CIRCUIT_FAILURES = 5
+
+    try:
+        LLM_ROUTER_CIRCUIT_COOLDOWN_SEC = max(
+            1.0, float(config.get("llm_router_circuit_cooldown_sec", 30.0) or 30.0),
+        )
+    except (TypeError, ValueError):
+        LLM_ROUTER_CIRCUIT_COOLDOWN_SEC = 30.0
+
+    try:
+        CASCADE_BACKOFF_MAX_ATTEMPTS = max(
+            1, int(config.get("cascade_backoff_max_attempts", 3) or 3),
+        )
+    except (TypeError, ValueError):
+        CASCADE_BACKOFF_MAX_ATTEMPTS = 3
+
+    _strategy = str(config.get("plan_retry_strategy", "off") or "off").lower()
+    if _strategy not in ("now", "manual", "off"):
+        _strategy = "off"
+    PLAN_RETRY_STRATEGY = _strategy
+
+    PLUGIN_REPORT_CARD_ENABLED = bool(config.get("plugin_report_card_enabled", False))
+    ADMIN_CHAT_ID = str(config.get("admin_chat_id", "") or "")
+
+    try:
+        MEMORY_GC_INTERVAL_HOURS = max(
+            0.0, float(config.get("memory_gc_interval_hours", 6.0) or 6.0),
+        )
+    except (TypeError, ValueError):
+        MEMORY_GC_INTERVAL_HOURS = 6.0
+
+    try:
+        CREW_CHECKPOINT_TTL_DAYS = max(
+            0.0, float(config.get("crew_checkpoint_ttl_days", 7.0) or 7.0),
+        )
+    except (TypeError, ValueError):
+        CREW_CHECKPOINT_TTL_DAYS = 7.0
+
+    _raw_timeouts = config.get("dev_stage_timeouts") or {}
+    _clean_timeouts: "dict[str, int]" = {}
+    if isinstance(_raw_timeouts, dict):
+        for _k, _v in _raw_timeouts.items():
+            try:
+                _iv = int(_v)
+            except (TypeError, ValueError):
+                continue
+            if _iv > 0 and isinstance(_k, str) and _k.strip():
+                _clean_timeouts[_k.strip()] = _iv
+    DEV_STAGE_TIMEOUTS = _clean_timeouts
 
 
 def _init_backends() -> None:

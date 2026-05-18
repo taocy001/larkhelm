@@ -120,6 +120,7 @@ class LarkhelmMetricsRegistry:
             self.cascade_midflight_cancelled_total = None
             self.query_duration_seconds = None
             self.extract_buffer_flushes_total = None
+            self.llm_router_circuit_state = None
             return
 
         # Use a private registry so the larkhelm metrics don't collide with
@@ -174,6 +175,14 @@ class LarkhelmMetricsRegistry:
             "larkhelm_extract_buffer_flushes_total",
             "Buffer-induced cascade flushes",
             ["trigger"],
+            registry=self._registry,
+        )
+        # P3 REQ-04: circuit-breaker state per LLM-router backend.
+        # 0 = closed, 1 = half_open, 2 = open.
+        self.llm_router_circuit_state = pc.Gauge(
+            "larkhelm_llm_router_circuit_state",
+            "LLM router circuit-breaker state (0=closed,1=half_open,2=open)",
+            ["backend"],
             registry=self._registry,
         )
 
@@ -288,6 +297,29 @@ def inc_extract_buffer_flush(trigger: str) -> None:
         safe_log(f"[Metrics] inc_extract_buffer_flush failed (trigger={trigger}): {e}")
 
 
+_CIRCUIT_STATE_CODE = {"closed": 0, "half_open": 1, "open": 2}
+
+
+def set_llm_router_circuit_state(backend: str, state: str) -> None:
+    """Reflect a :class:`CircuitBreaker` state into Prometheus (REQ-04).
+
+    Recognised states: ``closed`` (0), ``half_open`` (1), ``open`` (2).
+    Unknown strings collapse to 0 so a typo never poisons the gauge.
+    Safe to call when prometheus-client is missing (no-op).
+    """
+    reg = get_registry()
+    if not reg.available or reg.llm_router_circuit_state is None:
+        return
+    value = _CIRCUIT_STATE_CODE.get(state, 0)
+    try:
+        reg.llm_router_circuit_state.labels(backend=str(backend)).set(value)
+    except Exception as e:
+        safe_log(
+            f"[Metrics] set_llm_router_circuit_state failed "
+            f"(backend={backend}, state={state}): {e}"
+        )
+
+
 def update_health_gauges(snapshot: "HealthSnapshot") -> None:
     """Mirror :class:`HealthSnapshot` numbers into the gauge series.
 
@@ -370,5 +402,6 @@ __all__ = [
     "inc_cascade_extract",
     "observe_query_duration",
     "inc_extract_buffer_flush",
+    "set_llm_router_circuit_state",
     "update_health_gauges",
 ]

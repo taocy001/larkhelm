@@ -316,6 +316,101 @@ def _parse_llm_response(text: str, candidate_ids: set[str]) -> tuple[str, ...] |
         return None
 
 
+# ── Circuit breaker (P3 REQ-04) ────────────────────────────────────────────
+#
+# A single module-level CircuitBreaker guards every cheap-backend call out of
+# this router. Five consecutive failures (default; see
+# ``llm_router_circuit_failures``) opens the circuit and short-circuits
+# subsequent calls until ``llm_router_circuit_cooldown_sec`` elapses. Tests
+# and operators can rebuild the breaker by calling :func:`_rebuild_circuit`.
+
+
+_circuit_lock = threading.Lock()
+_circuit: "Any | None" = None
+
+
+def _build_circuit() -> "Any":
+    """Construct a CircuitBreaker honouring the current config values."""
+    from larkhelm.memory_circuit import CircuitBreaker, CircuitConfig
+    try:
+        import larkhelm.config as _cfg
+        failures = int(getattr(_cfg, "LLM_ROUTER_CIRCUIT_FAILURES", 5) or 5)
+        cooldown = float(getattr(_cfg, "LLM_ROUTER_CIRCUIT_COOLDOWN_SEC", 30.0) or 30.0)
+    except Exception:
+        failures, cooldown = 5, 30.0
+    return CircuitBreaker(CircuitConfig(
+        failure_threshold=max(1, failures),
+        cool_down_sec=max(1.0, cooldown),
+    ))
+
+
+def _get_circuit() -> "Any":
+    global _circuit
+    if _circuit is None:
+        with _circuit_lock:
+            if _circuit is None:
+                _circuit = _build_circuit()
+    return _circuit
+
+
+def _rebuild_circuit() -> None:
+    """Test-only: drop the singleton so the next call re-reads config."""
+    global _circuit
+    with _circuit_lock:
+        _circuit = None
+
+
+def circuit_state() -> str:
+    """Expose the current breaker state to the metrics layer (REQ-04)."""
+    try:
+        state = _get_circuit().current_state()
+    except Exception:
+        return "closed"
+    try:
+        # Sync the gauge whenever an observer asks (cheap, no-op when
+        # prometheus-client is missing).
+        from larkhelm.metrics import set_llm_router_circuit_state
+        set_llm_router_circuit_state("cheap", state)
+    except Exception:
+        pass
+    return state
+
+
+def _call_with_circuit(caller: Callable[[str], str], prompt: str) -> "str | None":
+    """Invoke ``caller(prompt)`` through the breaker.
+
+    Returns ``None`` if the breaker is open (caller falls back to the
+    underlying retriever). Re-raises any exception from ``caller`` after
+    recording it as a failure — the existing try/except in ``retrieve``
+    then maps it to ``skipped_reason="caller_exception"``.
+    """
+    cb = _get_circuit()
+    if not cb.allow():
+        try:
+            from larkhelm.metrics import set_llm_router_circuit_state
+            set_llm_router_circuit_state("cheap", cb.current_state())
+        except Exception:
+            pass
+        return None
+    try:
+        result = caller(prompt)
+    except Exception:
+        cb.record_failure()
+        try:
+            from larkhelm.metrics import set_llm_router_circuit_state
+            set_llm_router_circuit_state("cheap", cb.current_state())
+        except Exception:
+            pass
+        raise
+    cb.record_success()
+    try:
+        from larkhelm.metrics import set_llm_router_circuit_state
+        set_llm_router_circuit_state("cheap", cb.current_state())
+    except Exception:
+        pass
+    return result
+
+
 # ── Cheap LLM caller (lazy lookup for test override) ──────────────────────
 
 
@@ -482,10 +577,15 @@ class LLMRouterRetriever:
         prompt = _build_router_prompt(request, policy, pool, top_k=top_k)
         diag.invoked = True
         try:
-            raw = caller(prompt)
+            raw = _call_with_circuit(caller, prompt)
         except Exception as e:
             _debug_log(f"[LLMRouter] cheap caller raised: {e}")
             diag.skipped_reason = "caller_exception"
+            diag.elapsed_ms = int((time.monotonic() - t0) * 1000)
+            return underlying_scored[:top_k]
+        if raw is None:
+            # Circuit open — fail-open to underlying retriever.
+            diag.skipped_reason = "circuit_open"
             diag.elapsed_ms = int((time.monotonic() - t0) * 1000)
             return underlying_scored[:top_k]
 
@@ -507,4 +607,6 @@ __all__ = [
     "LLMRouterRetriever",
     "RouterDiagnostics",
     "_cache_clear_for_tests",  # exposed for unit-test fixtures
+    "circuit_state",
+    "_rebuild_circuit",
 ]

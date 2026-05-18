@@ -69,6 +69,41 @@ from larkhelm.crew._pipeline import (
     _make_dev_pipeline,
 )
 
+# ── Checkpoint GC (P3 REQ-09) ─────────────────────────────────
+from larkhelm.crew._checkpoint_gc import CheckpointGC
+
+
+def _register_checkpoint_gc() -> None:
+    """Build a :class:`CheckpointGC` for ``DATA_DIR/.crew_workspace`` and
+    register it with the :class:`MemoryGCRunner` singleton (D5).
+
+    Safe to call before _init_runtime — degrades to a no-op if DATA_DIR
+    isn't set yet or the memory_gc module isn't importable. Idempotent:
+    repeat calls overwrite the previous attachment.
+    """
+    try:
+        import larkhelm.config as _cfg
+        from larkhelm.memory_gc import attach_checkpoint_gc
+        from pathlib import Path
+        data_dir = getattr(_cfg, "DATA_DIR", None)
+        if data_dir is None:
+            return
+        workspaces_root = Path(data_dir) / ".crew_workspace"
+        ttl_days = float(getattr(_cfg, "CREW_CHECKPOINT_TTL_DAYS", 7.0) or 7.0)
+        gc = CheckpointGC(workspaces_root, ttl_days=ttl_days)
+        attach_checkpoint_gc(gc)
+    except Exception as e:
+        try:
+            from larkhelm.log import lazy_debug_log
+            lazy_debug_log(f"[CkptGc] register failed: {e}")
+        except Exception:
+            pass
+
+
+# Auto-register on import. The actual GC daemon may not be running yet
+# (test mode / boot ordering); the attachment is durable across ticks.
+_register_checkpoint_gc()
+
 __all__ = [
     # Global state
     "_active_crew",
@@ -113,4 +148,7 @@ __all__ = [
     "_run_crew",
     # Dev pipeline
     "_make_dev_pipeline",
+    # Checkpoint GC (P3 REQ-09)
+    "CheckpointGC",
+    "_register_checkpoint_gc",
 ]

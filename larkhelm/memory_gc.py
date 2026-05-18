@@ -37,17 +37,45 @@ class MemoryGCRunner:
 
     Single instance per process; ``start()`` is idempotent. Tests can call
     ``run_once()`` directly without starting the thread.
+
+    P3 REQ-08 / REQ-09: extended with:
+
+    * ``interval_hours`` configurable via ``memory_gc_interval_hours``.
+      Stored alongside the legacy ``interval_sec`` for back-compat.
+    * ``_ckpt_gc`` composition — :class:`CheckpointGC` is invoked from
+      ``run_once`` so its sweep shares the same tick thread (D5).
+    * ``stop()`` — ``threading.Event`` wake-up so atexit / tests can
+      end the daemon cleanly instead of waiting up to ``interval_sec``.
     """
 
     def __init__(self,
                  *,
                  max_age_days: int = SESSION_GC_MAX_AGE_DAYS,
-                 interval_sec: int = SESSION_GC_INTERVAL_SEC):
+                 interval_sec: int = SESSION_GC_INTERVAL_SEC,
+                 interval_hours: float | None = None,
+                 ckpt_gc: "object | None" = None):
         self.max_age_days = max(1, int(max_age_days))
-        self.interval_sec = max(60, int(interval_sec))
+        if interval_hours is not None and interval_hours > 0:
+            self.interval_hours = float(interval_hours)
+            self.interval_sec = max(60, int(interval_hours * 3600))
+        else:
+            self.interval_sec = max(60, int(interval_sec))
+            self.interval_hours = self.interval_sec / 3600.0
+        self._ckpt_gc = ckpt_gc
         self._started = False
         self._thread: threading.Thread | None = None
         self._started_lock = threading.Lock()
+        self._stop_event = threading.Event()
+
+    # ── P3 REQ-09: external composition ────────────────────────────
+
+    def attach_checkpoint_gc(self, ckpt_gc: "object | None") -> None:
+        """Register a :class:`CheckpointGC` for the next tick onward."""
+        self._ckpt_gc = ckpt_gc
+
+    def stop(self) -> None:
+        """Signal the daemon loop to wake up and exit."""
+        self._stop_event.set()
 
     # ── public API ─────────────────────────────────────────────────
 
@@ -105,10 +133,72 @@ class MemoryGCRunner:
         if scanned or deleted:
             info(f"[MemoryGC] sweep complete scanned={scanned} deleted={deleted}")
         self._phase2_tail()
+        # P3 REQ-09: checkpoint GC piggy-backs on the same tick when wired.
+        if self._ckpt_gc is not None:
+            try:
+                removed = self._ckpt_gc.scan_once()
+                if removed:
+                    _debug_log(f"[MemGcDaemon] checkpoint GC removed {removed} files")
+            except Exception as e:
+                _debug_log(f"[MemGcDaemon] checkpoint GC failed: {e}")
         return (scanned, deleted)
 
+    # ── P3 REQ-08 (class-diagram aliases) ───────────────────────────
+    # The design.md class diagram names two internal hooks that the
+    # original Phase-B impl folded into ``_phase2_tail``. We expose them
+    # as discrete methods so tests can call them directly and so the
+    # implementation matches the design contract verbatim.
+
+    def _rotate_audit_jsonl(self) -> None:
+        """Delegate to ``memory_retriever.rotate_audit_files`` (32MiB / 30d)."""
+        try:
+            from larkhelm.memory_retriever import rotate_audit_files
+            rotate_audit_files()
+        except Exception as e:
+            _debug_log(f"[MemGcDaemon] rotate_audit_jsonl failed: {e}")
+
+    def _recompute_stale_slices_incremental(self) -> None:
+        """Iterate known (chat_id, cwd) pairs and refresh stale sidecars."""
+        try:
+            from larkhelm.memory_lifecycle import (
+                iter_known_chat_cwd_pairs,
+                mark_stale_slices,
+            )
+            cfg = getattr(_cfg, "config", None) or {}
+            window_days = int(cfg.get("memory_stale_window_days", 90) or 90)
+            count = 0
+            for chat_id, cwd in iter_known_chat_cwd_pairs():
+                try:
+                    mark_stale_slices(chat_id, cwd, dry_run=False, window_days=window_days)
+                    count += 1
+                except Exception as inner:
+                    _debug_log(
+                        f"[MemGcDaemon] mark_stale_slices({chat_id}) failed: {inner}"
+                    )
+            if count:
+                _debug_log(f"[MemGcDaemon] stale sweep covered {count} chat(s)")
+        except Exception as e:
+            _debug_log(f"[MemGcDaemon] stale sweep failed: {e}")
+
+    def _tick(self) -> None:
+        """Single full tick — rotate, recompute stale, run checkpoint GC.
+
+        P3 REQ-08 / REQ-09: this is the canonical method named in the
+        design class diagram. ``run_once`` retains the session-file
+        sweep + counter return so legacy callers and tests still work.
+        """
+        self._rotate_audit_jsonl()
+        self._recompute_stale_slices_incremental()
+        if self._ckpt_gc is not None:
+            try:
+                removed = self._ckpt_gc.scan_once()
+                if removed:
+                    _debug_log(f"[MemGcDaemon] checkpoint GC removed {removed} files")
+            except Exception as e:
+                _debug_log(f"[MemGcDaemon] checkpoint GC failed: {e}")
+
     def _phase2_tail(self) -> None:
-        """Run Phase 2 housekeeping hooks; failures are swallowed."""
+        """Run Phase 2 + P3 housekeeping hooks; failures are swallowed."""
         try:
             from larkhelm.memory_retriever import rotate_audit_files
             rotate_audit_files()
@@ -147,10 +237,11 @@ class MemoryGCRunner:
 
     def _loop(self) -> None:
         while True:
-            try:
-                time.sleep(self.interval_sec)
-            except Exception:
-                time.sleep(self.interval_sec)
+            # ``Event.wait`` honours ``stop()`` so atexit / tests don't have
+            # to wait up to ``interval_sec`` for the daemon to notice.
+            if self._stop_event.wait(self.interval_sec):
+                _debug_log("[MemGcDaemon] stop signalled, exiting loop")
+                return
             try:
                 self.run_once()
             except Exception as e:
@@ -168,12 +259,31 @@ def _get_runner() -> MemoryGCRunner:
     with _RUNNER_LOCK:
         if _RUNNER is None:
             cfg = getattr(_cfg, "config", None) or {}
+            interval_hours = float(
+                getattr(_cfg, "MEMORY_GC_INTERVAL_HOURS", 0.0)
+                or cfg.get("memory_gc_interval_hours", 0.0)
+                or 0.0
+            )
             _RUNNER = MemoryGCRunner(
                 max_age_days=int(cfg.get("memory_session_gc_max_age_days",
                                          SESSION_GC_MAX_AGE_DAYS)),
                 interval_sec=SESSION_GC_INTERVAL_SEC,
+                interval_hours=interval_hours if interval_hours > 0 else None,
             )
         return _RUNNER
+
+
+def attach_checkpoint_gc(ckpt_gc: "object | None") -> None:
+    """Register a :class:`CheckpointGC` with the singleton runner.
+
+    Called from ``crew/__init__.py`` once DATA_DIR is known. Safe to
+    call before :func:`start_memory_gc_thread` — the runner picks up
+    the attachment on its next tick.
+    """
+    try:
+        _get_runner().attach_checkpoint_gc(ckpt_gc)
+    except Exception as e:
+        _debug_log(f"[MemGcDaemon] attach_checkpoint_gc failed: {e}")
 
 
 def start_memory_gc_thread() -> None:

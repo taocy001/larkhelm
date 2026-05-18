@@ -25,6 +25,7 @@ import os
 import re
 import shutil
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -1143,6 +1144,55 @@ _active_cascade_cancels: dict[str, threading.Event] = {}
 _active_cancels_lock = threading.Lock()
 
 
+def _run_one_shot_with_backoff(
+    prompt: str,
+    ns: str,
+    cancel_ev: threading.Event | None,
+) -> str:
+    """REQ-05: wrap ``_run_one_shot(prefer_cheap=True)`` in ExponentialBackoff.
+
+    Cancellation (``QueryCancelledError``) is **not** retried — it always
+    propagates so the caller's cancel_ev path is honoured immediately.
+    All other exceptions are retried up to
+    ``cascade_backoff_max_attempts`` (default 3) with 1s → 2s → 4s backoff.
+    """
+    try:
+        from larkhelm.memory_circuit import BackoffConfig, ExponentialBackoff
+        import larkhelm.config as _cfg
+        attempts = int(getattr(_cfg, "CASCADE_BACKOFF_MAX_ATTEMPTS", 3) or 3)
+    except Exception:
+        return _run_one_shot(prompt, ns=ns, prefer_cheap=True, cancel_ev=cancel_ev)
+
+    from larkhelm.ai_runner import QueryCancelledError
+
+    backoff = ExponentialBackoff(BackoffConfig(max_attempts=max(1, attempts)))
+
+    def _call() -> str:
+        # Re-check cancel before each attempt so a quick cancel during
+        # backoff exits without paying for another LLM round-trip.
+        if cancel_ev is not None and cancel_ev.is_set():
+            raise QueryCancelledError("cancelled before retry")
+        return _run_one_shot(prompt, ns=ns, prefer_cheap=True, cancel_ev=cancel_ev)
+
+    last_exc: "Exception | None" = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            return _call()
+        except QueryCancelledError:
+            raise
+        except Exception as e:
+            last_exc = e
+            if attempt >= attempts:
+                break
+            try:
+                time.sleep(backoff._delay_for(attempt))
+            except Exception:
+                pass
+    if last_exc is not None:
+        raise last_exc
+    return ""
+
+
 def _try_extract_project(session_content: str, cwd: str,
                          cancel_ev: threading.Event | None = None) -> None:
     """Extract project facts from a fresh session summary → update project layer if new info found.
@@ -1177,7 +1227,9 @@ def _try_extract_project(session_content: str, cwd: str,
         # 80%+ of these calls return ``UNCHANGED`` so we're predominantly
         # paying for input tokens we don't act on; using a cheap model
         # multiplies that "wasted input" by ~30× less per token.
-        result = _run_one_shot(prompt, ns=ns, prefer_cheap=True, cancel_ev=cancel_ev)
+        # P3 REQ-05: ExponentialBackoff wraps the call so a transient
+        # cheap-backend failure doesn't immediately mark the extract as error.
+        result = _run_one_shot_with_backoff(prompt, ns=ns, cancel_ev=cancel_ev)
         # Post-LLM cancel re-check: a newer cascade may have arrived during
         # the LLM call. Without this guard the old worker still writes its
         # (now-stale) session_hash into project frontmatter AFTER the new
@@ -1243,7 +1295,8 @@ def _try_extract_global(session_content: str, chat_id: str,
             record_extract_outcome("global", "cancelled")
             return
         # Same reasoning as project extract (including post-LLM cancel re-check).
-        result = _run_one_shot(prompt, ns=ns, prefer_cheap=True, cancel_ev=cancel_ev)
+        # P3 REQ-05: ExponentialBackoff wraps the call. See _try_extract_project.
+        result = _run_one_shot_with_backoff(prompt, ns=ns, cancel_ev=cancel_ev)
         if cancel_ev is not None and cancel_ev.is_set():
             _debug_log(f"[Memory] global extract cancelled post-LLM for {chat_id[:8]} (discarding result)")
             record_extract_outcome("global", "cancelled")

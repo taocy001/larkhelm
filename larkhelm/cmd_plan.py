@@ -27,6 +27,21 @@ from pathlib import Path
 
 from larkhelm.log import _debug_log, log_entry
 from larkhelm.card_builder import _fmt_elapsed, _make_card
+from larkhelm.plan_retry import PlanRetryEngine
+
+
+def _resolve_plan_retry_strategy() -> str:
+    """Look up the operator-configured plan_retry_strategy lazily.
+
+    Lazy because ``cmd_plan`` imports happen before ``_init_runtime``
+    on the cold path of some bootstrap tests, so reading the module
+    global at module-import time would freeze the value at "off".
+    """
+    try:
+        import larkhelm.config as _cfg
+        return str(getattr(_cfg, "PLAN_RETRY_STRATEGY", "off") or "off").lower()
+    except Exception:
+        return "off"
 
 
 # ── Constants ────────────────────────────────────────────────────
@@ -771,8 +786,27 @@ def _run_plan(state: MultiPlanState) -> None:
             if not ok:
                 label = _TYPE_LABEL.get(step.type, step.type.upper())
 
+                # P3 REQ-06: consult PlanRetryEngine. The engine is purely
+                # advisory here — the existing auto/manual retry loop below
+                # is unchanged when strategy is the default ``"off"``. With
+                # strategy ``"now"`` the engine's decision is logged so
+                # operators can correlate retries to the engine output. With
+                # ``"manual"`` we skip the silent auto-retry pass and go
+                # straight to the user-prompt path.
+                _retry_strategy = _resolve_plan_retry_strategy()
+                _retry_engine = PlanRetryEngine(_retry_strategy)
+                _retry_decision = _retry_engine.evaluate({
+                    "retry_count": step.retry_count,
+                    "max_retries": state.max_retries,
+                })
+                _debug_log(
+                    f"[PlanRetry] step {idx} failed; strategy={_retry_strategy} "
+                    f"decision={_retry_decision.reason} retry={_retry_decision.should_retry}"
+                )
+                _suppress_auto_retry = (_retry_strategy == "manual")
+
                 # Auto-retry without waking the user, up to max_retries times
-                if auto_retried < state.max_retries:
+                if not _suppress_auto_retry and auto_retried < state.max_retries:
                     auto_retried     += 1
                     step.retry_count += 1
                     step.status       = "pending"

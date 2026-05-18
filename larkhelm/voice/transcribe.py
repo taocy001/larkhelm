@@ -27,8 +27,11 @@ Design contract (see ``.crew_workspace/design.md`` v1.0):
 from __future__ import annotations
 
 import atexit
+import shutil
+import subprocess
 import threading
 import time
+import wave
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional, TypedDict
@@ -54,6 +57,47 @@ _LOAD_FAILED: bool = False              # terminal flag — set once, never clea
 _LOAD_LOGGED_SUCCESS: bool = False      # gate for "loaded in Xs" info message
 _load_model_lock = threading.Lock()
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="voice-stt")
+
+
+def _probe_duration_ms(audio_path: str) -> Optional[int]:
+    """Best-effort: return audio duration in ms from *container metadata only*.
+
+    Order of attempts (cheapest first):
+
+    1. ``ffprobe`` if ``ffmpeg`` shipped its companion binary. Reads the
+       container header, no decode. ~10ms on a 3-minute m4a.
+    2. ``wave`` stdlib for plain RIFF WAV. Reads ~44 bytes.
+
+    Returns ``None`` if every probe fails — caller's contract is "fail
+    open" (do NOT pre-reject; let inference handle it). REQ-01 only
+    promises to reject when we *can* prove the duration exceeds the
+    operator-set ceiling, not to second-guess every codec.
+    """
+    if shutil.which("ffprobe"):
+        try:
+            out = subprocess.run(
+                [
+                    "ffprobe", "-v", "error", "-show_entries",
+                    "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
+                    audio_path,
+                ],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=5, check=False,
+            )
+            raw = (out.stdout or b"").decode("ascii", "ignore").strip()
+            if raw:
+                return int(float(raw) * 1000)
+        except Exception as e:
+            _log.safe_log(f"[VoiceGate] ffprobe failed for {audio_path}: {e}")
+    try:
+        with wave.open(audio_path, "rb") as wf:
+            frames = wf.getnframes()
+            rate = wf.getframerate() or 0
+            if rate > 0:
+                return int(frames * 1000 / rate)
+    except Exception:
+        return None
+    return None
 
 
 def _disable_voice(reason: str) -> None:
@@ -207,6 +251,25 @@ def transcribe(
             error="disabled",
         )
 
+    # REQ-01: enforce VOICE_MAX_DURATION_MS *inside* transcribe so callers
+    # other than lark_client._download_message_file (CLI, tests, future
+    # hooks) also see the rejection. Fail-open: if duration probe fails we
+    # proceed to inference rather than silently dropping the audio.
+    try:
+        max_ms = int(getattr(_cfg, "VOICE_MAX_DURATION_MS", 0) or 0)
+    except (TypeError, ValueError):
+        max_ms = 0
+    if max_ms > 0:
+        probed_ms = _probe_duration_ms(str(audio_path))
+        if probed_ms is not None and probed_ms > max_ms:
+            _log.safe_log(
+                f"[VoiceGate] reject {audio_path} duration={probed_ms}ms > max={max_ms}ms"
+            )
+            return TranscribeResult(
+                ok=False, text="", duration=probed_ms / 1000.0, lang=lang,
+                error="duration_exceeded",
+            )
+
     engine = (getattr(_cfg, "VOICE_ENGINE", "faster_whisper") or "faster_whisper").lower()
     if engine == "dashscope":
         # DashScope path — synchronous HTTP call, no model load.
@@ -220,9 +283,6 @@ def transcribe(
             ok=False, text="", duration=0.0, lang=lang,
             error="disabled",
         )
-    # TODO(M3.2 next commit): enforce _cfg.VOICE_MAX_DURATION_MS here once
-    # handlers commit wires the duration check; until then the caller
-    # (lark_client._download_message_file) is the gatekeeper.
     fut = _executor.submit(_run_inference, str(audio_path), lang, beam_size)
     return fut.result()
 

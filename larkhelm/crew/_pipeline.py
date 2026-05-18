@@ -201,6 +201,19 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
             if spec.id not in ("pm", "architect")
         ]
 
+    # P3 REQ-10: per-stage timeout overrides from config.
+    # ``dev_stage_timeouts: {"pm": 600, "implementer": 7200}`` lets the
+    # operator dial individual roles up or down without touching the
+    # formula in this file. Unknown keys are ignored (the clamp in
+    # config.py already drops non-positive ints).
+    _stage_overrides = getattr(_cfg, "DEV_STAGE_TIMEOUTS", {}) or {}
+    if isinstance(_stage_overrides, dict) and _stage_overrides:
+        agents = [
+            dataclasses.replace(spec, timeout=int(_stage_overrides[spec.id]))
+            if spec.id in _stage_overrides else spec
+            for spec in agents
+        ]
+
     # Take only the first line for the title. Two reasons:
     #   1. When the caller (``_run_dev_crew_inner``) passes an
     #      ``_augment_requirement_with_context`` output, the user's

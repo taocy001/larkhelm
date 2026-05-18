@@ -135,15 +135,45 @@ def _parse_l2_json(raw: str) -> dict | None:
         return _extract_first_json_object(raw)
 
 
+def _try_embedding_l2(
+    text: str,
+    descriptions: list[tuple[str, str]],
+) -> IntentResult | None:
+    """REQ-03: cosine-based L2 classifier. ``None`` → caller falls back.
+
+    The classifier itself is cheap to instantiate (just a dict copy),
+    but the embedding backend may need to load an ONNX model on first
+    call, so we resolve it lazily.
+    """
+    try:
+        from larkhelm.memory_embedding import get_embedding_backend
+        from larkhelm.agent_hub.intent_embedding import EmbeddingIntentClassifier
+        import larkhelm.config as _cfg
+    except Exception as e:
+        from larkhelm.log import lazy_debug_log
+        lazy_debug_log(f"[IntentRouter] embedding strategy import failed: {e}")
+        return None
+    backend = None
+    try:
+        backend = get_embedding_backend()
+    except Exception as e:
+        from larkhelm.log import lazy_debug_log
+        lazy_debug_log(f"[IntentRouter] get_embedding_backend failed: {e}")
+        return None
+    if backend is None:
+        return None
+    threshold = float(getattr(_cfg, "INTENT_EMBEDDING_THRESHOLD", 0.30) or 0.30)
+    classifier = EmbeddingIntentClassifier(backend, threshold=threshold)
+    classifier.precompute(descriptions)
+    return classifier.classify(text)
+
+
 def _resolve_l2(text: str) -> IntentResult:
     try:
         from larkhelm.backend_registry import BACKEND_REGISTRY
         from larkhelm.agent_hub.agent_base import AGENT_REGISTRY
+        import larkhelm.config as _cfg
     except Exception:
-        return _fallback(text)
-
-    cheap = BACKEND_REGISTRY.get_by_tag(["cheap"])
-    if cheap is None:
         return _fallback(text)
 
     descriptions: list[tuple[str, str]] = []
@@ -151,6 +181,17 @@ def _resolve_l2(text: str) -> IntentResult:
         ag = AGENT_REGISTRY.get(atype)
         if ag is not None:
             descriptions.append((atype, ag.description or ""))
+
+    strategy = str((getattr(_cfg, "config", {}) or {}).get("intent_layer2_strategy", "llm") or "llm").lower()
+    if strategy == "embedding":
+        embedded = _try_embedding_l2(text, descriptions)
+        if embedded is not None:
+            return embedded
+        # Fall through to LLM path if embedding declined or unavailable.
+
+    cheap = BACKEND_REGISTRY.get_by_tag(["cheap"])
+    if cheap is None:
+        return _fallback(text)
 
     system_prompt = _build_l2_prompt(descriptions)
 

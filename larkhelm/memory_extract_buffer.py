@@ -221,10 +221,42 @@ class ExtractBuffer:
             except Exception as e:
                 _debug_log(f"[ExtractBuffer] cannot import _cascade_extract: {e}")
                 return
+        self._flush_with_backoff(fn, content, chat_id)
+
+    def _flush_with_backoff(
+        self,
+        fn: Callable[[str, str], None],
+        content: str,
+        chat_id: str,
+    ) -> None:
+        """REQ-05: wrap the cascade call in ExponentialBackoff.
+
+        ``cascade_backoff_max_attempts`` controls the max retries (default
+        3, capped delays 1s/2s/4s/30s). Last-failure bubbles up to a
+        debug log; the existing cascade pipeline already counts
+        ``cascade_extract_total{outcome="error"}`` so we don't double-count.
+        """
         try:
-            fn(content, chat_id)
+            from larkhelm.memory_circuit import BackoffConfig, ExponentialBackoff
+            import larkhelm.config as _cfg
+            attempts = int(getattr(_cfg, "CASCADE_BACKOFF_MAX_ATTEMPTS", 3) or 3)
+        except Exception:
+            # If memory_circuit can't be imported (very early bootstrap),
+            # fall back to the plain single-shot call.
+            try:
+                fn(content, chat_id)
+            except Exception as e:
+                _debug_log(f"[CascadeBackoff] cascade invocation failed for {chat_id[:8]}: {e}")
+            return
+
+        backoff = ExponentialBackoff(BackoffConfig(max_attempts=max(1, attempts)))
+        try:
+            backoff.run(lambda: fn(content, chat_id))
         except Exception as e:
-            _debug_log(f"[ExtractBuffer] cascade invocation failed for {chat_id[:8]}: {e}")
+            _debug_log(
+                f"[CascadeBackoff] cascade gave up after {attempts} attempts "
+                f"for {chat_id[:8]}: {e}"
+            )
 
     # ── test hook ──────────────────────────────────────────────────────
 

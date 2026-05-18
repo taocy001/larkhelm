@@ -77,6 +77,17 @@ CLI --data-dir > LARKHELM_DATA_DIR env > /var/lib/larkhelm > ~/.local/share/lark
 | `memory_session_smart_compress` | P2 REQ-07：session-layer 走句子级评分 + top-K（确定性，无 LLM），默认 `false` = P1 尾截断 |
 | `memory_global_profile_slot_enabled` | P2 REQ-05.1：global memory 按 style/format/domain/expertise 4 槽位写入（每槽 ≤200 chars），默认 `false` = 整段文本 |
 | `memory_project_section_enabled` | P2 REQ-05.2：project memory 按 TechStack/Conventions/Architecture/Constraints 4 段写入，默认 `false` = 整段文本 |
+| `query_session_v2_traffic` | P3 REQ-02：v2 路径灰度比 0.0–1.0；默认 `0.0` = legacy。`query_session_v2_enabled=true` 时强制走 v2（traffic 视为 1.0）|
+| `intent_embedding_top_k_threshold` | P3 REQ-03：embedding L2 分类器最低 cosine 置信，默认 `0.30`；低于则退回 LLM JSON 路径 |
+| `llm_router_circuit_failures` | P3 REQ-04：cheap 后端连续失败阈值，超过则开断路，默认 `5` |
+| `llm_router_circuit_cooldown_sec` | P3 REQ-04：断路 cool-down 秒数，默认 `30.0`；超过后允许 1 次半开探测 |
+| `cascade_backoff_max_attempts` | P3 REQ-05：memory cascade / extract buffer 的 ExponentialBackoff 最大尝试次数，默认 `3`（1s→2s→4s）|
+| `plan_retry_strategy` | P3 REQ-06：`/plan` step 失败时的重试策略，`now`/`manual`/`off`，默认 `off` = 保持 P0-P2 行为 |
+| `plugin_report_card_enabled` | P3 REQ-07：boot 后将 plugin 加载失败汇总成飞书橙色卡片推送给 admin，默认 `false` |
+| `admin_chat_id` | P3 REQ-07：失败卡片目标 chat_id；为空时退回 `default_owner_open_id` 私聊；都空则只 log |
+| `memory_gc_interval_hours` | P3 REQ-08：MemoryGC daemon tick 周期（小时），默认 `6.0`；`0` = 走 P2 的 boot-only 一次性扫描 |
+| `crew_checkpoint_ttl_days` | P3 REQ-09：`.crew_workspace/*/crew_checkpoint.json` 孤儿清理 TTL，默认 `7.0` 天 |
+| `dev_stage_timeouts` | P3 REQ-10：`/dev` 单 stage 超时覆盖（秒），形如 `{"pm": 600, "implementer": 7200}`；未列出的 stage 走默认公式 |
 
 > **超时层级说明**：
 > - `response_timeout`（软超时）：AI 响应无更新超过此时长，释放主锁但后台继续运行，默认 300s
@@ -489,6 +500,7 @@ if tl.startswith("/new_cmd"):
 | `larkhelm_cascade_midflight_cancelled_total` | Counter | — | mid-LLM 取消的 cascade |
 | `larkhelm_query_duration_seconds` | Histogram | — | query 端到端延时（buckets: 0.5/1/2/5/10/30/60/120/300/600） |
 | `larkhelm_extract_buffer_flushes_total` | Counter | `trigger` | trigger∈{timer,capacity,manual,shutdown} |
+| `larkhelm_llm_router_circuit_state` | Gauge | `backend` | P3 REQ-04：memory_llm_router 断路器状态，0=closed / 1=half_open / 2=open |
 
 Prometheus scrape 配置示例：
 
@@ -688,3 +700,18 @@ python3 -m larkhelm start
 | `crew/_runner.py` git diff | 非 git 仓库为预期行为 |
 | `mcp_server.py` config inner parse | MCP config 行级容错，解析失败继续下一行 |
 | `crew/_failure_card.py` `emit_agent_failure` / `emit_terminal_failure` / `emit_breakpoint_timeout` 顶层 try | 错误上报路径「永不抛」契约——这三个 emit 入口本身就是其它路径的失败兜底，再抛只会复合污染。docstring 显式说明；三者均由 `test_crew_failure_card.py::test_*_never_raises_on_lark_error` pinned |
+
+## P3 变更摘要（2026-05-18）
+
+P3 引入 10 项 prod-ready 收尾改进，全部默认关闭 / 状态不变。详见 `.crew_workspace/prd.md` + `.crew_workspace/design.md`：
+
+- **REQ-01 Voice duration gate**：`voice/transcribe.py` 强制 `VOICE_MAX_DURATION_MS`；超长音频返回 `error="duration_exceeded"` 而不走推理（ffprobe / wave 探测元数据，无解码成本）
+- **REQ-02 Query session v2 traffic**：`query_session_v2_traffic` 灰度比，复用 `_gating.hash_bucket_allows`；`query_session_v2_enabled=true` 仍是强制全开
+- **REQ-03 Intent embedding L2**：`intent_layer2_strategy="embedding"` 时走 cosine top-1 + `intent_embedding_top_k_threshold`，失败静默退 LLM
+- **REQ-04 LLM router circuit breaker**：`memory_circuit.CircuitBreaker` wrap cheap-backend，metric `larkhelm_llm_router_circuit_state`
+- **REQ-05 Cascade exponential backoff**：`memory.cascade_extract` + `memory_extract_buffer.flush` 加 `ExponentialBackoff(max_attempts=cascade_backoff_max_attempts)`，1s→2s→4s（cap 30s）
+- **REQ-06 Plan retry engine**：`plan_retry.PlanRetryEngine`，三策略 `now`/`manual`/`off`，默认 `off` 保持现状
+- **REQ-07 Plugin failure card**：`plugin_loader.load_plugins` 返回 `PluginLoadReport`；`plugin_report_card_enabled=true` 时 bridge 启动后推送橙色卡片给 `admin_chat_id`
+- **REQ-08 MemoryGC daemon**：`memory_gc.MemoryGC` 加 `interval_hours` + `start/stop`；tick 内 audit rotate + stale 重算
+- **REQ-09 Checkpoint TTL GC**：`crew/_checkpoint_gc.CheckpointGC` 由 MemoryGC tick 调度，7d 孤儿 checkpoint 清理
+- **REQ-10 Dev stage timeouts**：`dev_stage_timeouts: {stage_id: seconds}` 覆盖 `_make_dev_pipeline` 的公式

@@ -45,6 +45,26 @@ CARD_PUSH_INTERVAL = _cfg.CARD_PUSH_INTERVAL
 CURSOR_INTERVAL    = _cfg.CURSOR_INTERVAL
 
 
+def _should_use_query_session_v2(chat_id: str) -> bool:
+    """P3 REQ-02: decide if this chat sees the v2 query path.
+
+    Legacy boolean ``query_session_v2_enabled`` is preserved as a hard
+    override: ``true`` forces v2 for every chat (traffic implicitly 1.0),
+    ``false`` leaves the new ``query_session_v2_traffic`` knob in control.
+    A traffic of 0.0 (default) keeps every chat on the legacy path → P2
+    byte-compatibility.
+    """
+    if bool(_cfg.config.get("query_session_v2_enabled")):
+        return True
+    try:
+        from larkhelm._gating import hash_bucket_allows
+        traffic = float(getattr(_cfg, "QUERY_SESSION_V2_TRAFFIC", 0.0) or 0.0)
+        return hash_bucket_allows(chat_id, traffic)
+    except Exception as e:
+        _debug_log(f"[DoQuery] v2 gating lookup failed, defaulting to legacy: {e}")
+        return False
+
+
 # ═══════════════════════════════════════════════════
 #  Document URL auto-injection
 # ═══════════════════════════════════════════════════
@@ -354,7 +374,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
     # — falling back to legacy at that point would acquire the chat lock
     # a second time, emit a second init card, and run the LLM again. So we
     # log the escape and return: fail loud, never double-process.
-    if _cfg.config.get("query_session_v2_enabled"):
+    if _should_use_query_session_v2(chat_id):
         try:
             from larkhelm.handlers._query_session import QuerySession
             _session = QuerySession(

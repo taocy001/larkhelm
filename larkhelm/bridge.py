@@ -341,6 +341,38 @@ def _post_init_notify(cfg) -> None:
     if cfg.ALLOWED_CHATS:
         _debug_log(f"   白名单:    {cfg.ALLOWED_CHATS}")
 
+    _emit_plugin_load_report(cfg)
+
+
+def _emit_plugin_load_report(cfg) -> None:
+    """P3 REQ-07: re-run the plugin loader so the structured report exists,
+    then push an admin card when ``plugin_report_card_enabled=true``.
+
+    The earlier ``_init_plugins`` invocation discarded the report; we
+    duplicate the call here so a non-trivial failure is visible without
+    requiring a second boot. The registry registration on the second
+    call is idempotent (registers under the same agent_type).
+    """
+    try:
+        if not getattr(cfg, "PLUGIN_REPORT_CARD_ENABLED", False):
+            return
+        admin = getattr(cfg, "ADMIN_CHAT_ID", "") or ""
+        if not admin:
+            _debug_log("[PluginReport] enabled but admin_chat_id empty; skipping card")
+            return
+        from larkhelm.agent_hub.plugin_loader import load_plugins
+        from larkhelm.agent_hub.plugin_report import emit_admin_card
+        report = load_plugins(getattr(cfg, "config", {}) or {})
+        if report.has_failures():
+            emit_admin_card(report, admin)
+        else:
+            _debug_log(
+                f"[PluginReport] loaded {len(report.loaded)} plugin(s) "
+                f"in {report.duration_sec:.2f}s, no failures"
+            )
+    except Exception as e:
+        _debug_log(f"[PluginReport] emit failed: {e}")
+
 
 # ── Top-level entry point ────────────────────────────────────────────────
 
