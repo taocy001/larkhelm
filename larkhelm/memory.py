@@ -1795,8 +1795,14 @@ def _aggregate_memory_observation(
         # the debug log tail. Only HH:MM:SS — but better than nothing.
         last_successful_update = debug.get("last_save_ts")
 
-    # ── 5. trends — REQ-13 reserved slot, populated from jsonl tail ─────────
-    trends = _compute_session_trends(chat_id)
+    # ── 5. trends — REQ-13 reserved slot, kept for API symmetry ─────────────
+    # Was wired through ``_compute_session_trends`` which always returned
+    # ``[]`` (no business driver materialised since the reservation). YAGNI
+    # cleanup (analysis_report_full.md 第一档): inline the empty list and
+    # drop the helper. The ``trends`` field stays in the dict so existing
+    # observe-card consumers (test_memory_observe.py and the Feishu card
+    # template) keep their schema.
+    trends: list[int] = []
 
     # ── 6. recent-turns pruning summary (read-only snapshot) ────────────────
     # Read the ring-buffer summary from ``log._pruning_stats``. Failure to
@@ -1828,6 +1834,3 @@ def _aggregate_memory_observation(
     }
 
 
-def _compute_session_trends(chat_id: str) -> list[int]:
-    """Reserved for REQ-13 — returns [] until log_entry records session sizes."""
-    return []
