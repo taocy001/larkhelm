@@ -23,6 +23,7 @@ import re
 import threading
 import time
 import uuid
+from enum import Enum
 from pathlib import Path
 
 from functools import lru_cache
@@ -89,6 +90,44 @@ class PlanStep:
     retry_count: int           = 0
 
 
+class PlanPhase(Enum):
+    """State-machine phases for a multi-step /plan run.
+
+    The earlier ``phase: str`` field was a pure string token compared in
+    ~25 sites across this module; a typo (``"runing"``) would silently
+    skip the branch and leak through to the persistence file. P3-7
+    cleanup converts the contract to an Enum so the typo is a
+    ``ValueError`` at the boundary instead of a silent miss.
+
+    Values are preserved verbatim from the pre-migration strings so
+    ``state.phase.value`` round-trips byte-identically through the
+    persistence JSON — existing on-disk plan_state files keep working.
+    """
+    PLANNING   = "planning"
+    CONFIRMING = "confirming"
+    RUNNING    = "running"
+    WAITING    = "waiting"
+    DONE       = "done"
+    CANCELLED  = "cancelled"
+    FAILED     = "failed"
+
+
+def _coerce_phase(value) -> "PlanPhase":
+    """Boundary helper: accept ``PlanPhase`` or its string value.
+
+    Used by:
+      * test fixtures that still pass ``phase="running"`` for ergonomics
+      * the persistence loader, where the on-disk JSON stores the raw value
+      * any third-party tooling that pokes at ``state.phase`` from outside
+        this module (none known today, but the surface is public-ish)
+
+    Unknown strings raise ``ValueError`` so a typo is caught loudly.
+    """
+    if isinstance(value, PlanPhase):
+        return value
+    return PlanPhase(value)
+
+
 @dataclasses.dataclass
 class MultiPlanState:
     plan_id:         str
@@ -99,7 +138,7 @@ class MultiPlanState:
     trigger_msg_id:  str | None        = None
     cancel_ev:       threading.Event   = dataclasses.field(default_factory=threading.Event)
     lock:            threading.Lock    = dataclasses.field(default_factory=threading.Lock)
-    phase:           str               = "running"   # running | waiting | done | cancelled | failed
+    phase:           PlanPhase         = PlanPhase.RUNNING
     current_idx:     int               = 0
     start_time:      float             = dataclasses.field(default_factory=time.time)
     _confirm_ev:     threading.Event   = dataclasses.field(default_factory=threading.Event)
@@ -107,6 +146,15 @@ class MultiPlanState:
     last_step_failed: bool             = False        # True when entering waiting after a failure
     max_retries:     int               = 1            # auto-retries before notifying user
     no_confirm:      bool              = False        # skip between-step confirmations
+
+    def __post_init__(self) -> None:
+        # Accept either ``PlanPhase`` or the raw string value at construction
+        # so existing test fixtures (``phase="running"``) and persistence
+        # round-tripping (raw string from JSON) keep working with no caller
+        # changes. Unknown strings raise ``ValueError`` here — caught loudly
+        # at the boundary rather than silently miscompared later.
+        if not isinstance(self.phase, PlanPhase):
+            self.phase = _coerce_phase(self.phase)
 
 
 # plan_id → MultiPlanState
@@ -345,20 +393,20 @@ def _build_plan_card(state: MultiPlanState) -> str:
     n_done  = sum(1 for s in state.steps if s.status in ("done", "skipped"))
     n_total = len(state.steps)
 
-    if state.phase == "planning":
+    if state.phase == PlanPhase.PLANNING:
         title, color = "🧠 Plan · 生成计划中…", "grey"
-    elif state.phase == "confirming":
+    elif state.phase == PlanPhase.CONFIRMING:
         title, color = f"📋 Plan 已生成 · 共 {n_total} 步，确认后开始执行", "blue"
-    elif state.phase == "running":
+    elif state.phase == PlanPhase.RUNNING:
         title, color = f"⚙️ Plan · {n_done}/{n_total} ({elapsed})", "blue"
-    elif state.phase == "waiting":
+    elif state.phase == PlanPhase.WAITING:
         if state.last_step_failed:
             title, color = f"⚠️ Plan · 步骤失败，请处理  {n_done}/{n_total} ({elapsed})", "orange"
         else:
             title, color = f"⏸ Plan · 等待确认  {n_done}/{n_total} ({elapsed})", "yellow"
-    elif state.phase == "done":
+    elif state.phase == PlanPhase.DONE:
         title, color = f"✅ Plan · 完成  {n_total} 阶段  ({elapsed})", "green"
-    elif state.phase == "cancelled":
+    elif state.phase == PlanPhase.CANCELLED:
         title, color = f"🛑 Plan · 已取消 ({elapsed})", "orange"
     else:
         title, color = f"❌ Plan · 失败 ({elapsed})", "red"
@@ -380,23 +428,23 @@ def _build_plan_card(state: MultiPlanState) -> str:
 
     body = "\n".join(lines)
 
-    if state.phase == "planning":
+    if state.phase == PlanPhase.PLANNING:
         return _make_card(title, f"**需求：** {state.title}\n\n生成多阶段执行计划中，请稍候…",
                           color=color,
                           buttons=[("🛑 取消", f"plan_cancel:{state.plan_id}")])
 
-    if state.phase == "confirming":
+    if state.phase == PlanPhase.CONFIRMING:
         return _make_card(title, body, color=color,
                           buttons=[
                               ("▶ 开始执行", f"plan_continue:{state.plan_id}"),
                               ("🛑 取消", f"plan_cancel:{state.plan_id}"),
                           ])
 
-    if state.phase == "running":
+    if state.phase == PlanPhase.RUNNING:
         return _make_card(title, body, color=color,
                           buttons=[("🛑 取消", f"plan_cancel:{state.plan_id}")])
 
-    if state.phase == "waiting":
+    if state.phase == PlanPhase.WAITING:
         # Show failed step error if applicable
         if state.last_step_failed:
             failed_steps = [s for s in state.steps if s.status == "failed"]
@@ -699,7 +747,7 @@ def _wait_confirm(state: MultiPlanState) -> str:
       - User sends /cancel command (chat-level cancel event)
     """
     with state.lock:
-        state.phase = "waiting"
+        state.phase = PlanPhase.WAITING
         state._confirm_ev.clear()
         state._confirm_result = "cancel"   # default on timeout / cancel
     _update_plan_card(state)
@@ -756,7 +804,7 @@ def _run_plan(state: MultiPlanState) -> None:
 
             with state.lock:
                 state.current_idx = idx
-                state.phase       = "running"
+                state.phase       = PlanPhase.RUNNING
                 step.status       = "running"
                 step.start_time   = time.time()
                 step.end_time     = None
@@ -894,11 +942,11 @@ def _run_plan(state: MultiPlanState) -> None:
         # ── Final state ───────────────────────────────────────────
         with state.lock:
             if state.cancel_ev.is_set():
-                state.phase = "cancelled"
+                state.phase = PlanPhase.CANCELLED
             elif any(s.status == "failed" for s in state.steps):
-                state.phase = "failed"
+                state.phase = PlanPhase.FAILED
             else:
-                state.phase = "done"
+                state.phase = PlanPhase.DONE
 
         _release_slot()
         _update_plan_card(state)
@@ -907,7 +955,7 @@ def _run_plan(state: MultiPlanState) -> None:
                                  # the finally itself still leaves a recoverable
                                  # record of the terminal state.
 
-        if state.phase == "done":
+        if state.phase == PlanPhase.DONE:
             n       = len(state.steps)
             elapsed = _fmt_elapsed(time.time() - state.start_time)
             send_card(state.chat_id, "✅ Plan 全部完成",
@@ -1050,7 +1098,7 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None) -> None:
             plan_id=plan_id, chat_id=chat_id,
             title=requirement[:40],   # placeholder until planner generates real title
             steps=[],
-            phase="planning",
+            phase=PlanPhase.PLANNING,
             trigger_msg_id=user_msg_id,
             max_retries=max_retries,
             no_confirm=no_confirm,
@@ -1077,7 +1125,7 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None) -> None:
         except Exception as e:
             _debug_log(f"[Plan] auto_plan error: {e}")
             with state.lock:
-                state.phase = "failed"
+                state.phase = PlanPhase.FAILED
             _update_plan_card(state)
             with _active_plans_lock:
                 _active_plans.pop(plan_id, None)
@@ -1085,7 +1133,7 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None) -> None:
 
         if state.cancel_ev.is_set() or not steps:
             with state.lock:
-                state.phase = "cancelled" if state.cancel_ev.is_set() else "failed"
+                state.phase = PlanPhase.CANCELLED if state.cancel_ev.is_set() else "failed"
             _update_plan_card(state)
             with _active_plans_lock:
                 _active_plans.pop(plan_id, None)
@@ -1095,7 +1143,7 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None) -> None:
         with state.lock:
             state.title = title
             state.steps = steps
-            state.phase = "confirming"
+            state.phase = PlanPhase.CONFIRMING
             state._confirm_ev.clear()
             state._confirm_result = "cancel"
         _update_plan_card(state)
@@ -1109,7 +1157,7 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None) -> None:
 
         if action == "cancel" or state.cancel_ev.is_set():
             with state.lock:
-                state.phase = "cancelled"
+                state.phase = PlanPhase.CANCELLED
             _update_plan_card(state)
             with _active_plans_lock:
                 _active_plans.pop(plan_id, None)

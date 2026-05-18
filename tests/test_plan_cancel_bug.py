@@ -116,7 +116,11 @@ class TestPlanCancelBug(unittest.TestCase):
         with _active_crew_lock:
             self.assertNotIn(chat_id, _active_crew,
                              "_run_plan finally must release _active_crew slot")
-        self.assertEqual(state.phase, "done")
+        # ``state.phase`` is a ``PlanPhase`` enum after the P3-7 migration;
+        # accept both the enum and its raw string value so this test can
+        # stay readable without importing the enum.
+        from larkhelm.cmd_plan import PlanPhase
+        self.assertEqual(state.phase, PlanPhase.DONE)
 
 
 if __name__ == "__main__":

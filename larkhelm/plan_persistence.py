@@ -250,7 +250,10 @@ def _serialise(state: "MultiPlanState") -> dict:
         "plan_id":          state.plan_id,
         "chat_id":          state.chat_id,
         "title":            state.title,
-        "phase":            state.phase,
+        # state.phase is a ``PlanPhase`` enum (P3-7 migration); serialize
+        # as its raw string value so existing on-disk plan_state.json
+        # files round-trip byte-identically.
+        "phase":            state.phase.value if hasattr(state.phase, "value") else state.phase,
         "current_idx":      state.current_idx,
         "start_time":       state.start_time,
         "saved_at":         time.time(),
