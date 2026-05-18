@@ -9,6 +9,8 @@ re-introduces any of them trips loudly. Reports archived at
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -16,6 +18,81 @@ from unittest.mock import patch
 
 import larkhelm.config as _cfg
 from larkhelm import token_stats
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Helpers for the R1.5 end-to-end tests (DeepSeek runner + Gemini event).
+# Inlined deliberately so this file doesn't import from
+# ``tests.test_runner_deepseek`` — that module bootstraps its own config
+# at import time (incl. ``HARD_TIMEOUT = 600``) which would silently
+# contaminate ``TestDurationHardCapMatchesHardTimeout`` further down.
+# ────────────────────────────────────────────────────────────────────────
+
+class _FakeStreamResponse:
+    """Minimal stand-in for the slice of ``requests.Response`` that
+    ``DeepSeekRunner._consume_sse`` uses."""
+
+    def __init__(self, status_code: int, lines: list[str], text: str = ""):
+        self.status_code = status_code
+        self._lines = lines
+        self.text = text
+        self.closed = False
+
+    def iter_lines(self, decode_unicode: bool = False):
+        yield from self._lines
+
+    def close(self):
+        self.closed = True
+
+
+def _ds_sse(content_chunks: list[str], usage: dict | None = None) -> list[str]:
+    """Build a list of raw SSE lines matching DeepSeek's stream format."""
+    lines: list[str] = []
+    for chunk in content_chunks:
+        lines.append("data: " + json.dumps({
+            "id": "chatcmpl-x",
+            "choices": [{"index": 0, "delta": {"content": chunk},
+                         "finish_reason": None}],
+        }))
+        lines.append("")
+    if usage:
+        lines.append("data: " + json.dumps({
+            "id": "chatcmpl-x",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": usage,
+        }))
+        lines.append("")
+    lines.append(": keep-alive")
+    lines.append("data: [DONE]")
+    return lines
+
+
+def _deepseek_min_config():
+    """Set the minimum config fields needed to instantiate DeepSeekRunner.
+
+    Critically does NOT touch ``HARD_TIMEOUT`` / ``RESPONSE_TIMEOUT`` — those
+    are read by other tests in this file and their values must survive the
+    bootstrap. Tests using this helper should either save/restore those
+    fields themselves or simply leave them at whatever the production
+    config established."""
+    tmp = Path(tempfile.mkdtemp(prefix="larkhelm-stats-audit-ds-"))
+    _cfg.DATA_DIR    = tmp
+    _cfg.SESSION_DIR = tmp / "sessions"
+    _cfg.SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    if not getattr(_cfg, "LOG_DIR", None):
+        _cfg.LOG_DIR = tmp / "logs"
+        _cfg.LOG_DIR.mkdir(parents=True, exist_ok=True)
+    _cfg.STATE_FILE  = tmp / "state.json"
+    _cfg.DEBUG_LOG   = tmp / "larkhelm.log"
+    # RESPONSE_TIMEOUT / HARD_TIMEOUT intentionally NOT touched.
+    if not getattr(_cfg, "RESPONSE_TIMEOUT", None):
+        _cfg.RESPONSE_TIMEOUT = 300
+    if not getattr(_cfg, "HARD_TIMEOUT", None):
+        _cfg.HARD_TIMEOUT = 21600
+    _cfg.DEEPSEEK_API_KEY  = "sk-test-fake"
+    _cfg.DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+    _cfg.DEEPSEEK_MODEL    = "deepseek-chat"
+    return tmp
 
 
 class TestPersistentReadIncludesRotationBackup(unittest.TestCase):
@@ -205,19 +282,75 @@ class TestKimiCleanupExtraEstimate(unittest.TestCase):
 class TestDeepSeekStreamOptions(unittest.TestCase):
     """Fix #2: DeepSeek's streaming body MUST set
     ``stream_options.include_usage=true``, otherwise the terminal SSE
-    block omits ``usage`` and every query records zero tokens."""
+    block omits ``usage`` and every query records zero tokens.
+
+    R1.5-3: previous version of this test grep'd the source file for the
+    literal ``"stream_options": {"include_usage": True}`` string. That
+    "text-as-test" approach is trivially defeated by any variable
+    rename / dict-construction refactor (e.g. ``body["stream_options"] = ...``
+    or ``opts = {"include_usage": True}; body["stream_options"] = opts``).
+    The runner could ship without actually sending the key and the test
+    would still pass.
+
+    Replaced with a proper integration check: mock ``requests.Session.post``,
+    drive a real ``DeepSeekRunner.run()`` to completion, then inspect the
+    JSON body that was actually handed to the HTTP client. This guards
+    against EVERY way of breaking the contract — including someone
+    rewriting the body assembly while the source string literal stays
+    intact elsewhere (e.g. left over in a comment).
+    """
 
     def test_streaming_body_requests_usage_chunk(self):
-        # Read the source to confirm the body literal contains the
-        # required key. (Functional integration is covered by the live
-        # _record_tokens path elsewhere; here we're pinning the body
-        # constructor against re-introducing the bug.)
-        source = (Path(__file__).resolve().parents[1] /
-                  "larkhelm" / "runner_deepseek.py").read_text(encoding="utf-8")
-        self.assertIn(
-            '"stream_options": {"include_usage": True}', source,
-            "DeepSeek streaming body lost stream_options.include_usage — "
-            "production calls will silently stop reporting tokens"
+        import threading as _threading
+        from unittest import mock as _mock
+        # Module-level helpers (top of file) are inlined deliberately so
+        # we don't import from test_runner_deepseek (whose own bootstrap
+        # clobbers HARD_TIMEOUT, breaking other tests in this file).
+        from larkhelm.runner_deepseek import DeepSeekRunner
+
+        _deepseek_min_config()
+        sse = _ds_sse(["ok"], usage={
+            "prompt_tokens": 10, "completion_tokens": 2,
+            "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 10,
+        })
+        fake_resp = _FakeStreamResponse(200, sse)
+
+        with _mock.patch("requests.Session.post",
+                         return_value=fake_resp) as m_post:
+            DeepSeekRunner(
+                "chat-stream-opts-test", "Hi",
+                sid=None, cwd="/tmp",
+                cancel_ev=_threading.Event(),
+            ).run()
+
+        # Exactly one POST issued.
+        self.assertEqual(m_post.call_count, 1,
+            "runner must hit Session.post exactly once for a single-attempt query"
+        )
+        # Capture the JSON body actually sent over the wire.
+        _, kwargs = m_post.call_args
+        body = kwargs.get("json")
+        self.assertIsInstance(body, dict,
+            "runner must pass the request body via the ``json=`` kwarg so "
+            "requests serializes + content-type-tags it; sending raw "
+            "``data=...`` would silently lose stream_options because "
+            "DeepSeek's content negotiation would reject the call"
+        )
+        self.assertIn("stream_options", body,
+            "request body is missing ``stream_options`` — DeepSeek's "
+            "OpenAI-compatible API requires this key on streaming calls "
+            "or the terminal SSE chunk omits ``usage`` entirely (every "
+            "query then records zero tokens)"
+        )
+        self.assertEqual(
+            body["stream_options"], {"include_usage": True},
+            f"stream_options must be exactly {{'include_usage': True}}; "
+            f"got {body['stream_options']!r}"
+        )
+        # And ``stream`` itself must remain true — stream_options is
+        # only honoured when streaming is on.
+        self.assertTrue(body.get("stream"),
+            "stream=true must be set alongside stream_options.include_usage"
         )
 
 
@@ -743,6 +876,184 @@ class TestDurationHardCapMatchesHardTimeout(unittest.TestCase):
         self.assertEqual(durations, [7200.0],
             f"2h query must be kept (cap = {hard_cap}s); the old "
             "3600s cap silently dropped every long /dev query"
+        )
+
+
+class TestOverlappingCacheNoDoubleCount(unittest.TestCase):
+    """R1.5-2: end-to-end pipeline test for the DeepSeek + Gemini
+    "overlapping cache field" regression that round-2 audit caught.
+
+    Background: post-991443f, ``_fmt_token_block`` switched to
+    ``total = inp + out + cr + cc`` on the assumption the four buckets are
+    disjoint. That assumption holds for Claude and (post-fix) Gemini, but
+    BOTH backends previously reported overlapping fields (DeepSeek
+    ``prompt_tokens = hit + miss``; Gemini ``stats.input_tokens = total``
+    including cached). If the runner-level normalization to disjoint
+    ever regresses, the displayed total near-doubles on every cache-heavy
+    query — a P0 user-visible bug.
+
+    The previous unit tests for both runners exercised either ``__new__``-
+    bypassed instances or ``patch.object(_record_tokens)``, so they
+    pinned the runner's call shape but NEVER drove the full chain
+    ``runner → _record_tokens → record_token_usage → all.jsonl →
+    get_token_stats_persistent → _fmt_token_block``. That's exactly
+    where the round-2 regression hid in 991443f → ca8c609. These two
+    tests close the gap by hitting every step with real I/O (the only
+    mock is at the HTTP / subprocess boundary, which the tests must
+    fake to stay hermetic).
+    """
+
+    def setUp(self):
+        # Redirect token-stats JSONL writes to a tmp dir so production
+        # all.jsonl is never touched.
+        self._tmp = Path(__file__).resolve().parent / "_overlap_e2e_tmp"
+        self._tmp.mkdir(exist_ok=True)
+        for f in (self._tmp / "all.jsonl", self._tmp / "all.jsonl.1"):
+            if f.exists():
+                f.unlink()
+        self._orig_log_dir = getattr(_cfg, "LOG_DIR", None)
+        _cfg.LOG_DIR = self._tmp
+
+    def tearDown(self):
+        # Drop the in-memory token_stats accumulator entries we polluted
+        # so the next test starts clean (record_token_usage updates the
+        # process-wide ``_token_stats`` OrderedDict too, not just JSONL).
+        with token_stats._token_stats_lock:
+            for cid in ("deepseek_overlap_e2e", "gemini_overlap_e2e"):
+                token_stats._token_stats.pop(cid, None)
+
+        if self._orig_log_dir is None:
+            try:
+                delattr(_cfg, "LOG_DIR")
+            except AttributeError:
+                pass
+        else:
+            _cfg.LOG_DIR = self._orig_log_dir
+        for f in (self._tmp / "all.jsonl", self._tmp / "all.jsonl.1"):
+            if f.exists():
+                f.unlink()
+        if self._tmp.exists():
+            self._tmp.rmdir()
+
+    def _read_rendered_total(self, chat_id: str, model: str) -> tuple[int, str]:
+        """Run the persistent reader + UI formatter, return (total, body)."""
+        from larkhelm.commands import _fmt_token_block
+        data = token_stats.get_token_stats_persistent(chat_id)
+        self.assertIn(model, data,
+            f"persistent reader should expose {model} usage for {chat_id}"
+        )
+        body = _fmt_token_block("__test__", data)
+        # Pull the "合计 N,NNN tokens" number out of the body.
+        import re
+        m = re.search(r"合计 \*\*([\d,]+)\*\*", body)
+        self.assertIsNotNone(m, f"could not parse total from {body!r}")
+        return int(m.group(1).replace(",", "")), body
+
+    def test_deepseek_overlapping_cache_no_double_count(self):
+        """Real DeepSeekRunner SSE event with ``prompt_tokens=50000,
+        prompt_cache_hit_tokens=40000, completion_tokens=500`` must
+        render total = 50,500 (NOT ~100,500). Cache hit-rate must be
+        ~80% in the rendered card."""
+        import threading as _threading
+        from unittest import mock as _mock
+        # Use the module-level helpers (top of file) — they bootstrap the
+        # minimum config DeepSeekRunner needs WITHOUT touching HARD_TIMEOUT,
+        # so the duration-cap test downstream stays unaffected. We DO need
+        # to preserve our LOG_DIR override (setUp redirected it to tmp).
+        _saved_log_dir = _cfg.LOG_DIR
+        _deepseek_min_config()
+        _cfg.LOG_DIR = _saved_log_dir
+        from larkhelm.runner_deepseek import DeepSeekRunner
+
+        sse = _ds_sse(["hello world"], usage={
+            "prompt_tokens": 50000,                # overlapping: hit + miss
+            "completion_tokens": 500,
+            "prompt_cache_hit_tokens": 40000,
+            "prompt_cache_miss_tokens": 10000,
+        })
+        fake_resp = _FakeStreamResponse(200, sse)
+
+        chat_id = "deepseek_overlap_e2e"
+        with _mock.patch("requests.Session.post", return_value=fake_resp):
+            DeepSeekRunner(
+                chat_id, "Hi", sid=None, cwd="/tmp",
+                cancel_ev=_threading.Event(),
+            ).run()
+
+        # Run the full reader + UI chain and inspect.
+        total, body = self._read_rendered_total(chat_id, "deepseek")
+        real_total = 50000 + 500  # the OpenAI-compatible "true" cost
+        self.assertLessEqual(total, real_total + 1,  # +1 for any int rounding
+            f"deepseek total {total:,} exceeds the real API total "
+            f"{real_total:,}; round-2 double-count regression is back. "
+            f"Body:\n{body}"
+        )
+        # And cache hit pct should reflect 40000 / 50000 = 80%, not 400%.
+        self.assertIn("（80%）", body,
+            f"expected '（80%）' for cache hit rate (40k/50k), got body:\n{body}"
+        )
+
+    def test_gemini_overlapping_cache_no_double_count(self):
+        """Real GeminiRunner.parse_stdout_event with the audit-observed
+        envelope ``stats={"input_tokens": 12184, "cached": 11555,
+        "input": 629, "output_tokens": 19}`` must render total = 12,203
+        (NOT 12184 + 11555 + 19). The previous "stats" reader pinned
+        only the call-shape; this test verifies the disjoint contract
+        survives the full JSONL → persistent reader → UI chain."""
+        from larkhelm.runner_gemini import GeminiRunner
+        from larkhelm.runner_base import BaseProcessRunner
+
+        chat_id = "gemini_overlap_e2e"
+        # Build a real GeminiRunner without spawning a subprocess. We can
+        # bypass ``__init__`` (which would call super().__init__ and try
+        # to acquire the AI semaphore on run()); ``parse_stdout_event``
+        # only needs the handful of fields below.
+        r = GeminiRunner.__new__(GeminiRunner)
+        # BaseProcessRunner.__init__ sets these (some via the constructor
+        # signature); we only need the subset _record_tokens reads.
+        r.backend_name   = "gemini"
+        r.chat_id        = chat_id
+        r.record_under   = None
+        r._tokens_recorded = False
+        r._last_usage_seen = {}
+        r.use_session    = False
+        r._extra_args    = []
+        r._new_sid       = None
+        # Sanity: _record_tokens is inherited from BaseProcessRunner;
+        # don't patch it — we want the real persistence path. On py3
+        # methods accessed on the class itself are bare functions (no
+        # __func__ wrapper), so compare the function objects directly.
+        self.assertIs(
+            GeminiRunner._record_tokens,
+            BaseProcessRunner._record_tokens,
+            "GeminiRunner must inherit _record_tokens unchanged; if it "
+            "overrides we need to retarget this test"
+        )
+
+        ev = {
+            "type": "result", "session_id": "gsid_overlap_test",
+            "stats": {
+                "input_tokens": 12184,   # OVERLAPPING — = input + cached
+                "output_tokens": 19,
+                "cached": 11555,
+                "input": 629,            # = 12184 - 11555
+                "total_tokens": 12203,
+            },
+        }
+        r.parse_stdout_event(ev)
+
+        # The runner persisted via the real chain. Verify the rendered total.
+        total, body = self._read_rendered_total(chat_id, "gemini")
+        real_total = 12184 + 19  # input_tokens (which is hit+miss) + output
+        self.assertEqual(total, real_total,
+            f"gemini total {total:,} != real API total {real_total:,}; "
+            f"input/cached overlap must NOT be counted twice. "
+            f"Body:\n{body}"
+        )
+        # Hit pct = cached / (cached + non-cached input) = 11555 / 12184
+        # = 94.84% → rendered as "94%" by the int() truncation.
+        self.assertIn("（94%）", body,
+            f"expected '（94%）' cache hit pct (11555/12184), got body:\n{body}"
         )
 
 
