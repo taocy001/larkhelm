@@ -205,10 +205,27 @@ class DeepSeekRunnerTest(unittest.TestCase):
         args, _ = m_rec.call_args
         self.assertEqual(args[0], "chat-test")
         self.assertEqual(args[1], "deepseek")
-        self.assertEqual(args[2]["input_tokens"], 100)
+        # Post-stats-audit round-2: DeepSeek field semantics aligned to
+        # the uniform contract (input_tokens = non-cached only). The
+        # pre-fix assignment (input=prompt_tokens, cache_create=miss)
+        # combined with ``total = inp + out + cr + cc`` in
+        # ``_fmt_token_block`` near-doubled DeepSeek totals — audit
+        # caught it. New contract: input=miss, cache_read=hit,
+        # cache_create=0.
+        self.assertEqual(args[2]["input_tokens"], 90,
+            "input_tokens must be miss only (90), not prompt_tokens (100)")
         self.assertEqual(args[2]["output_tokens"], 50)
         self.assertEqual(args[2]["cache_read"], 10)
-        self.assertEqual(args[2]["cache_create"], 90)
+        self.assertEqual(args[2]["cache_create"], 0,
+            "DeepSeek has no separate cache-creation band; cache_create "
+            "must stay 0 so it doesn't double-count cache_miss")
+        # Round-trip: bucket sum via the new assignment = real API total.
+        self.assertEqual(
+            args[2]["input_tokens"] + args[2]["output_tokens"]
+            + args[2]["cache_read"] + args[2]["cache_create"],
+            150,
+            "post-fix DeepSeek bucket sum should equal prompt+completion=150"
+        )
 
     # ------------------------------------------------------------------ failure modes
 

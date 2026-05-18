@@ -528,9 +528,33 @@ class DeepSeekRunner:
                 usage_seen = ev["usage"]
 
         if usage_seen:
+            # Field-semantics alignment with the rest of the codebase
+            # (post-stats-audit round-2). The pre-alignment record
+            # stored:
+            #   input_tokens = prompt_tokens (= cache_hit + cache_miss)
+            #   cache_create = prompt_cache_miss_tokens (input subset)
+            # …which double-counted the miss portion: ``input_tokens``
+            # already included it, AND ``cache_create`` re-added it on
+            # top via the new ``total = inp + out + cr + cc`` formula in
+            # ``_fmt_token_block``. Result was a near-2× total on every
+            # DeepSeek query once stream_options started reporting usage.
+            #
+            # New contract (uniform across Claude / Gemini / DeepSeek):
+            #   input_tokens — non-cached prompt only (= miss)
+            #   cache_read   — cached prompt prefix (= hit)
+            #   cache_create — NEW cache writes (DeepSeek doesn't have a
+            #     separate cache-creation cost band; stays 0)
+            # DeepSeek docs guarantee
+            # prompt_tokens == cache_hit_tokens + cache_miss_tokens, so
+            # ``prompt_cache_miss_tokens`` is the right value for the
+            # non-cached portion; if the schema ever changes we fall
+            # back to ``prompt_tokens - cache_hit`` to stay safe.
+            hit = int(usage_seen.get("prompt_cache_hit_tokens", 0) or 0)
+            miss = int(usage_seen.get("prompt_cache_miss_tokens",
+                                       max(0, int(usage_seen.get("prompt_tokens", 0) or 0) - hit)))
             self._record_tokens({
-                "input_tokens":  usage_seen.get("prompt_tokens", 0),
-                "output_tokens": usage_seen.get("completion_tokens", 0),
-                "cache_read":    usage_seen.get("prompt_cache_hit_tokens", 0),
-                "cache_create":  usage_seen.get("prompt_cache_miss_tokens", 0),
+                "input_tokens":  miss,
+                "output_tokens": int(usage_seen.get("completion_tokens", 0) or 0),
+                "cache_read":    hit,
+                "cache_create":  0,
             }, cost=0.0)

@@ -102,6 +102,14 @@ def record_token_usage(chat_id: str, model: str, usage: dict) -> None:
         "cache_create":  usage.get("cache_create", 0),
         "cost_usd":      usage.get("cost_usd", 0.0),
     }
+    # Preserve the ``estimated`` flag (currently only Kimi sets it — the
+    # CLI emits no usage envelope so we char-count / 4 in cleanup_extra).
+    # Persisting the flag lets future audit / cost-rollup tooling exclude
+    # estimated rows when computing precise SDK-derived totals. Don't
+    # write the field when it's the default False to keep the JSONL
+    # rows backwards-compatible.
+    if usage.get("estimated"):
+        record["estimated"] = True
     with _jsonl_lock:
         try:
             _cfg.LOG_DIR.mkdir(parents=True, exist_ok=True)
