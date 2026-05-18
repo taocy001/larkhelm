@@ -10,7 +10,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from larkhelm.log import _debug_log, log_entry
+from larkhelm.log import _debug_log, log_entry, warn
 from larkhelm.ai_runner import QueryCancelledError
 from larkhelm.crew_types import (
     HardFailError, AgentSpec, AgentState, AgentStatus, CrewState,
@@ -133,9 +133,17 @@ def _persist_result_to_output_file_if_missing(
         tmp.write_text(result, encoding="utf-8")
         import os as _os
         _os.replace(tmp, out_path)
-        _debug_log(
+        # Surface at WARN so this never silently becomes "background noise":
+        # every safety-net hit means the underlying agent failed to honour
+        # the Write-tool contract, which is a real regression to chase
+        # (Claude CLI perm denial / agent-prompt drift / token-limit cutoff
+        # etc.). Independent review flagged that the original ``_debug_log``
+        # alone gave operators zero signal.
+        warn(
             f"[Crew] {agent_id} output_file safety-net wrote {len(result)} chars "
-            f"to {spec.output_file} (agent skipped Write tool; existing={existing_size}b)"
+            f"to {spec.output_file} — agent skipped Write tool "
+            f"(existing on disk: {existing_size}b). Investigate the agent's "
+            f"tool-call trace to find why Write was bypassed."
         )
     except Exception as e:
         _debug_log(f"[Crew] {agent_id} output_file safety-net failed: {e}")
@@ -1091,46 +1099,77 @@ def _execute(state: CrewState, total_timeout: int):
 _TASK_COMPLETE_MARKER = "TASK_ALREADY_COMPLETE"
 
 
+def _extract_task_complete_marker(state: CrewState) -> "tuple[bool, str]":
+    """Single source of truth for the marker detection. Returns
+    ``(hit, reason)`` where:
+
+      • ``hit`` is True iff PM is DONE, not a retry, AND the marker
+        appears at the start of either PM's in-memory result OR the
+        first non-blank line of ``.crew_workspace/prd.md``.
+      • ``reason`` is the trailing free-text after ``TASK_ALREADY_COMPLETE:``
+        (empty if no colon / nothing after).
+
+    Round-2 review caught that ``_check_task_already_complete`` had the
+    prd.md fallback but ``_synthesize`` only inspected ``pm_state.result``,
+    so PM honouring the system-prompt contract by writing only the file
+    (a very common shape — PM emits "PRD written." as result after the
+    Write tool call) would correctly short-circuit ``_execute`` but
+    silently trigger the LLM synthesis path. Sharing this helper
+    guarantees the two phases never disagree.
+    """
+    pm_state = state.agents.get("pm")
+    if not pm_state or pm_state.status != AgentStatus.DONE:
+        return False, ""
+    if pm_state.retry_count > 0:
+        return False, ""
+
+    # Primary source: in-memory result. Fallback: first non-blank line of
+    # prd.md (covers the case where the agent honoured the system-prompt
+    # contract by writing the marker to the file but the in-memory result
+    # is a short closing summary).
+    candidates: list[str] = []
+    head = (pm_state.result or "").lstrip()
+    if head:
+        candidates.append(head)
+    try:
+        from larkhelm.chat_state import _get_cwd
+        cwd = _get_cwd(state.chat_id)
+        prd_path = Path(cwd) / ".crew_workspace" / "prd.md"
+        if prd_path.exists():
+            file_head = prd_path.read_text(encoding="utf-8").lstrip()
+            if file_head:
+                candidates.append(file_head)
+    except Exception:
+        pass
+
+    for cand in candidates:
+        if cand.startswith(_TASK_COMPLETE_MARKER):
+            first_line = cand.splitlines()[0].strip()
+            reason = first_line.removeprefix(_TASK_COMPLETE_MARKER).lstrip(": ").strip()
+            return True, reason
+    return False, ""
+
+
 def _check_task_already_complete(state: CrewState, wave) -> bool:
     """Return True iff a just-completed first-wave PM agent emitted the
-    ``TASK_ALREADY_COMPLETE: <reason>`` marker on the first line of its
-    result, signalling that the codebase already satisfies the user's
-    acceptance points.
+    ``TASK_ALREADY_COMPLETE: <reason>`` marker, signalling that the
+    codebase already satisfies the user's acceptance points.
 
     Only fires when:
       • the wave contains an agent with id ``"pm"`` (dev pipeline shape;
-        /crew dynamic plans are unaffected)
-      • that PM is DONE
-      • its result (or its on-disk output_file head) starts with the
-        marker token
-      • PM has not been retried (avoids accidentally short-circuiting a
-        re-run that the user explicitly asked for via /dev --no-confirm)
+        /crew dynamic plans are unaffected) — guard so this helper can't
+        misfire on a non-dev plan whose first agent happens to be named
+        differently.
+      • the marker is found in either PM's in-memory result or in
+        ``.crew_workspace/prd.md`` (see ``_extract_task_complete_marker``).
 
     The check is read-only — the caller is responsible for marking the
     remaining agents as SKIPPED.
     """
-    has_pm_in_wave = any(s.id == "pm" for s in wave)
-    if not has_pm_in_wave:
+    if not any(s.id == "pm" for s in wave):
         return False
-    pm_state = state.agents.get("pm")
-    if not pm_state or pm_state.status != AgentStatus.DONE:
-        return False
-    if pm_state.retry_count > 0:
-        return False
-    # Primary source: in-memory result. Fallback: first line of prd.md
-    # (covers the case where the safety-net wrote the file but the in-
-    # memory result is a short closing summary).
-    head = (pm_state.result or "").lstrip()
-    if not head.startswith(_TASK_COMPLETE_MARKER):
-        try:
-            from larkhelm.chat_state import _get_cwd
-            cwd = _get_cwd(state.chat_id)
-            prd_path = Path(cwd) / ".crew_workspace" / "prd.md"
-            if prd_path.exists():
-                head = prd_path.read_text(encoding="utf-8").lstrip()
-        except Exception:
-            head = ""
-    return head.startswith(_TASK_COMPLETE_MARKER)
+    hit, _reason = _extract_task_complete_marker(state)
+    return hit
 
 
 def _execute_from(state: CrewState, total_timeout: int, skip_ids: set):
@@ -1246,16 +1285,22 @@ def _synthesize(state: CrewState) -> str:
     # synthesise. Return a templated card body so the user sees a clean
     # "已完成" message instead of a synthesis-LLM hallucinating about empty
     # inputs.
-    pm_state = state.agents.get("pm")
-    if (pm_state and pm_state.status == AgentStatus.DONE
-            and (pm_state.result or "").lstrip().startswith(_TASK_COMPLETE_MARKER)):
-        reason_line = (pm_state.result or "").splitlines()[0].strip()
-        reason = reason_line.removeprefix(_TASK_COMPLETE_MARKER).lstrip(": ").strip()
+    #
+    # Round-2 review caught that this branch previously only inspected
+    # ``pm_state.result``, but ``_check_task_already_complete`` also
+    # falls back to prd.md. The asymmetry meant a PM that wrote the
+    # marker only to the file (the more common shape: PM calls Write,
+    # then emits "Done." as the in-memory result) correctly short-
+    # circuited ``_execute`` but quietly hit this branch's "no" path
+    # and ran a full synthesis LLM call. Fixed by sharing
+    # ``_extract_task_complete_marker``.
+    _marker_hit, _marker_reason = _extract_task_complete_marker(state)
+    if _marker_hit:
         skipped_ids = [s.id for s in state.plan.agents
                        if state.agents[s.id].status == AgentStatus.SKIPPED]
         return (
             "**✅ 任务已经在代码中完成**\n\n"
-            f"PM 判定：{reason or '（PM 未给出详细说明）'}\n\n"
+            f"PM 判定：{_marker_reason or '（PM 未给出详细说明）'}\n\n"
             f"已跳过的阶段：{', '.join(skipped_ids) if skipped_ids else '（无）'}\n\n"
             "若你认为这个判断不对，请用 `/dev --no-confirm <更具体的需求>` 强制重跑。"
         )

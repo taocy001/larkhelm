@@ -581,10 +581,19 @@ def _cmd_crew_status(chat_id: str):
         n_total = len(state.agents)
         lines   = [f"**任务：** {state.plan.title}",
                    f"**状态：** {state.phase}  · {n_done}/{n_total} Agent 完成  · 已耗时 {elapsed}"]
+        from larkhelm.crew_card import _backend_label
         for spec in state.plan.agents:
             ag   = state.agents[spec.id]
             icon = _STATUS_ICON.get(ag.status, "?")
-            lines.append(f"{icon} {spec.role}（{spec.model}）")
+            # ``spec.model`` is empty under the Phase-C ``task_profile``
+            # dispatch (dev pipeline). Use the shared ``_backend_label``
+            # helper that prefers the resolved ``actual_backend_id`` and
+            # falls back through ``spec.model`` → ``spec.task_profile`` →
+            # nothing — so the user sees ``（claude）`` once resolved
+            # instead of the empty ``（）`` this line used to render.
+            _backend = _backend_label(spec, ag)
+            _backend_paren = f"（{_backend}）" if _backend else ""
+            lines.append(f"{icon} {spec.role}{_backend_paren}")
         send_card(chat_id, "⚙️ Crew 任务进行中", "\n".join(lines), color="blue")
     else:
         # Look for the most recent crew record in the logs

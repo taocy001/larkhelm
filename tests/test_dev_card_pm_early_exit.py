@@ -269,3 +269,47 @@ def test_synthesize_renders_templated_card_when_marker_set(tmp_path, monkeypatch
     assert "一句话说明" in body
     assert "architect" in body
     assert "implementer" in body
+
+
+def test_synthesize_finds_marker_in_prd_file_when_result_is_short(
+    tmp_path, monkeypatch,
+):
+    """Round-2 review MUST-FIX regression:
+
+    ``_check_task_already_complete`` falls back to prd.md when PM's
+    in-memory result is short. Previously ``_synthesize``'s short-
+    circuit only inspected ``pm_state.result`` directly, so PM
+    honouring the Write-tool contract (writing the marker to prd.md
+    and emitting a short "Done." closing message as ``result``) made
+    ``_execute`` correctly SKIP the downstream agents BUT ``_synthesize``
+    fell through to the full LLM-synthesis path — generating a
+    hallucinated summary about empty agent outputs.
+
+    Fix: both helpers go through the shared
+    ``_extract_task_complete_marker`` so the two judgements never
+    diverge. Test pins the prd-only-marker path end-to-end.
+    """
+    from larkhelm.crew._runner import _synthesize
+    from larkhelm.crew_types import AgentStatus
+
+    # PM result is the short closing summary; marker only on disk.
+    state = _build_dev_state(
+        tmp_path,
+        pm_result="PRD written to .crew_workspace/prd.md.",
+    )
+    for sid in ("architect", "implementer"):
+        state.agents[sid].status = AgentStatus.SKIPPED
+
+    monkeypatch.setattr("larkhelm.chat_state._get_cwd", lambda _cid: str(tmp_path))
+    (tmp_path / ".crew_workspace").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".crew_workspace" / "prd.md").write_text(
+        "TASK_ALREADY_COMPLETE: P0-P3 全部在 commit 9e7d4be 落地\n",
+        encoding="utf-8",
+    )
+
+    body = _synthesize(state)
+    assert "任务已经在代码中完成" in body, (
+        "synthesize did not pick up the marker from prd.md fallback — "
+        "MUST-FIX regression"
+    )
+    assert "9e7d4be" in body, "reason text from prd.md was not threaded through"
