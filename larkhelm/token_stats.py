@@ -136,40 +136,66 @@ def get_token_stats_persistent(chat_id: str, date_prefix: str | None = None) -> 
     """Read persistent token statistics from all.jsonl (survives restarts).
     date_prefix: e.g. "2026-04" to filter by month, "2026-04-06" by day, None for all.
     Returns {model: {input_tokens, output_tokens, cache_read, cache_create, cost_usd, calls}}
+
+    Reads BOTH ``all.jsonl`` and ``all.jsonl.1`` (the single rotation
+    backup ``log.py`` keeps when the live file exceeds 100 MiB). The
+    earlier version read only the live file, so once a rotation happened
+    every token record in the backup permanently disappeared from
+    ``/stats`` — the "累计（全部）" window could legitimately become
+    SMALLER than the "本月" window. Independent stats audit (P0).
     """
     with _jsonl_lock:
-        log_path = _cfg.LOG_DIR / "all.jsonl"
+        live = _cfg.LOG_DIR / "all.jsonl"
+        backup = _cfg.LOG_DIR / "all.jsonl.1"
     totals: dict[str, dict] = {}
-    try:
-        with log_path.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    r = json.loads(line)
-                except Exception:
-                    continue
-                if r.get("role") != "token":
-                    continue
-                # Match normal queries (exact) and crew agent namespaces (prefixed with chat_id + "__")
-                rec_chat = r.get("chat_id", "")
-                if rec_chat != chat_id and not rec_chat.startswith(chat_id + "__"):
-                    continue
-                if date_prefix and not r.get("ts", "").startswith(date_prefix):
-                    continue
-                mdl = r.get("model", "claude")
-                t = totals.setdefault(mdl, {
-                    "input_tokens": 0, "output_tokens": 0,
-                    "cache_read": 0, "cache_create": 0,
-                    "cost_usd": 0.0, "calls": 0,
-                })
-                t["input_tokens"]  += r.get("input_tokens", 0)
-                t["output_tokens"] += r.get("output_tokens", 0)
-                t["cache_read"]    += r.get("cache_read", 0)
-                t["cache_create"]  += r.get("cache_create", 0)
-                t["cost_usd"]      += r.get("cost_usd", 0.0)
-                t["calls"]         += 1
-    except Exception as e:
-        _debug_log(f"[token_stats] get_token_stats_persistent failed: {e}")
+
+    def _scan(path) -> None:
+        try:
+            with path.open(encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        r = json.loads(line)
+                    except Exception:
+                        continue
+                    if r.get("role") != "token":
+                        continue
+                    # Strict per-chat match. The previous fuzzy
+                    # ``startswith(chat_id + "__")`` branch was dead code
+                    # at write-time (``runner_base._record_tokens`` strips
+                    # the ``__crew_*`` suffix before writing the bare
+                    # parent chat_id) AND a cross-chat-leak risk: any
+                    # future record with ``chat_id="abc__leak"`` would
+                    # have been silently aggregated into chat ``abc``.
+                    if r.get("chat_id", "") != chat_id:
+                        continue
+                    if date_prefix and not r.get("ts", "").startswith(date_prefix):
+                        continue
+                    mdl = r.get("model", "claude")
+                    t = totals.setdefault(mdl, {
+                        "input_tokens": 0, "output_tokens": 0,
+                        "cache_read": 0, "cache_create": 0,
+                        "cost_usd": 0.0, "calls": 0,
+                    })
+                    # Defensive ``max(0, …)``: a misbehaving backend
+                    # returning a negative count would otherwise silently
+                    # pull the running total below truth.
+                    t["input_tokens"]  += max(0, int(r.get("input_tokens", 0) or 0))
+                    t["output_tokens"] += max(0, int(r.get("output_tokens", 0) or 0))
+                    t["cache_read"]    += max(0, int(r.get("cache_read", 0) or 0))
+                    t["cache_create"]  += max(0, int(r.get("cache_create", 0) or 0))
+                    t["cost_usd"]      += max(0.0, float(r.get("cost_usd", 0.0) or 0.0))
+                    t["calls"]         += 1
+        except FileNotFoundError:
+            return
+        except Exception as e:
+            _debug_log(f"[token_stats] get_token_stats_persistent scan {path.name} failed: {e}")
+
+    # Read backup first then live so the natural file order (older →
+    # newer) is preserved; the aggregation itself is order-independent
+    # but reading older first keeps log-tail debugging intuitive.
+    _scan(backup)
+    _scan(live)
     return totals

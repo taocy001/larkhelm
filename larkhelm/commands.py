@@ -618,19 +618,37 @@ def _fmt_token_block(label: str, data: dict) -> str:
         out   = m["output_tokens"]
         cr    = m["cache_read"]
         cc    = m["cache_create"]
-        total = inp + out
         calls = m["calls"]
         cost  = m["cost_usd"]
 
-        # Cache hit rate: cache_read / (cache_read + non-cached input)
-        # non-cached input = inp - cache_read (cache_read is already included in inp)
-        hit_pct    = int(cr / max(inp, 1) * 100)
-        create_pct = int(cc / max(inp, 1) * 100)
+        # Field semantics now uniform across all runners (post-stats-audit):
+        #   input_tokens — non-cached prompt tokens (NEW input)
+        #   cache_read   — input served from cache (priced at ~10%)
+        #   cache_create — input written to cache (Claude only; priced ~25% extra)
+        #   output_tokens — completion tokens
+        # All four buckets are disjoint and additive. Total counts ALL four:
+        # leaving cache_read out of "合计" hides ~80% of the real consumption
+        # on cache-heavy chats and was the most user-visible /stats bug
+        # caught by the independent audit (commands.py:621 → 34× under-count
+        # in a 50k-cache hit + 1k new + 500 output scenario).
+        total = inp + out + cr + cc
 
-        cost_str = f"${cost:.4f}" if cost else "—"
+        # Cache hit-rate = cache_read / (cache_read + non-cached input).
+        # Previously the denominator was ``inp`` alone, which mathematically
+        # could exceed 100% on Claude where ``inp`` and ``cr`` are disjoint
+        # (audit reproduced 900% on cr=9000 / inp=1000).
+        prompt_in_total = cr + inp
+        hit_pct    = int(cr / max(prompt_in_total, 1) * 100)
+        create_pct = int(cc / max(prompt_in_total, 1) * 100)
+
+        # ``cost`` is set explicitly by runner_*; only show "—" when the
+        # source had no cost field at all (None). A real $0 (cache full
+        # hit or free-tier) renders as "$0.0000" so the user can tell
+        # apart "we don't know" from "we know it was free".
+        cost_str = "—" if cost is None else f"${cost:.4f}"
         lines.append(
             f"› **{model}**  {calls} 次  合计 **{total:,}** tokens  费用 **{cost_str}**\n"
-            f"  输入 {inp:,}  输出 {out:,}\n"
+            f"  新输入 {inp:,}  输出 {out:,}\n"
             f"  缓存命中 {cr:,}（{hit_pct}%）  缓存写入 {cc:,}（{create_pct}%）"
         )
     return "\n".join(lines)
@@ -649,11 +667,23 @@ def _cmd_stats_intent(chat_id: str, msg_id: str = None, date: str | None = None)
         send_card_reply(chat_id, msg_id, f"📊 Intent 统计 · {agg['date']}",
                         "_当日没有 Agent 调度记录_", color="grey")
         return
+    # ``agg['total_cost']`` was always rendered as "$0.0000" because none
+    # of the 5 builtin agents (chat / dev / crew / plan / doc) populate
+    # ``AgentResult.cost_usd`` — it just emits the default 0.0. Showing
+    # a hardcoded "$0.0000" pretended the dispatcher was free; the
+    # accurate per-chat cost lives in ``/stats`` (token block). Suppress
+    # the cost line entirely until at least one agent emits a real value.
+    # Independent stats audit caught this as a UI lie.
+    has_cost = bool(agg.get("total_cost"))
+    header = (
+        f"**成功率：** {agg['success_rate'] * 100:.1f}%　·　"
+        f"平均耗时：{agg['avg_duration']:.2f}s"
+    )
+    if has_cost:
+        header += f"　·　成本：${agg['total_cost']:.4f}"
     lines = [
         f"**调度总数：** {agg['total']}",
-        f"**成功率：** {agg['success_rate'] * 100:.1f}%　·　"
-        f"平均耗时：{agg['avg_duration']:.2f}s　·　"
-        f"成本：${agg['total_cost']:.4f}",
+        header,
         "",
         "**按 Agent：**",
     ]

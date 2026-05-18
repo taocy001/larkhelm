@@ -124,13 +124,45 @@ class GeminiRunner(BaseProcessRunner):
                 self._new_sid = cand
                 if self.use_session and not self._no_checkpointing:
                     _save_sid(self.chat_id, cand, self._session_key)
-            usage = ev.get("usage", {})
-            cost = ev.get("total_cost_usd", 0.0)
-            if usage:
+            # Gemini CLI 0.41.x emits ``stats`` (not ``usage``) on its
+            # terminal ``type=result`` envelope. The previous ``ev.get("usage", {})``
+            # always read an empty dict so ``if usage:`` was permanently
+            # false and ``_record_tokens`` never fired — every Gemini
+            # query silently contributed zero to ``token_stats``. Schema
+            # verified by independent audit (.crew_workspace/stats_audit_gemini.md)
+            # and reproduced by running gemini --output-format stream-json
+            # locally:
+            #   {"type":"result", "stats":{"input_tokens", "output_tokens",
+            #                              "cached", "input", ...}, ...}
+            #
+            # Field semantics (Gemini reports the total input including the
+            # cached prefix):
+            #   stats.input_tokens  — TOTAL prompt tokens (cached + new)
+            #   stats.cached        — prefix served from cache
+            #   stats.input         — non-cached input (= input_tokens − cached)
+            #   stats.output_tokens — completion tokens
+            #
+            # Persist Gemini's totals using the Claude-style three-bucket
+            # shape so ``_fmt_token_block`` renders consistently:
+            #   input_tokens — non-cached prompt (= stats.input)
+            #   cache_read   — cache hit (= stats.cached); priced at ~10%
+            #   output_tokens, cache_create — verbatim / zero (Gemini doesn't
+            #     distinguish cache creation from cache read).
+            #
+            # ``total_cost_usd`` doesn't exist in Gemini's stream-json — left
+            # at 0.0; cost is derived later from input/output counts × price
+            # table elsewhere (cost column shows "—" rather than $0).
+            stats = ev.get("stats", {})
+            cost  = float(ev.get("total_cost_usd", 0.0) or 0.0)
+            if stats:
+                input_total = int(stats.get("input_tokens", 0) or 0)
+                cached      = int(stats.get("cached", 0) or 0)
+                non_cached  = int(stats.get("input", max(0, input_total - cached)) or 0)
+                output      = int(stats.get("output_tokens", 0) or 0)
                 self._record_tokens("gemini", {
-                    "input_tokens":  usage.get("input_tokens", 0),
-                    "output_tokens": usage.get("output_tokens", 0),
-                    "cache_read":    0,
+                    "input_tokens":  non_cached,
+                    "output_tokens": output,
+                    "cache_read":    cached,
                     "cache_create":  0,
                 }, cost)
             return True

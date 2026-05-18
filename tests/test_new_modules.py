@@ -392,9 +392,39 @@ class TestTokenStats(unittest.TestCase):
         stats = token_stats.get_token_stats("conc_ts")
         self.assertEqual(stats["claude"]["calls"], 30)
 
-    def test_crew_namespace_matching(self):
-        """get_token_stats_persistent should include records under chat_id + '__agent' namespaces"""
+    def test_crew_namespace_does_not_leak_into_parent_chat(self):
+        """Strict per-chat aggregation: a record with chat_id ``X__suffix``
+        must NOT roll up into chat ``X``.
+
+        Was the opposite contract until the stats audit caught it as
+        a cross-chat leak risk. The justification used to be "crew
+        agents write under a ``parent__crew_id_role`` namespace and the
+        user wants /stats to aggregate those up to the parent". The
+        catch: by the time the JSONL record gets written,
+        ``runner_base._record_tokens`` (lines 535-545) has ALREADY
+        stripped the ``__crew_*`` suffix and written the bare parent
+        chat_id, so the fuzzy-match branch in
+        ``get_token_stats_persistent`` was dead code at the legitimate
+        caller AND opened a leak for any ad-hoc / future writer using
+        ``X__leak`` as a chat_id key.
+        """
         token_stats.record_token_usage("crew_chat__agent1", "claude", {"input_tokens": 42})
+        result = token_stats.get_token_stats_persistent("crew_chat")
+        self.assertNotIn(
+            "claude", result,
+            "records under 'crew_chat__agent1' leaked into chat 'crew_chat' — "
+            "fuzzy prefix match has been re-introduced (or runner_base no "
+            "longer strips __crew_ suffixes before writing)"
+        )
+
+    def test_crew_token_roll_up_via_runner_base_strip(self):
+        """Documents the legitimate roll-up path: ``runner_base._record_tokens``
+        strips ``__crew_*`` before writing, so the bare parent chat_id is
+        what lands in JSONL. ``get_token_stats_persistent`` then matches
+        exactly. This test pins THAT contract — any regression where
+        runner_base stops stripping the suffix would surface here as
+        the parent chat showing zero tokens despite crew activity."""
+        token_stats.record_token_usage("crew_chat", "claude", {"input_tokens": 42})
         result = token_stats.get_token_stats_persistent("crew_chat")
         self.assertIn("claude", result)
         self.assertEqual(result["claude"]["input_tokens"], 42)

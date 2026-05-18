@@ -372,6 +372,17 @@ class DeepSeekRunner:
             "model": self._model,
             "messages": messages,
             "stream": True,
+            # DeepSeek (OpenAI-compatible): stream=True omits the usage
+            # chunk by default. Without ``stream_options.include_usage``
+            # the terminal SSE block never carries ``usage``, so
+            # ``_record_tokens`` was never reached for any production
+            # call — every DeepSeek query contributed zero to
+            # ``token_stats``. The single-line fix was hidden behind a
+            # test gap: ``test_runner_deepseek.py`` fabricates a usage-
+            # bearing SSE chunk locally, so the missing flag never
+            # surfaced. Independent audit
+            # (.crew_workspace/stats_audit_deepseek.md, P0-1) caught it.
+            "stream_options": {"include_usage": True},
         }
         # Use the shared Session so TLS handshake / TCP connection are reused
         # across rapid back-to-back requests (e.g. /dev pipeline agent steps).

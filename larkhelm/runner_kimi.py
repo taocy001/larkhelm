@@ -162,4 +162,32 @@ class KimiRunner(BaseProcessRunner):
         return False
 
     def cleanup_extra(self) -> None:
-        pass
+        # Kimi CLI 1.43.x emits Message / ToolResult / Notification /
+        # PlanDisplay envelopes via ``--output-format stream-json`` but
+        # NEVER surfaces a usage / result envelope on stdout — token
+        # accounting therefore got 0 contributions for every kimi query
+        # (independent audit confirmed: 91 ``model=kimi`` user records
+        # → 0 ``role=token`` kimi records on the live JSONL). Without
+        # at least an estimate the user's "本月 kimi tokens" stays at
+        # 0 forever, masking real usage entirely.
+        #
+        # Best-effort fallback: estimate via char-count / 4 (rough
+        # tokens-per-char heuristic for mixed CJK + ASCII). Marked
+        # ``estimated=True`` in the JSONL record so downstream tooling
+        # can distinguish from precise SDK-reported counts. cache_read
+        # and cache_create stay 0 — there's no schema to read them from
+        # on the CLI path.
+        try:
+            text = getattr(self, "_result_text", "") or ""
+            prompt = getattr(self, "message", "") or ""
+            if not text and not prompt:
+                return
+            self._record_tokens("kimi", {
+                "input_tokens":  max(0, len(prompt) // 4),
+                "output_tokens": max(0, len(text)   // 4),
+                "cache_read":    0,
+                "cache_create":  0,
+                "estimated":     True,
+            }, 0.0)
+        except Exception as e:
+            _debug_log(f"[kimi] cleanup_extra estimate failed: {e}")
