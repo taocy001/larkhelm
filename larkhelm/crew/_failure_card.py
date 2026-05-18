@@ -85,8 +85,14 @@ def emit_agent_failure(
                 if ag is not None:
                     ag.error = msg
                     # Mark FAILED only when not already terminal — a
-                    # caller may have already written DONE/CANCELLED.
-                    if ag.status not in (AgentStatus.DONE, AgentStatus.CANCELLED):
+                    # caller may have already written DONE/CANCELLED/SKIPPED.
+                    # SKIPPED added defensively: the
+                    # ``TASK_ALREADY_COMPLETE`` short-circuit marks downstream
+                    # agents SKIPPED, and a stray failure-card emit (e.g.
+                    # from a heartbeat thread that already had the agent
+                    # queued) must NOT flip SKIPPED back to FAILED.
+                    if ag.status not in (AgentStatus.DONE, AgentStatus.CANCELLED,
+                                         AgentStatus.SKIPPED):
                         ag.status = AgentStatus.FAILED
                         if ag.end_time is None:
                             ag.end_time = time.time()

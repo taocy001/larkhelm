@@ -28,11 +28,19 @@ def _save_checkpoint(state: CrewState, completed_wave_ids: list[str]):
     def _ser_spec(spec: AgentSpec) -> dict:
         return dataclasses.asdict(spec)
 
-    # Serialize completed/failed agent states
+    # Serialize completed/failed/cancelled/skipped agent states. SKIPPED is
+    # included so a resume-after-restart correctly picks up the
+    # ``TASK_ALREADY_COMPLETE`` short-circuit — without it, a checkpoint
+    # saved between PM's marker-emit and the synthesis would reload the
+    # downstream agents as PENDING and run them anyway, undoing the early-
+    # exit. (Defensive: today the short-circuit clears the checkpoint
+    # before this race can fire, but future scheduler changes might
+    # insert a save in between.)
     agents_snap: dict = {}
     with state.lock:
         for ag_id, ag in state.agents.items():
-            if ag.status in (AgentStatus.DONE, AgentStatus.FAILED, AgentStatus.CANCELLED):
+            if ag.status in (AgentStatus.DONE, AgentStatus.FAILED,
+                             AgentStatus.CANCELLED, AgentStatus.SKIPPED):
                 agents_snap[ag_id] = {
                     "status":      ag.status.value,
                     "result":      ag.result,
