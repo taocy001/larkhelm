@@ -411,81 +411,69 @@ def _cmd_status(chat_id: str, msg_id: str = None):
 def _cmd_help(chat_id: str, msg_id: str = None):
     model = _get_chat_model(chat_id)
     other = _NEXT_MODEL_CYCLE.get(model, "claude")
+    # Help card layout rationale (重梳，2026-05-19):
+    #
+    # 1. Buttons: trimmed from 5 to 3. Feishu wraps multi-button rows in
+    #    a single ``column_set`` with ``width: "auto"`` (see
+    #    ``card_builder._make_buttons_block``), splitting available
+    #    width evenly. At 5 columns each button got ~⅕ of the card
+    #    width (~60 px on mobile); emoji-prefixed labels collapsed to
+    #    ``...``. 3 columns gives each button ~⅓ width, enough for
+    #    4–5 Chinese characters without ellipsis.
+    # 2. Labels: dropped emoji prefixes — they cost double-width and
+    #    don't add information beyond the 2-character verb.
+    # 3. Body: deduped — the "多 Agent 协作" section was a verbose
+    #    restatement of the decision tree above it; collapsed into the
+    #    tree. "单条消息指定模型" expanded over 4 lines for the same
+    #    pattern → collapsed to 1. Low-frequency commands (cron / doc /
+    #    voice / upgrade / btw) moved to a single "其他命令" line —
+    #    discoverable but not crowding the high-frequency content.
     body = (
         f"**当前模型:** {model}　　发消息直接提问，命令均以 `/` 开头\n"
         "\n"
-        "**🧭 任务复杂度决策树**\n"
-        "💬 直接发消息 — 单轮问答 / 闲聊 / 代码片段解释｜产物：一条卡片回复｜示例：「解释下这段正则」\n"
-        "🧭 **/plan** — 多阶段编排，串行执行多个 dev/review/fix/test｜产物：一组按步骤推进的卡片｜示例：「实现登录 + 安全审查 + 修复 + 回归」\n"
-        "🛠 **/dev** — 软件工程流水线（PM→架构→工程→QA→审查）｜产物：通常一次 commit｜示例：「重构 _cmd_help 抽出 menu builder 模块」\n"
-        "🤖 **/crew** — 动态规划，Manager 自动分解任务多 Agent 并行｜产物：一组 commit + 卡片汇总｜示例：「调研 X 库并接入」\n"
+        "**🧭 任务怎么选**\n"
+        "💬 直接发消息 — 单轮问答 / 闲聊 / 代码片段解释\n"
+        "🛠 **/dev** <需求> — 软件工程流水线（PM→架构→工程→QA→审查），产物通常一次 commit\n"
+        "🤖 **/crew** <需求> — 动态规划，Manager 自动分解任务多 Agent 并行\n"
+        "🧭 **/plan** — 多阶段串行：`[dev]` `[review]` `[fix]` `[test]`，每步确认；支持飞书文档 URL\n"
         "💡 不确定时 → 直接发消息让 AI 判断\n"
         "\n"
         "---\n"
         "\n"
-        "**🚀 常用操作**\n"
-        f"**/reset** — 重置会话，开始新对话\n"
-        f"**/pickup** — 获取在终端接力会话的命令\n"
-        f"**/model {other}** — 切换到 {other}\n"
-        "**/cd 路径** — 切换工作目录\n"
-        "**/cancel** — 取消当前查询\n"
-        "**/rename <名称>** — 给当前会话命名\n"
+        "**🚀 常用**\n"
+        f"**/reset** 重置会话　　**/cancel** 取消当前　　**/model {other}** 切换到 {other}\n"
+        "**/cd 路径** 切换目录　　**/pwd** 当前目录　　**/ls** [路径] 列目录　　**/run** 命令（30s）\n"
+        "**/pickup** 终端接力　　**/status** 运行状态　　**/rename** <名称> 命名会话\n"
+        "**/history** [all] 最近 10 条　　**/stats** 今日统计\n"
         "\n"
-        "---\n"
+        "**🎯 单条消息指定 backend**（本条生效，不改默认）：\n"
+        "**/c** **/g** **/k** **/d** <消息> — Claude / Gemini / Kimi / DeepSeek\n"
         "\n"
-        "**单条消息指定模型（本条生效，不改变默认）**\n"
-        "**/c** 或 **/claude** 消息 — 本条用 Claude\n"
-        "**/g** 或 **/gemini** 消息 — 本条用 Gemini\n"
-        "**/k** 或 **/kimi** 消息 — 本条用 Kimi\n"
-        "**/d** 或 **/deepseek** 消息 — 本条用 DeepSeek（HTTP API）\n"
+        "**🔒 Backend 锁定**\n"
+        "**/lock** 列出所有 backend 及健康状态　　**/lock** <id> 持久锁定　　**/lock off** 解锁\n"
+        "**/model** <id> 等价于 /lock\n"
         "\n"
-        "**会话**\n"
-        "**/reset** claude · gemini · kimi · deepseek — 单独重置会话\n"
-        "**/reset perm** — 重置权限审批　　**/reset memory** — 清除会话记忆（全局/项目保留）\n"
-        "**/lock** — 列出所有可用 backend 及健康状态\n"
-        "**/lock <id>** — 持久锁定到指定 backend（后续所有消息生效）　**/lock off** — 解锁\n"
-        "**/model** <id> — 同 /lock（两者完全等价，均接受任意 backend ID）\n"
+        "**♻️ 重置细分**\n"
+        "**/reset** claude · gemini · kimi · deepseek — 单独重置某个 backend 会话\n"
+        "**/reset perm** 权限审批　　**/reset memory** 清除会话记忆（全局/项目保留）\n"
         "\n"
-        "**目录 & Shell**\n"
-        "**/pwd**　**/ls** [路径]　**/run** 命令（30s 超时）\n"
+        "**🧠 记忆系统**（每 10 轮自动从对话中提取，无需手工维护）\n"
+        "**/memory** 查看三层（全局/项目/会话）　　**/memory observe** 容量与健康度\n"
+        "**/memory set global|project** <内容> — 手动覆盖偏好 / 项目记忆\n"
+        "**/memory update** 立即触发摘要 + 抽取　　**/memory clear** session|project|global|all\n"
+        "**/memory list** · **/memory gc** [天数] [apply]　　**/memory export** · **/memory import** [file_key]\n"
         "\n"
-        "**其他**\n"
-        "**/status** — 查看运行状态　　**/help** — 此帮助\n"
-        "**/history** [all] — 最近 10 条对话摘要　　**/stats** — 今日统计\n"
-        "**/upgrade** — 更新 larkhelm 到最新版本\n"
-        "**/cron add** \"<expr>\" <查询>　**/cron list**　**/cron del** <id> — 定时任务\n"
-        "**/doc** read · append · write · create · setfolder — 飞书文档操作\n"
-        "**/voice** [status | lang <zh|en|auto>] — 查看 / 切换语音转写设置\n"
-        "\n"
-        "**🤖 多 Agent 协作**\n"
-        "**/crew** <需求> — 动态规划：Manager 自动分解任务，多 Agent 并行执行\n"
-        "**/dev** <需求> — 软件工程流水线：\n"
-        "　　PM → **[确认]** → 架构师 → 工程师 → QA（失败重试 2×）→ 审查员（APPROVED · REJECTED 重试 1×）\n"
-        "**/plan** — 多阶段编排，一条指令串行执行多个 dev/review/fix/test 步骤：\n"
-        "　　**[dev]** 实现登录　**[review]** 安全审查　**[fix]** 修复问题　**[test]** 回归测试\n"
-        "　　每步完成后等待确认，支持跳过或取消；也可 **/plan** <飞书文档URL> 从文档读取计划\n"
-        "**/btw** <问题> — 快问（不占主任务锁，回复到消息线程）\n"
-        "\n"
-        "**🧠 记忆系统（自动学习，无需手工维护）**\n"
-        "**/memory** — 查看三层记忆（全局/项目/会话）当前内容\n"
-        "**/memory status** — 查看记忆数据摘要（chat 数、日志大小等）\n"
-        "**/memory observe** — 查看记忆容量与摘要健康度\n"
-        "**/memory export** — 导出当前 chat 的持久化数据为 zip 文件\n"
-        "**/memory import [file_key]** — 从 zip 文件导入记忆数据\n"
-        "全局/项目记忆每 10 轮自动从对话中提取并更新；以下命令用于手工覆盖：\n"
-        "**/memory set global <内容>** — 手动覆盖全局偏好\n"
-        "**/memory set project <内容>** — 手动覆盖当前项目记忆\n"
-        "**/memory update** — 立即触发会话摘要生成（同时触发全局/项目提取）\n"
-        "**/memory clear session|project|global|all** — 清除指定层记忆\n"
-        "**/memory list** — 查看所有项目记忆文件\n"
-        "**/memory gc [天数] [apply]** — 清理 N 天未更新的项目记忆（默认预演 30 天）"
+        "**📦 其他命令** ：**/doc** read/append/write/create/setfolder · **/voice** [status|lang …] · "
+        "**/cron** add/list/del · **/btw** <问题>（快问，不占主锁） · **/upgrade**"
     )
+    # Button label = ``→ {backend_name}``: the arrow conveys "switch to"
+    # without spending 4 visual cols on the verb "切换". DeepSeek (8 ASCII)
+    # is the longest possible suffix; arrow + space + 8 = 10 visual cols,
+    # comfortably inside the ⅓-column slot Feishu allocates for 3 buttons.
     buttons = [
-        ("♻️ 重置会话", "/reset"),
-        ("🔗 接入终端", "/pickup"),
-        ("📊 查看状态", "/status"),
-        ("🛑 取消查询", "/cancel"),
-        (f"切换 {other}", f"/model {other}"),
+        ("重置", "/reset"),
+        ("取消", "/cancel"),
+        (f"→ {other}", f"/model {other}"),
     ]
     send_card_reply(chat_id, msg_id, "📖 帮助", body, color="blue", buttons=buttons, normalize=False)
 

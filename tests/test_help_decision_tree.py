@@ -27,9 +27,24 @@ class TestHelpDecisionTree(unittest.TestCase):
         self.assertIn("body", captured, "send_card_reply was not invoked by _cmd_help")
         return captured["body"]
 
+    # NOTE (2026-05-19 help-card refresh):
+    #   • Section heading renamed from "任务复杂度决策树" to "任务怎么选" —
+    #     more conversational, same intent. Test asserts on the new heading.
+    #   • Per-row content trimmed from "描述 ｜ 产物 ｜ 示例" three-segment
+    #     form to a single short description. Without ``｜`` separators
+    #     the GFM-table-parse pitfall the old test guarded against no
+    #     longer applies; the test is rewritten as a defensive "if you
+    #     re-introduce row separators, use the full-width variant".
+    def _decision_tree_block(self, body: str) -> str:
+        """Return the substring between the decision-tree heading and
+        the first ``---`` separator that follows it."""
+        start = body.index("任务怎么选")
+        end = body.index("---", start)
+        return body[start:end]
+
     def test_decision_tree_section_present(self):
         body = self._capture_help_body()
-        self.assertIn("任务复杂度决策树", body)
+        self.assertIn("任务怎么选", body)
 
     def test_all_four_entries_present(self):
         body = self._capture_help_body()
@@ -49,17 +64,17 @@ class TestHelpDecisionTree(unittest.TestCase):
         # so the decision tree never pushes /help past the single-card threshold.
         self.assertLess(len(body), 3000, f"_cmd_help body grew to {len(body)} chars")
 
-    def test_uses_fullwidth_separator_not_gfm_pipe(self):
-        """Decision tree rows must use `｜` (U+FF5C) to avoid GFM table parsing."""
-        body = self._capture_help_body()
-        # Extract just the decision tree block (between the section heading and the
-        # following `---` separator) so we don't accidentally inspect unrelated
-        # `|` characters that may appear in other markdown segments.
-        start = body.index("任务复杂度决策树")
-        end = body.index("---", start)
-        block = body[start:end]
-        self.assertIn("｜", block)
-        self.assertNotIn("|", block)
+    def test_decision_tree_avoids_gfm_pipe_separators(self):
+        """Even if a future revision re-introduces in-row separators, they
+        must be ``｜`` (U+FF5C) — never the GFM table pipe ``|`` which
+        would render as an empty-header three-column table on Feishu."""
+        block = self._decision_tree_block(self._capture_help_body())
+        self.assertNotIn(
+            "|", block,
+            "decision-tree block contains a GFM `|` separator, which "
+            "Feishu interprets as a table header row — use the full-"
+            "width `｜` (U+FF5C) if you really need a row separator"
+        )
 
 
 if __name__ == "__main__":
