@@ -200,6 +200,11 @@ class DeepSeekRunner:
         self._completed = threading.Event()
         self._cancelled_flag = threading.Event()
         self._soft_timeout_flag = threading.Event()
+        # Mirrors ``BaseProcessRunner._tokens_recorded`` — set by
+        # ``_record_tokens`` when the terminal SSE usage chunk arrives.
+        # Cancel-path safety net in ``run()``'s finally consults this
+        # before deciding to write an estimated record.
+        self._tokens_recorded: bool = False
         # Idle-timeout tracking — see ``BaseProcessRunner.__init__`` for
         # rationale. ``_consume_sse`` calls ``_touch_activity`` on every
         # SSE line so a slow but steadily-streaming DeepSeek response
@@ -215,6 +220,9 @@ class DeepSeekRunner:
 
     def _record_tokens(self, usage: dict, cost: float = 0.0) -> None:
         """Mirror BaseProcessRunner._record_tokens semantics for crew double-recording."""
+        # Mark recorded so the cancel-path safety net in ``run()``'s
+        # finally doesn't double-count this exact event.
+        self._tokens_recorded = True
         if self.record_under:
             record_id = self.record_under
         elif "__crew_" in self.chat_id:
@@ -347,6 +355,35 @@ class DeepSeekRunner:
             # (one watcher poll); reviewer flagged the redundancy correctly
             # since the watcher is daemon-only and exits within one tick.
             self._completed.set()
+            # Partial-token safety net (round-3 stats fix): DeepSeek emits
+            # ``usage`` only in the very last SSE chunk before ``[DONE]``;
+            # cancel / hard-kill / 5xx-after-deltas all skip that chunk
+            # and the whole query would otherwise contribute zero. Estimate
+            # from char counts if we observed deltas but no usage. The
+            # ``_tokens_recorded`` flag (set in ``_record_tokens``) prevents
+            # double counting on the happy path. Failures swallowed —
+            # bookkeeping must never raise.
+            try:
+                if not self._tokens_recorded:
+                    msg = "\n".join(
+                        (m.get("content") or "") for m in self._build_messages()
+                        if isinstance(m, dict) and m.get("role") == "user"
+                    )
+                    text = self._result_text or ""
+                    if msg or text:
+                        self._record_tokens({
+                            "input_tokens":  max(0, len(msg) // 4),
+                            "output_tokens": max(0, len(text) // 4),
+                            "cache_read":    0,
+                            "cache_create":  0,
+                            "estimated":     True,
+                        }, cost=0.0)
+                        _debug_log(
+                            "[DeepSeek] partial tokens estimated from char "
+                            "count (cancel/timeout/early-error)"
+                        )
+            except Exception as _est_err:
+                _debug_log(f"[DeepSeek] partial-token estimate failed: {_est_err}")
             if sem_held:
                 # Release the *exact* sem instance we acquired (P0 fix —
                 # see runner_base.get_ai_sem docstring).

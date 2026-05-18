@@ -10,6 +10,7 @@ import os
 import threading
 import time
 import traceback
+import uuid
 
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1, P2ImMessageReactionCreatedV1
 
@@ -423,7 +424,11 @@ def handle_message(data: P2ImMessageReceiveV1):
                 # log into the conversation .md so memory/auto-update sees the
                 # voice-originated turn, and clear any stale /cancel event so
                 # _do_query doesn't abort immediately on its first read.
-                log_entry(chat_id, "user", text_out, model=target_model)
+                # Same trace_id wiring as the text path so duration
+                # pairing in /stats works for voice-originated turns.
+                voice_trace_id = uuid.uuid4().hex[:12]
+                log_entry(chat_id, "user", text_out, model=target_model,
+                          trace_id=voice_trace_id)
                 _reset_cancel(chat_id)
                 if _cfg.VOICE_MERGE_WINDOW_SEC > 0:
                     add_voice(
@@ -441,6 +446,7 @@ def handle_message(data: P2ImMessageReceiveV1):
                             "model": target_model,
                             "user_msg_id": message.message_id,
                             "parent_id": parent_id,
+                            "trace_id": voice_trace_id,
                         },
                         daemon=True,
                         name=f"voice-query-{chat_id[:8]}",
@@ -683,7 +689,14 @@ def handle_message(data: P2ImMessageReceiveV1):
         except Exception as e:
             _debug_log(f"[message] workspace listing failed: {e}")
 
-        log_entry(chat_id, "user", prompt, model=target_model)
+        # Generate ``trace_id`` HERE — before the user log entry — so the
+        # user side carries the same id ``_do_query`` will later use on
+        # the assistant log entry. This is what powers ``_cmd_stats``
+        # duration pairing under concurrent /btw or rapid resends; the
+        # pre-fix FIFO pending_ts scrambled pairs when entries interleaved.
+        # ``log_entry`` already accepts ``trace_id`` as a kwarg.
+        trace_id = uuid.uuid4().hex[:12]
+        log_entry(chat_id, "user", prompt, model=target_model, trace_id=trace_id)
         _reset_cancel(chat_id)
         user_msg_id = message.message_id
         # Doc injection and parent message fetch are done inside _do_query (background
@@ -696,6 +709,7 @@ def handle_message(data: P2ImMessageReceiveV1):
                 "images": _msg_images if _msg_images else None,
                 "parent_id": parent_id,
                 "force_backend_id": force_backend_id,
+                "trace_id": trace_id,
             },
             daemon=True,
             name=f"query-{chat_id[:8]}",

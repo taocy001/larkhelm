@@ -177,6 +177,12 @@ class KimiRunner(BaseProcessRunner):
         # can distinguish from precise SDK-reported counts. cache_read
         # and cache_create stay 0 — there's no schema to read them from
         # on the CLI path.
+        # Short-circuit if a (hypothetical) future kimi CLI version
+        # starts emitting usage and ``parse_stdout_event`` already
+        # recorded — don't double-count. Mirrors the base
+        # ``record_partial_tokens_if_needed`` guard.
+        if self._tokens_recorded:
+            return
         try:
             text = getattr(self, "_result_text", "") or ""
             prompt = getattr(self, "message", "") or ""

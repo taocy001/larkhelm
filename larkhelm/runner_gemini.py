@@ -169,4 +169,8 @@ class GeminiRunner(BaseProcessRunner):
         return False
 
     def cleanup_extra(self) -> None:
-        pass
+        # Cancel/timeout safety net (see runner_base for design notes).
+        # Gemini stream-json doesn't emit intermediate usage, so the
+        # fallback path will char-count from message + result_text and
+        # write ``estimated=True``. Better than dropping the entire query.
+        self.record_partial_tokens_if_needed("gemini")

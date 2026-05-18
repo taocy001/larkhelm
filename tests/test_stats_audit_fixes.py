@@ -166,6 +166,10 @@ class TestKimiCleanupExtraEstimate(unittest.TestCase):
                           lambda self, model, usage, cost: captured.append(
                               (model, dict(usage), cost))):
             r = KimiRunner.__new__(KimiRunner)
+            # Round-3 fix: cleanup_extra now short-circuits on
+            # _tokens_recorded; the field is set in BaseProcessRunner.__init__
+            # which __new__ bypasses, so re-create it manually for the test.
+            r._tokens_recorded = False
             r.message = "Hello kimi" * 10   # 100 chars → ~25 input tokens
             r._result_text = "Reply text!" * 20   # 220 chars → ~55 output
             r.cleanup_extra()
@@ -188,6 +192,7 @@ class TestKimiCleanupExtraEstimate(unittest.TestCase):
         with patch.object(KimiRunner, "_record_tokens",
                           lambda self, model, usage, cost: captured.append(usage)):
             r = KimiRunner.__new__(KimiRunner)
+            r._tokens_recorded = False
             r.message = ""
             r._result_text = ""
             r.cleanup_extra()
@@ -505,6 +510,240 @@ class TestIntentCostLineSuppressedWhenZero(unittest.TestCase):
 
         self.assertEqual(len(sent), 1)
         self.assertIn("成本：$0.1234", sent[0]["body"])
+
+
+class TestCancelTimeoutPartialTokenRecording(unittest.TestCase):
+    """Round-3 fix #1: when cancel / hard-timeout truncates the stream
+    before the terminal usage envelope arrives, the runner must still
+    persist a partial record (estimated=True) so /stats doesn't drop
+    the entire query from accounting."""
+
+    def test_safety_net_records_from_last_usage_seen(self):
+        """When the runner stashed an intermediate usage (Claude
+        ``assistant`` events carry usage too), the safety net writes
+        those counts with estimated=True."""
+        from larkhelm.runner_base import BaseProcessRunner
+
+        captured: list = []
+
+        class _Stub(BaseProcessRunner):
+            def build_args(self): return ["true"]
+            def build_stdin(self): return None
+            def parse_stdout_event(self, ev): return False
+            def cleanup_extra(self): pass
+
+        with patch.object(BaseProcessRunner, "_record_tokens",
+                          lambda self, model, usage, cost: captured.append(
+                              (model, dict(usage), cost))):
+            r = _Stub.__new__(_Stub)
+            BaseProcessRunner.__init__(
+                r, backend_name="stub", chat_id="c1", message="m",
+                sid=None, cwd="/tmp",
+            )
+            r._last_usage_seen = {
+                "input_tokens": 5000, "output_tokens": 200,
+                "cache_read": 2000, "cache_create": 0,
+            }
+            r.record_partial_tokens_if_needed("claude")
+
+        self.assertEqual(len(captured), 1)
+        model, usage, cost = captured[0]
+        self.assertEqual(model, "claude")
+        self.assertEqual(usage["input_tokens"], 5000)
+        self.assertEqual(usage["cache_read"], 2000)
+        self.assertTrue(usage.get("estimated"),
+            "partial records must be flagged estimated=True so future "
+            "tooling can exclude them from precise totals"
+        )
+
+    def test_safety_net_falls_back_to_char_count(self):
+        """No intermediate usage observed → char-count fallback."""
+        from larkhelm.runner_base import BaseProcessRunner
+
+        captured: list = []
+
+        class _Stub(BaseProcessRunner):
+            def build_args(self): return ["true"]
+            def build_stdin(self): return None
+            def parse_stdout_event(self, ev): return False
+            def cleanup_extra(self): pass
+
+        with patch.object(BaseProcessRunner, "_record_tokens",
+                          lambda self, model, usage, cost: captured.append(
+                              dict(usage))):
+            r = _Stub.__new__(_Stub)
+            BaseProcessRunner.__init__(
+                r, backend_name="stub", chat_id="c1",
+                message="user prompt " * 25,  # ~275 chars → 68 input
+                sid=None, cwd="/tmp",
+            )
+            r._result_text = "partial response " * 30  # ~510 chars → 127 output
+            r.record_partial_tokens_if_needed("claude")
+
+        self.assertEqual(len(captured), 1)
+        usage = captured[0]
+        self.assertGreater(usage["input_tokens"], 0)
+        self.assertGreater(usage["output_tokens"], 0)
+        self.assertTrue(usage.get("estimated"))
+        self.assertEqual(usage["cache_read"], 0,
+            "char-count fallback can't know cache breakdown; stays 0"
+        )
+
+    def test_safety_net_short_circuits_when_already_recorded(self):
+        """When the happy-path ``_record_tokens`` fired, the safety net
+        must NOT write a second record."""
+        from larkhelm.runner_base import BaseProcessRunner
+
+        captured: list = []
+
+        class _Stub(BaseProcessRunner):
+            def build_args(self): return ["true"]
+            def build_stdin(self): return None
+            def parse_stdout_event(self, ev): return False
+            def cleanup_extra(self): pass
+
+        with patch.object(BaseProcessRunner, "_record_tokens",
+                          lambda self, model, usage, cost: captured.append(
+                              dict(usage))):
+            r = _Stub.__new__(_Stub)
+            BaseProcessRunner.__init__(
+                r, backend_name="stub", chat_id="c1",
+                message="anything", sid=None, cwd="/tmp",
+            )
+            r._tokens_recorded = True   # happy path already fired
+            r._last_usage_seen = {"input_tokens": 999, "output_tokens": 999}
+            r.record_partial_tokens_if_needed("claude")
+
+        self.assertEqual(captured, [],
+            "safety net should short-circuit when _tokens_recorded=True; "
+            "writing again would double-count the same query"
+        )
+
+
+class TestDurationPairingByTraceId(unittest.TestCase):
+    """Round-3 fix #2: ``_cmd_stats`` pairs user/assistant entries by
+    ``trace_id`` when both sides carry one. Falls back to FIFO when
+    not. Pre-fix FIFO-only logic scrambled durations under concurrent
+    /btw or rapid /cancel + resend."""
+
+    def _accept_durations(self, today_records):
+        """Replay the duration-pairing block from _cmd_stats against a
+        fixture record list and return the computed durations."""
+        from datetime import datetime as _dt
+        import larkhelm.config as _cfg
+        durations: list[float] = []
+        _pending_by_trace: dict[str, _dt] = {}
+        _pending_fifo = None
+        _hard_cap_secs = float(getattr(_cfg, "HARD_TIMEOUT", 21600) or 21600) * 1.1
+        for r in today_records:
+            role = r.get("role", "")
+            if role not in ("user", "assistant", "error"):
+                continue
+            try:
+                ts = _dt.fromisoformat(r["ts"])
+            except (KeyError, ValueError):
+                continue
+            tid = r.get("trace_id")
+            if role == "user":
+                if tid:
+                    _pending_by_trace[tid] = ts
+                else:
+                    _pending_fifo = ts
+            else:
+                paired = None
+                if tid and tid in _pending_by_trace:
+                    paired = _pending_by_trace.pop(tid)
+                elif _pending_fifo is not None:
+                    paired = _pending_fifo
+                    _pending_fifo = None
+                if paired is not None:
+                    secs = (ts - paired).total_seconds()
+                    if 0 < secs < _hard_cap_secs:
+                        durations.append(secs)
+        return durations
+
+    def test_interleaved_pairs_resolve_by_trace_id(self):
+        """Scenario: user A → user B → assistant B → assistant A.
+        FIFO would record only one (B's start paired with B's end,
+        then drop A entirely). Trace-id pairing recovers both."""
+        records = [
+            {"role": "user",      "ts": "2026-05-19T10:00:00", "trace_id": "A"},
+            {"role": "user",      "ts": "2026-05-19T10:00:30", "trace_id": "B"},
+            {"role": "assistant", "ts": "2026-05-19T10:01:00", "trace_id": "B"},
+            {"role": "assistant", "ts": "2026-05-19T10:05:00", "trace_id": "A"},
+        ]
+        durations = self._accept_durations(records)
+        self.assertEqual(len(durations), 2,
+            "both A (300s) and B (30s) durations must be recovered; "
+            "FIFO would have given only 1"
+        )
+        # B (30s) and A (300s) — verify both magnitudes appear
+        self.assertIn(30.0, durations)
+        self.assertIn(300.0, durations)
+
+    def test_fifo_fallback_for_old_records_without_trace_id(self):
+        """JSONL rows logged before trace_id propagation still get a
+        FIFO duration so historical /stats numbers stay populated."""
+        records = [
+            {"role": "user",      "ts": "2026-05-19T10:00:00"},
+            {"role": "assistant", "ts": "2026-05-19T10:00:42"},
+        ]
+        durations = self._accept_durations(records)
+        self.assertEqual(durations, [42.0])
+
+    def test_mixed_trace_id_and_legacy(self):
+        """One pair has trace_id, another doesn't — both should record.
+
+        Timeline (Δ vs the user-side start):
+          T=0       user trace_id=T1
+          T=60s     user no trace_id (legacy)        → _pending_fifo
+          T=70s     assistant no trace_id           → FIFO pair = 10s
+          T=300s    assistant trace_id=T1            → traced pair = 300s
+        """
+        records = [
+            {"role": "user",      "ts": "2026-05-19T10:00:00", "trace_id": "T1"},
+            {"role": "user",      "ts": "2026-05-19T10:01:00"},   # legacy → FIFO
+            {"role": "assistant", "ts": "2026-05-19T10:01:10"},  # FIFO end → 10s
+            {"role": "assistant", "ts": "2026-05-19T10:05:00", "trace_id": "T1"},  # traced → 300s
+        ]
+        durations = self._accept_durations(records)
+        self.assertEqual(sorted(durations), [10.0, 300.0])
+
+
+class TestDurationHardCapMatchesHardTimeout(unittest.TestCase):
+    """Round-3 fix #3: the previous ``if 0 < secs < 3600`` silently
+    dropped every /dev / /crew query > 1h. Cap now keys off
+    ``_cfg.HARD_TIMEOUT * 1.1`` so it only filters truly-bad records
+    (pair-end missing across days etc.)."""
+
+    def test_long_query_below_hard_timeout_is_kept(self):
+        """A 2-hour /dev pipeline (well under the default 6h
+        hard_timeout) must NOT be filtered."""
+        import larkhelm.config as _cfg
+
+        records = [
+            {"role": "user",      "ts": "2026-05-19T10:00:00"},
+            # assistant arrives 2 hours later (7200s) — under the
+            # default 21600 * 1.1 = 23760s cap.
+            {"role": "assistant", "ts": "2026-05-19T12:00:00"},
+        ]
+        from datetime import datetime as _dt
+        hard_cap = float(getattr(_cfg, "HARD_TIMEOUT", 21600) or 21600) * 1.1
+        durations: list[float] = []
+        pending = None
+        for r in records:
+            ts = _dt.fromisoformat(r["ts"])
+            if r["role"] == "user":
+                pending = ts
+            elif pending is not None:
+                secs = (ts - pending).total_seconds()
+                if 0 < secs < hard_cap:
+                    durations.append(secs)
+                pending = None
+        self.assertEqual(durations, [7200.0],
+            f"2h query must be kept (cap = {hard_cap}s); the old "
+            "3600s cap silently dropped every long /dev query"
+        )
 
 
 if __name__ == "__main__":

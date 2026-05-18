@@ -712,16 +712,53 @@ def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
     user_count  = sum(1 for r in today_records if r["role"] == "user")
     error_count = sum(1 for r in today_records if r["role"] == "error")
 
+    # Duration pairing — round-3 stats fixes:
+    #
+    # (Fix #2) Pair user/assistant entries by ``trace_id`` when both
+    # sides carry one (covers concurrent /btw + main task where FIFO
+    # pending_ts was scrambled by interleaved entries). Fall back to
+    # FIFO position for entries without trace_id so old JSONL records
+    # (pre-trace_id-propagation) still contribute.
+    #
+    # (Fix #3) The previous ``if 0 < secs < 3600`` cap silently dropped
+    # every long-running /dev / /crew query — those are normal at >1h
+    # under the default ``hard_timeout=21600``. Raised to
+    # ``HARD_TIMEOUT * 1.1`` so the cap kicks in only for clearly-bad
+    # records (e.g. a missing pair-end making the gap span days).
     durations: list[float] = []
-    pending_ts = None
+    _pending_by_trace: dict[str, datetime] = {}
+    _pending_fifo: datetime | None = None
+    _hard_cap_secs = float(getattr(_cfg, "HARD_TIMEOUT", 21600) or 21600) * 1.1
+
+    def _accept_duration(end_ts: datetime, start_ts: datetime) -> None:
+        secs = (end_ts - start_ts).total_seconds()
+        if 0 < secs < _hard_cap_secs:
+            durations.append(secs)
+
     for r in today_records:
-        if r["role"] == "user":
-            pending_ts = datetime.fromisoformat(r["ts"])
-        elif r["role"] in ("assistant", "error") and pending_ts:
-            secs = (datetime.fromisoformat(r["ts"]) - pending_ts).total_seconds()
-            if 0 < secs < 3600:
-                durations.append(secs)
-            pending_ts = None
+        role = r.get("role", "")
+        if role not in ("user", "assistant", "error"):
+            continue
+        try:
+            ts = datetime.fromisoformat(r["ts"])
+        except (KeyError, ValueError):
+            continue
+        tid = r.get("trace_id")
+        if role == "user":
+            if tid:
+                _pending_by_trace[tid] = ts
+            else:
+                _pending_fifo = ts
+        else:
+            # assistant / error — prefer trace-id pairing; fall back to FIFO.
+            paired_start: datetime | None = None
+            if tid and tid in _pending_by_trace:
+                paired_start = _pending_by_trace.pop(tid)
+            elif _pending_fifo is not None:
+                paired_start = _pending_fifo
+                _pending_fifo = None
+            if paired_start is not None:
+                _accept_duration(ts, paired_start)
     avg = sum(durations) / len(durations) if durations else 0
 
     # Persistent stats across three time windows

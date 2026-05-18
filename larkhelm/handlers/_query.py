@@ -361,7 +361,8 @@ def _post_query_memory_hook(chat_id: str, trace_id: str) -> None:
 
 def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
               images: list = None, parent_id: str | None = None,
-              force_backend_id: str | None = None):
+              force_backend_id: str | None = None,
+              trace_id: str | None = None):
     # P1-1 PR2: opt-in dispatch to the QuerySession rewrite. Default OFF so
     # existing behaviour is byte-identical until the flag flips.
     #
@@ -397,7 +398,13 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 )
             return   # v2 owned this request — success or failure.
 
-    trace_id = uuid.uuid4().hex[:12]
+    # Use caller-supplied trace_id (_message.py generates one BEFORE
+    # logging the user entry so user/assistant pair share an id —
+    # /stats duration pairing depends on it). Fall back to a fresh uuid
+    # when called from a context that doesn't propagate trace_id (e.g.
+    # crew sub-agent dispatch path).
+    if not trace_id:
+        trace_id = uuid.uuid4().hex[:12]
 
     chat_lock = _get_chat_lock(chat_id)
     cancel_ev = _get_cancel_event(chat_id)

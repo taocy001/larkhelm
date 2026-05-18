@@ -230,10 +230,30 @@ class ClaudeRunner(BaseProcessRunner):
                     "cache_create":  usage.get("cache_creation_input_tokens", 0),
                 }, cost)
             return True
+        # Intermediate ``assistant`` envelopes carry ``message.usage``
+        # too (per Anthropic Messages API). Stash whatever we've seen
+        # so the cancel/timeout safety net in ``cleanup_extra`` can
+        # persist it instead of dropping the whole query.
+        if etype == "assistant":
+            msg = ev.get("message", {}) or {}
+            mid_usage = msg.get("usage") if isinstance(msg, dict) else None
+            if isinstance(mid_usage, dict) and mid_usage:
+                self._last_usage_seen = {
+                    "input_tokens":  mid_usage.get("input_tokens", 0),
+                    "output_tokens": mid_usage.get("output_tokens", 0),
+                    "cache_read":    mid_usage.get("cache_read_input_tokens", 0),
+                    "cache_create":  mid_usage.get("cache_creation_input_tokens", 0),
+                }
         return False
 
     def cleanup_extra(self) -> None:
-        pass
+        # Cancel/timeout safety net: ``run()``'s finally always invokes
+        # ``cleanup_extra`` regardless of how the subprocess exited. If
+        # the terminal ``result`` envelope never arrived (idle hard kill
+        # or /cancel mid-stream), the base helper persists whatever
+        # usage we last observed — or falls back to a char-count
+        # estimate. ``_tokens_recorded`` short-circuits the no-op case.
+        self.record_partial_tokens_if_needed("claude")
 
     def _on_stderr_line(self, line: str) -> None:
         if "Warning: Python" in line and "lockfile expects" in line:

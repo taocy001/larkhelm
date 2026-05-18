@@ -366,6 +366,32 @@ class BaseProcessRunner(abc.ABC):
         self._cancelled_flag = threading.Event()
         self._soft_timeout_flag = threading.Event()
         self._ctor_kwargs: dict = {}  # populated by subclass for _clone()
+        # Partial-token bookkeeping for cancel / timeout paths
+        # ----------------------------------------------------
+        # Stats audit round-2 flagged that ``_record_tokens`` only fires
+        # when ``parse_stdout_event`` sees the terminal ``result`` /
+        # ``usage`` envelope — which never arrives if the user hits
+        # /cancel or the idle hard-timeout kicks in mid-stream. Result:
+        # every interrupted query contributed zero to ``token_stats``,
+        # hiding real cost (a 300k-token /dev that ran 30 min then got
+        # /cancel'd just vanished from /stats).
+        #
+        # Fix: each runner stashes the last ``usage`` dict it observes
+        # in ``self._last_usage_seen`` and sets ``_tokens_recorded=True``
+        # when ``_record_tokens`` actually fires. The default
+        # ``cleanup_extra`` (called in the ``run()`` finally regardless
+        # of cancel/timeout/normal-exit) checks the flag and, if still
+        # False, writes a best-effort partial record:
+        #   • if ``_last_usage_seen`` is non-empty → use those counts
+        #     and flag the record ``estimated=True`` (since the stream
+        #     was truncated and the SDK may have buffered more)
+        #   • else → char-count fallback (len(message)/4 input,
+        #     len(_result_text)/4 output) like the Kimi runner already
+        #     does for its zero-usage CLI
+        # Subclasses can override ``cleanup_extra`` if they need a
+        # backend-specific fallback (e.g. Kimi already does char-count).
+        self._last_usage_seen: dict | None = None
+        self._tokens_recorded: bool = False
         # Idle-timeout tracking: ``_watch`` compares ``time.time() -
         # _last_activity_ts`` against RESPONSE_TIMEOUT / HARD_TIMEOUT, so a
         # task that keeps producing output (genuine 6-hour /dev pipeline,
@@ -533,6 +559,11 @@ class BaseProcessRunner(abc.ABC):
             time.sleep(0.3)
 
     def _record_tokens(self, model: str, usage: dict, cost: float) -> None:
+        # Mark recorded so the cancel/timeout safety net in
+        # ``record_partial_tokens_if_needed`` doesn't double-count this
+        # exact event (called both from the normal ``result`` path AND
+        # — for ``estimated=True`` records — from the safety net itself).
+        self._tokens_recorded = True
         if self.record_under:
             record_id = self.record_under
         elif "__crew_" in self.chat_id:
@@ -551,6 +582,56 @@ class BaseProcessRunner(abc.ABC):
                 record_crew_agent_tokens(self.chat_id, model, full_usage)
             except Exception as e:
                 _debug_log(f"[{self.backend_name}] token_stats update failed: {e}")
+
+    def record_partial_tokens_if_needed(self, model_label: str) -> None:
+        """Cancel / timeout safety net: persist whatever token data we have
+        if the terminal ``result`` envelope never arrived.
+
+        Called from ``cleanup_extra`` by runners that don't have their
+        own backend-specific fallback (Kimi's char-count path already
+        does its own thing inside ``cleanup_extra``; this helper is for
+        Claude / Gemini / DeepSeek). Three branches:
+
+          1. ``_tokens_recorded`` already True → terminal envelope made
+             it through, nothing to do.
+          2. ``_last_usage_seen`` populated from an intermediate event
+             → record it with ``estimated=True`` (SDK may have buffered
+             more deltas we never saw).
+          3. Nothing observed but message / result_text non-empty →
+             char-count fallback, ``estimated=True``.
+
+        Safe to call multiple times — the flag short-circuits re-entries.
+        """
+        if self._tokens_recorded:
+            return
+        usage = self._last_usage_seen
+        try:
+            if usage:
+                payload = dict(usage)
+                payload["estimated"] = True
+                self._record_tokens(model_label, payload, 0.0)
+                _debug_log(
+                    f"[{self.backend_name}] partial tokens recorded from "
+                    f"last_usage_seen (cancel/timeout): {payload}"
+                )
+                return
+            msg = getattr(self, "message", "") or ""
+            result_text = self._result_text or ""
+            if not msg and not result_text:
+                return
+            self._record_tokens(model_label, {
+                "input_tokens":  max(0, len(msg) // 4),
+                "output_tokens": max(0, len(result_text) // 4),
+                "cache_read":    0,
+                "cache_create":  0,
+                "estimated":     True,
+            }, 0.0)
+            _debug_log(
+                f"[{self.backend_name}] partial tokens estimated from char "
+                f"count (cancel/timeout)"
+            )
+        except Exception as e:
+            _debug_log(f"[{self.backend_name}] partial-token record failed: {e}")
 
     @staticmethod
     def _summarize_tool_input(name: str, inp: dict) -> str:
