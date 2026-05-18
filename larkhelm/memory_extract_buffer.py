@@ -238,7 +238,9 @@ class ExtractBuffer:
         """
         try:
             from larkhelm.memory_circuit import BackoffConfig, ExponentialBackoff
-            import larkhelm.config as _cfg
+            # ``_cfg`` is already imported at module top (line 32); the
+            # earlier local re-import was redundant — flagged as STYLE-1
+            # in P3 review.
             attempts = int(getattr(_cfg, "CASCADE_BACKOFF_MAX_ATTEMPTS", 3) or 3)
         except Exception:
             # If memory_circuit can't be imported (very early bootstrap),

@@ -1158,7 +1158,8 @@ def _run_one_shot_with_backoff(
     """
     try:
         from larkhelm.memory_circuit import BackoffConfig, ExponentialBackoff
-        import larkhelm.config as _cfg
+        # ``_cfg`` is already imported at module top (line 33); the earlier
+        # local re-import was redundant — flagged as STYLE-1 in P3 review.
         attempts = int(getattr(_cfg, "CASCADE_BACKOFF_MAX_ATTEMPTS", 3) or 3)
     except Exception:
         return _run_one_shot(prompt, ns=ns, prefer_cheap=True, cancel_ev=cancel_ev)

@@ -107,7 +107,12 @@ class MemoryGCRunner:
         deleted = 0
         try:
             if not MEMORY_HOME_DIR.exists():
+                # Even when there's no session file to sweep we still run
+                # the phase-2 tail (audit rotate + stale recompute) and the
+                # checkpoint GC, so an early-deployment instance whose
+                # MEMORY_HOME_DIR is empty still gets its tail tasks done.
                 self._phase2_tail()
+                self._run_checkpoint_gc()
                 return (0, 0)
         except Exception as e:
             _debug_log(f"[MemoryGC] home dir stat failed: {e}")
@@ -134,13 +139,8 @@ class MemoryGCRunner:
             info(f"[MemoryGC] sweep complete scanned={scanned} deleted={deleted}")
         self._phase2_tail()
         # P3 REQ-09: checkpoint GC piggy-backs on the same tick when wired.
-        if self._ckpt_gc is not None:
-            try:
-                removed = self._ckpt_gc.scan_once()
-                if removed:
-                    _debug_log(f"[MemGcDaemon] checkpoint GC removed {removed} files")
-            except Exception as e:
-                _debug_log(f"[MemGcDaemon] checkpoint GC failed: {e}")
+        # Shared helper with ``_tick`` (NIT-1 dedup follow-up).
+        self._run_checkpoint_gc()
         return (scanned, deleted)
 
     # ── P3 REQ-08 (class-diagram aliases) ───────────────────────────
@@ -180,6 +180,19 @@ class MemoryGCRunner:
         except Exception as e:
             _debug_log(f"[MemGcDaemon] stale sweep failed: {e}")
 
+    def _run_checkpoint_gc(self) -> None:
+        """Single source of truth for the checkpoint sub-GC call. Both
+        ``run_once`` and ``_tick`` used to inline the same try/except block;
+        NIT-1 in P3 review flagged the duplication."""
+        if self._ckpt_gc is None:
+            return
+        try:
+            removed = self._ckpt_gc.scan_once()
+            if removed:
+                _debug_log(f"[MemGcDaemon] checkpoint GC removed {removed} files")
+        except Exception as e:
+            _debug_log(f"[MemGcDaemon] checkpoint GC failed: {e}")
+
     def _tick(self) -> None:
         """Single full tick — rotate, recompute stale, run checkpoint GC.
 
@@ -189,41 +202,18 @@ class MemoryGCRunner:
         """
         self._rotate_audit_jsonl()
         self._recompute_stale_slices_incremental()
-        if self._ckpt_gc is not None:
-            try:
-                removed = self._ckpt_gc.scan_once()
-                if removed:
-                    _debug_log(f"[MemGcDaemon] checkpoint GC removed {removed} files")
-            except Exception as e:
-                _debug_log(f"[MemGcDaemon] checkpoint GC failed: {e}")
+        self._run_checkpoint_gc()
 
     def _phase2_tail(self) -> None:
-        """Run Phase 2 + P3 housekeeping hooks; failures are swallowed."""
-        try:
-            from larkhelm.memory_retriever import rotate_audit_files
-            rotate_audit_files()
-        except Exception as e:
-            _debug_log(f"[MemoryGC] rotate_audit_files failed: {e}")
-        try:
-            from larkhelm.memory_lifecycle import (
-                iter_known_chat_cwd_pairs,
-                mark_stale_slices,
-            )
-            cfg = getattr(_cfg, "config", None) or {}
-            window_days = int(cfg.get("memory_stale_window_days", 90) or 90)
-            count = 0
-            for chat_id, cwd in iter_known_chat_cwd_pairs():
-                try:
-                    mark_stale_slices(chat_id, cwd, dry_run=False, window_days=window_days)
-                    count += 1
-                except Exception as inner:
-                    _debug_log(
-                        f"[MemoryGC] mark_stale_slices({chat_id}) failed: {inner}"
-                    )
-            if count:
-                _debug_log(f"[MemoryGC] stale sweep covered {count} chat(s)")
-        except Exception as e:
-            _debug_log(f"[MemoryGC] stale sweep failed: {e}")
+        """Run Phase 2 + P3 housekeeping hooks; failures are swallowed.
+
+        NIT-1 follow-up: previously this method inlined the audit-rotate
+        and stale-recompute logic that also lived in ``_rotate_audit_jsonl``
+        / ``_recompute_stale_slices_incremental``. Now delegates to those
+        two so there's exactly one implementation per step.
+        """
+        self._rotate_audit_jsonl()
+        self._recompute_stale_slices_incremental()
 
     # ── internals ──────────────────────────────────────────────────
 

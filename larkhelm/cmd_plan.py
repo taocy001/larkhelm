@@ -25,9 +25,22 @@ import time
 import uuid
 from pathlib import Path
 
+from functools import lru_cache
+
 from larkhelm.log import _debug_log, log_entry
 from larkhelm.card_builder import _fmt_elapsed, _make_card
 from larkhelm.plan_retry import PlanRetryEngine
+
+
+# NIT-2 (P3 review): ``PlanRetryEngine`` is stateless — just a strategy
+# string. Building a fresh instance on every step failure is wasteful even
+# though the cost is negligible. Cache by strategy so the hot retry-failure
+# path on a long plan reuses the same engine. Three valid strategies + a
+# slot for any unknown passthrough (which defaults to ``"off"`` internally)
+# fits in 4 entries.
+@lru_cache(maxsize=4)
+def _get_plan_retry_engine(strategy: str) -> PlanRetryEngine:
+    return PlanRetryEngine(strategy)
 
 
 def _resolve_plan_retry_strategy() -> str:
@@ -794,7 +807,7 @@ def _run_plan(state: MultiPlanState) -> None:
                 # ``"manual"`` we skip the silent auto-retry pass and go
                 # straight to the user-prompt path.
                 _retry_strategy = _resolve_plan_retry_strategy()
-                _retry_engine = PlanRetryEngine(_retry_strategy)
+                _retry_engine = _get_plan_retry_engine(_retry_strategy)
                 _retry_decision = _retry_engine.evaluate({
                     "retry_count": step.retry_count,
                     "max_retries": state.max_retries,

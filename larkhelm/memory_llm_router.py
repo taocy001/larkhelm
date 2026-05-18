@@ -383,6 +383,14 @@ def _call_with_circuit(caller: Callable[[str], str], prompt: str) -> "str | None
     underlying retriever). Re-raises any exception from ``caller`` after
     recording it as a failure — the existing try/except in ``retrieve``
     then maps it to ``skipped_reason="caller_exception"``.
+
+    .. note::
+       P3 design.md §4 class-diagram referred to this method as
+       ``_call_cheap_backend``. Renamed to ``_call_with_circuit`` during
+       implementation because the cheap-backend RESOLUTION lives in
+       ``BackendRegistry.get_by_tag(["cheap"])`` — this function only
+       gates the call with the breaker. NIT-3 in P3 review documented
+       the deviation; the descriptive name is intentional.
     """
     cb = _get_circuit()
     if not cb.allow():
