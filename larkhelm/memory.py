@@ -1153,8 +1153,11 @@ def _run_one_shot_with_backoff(
 
     Cancellation (``QueryCancelledError``) is **not** retried — it always
     propagates so the caller's cancel_ev path is honoured immediately.
-    All other exceptions are retried up to
-    ``cascade_backoff_max_attempts`` (default 3) with 1s → 2s → 4s backoff.
+    All other exceptions are retried up to ``cascade_backoff_max_attempts``
+    (default 3). The sleep sequence depends on ``max_attempts``: the
+    default 3 yields two sleeps ``[1.0, 2.0]``; set
+    ``cascade_backoff_max_attempts=4`` to get ``[1.0, 2.0, 4.0]``.
+    Each delay is capped at 30s.
     """
     try:
         from larkhelm.memory_circuit import BackoffConfig, ExponentialBackoff

@@ -58,6 +58,49 @@ def _resolve_plan_retry_strategy() -> str:
         return "off"
 
 
+def decide_retry_action(
+    strategy: str,
+    step_retry_count: int,
+    auto_retried: int,
+    max_retries: int,
+) -> tuple[str, str]:
+    """Pure routing helper for the /plan failure branch (P3 REQ-04).
+
+    Returns ``(action, reason)`` where:
+
+    * ``action`` is ``"auto_retry"`` (silently retry the same step) or
+      ``"user_prompt"`` (render the retry/continue/cancel card and wait
+      for the operator).
+    * ``reason`` is one of ``"below_threshold"``, ``"retries_exhausted"``,
+      ``"manual_required"``, ``"disabled"`` — purely for logging.
+
+    Strategy semantics:
+
+    * ``"off"``    — auto-retry only while ``auto_retried < max_retries``
+      (the P2 behaviour; ``PlanRetryEngine`` is bypassed).
+    * ``"now"``    — consult :class:`PlanRetryEngine` with
+      ``step_retry_count`` so retries persist across user-initiated
+      re-runs that already incremented the counter.
+    * ``"manual"`` — always defer to the user card.
+    * unknown     — collapse to ``"off"`` semantics for safety.
+    """
+    s = (strategy or "off").lower()
+    if s == "manual":
+        return ("user_prompt", "manual_required")
+    if s == "now":
+        engine = _get_plan_retry_engine("now")
+        decision = engine.evaluate({
+            "retry_count": step_retry_count,
+            "max_retries": max_retries,
+        })
+        if decision.should_retry:
+            return ("auto_retry", decision.reason)
+        return ("user_prompt", decision.reason)
+    if auto_retried < max_retries:
+        return ("auto_retry", "below_threshold")
+    return ("user_prompt", "retries_exhausted")
+
+
 # ── Constants ────────────────────────────────────────────────────
 
 _STATUS_ICON = {
@@ -847,27 +890,24 @@ def _run_plan(state: MultiPlanState) -> None:
             if not ok:
                 label = _TYPE_LABEL.get(step.type, step.type.upper())
 
-                # P3 REQ-06: consult PlanRetryEngine. The engine is purely
-                # advisory here — the existing auto/manual retry loop below
-                # is unchanged when strategy is the default ``"off"``. With
-                # strategy ``"now"`` the engine's decision is logged so
-                # operators can correlate retries to the engine output. With
-                # ``"manual"`` we skip the silent auto-retry pass and go
-                # straight to the user-prompt path.
+                # P3 REQ-04: route through decide_retry_action so the
+                # ``plan_retry_strategy`` config actually affects behaviour.
+                # ``off`` keeps the P2 auto_retried-counter path; ``now``
+                # consults PlanRetryEngine against ``step.retry_count``;
+                # ``manual`` skips silent auto-retry entirely.
                 _retry_strategy = _resolve_plan_retry_strategy()
-                _retry_engine = _get_plan_retry_engine(_retry_strategy)
-                _retry_decision = _retry_engine.evaluate({
-                    "retry_count": step.retry_count,
-                    "max_retries": state.max_retries,
-                })
+                _action, _reason = decide_retry_action(
+                    _retry_strategy,
+                    step.retry_count,
+                    auto_retried,
+                    state.max_retries,
+                )
                 _debug_log(
                     f"[PlanRetry] step {idx} failed; strategy={_retry_strategy} "
-                    f"decision={_retry_decision.reason} retry={_retry_decision.should_retry}"
+                    f"action={_action} reason={_reason}"
                 )
-                _suppress_auto_retry = (_retry_strategy == "manual")
 
-                # Auto-retry without waking the user, up to max_retries times
-                if not _suppress_auto_retry and auto_retried < state.max_retries:
+                if _action == "auto_retry":
                     auto_retried     += 1
                     step.retry_count += 1
                     step.status       = "pending"

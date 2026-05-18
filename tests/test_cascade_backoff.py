@@ -56,6 +56,19 @@ class TestExponentialBackoff(unittest.TestCase):
         self.assertEqual(bo._delay_for(4), 4.0)
         self.assertEqual(bo._delay_for(5), 4.0)
 
+    def test_max_attempts_4_full_sequence(self) -> None:
+        """``max_attempts=4`` yields the documented ``[1.0, 2.0, 4.0]`` series."""
+        bo = ExponentialBackoff(BackoffConfig(max_attempts=4))
+
+        def fn():
+            raise RuntimeError("permanent")
+
+        slept: list[float] = []
+        with patch("larkhelm.memory_circuit.time.sleep", side_effect=slept.append):
+            with self.assertRaises(RuntimeError):
+                bo.run(fn)
+        self.assertEqual(slept, [1.0, 2.0, 4.0])
+
 
 if __name__ == "__main__":
     unittest.main()

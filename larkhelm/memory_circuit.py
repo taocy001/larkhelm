@@ -51,6 +51,7 @@ class CircuitState:
     consecutive_failures: int = 0
     opened_at: float = 0.0
     last_attempt_at: float = 0.0
+    last_failure_at: float = 0.0
     half_open_in_flight: int = field(default=0)
 
 
@@ -104,13 +105,17 @@ class CircuitBreaker:
         now = time.monotonic()
         with self._lock:
             # Reset counter when previous failure is outside the rolling window.
+            # Use ``last_failure_at`` (not ``last_attempt_at``) so successful
+            # calls that refresh ``last_attempt_at`` don't keep the window
+            # sliding forward and prevent the reset branch from firing.
             if (
-                self.state.last_attempt_at > 0
+                self.state.last_failure_at > 0
                 and self.state.consecutive_failures > 0
-                and (now - self.state.last_attempt_at) > self.config.window_sec
+                and (now - self.state.last_failure_at) > self.config.window_sec
             ):
                 self.state.consecutive_failures = 0
             self.state.consecutive_failures += 1
+            self.state.last_failure_at = now
             if self.state.state == "half_open":
                 self.state.state = "open"
                 self.state.opened_at = now
@@ -132,9 +137,12 @@ class CircuitBreaker:
 class ExponentialBackoff:
     """Capped exponential-delay retry loop.
 
-    ``run(fn)`` invokes ``fn()`` up to ``max_attempts`` times. Between
-    attempts it sleeps ``initial * multiplier**(attempt-1)`` seconds,
-    clamped to ``max_sec``. If every attempt raises, the last exception
+    ``run(fn)`` invokes ``fn()`` up to ``max_attempts`` times. With
+    ``max_attempts=N`` there are at most ``N-1`` sleeps; the i-th sleep
+    (1-indexed) is ``min(initial * multiplier**(i-1), max_sec)``. The
+    default ``max_attempts=3`` therefore yields two sleeps ``[1.0, 2.0]``;
+    set ``cascade_backoff_max_attempts=4`` to extend the sequence to
+    ``[1.0, 2.0, 4.0]``. If every attempt raises, the last exception
     propagates.
 
     Tests can monkey-patch ``larkhelm.memory_circuit.time.sleep`` to

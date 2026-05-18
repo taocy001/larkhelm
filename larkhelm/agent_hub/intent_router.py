@@ -6,11 +6,64 @@ a separate downstream parser.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import threading
 from typing import Any, Callable
 
 from larkhelm.agent_hub.intent_types import IntentResult
+
+
+# REQ-03: module-level cache for the embedding classifier. Building the
+# classifier itself is cheap, but ``precompute(descriptions)`` invokes the
+# embedding backend once per agent description on every call to
+# ``_try_embedding_l2``. With ``intent_layer2_strategy="embedding"`` that
+# means N redundant backend round-trips per user message. The signature
+# changes whenever the registered (agent_type, description) pairs or the
+# similarity threshold change, so AgentRegistry plugins that load later
+# still re-precompute correctly.
+_EMB_CACHE_LOCK: threading.Lock = threading.Lock()
+_EMB_CLASSIFIER: Any = None
+_EMB_SIGNATURE: str = ""
+
+
+def _emb_signature(descriptions: list[tuple[str, str]], threshold: float) -> str:
+    """Deterministic signature over sorted (agent_type, description) pairs."""
+    serial = "\n".join(f"{a}\x00{d}" for a, d in sorted(descriptions))
+    return hashlib.sha1(f"{threshold:.4f}\n{serial}".encode("utf-8")).hexdigest()
+
+
+def _resolve_embedding_classifier(
+    backend: Any,
+    descriptions: list[tuple[str, str]],
+    threshold: float,
+) -> Any:
+    """Return a module-cached :class:`EmbeddingIntentClassifier`.
+
+    Rebuilds (and re-precomputes) when the (descriptions, threshold)
+    signature changes, otherwise hands back the cached instance so only
+    the per-query embed call remains.
+    """
+    global _EMB_CLASSIFIER, _EMB_SIGNATURE
+    sig = _emb_signature(descriptions, threshold)
+    with _EMB_CACHE_LOCK:
+        if _EMB_CLASSIFIER is not None and _EMB_SIGNATURE == sig:
+            return _EMB_CLASSIFIER
+        from larkhelm.agent_hub.intent_embedding import EmbeddingIntentClassifier
+        clf = EmbeddingIntentClassifier(backend, threshold=threshold)
+        clf.precompute(descriptions)
+        _EMB_CLASSIFIER = clf
+        _EMB_SIGNATURE = sig
+        return clf
+
+
+def _reset_embedding_cache_for_tests() -> None:
+    """Test-only hook: clear the module-level classifier cache."""
+    global _EMB_CLASSIFIER, _EMB_SIGNATURE
+    with _EMB_CACHE_LOCK:
+        _EMB_CLASSIFIER = None
+        _EMB_SIGNATURE = ""
 
 
 # ── Explicit slash-command prefixes mapped to agent_type ────────────────
@@ -143,11 +196,12 @@ def _try_embedding_l2(
 
     The classifier itself is cheap to instantiate (just a dict copy),
     but the embedding backend may need to load an ONNX model on first
-    call, so we resolve it lazily.
+    call, so we resolve it lazily. Subsequent calls with the same
+    (descriptions, threshold) re-use the cached classifier and only pay
+    the per-query embed cost (see :func:`_resolve_embedding_classifier`).
     """
     try:
         from larkhelm.memory_embedding import get_embedding_backend
-        from larkhelm.agent_hub.intent_embedding import EmbeddingIntentClassifier
         import larkhelm.config as _cfg
     except Exception as e:
         from larkhelm.log import lazy_debug_log
@@ -163,8 +217,7 @@ def _try_embedding_l2(
     if backend is None:
         return None
     threshold = float(getattr(_cfg, "INTENT_EMBEDDING_THRESHOLD", 0.30) or 0.30)
-    classifier = EmbeddingIntentClassifier(backend, threshold=threshold)
-    classifier.precompute(descriptions)
+    classifier = _resolve_embedding_classifier(backend, descriptions, threshold)
     return classifier.classify(text)
 
 

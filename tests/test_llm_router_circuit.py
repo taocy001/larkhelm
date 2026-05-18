@@ -54,6 +54,34 @@ class TestCircuitBreaker(unittest.TestCase):
             cb.record_failure()
             self.assertEqual(cb.current_state(), "open")
 
+    def test_window_outside_resets_failures(self) -> None:
+        """Failures spaced beyond ``window_sec`` must not accumulate."""
+        cb = CircuitBreaker(CircuitConfig(
+            failure_threshold=5, window_sec=1.0, cool_down_sec=30.0,
+        ))
+        t = [0.0]
+        with patch("larkhelm.memory_circuit.time.monotonic",
+                   side_effect=lambda: t[0]):
+            for _ in range(10):
+                self.assertTrue(cb.allow())
+                cb.record_failure()
+                t[0] += 2.0  # each failure 2s apart > window 1.0s
+            self.assertEqual(cb.current_state(), "closed")
+
+    def test_window_inside_accumulates(self) -> None:
+        """Failures within ``window_sec`` accumulate to open the circuit."""
+        cb = CircuitBreaker(CircuitConfig(
+            failure_threshold=5, window_sec=10.0, cool_down_sec=30.0,
+        ))
+        t = [0.0]
+        with patch("larkhelm.memory_circuit.time.monotonic",
+                   side_effect=lambda: t[0]):
+            for _ in range(5):
+                cb.allow()
+                cb.record_failure()
+                t[0] += 0.2  # 5 failures within 1s — well inside window
+            self.assertEqual(cb.current_state(), "open")
+
 
 class TestMemoryLLMRouterCircuit(unittest.TestCase):
 

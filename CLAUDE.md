@@ -81,7 +81,7 @@ CLI --data-dir > LARKHELM_DATA_DIR env > /var/lib/larkhelm > ~/.local/share/lark
 | `intent_embedding_top_k_threshold` | P3 REQ-03：embedding L2 分类器最低 cosine 置信，默认 `0.30`；低于则退回 LLM JSON 路径 |
 | `llm_router_circuit_failures` | P3 REQ-04：cheap 后端连续失败阈值，超过则开断路，默认 `5` |
 | `llm_router_circuit_cooldown_sec` | P3 REQ-04：断路 cool-down 秒数，默认 `30.0`；超过后允许 1 次半开探测 |
-| `cascade_backoff_max_attempts` | P3 REQ-05：memory cascade / extract buffer 的 ExponentialBackoff 最大尝试次数，默认 `3`（1s→2s→4s）|
+| `cascade_backoff_max_attempts` | P3 REQ-05：memory cascade / extract buffer 的 ExponentialBackoff 最大尝试次数，默认 `3` 即 sleep 序列 `[1.0s, 2.0s]`；要 `[1.0s, 2.0s, 4.0s]` 共 3 次 sleep 需显式设为 `4`（单次 sleep cap 30s）|
 | `plan_retry_strategy` | P3 REQ-06：`/plan` step 失败时的重试策略，`now`/`manual`/`off`，默认 `off` = 保持 P0-P2 行为 |
 | `plugin_report_card_enabled` | P3 REQ-07：boot 后将 plugin 加载失败汇总成飞书橙色卡片推送给 admin，默认 `false` |
 | `admin_chat_id` | P3 REQ-07：失败卡片目标 chat_id；为空时退回 `default_owner_open_id` 私聊；都空则只 log |
@@ -709,7 +709,7 @@ P3 引入 10 项 prod-ready 收尾改进，全部默认关闭 / 状态不变。�
 - **REQ-02 Query session v2 traffic**：`query_session_v2_traffic` 灰度比，复用 `_gating.hash_bucket_allows`；`query_session_v2_enabled=true` 仍是强制全开
 - **REQ-03 Intent embedding L2**：`intent_layer2_strategy="embedding"` 时走 cosine top-1 + `intent_embedding_top_k_threshold`，失败静默退 LLM
 - **REQ-04 LLM router circuit breaker**：`memory_circuit.CircuitBreaker` wrap cheap-backend，metric `larkhelm_llm_router_circuit_state`
-- **REQ-05 Cascade exponential backoff**：`memory.cascade_extract` + `memory_extract_buffer.flush` 加 `ExponentialBackoff(max_attempts=cascade_backoff_max_attempts)`，1s→2s→4s（cap 30s）
+- **REQ-05 Cascade exponential backoff**：`memory.cascade_extract` + `memory_extract_buffer.flush` 加 `ExponentialBackoff(max_attempts=cascade_backoff_max_attempts)`，默认 `3` 即 sleep 序列 `[1.0s, 2.0s]`；要 `[1.0s, 2.0s, 4.0s]`（共 4 次尝试）需显式 `cascade_backoff_max_attempts=4`，单次 sleep cap 30s
 - **REQ-06 Plan retry engine**：`plan_retry.PlanRetryEngine`，三策略 `now`/`manual`/`off`，默认 `off` 保持现状
 - **REQ-07 Plugin failure card**：`plugin_loader.load_plugins` 返回 `PluginLoadReport`；`plugin_report_card_enabled=true` 时 bridge 启动后推送橙色卡片给 `admin_chat_id`
 - **REQ-08 MemoryGC daemon**：`memory_gc.MemoryGC` 加 `interval_hours` + `start/stop`；tick 内 audit rotate + stale 重算

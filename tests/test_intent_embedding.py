@@ -88,6 +88,66 @@ class TestEmbeddingIntentClassifier(unittest.TestCase):
         self.assertIsNone(classifier.classify("anything"))
 
 
+class _CountingBackend:
+    """Embedding backend that records every ``embed()`` call's inputs."""
+
+    name = "counting"
+    dim = 4
+
+    def __init__(self, table: dict[str, list[float]]):
+        self._table = table
+        self.calls: list[list[str]] = []
+
+    def embed(self, texts):  # noqa: D401 - protocol shim
+        self.calls.append(list(texts))
+        return [self._table.get(t, [0.0] * self.dim) for t in texts]
+
+
+class TestEmbeddingClassifierCache(unittest.TestCase):
+
+    def test_classifier_caches_descriptions(self) -> None:
+        """REQ-03: repeated lookups with the same descriptions re-precompute
+        only on the first call. The next N calls embed only the query."""
+        from larkhelm.agent_hub import intent_router as ir
+        ir._reset_embedding_cache_for_tests()
+        backend = _CountingBackend({
+            "dev desc":  [1.0, 0.0, 0.0, 0.0],
+            "chat desc": [0.0, 1.0, 0.0, 0.0],
+            "q":         [0.9, 0.05, 0.0, 0.0],
+        })
+        descriptions = [("dev", "dev desc"), ("chat", "chat desc")]
+        for _ in range(5):
+            ir._resolve_embedding_classifier(backend, descriptions, 0.30).classify("q")
+        # 1 precompute call (both descriptions in a single batch) + 5 query embeds.
+        self.assertEqual(len(backend.calls), 6)
+        self.assertEqual(backend.calls[0], ["dev desc", "chat desc"])
+        self.assertEqual(sum(1 for c in backend.calls if c == ["q"]), 5)
+
+    def test_signature_change_triggers_reprecompute(self) -> None:
+        """Different descriptions produce a different signature → re-precompute."""
+        from larkhelm.agent_hub import intent_router as ir
+        ir._reset_embedding_cache_for_tests()
+        backend = _CountingBackend({
+            "dev desc":  [1.0, 0.0, 0.0, 0.0],
+            "chat desc": [0.0, 1.0, 0.0, 0.0],
+            "doc desc":  [0.0, 0.0, 1.0, 0.0],
+            "q":         [0.9, 0.05, 0.0, 0.0],
+        })
+        ir._resolve_embedding_classifier(
+            backend, [("dev", "dev desc"), ("chat", "chat desc")], 0.30
+        ).classify("q")
+        # Second call has a different agent set → fresh precompute.
+        ir._resolve_embedding_classifier(
+            backend,
+            [("dev", "dev desc"), ("chat", "chat desc"), ("doc", "doc desc")],
+            0.30,
+        ).classify("q")
+        precompute_calls = [c for c in backend.calls if len(c) > 1]
+        self.assertEqual(len(precompute_calls), 2)
+        self.assertEqual(precompute_calls[0], ["dev desc", "chat desc"])
+        self.assertEqual(precompute_calls[1], ["dev desc", "chat desc", "doc desc"])
+
+
 class TestIntentRouterFallback(unittest.TestCase):
 
     def test_try_embedding_l2_returns_none_when_backend_unavailable(self) -> None:

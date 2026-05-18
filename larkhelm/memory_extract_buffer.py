@@ -232,9 +232,12 @@ class ExtractBuffer:
         """REQ-05: wrap the cascade call in ExponentialBackoff.
 
         ``cascade_backoff_max_attempts`` controls the max retries (default
-        3, capped delays 1s/2s/4s/30s). Last-failure bubbles up to a
-        debug log; the existing cascade pipeline already counts
-        ``cascade_extract_total{outcome="error"}`` so we don't double-count.
+        3). Sleep sequence depends on the configured attempts: default 3
+        gives ``[1.0, 2.0]``; set ``cascade_backoff_max_attempts=4`` to
+        extend to ``[1.0, 2.0, 4.0]``. Each delay is capped at 30s.
+        Last-failure bubbles up to a debug log; the existing cascade
+        pipeline already counts ``cascade_extract_total{outcome="error"}``
+        so we don't double-count.
         """
         try:
             from larkhelm.memory_circuit import BackoffConfig, ExponentialBackoff
