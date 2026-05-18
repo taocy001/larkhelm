@@ -80,40 +80,71 @@ def test_json_decode(isolated_state):
 # ── 4) Subprocess SIGKILL — fake the subprocess wait ─────────────────────
 
 
-def test_subprocess_killed(monkeypatch):
-    """When proc.kill() raises (e.g. process already gone), the runner's
-    silent-cleanup paths must not propagate.
+def test_subprocess_killed():
+    """Real subprocess-kill semantics: when ``self._proc.kill()`` raises
+    (because the OS process has already exited — ``ProcessLookupError`` on
+    POSIX), the runner's ``_watch`` thread must swallow it and return
+    cleanly rather than propagating the exception out of the daemon
+    thread (where it would be silently lost AND leave ``_completed`` /
+    ``_watch_killed`` in an inconsistent state).
+
+    This exercises the actual cancel-kill path in
+    ``runner_base._watch`` (lines 500-503) — the previous version of
+    this test only called ``_cleanup_tmp`` on a missing path, which
+    didn't touch any subprocess kill code.
     """
-    import larkhelm.runner_base as _rb
+    import threading
+    from unittest.mock import MagicMock
+    from larkhelm.runner_base import BaseProcessRunner
 
-    # Build a fake Popen-like object whose kill() raises and whose
-    # wait() returns the SIGKILL exit code (-9 on POSIX).
-    class _FakeProc:
-        pid = 99999
-        returncode = -9
-        stdin = None
-        stdout = None
-        stderr = None
+    class _StubRunner(BaseProcessRunner):
+        def build_args(self): return ["true"]
+        def build_stdin(self): return None
+        def parse_stdout_event(self, ev): return False
+        def cleanup_extra(self): pass
 
-        def kill(self):
-            raise ProcessLookupError("already dead")
+    r = _StubRunner.__new__(_StubRunner)
+    BaseProcessRunner.__init__(
+        r, backend_name="stub", chat_id="c_kill", message="m",
+        sid=None, cwd="/tmp",
+    )
 
-        def wait(self, timeout=None):
-            return -9
+    # Fake Popen whose kill() raises ProcessLookupError — the exact
+    # condition the silent-except is designed to catch (proc already gone).
+    r._proc = MagicMock()
+    kill_called = threading.Event()
 
-        def poll(self):
-            return -9
+    def _kill_raises():
+        kill_called.set()
+        raise ProcessLookupError("already dead")
+    r._proc.kill = _kill_raises
 
-    # Most cleanup paths look like ``try: proc.kill() except Exception: pass``.
-    # Use the public ``_cleanup_tmp`` helper which is the only narrow surface
-    # area we want to call here — verify it tolerates a missing file.
-    if hasattr(_rb, "_cleanup_tmp"):
-        # _cleanup_tmp(path) silently noops if file gone — exercise that branch.
-        missing = Path("/tmp/larkhelm_does_not_exist_xyz.tmp")
+    # Wire cancel_ev so the next _watch loop iteration takes the cancel branch.
+    r.cancel_ev = threading.Event()
+    r.cancel_ev.set()
+
+    # Track any exception that escapes _watch (a daemon thread eating the
+    # exception silently would otherwise hide a regression).
+    escaped: list[BaseException] = []
+
+    def _runner():
         try:
-            _rb._cleanup_tmp(missing)
-        except Exception as e:
-            pytest.fail(f"_cleanup_tmp raised on missing file: {e}")
+            r._watch()
+        except BaseException as e:
+            escaped.append(e)
+
+    watcher = threading.Thread(target=_runner, daemon=True)
+    watcher.start()
+    watcher.join(timeout=2.0)
+
+    assert not watcher.is_alive(), "_watch did not return after cancel"
+    assert escaped == [], (
+        f"_watch propagated exception out of the silent-kill path: "
+        f"{escaped!r}"
+    )
+    assert kill_called.is_set(), "kill() was never invoked"
+    assert r._cancelled_flag.is_set(), "cancel flag should be set"
+    assert r._watch_killed, "_watch_killed should be True after self-kill"
 
 
 # ── 5) Concurrent writes to state.json (10 threads × 50 writes) ──────────
