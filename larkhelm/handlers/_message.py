@@ -431,9 +431,15 @@ def handle_message(data: P2ImMessageReceiveV1):
                           trace_id=voice_trace_id)
                 _reset_cancel(chat_id)
                 if _cfg.VOICE_MERGE_WINDOW_SEC > 0:
+                    # Pass voice_trace_id so the eventual merged
+                    # dispatch (only the HEAD fragment's trace_id
+                    # survives the merge — see voice/merge.py
+                    # ``_flush_locked``) lines up with the head's
+                    # user log entry. Stats round-3 MUST-FIX.
                     add_voice(
                         chat_id, text_out, target_model,
                         user_msg_id=message.message_id, parent_id=parent_id,
+                        trace_id=voice_trace_id,
                     )
                 else:
                     # Off-thread the LLM call so the SDK event worker is not

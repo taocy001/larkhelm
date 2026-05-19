@@ -102,10 +102,15 @@ class _MergeTestBase(unittest.TestCase):
         self._timer_patch = patch.object(merge, "_Timer", FakeTimer)
         self._timer_patch.start()
 
-        self.dispatched: "list[tuple[str, str, str, object, object]]" = []
+        # Stats round-3 added ``trace_id`` as the 6th arg to ``_dispatch``;
+        # collector tuple now carries it so per-fragment trace_id
+        # propagation can be asserted in future tests if needed.
+        self.dispatched: "list[tuple[str, str, str, object, object, object]]" = []
 
-        def _collect(prompt, chat_id, model, user_msg_id, parent_id):
-            self.dispatched.append((prompt, chat_id, model, user_msg_id, parent_id))
+        def _collect(prompt, chat_id, model, user_msg_id, parent_id, trace_id=None):
+            self.dispatched.append(
+                (prompt, chat_id, model, user_msg_id, parent_id, trace_id),
+            )
 
         self._dispatch_patch = patch.object(merge, "_dispatch", _collect)
         self._dispatch_patch.start()
@@ -149,7 +154,7 @@ class TestTimerAutoFlush(_MergeTestBase):
         merge._on_timer("chat_X")
 
         self.assertEqual(len(self.dispatched), 1)
-        prompt, chat_id, model, user_msg_id, parent_id = self.dispatched[0]
+        prompt, chat_id, model, user_msg_id, parent_id, _trace_id = self.dispatched[0]
         self.assertEqual(prompt, "a\n\nb")
         self.assertEqual(chat_id, "chat_X")
         self.assertEqual(model, "claude")
@@ -176,7 +181,7 @@ class TestCapImmediateFlush(_MergeTestBase):
         merge.add_voice("chat_Y", "second", "claude")
         # Second add: buffer=2 == cap → flush immediately, no Timer left.
         self.assertEqual(len(self.dispatched), 1)
-        prompt, _, _, _, _ = self.dispatched[0]
+        prompt, _, _, _, _, _ = self.dispatched[0]
         self.assertEqual(prompt, "first\n\nsecond")
         self.assertNotIn("chat_Y", merge._timers)
         self.assertNotIn("chat_Y", merge._buffers)

@@ -843,6 +843,72 @@ class TestDurationPairingByTraceId(unittest.TestCase):
         self.assertEqual(sorted(durations), [10.0, 300.0])
 
 
+class TestCmdStatsEndToEndWithMockJsonl(unittest.TestCase):
+    """Round-3 review SHOULD-FIX: the per-fix pairing tests above
+    replay the algorithm in-line (``_accept_durations``). This adds
+    an end-to-end driver that hits ``_cmd_stats`` itself through a
+    mocked ``_read_logs``, so any future refactor that diverges
+    pairing logic between the two implementations fires here."""
+
+    def test_cmd_stats_renders_traced_pairs_and_logs_orphans(self):
+        sent: list = []
+
+        def _capture(chat_id, msg_id, title, body, color="blue", **kw):
+            sent.append({"title": title, "body": body, "color": color})
+
+        debug_lines: list = []
+
+        def _capture_debug(msg):
+            debug_lines.append(msg)
+
+        # Fixture: 1 paired (trace_id=A, 60s), 1 orphan (trace_id=B
+        # user, no assistant), 1 FIFO pair (no trace_id, 30s).
+        # Expected: 2 durations recorded, average = (60+30)/2 = 45s,
+        # debug log fires for the orphan B.
+        fake_records = [
+            {"ts": "2026-05-19T10:00:00", "role": "user", "trace_id": "A"},
+            {"ts": "2026-05-19T10:00:30", "role": "user"},
+            {"ts": "2026-05-19T10:01:00", "role": "user", "trace_id": "B"},
+            {"ts": "2026-05-19T10:01:00", "role": "assistant"},  # FIFO 30s
+            {"ts": "2026-05-19T10:01:00", "role": "assistant", "trace_id": "A"},  # 60s
+            # B never gets an assistant — orphan.
+        ]
+        # Date-stamp matching: _cmd_stats filters by ``today``. Make
+        # our records appear "today" so the filter accepts them.
+        from datetime import datetime as _dt
+        today_iso = _dt.now().strftime("%Y-%m-%d")
+        for r in fake_records:
+            r["ts"] = today_iso + "T" + r["ts"].split("T", 1)[1]
+
+        with patch("larkhelm.commands.send_card_reply", side_effect=_capture):
+            with patch("larkhelm.commands._read_logs", return_value=fake_records):
+                with patch("larkhelm.commands.get_token_stats_persistent",
+                           return_value={}):
+                    with patch("larkhelm.commands.get_token_stats",
+                               return_value={}):
+                        with patch("larkhelm.commands._debug_log",
+                                   side_effect=_capture_debug):
+                            from larkhelm.commands import _cmd_stats
+                            _cmd_stats("oc_e2e", "msg_1")
+
+        self.assertEqual(len(sent), 1, "exactly one /stats card expected")
+        body = sent[0]["body"]
+        # Average shown is _fmt_elapsed-ish; the raw number was ~45.0s
+        # → "45s" or "45.0s" — body must surface a non-dash average.
+        self.assertNotIn("平均耗时：**—**", body,
+            "two pairs should produce a real average, not '—'"
+        )
+        # Orphan B should have triggered the debug-log warning line
+        # (round-3 NICE-TO-HAVE).
+        orphan_logs = [m for m in debug_lines if "pairing leftovers" in m]
+        self.assertTrue(orphan_logs,
+            "[stats] pairing-leftovers debug line should fire for the "
+            "orphan trace_id B"
+        )
+        # The line should mention "1 trace_id orphan" (B).
+        self.assertIn("1 trace_id orphan", orphan_logs[0])
+
+
 class TestDurationHardCapMatchesHardTimeout(unittest.TestCase):
     """Round-3 fix #3: the previous ``if 0 < secs < 3600`` silently
     dropped every /dev / /crew query > 1h. Cap now keys off

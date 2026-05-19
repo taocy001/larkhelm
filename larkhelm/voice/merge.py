@@ -61,6 +61,15 @@ class _VoiceItem:
     user_msg_id: Optional[str]
     parent_id: Optional[str]
     ts: float
+    # Per-fragment trace_id propagated from ``_message.py`` so the
+    # merged-voice dispatch can share an id with the user-side log
+    # entry. Only the HEAD item's trace_id survives the merge — see
+    # ``_flush_locked``. The non-head fragments contribute orphan
+    # entries in the ``/stats`` per-call ``_pending_by_trace`` dict;
+    # those fall back to FIFO pairing and the dict gets GC'd at the
+    # end of ``_cmd_stats``. Acceptable trade-off for the niche
+    # multi-fragment-merge path. Stats round-3 review MUST-FIX.
+    trace_id: Optional[str] = None
 
 
 # ── Module-level state ─────────────────────────────────────────────────────
@@ -81,6 +90,7 @@ def add_voice(
     model: str,
     user_msg_id: Optional[str] = None,
     parent_id: Optional[str] = None,
+    trace_id: Optional[str] = None,
 ) -> None:
     """Push one transcribed voice fragment into ``chat_id``'s merge buffer.
 
@@ -105,6 +115,7 @@ def add_voice(
         user_msg_id=user_msg_id,
         parent_id=parent_id,
         ts=time.monotonic(),
+        trace_id=trace_id,
     )
 
     window = int(getattr(_cfg, "VOICE_MERGE_WINDOW_SEC", 0))
@@ -166,7 +177,8 @@ def _flush_locked(chat_id: str) -> None:
     head = items[0]
     threading.Thread(
         target=_dispatch,
-        args=(prompt, chat_id, head.model, head.user_msg_id, head.parent_id),
+        args=(prompt, chat_id, head.model, head.user_msg_id,
+              head.parent_id, head.trace_id),
         daemon=True,
         name=f"voice-merge-dispatch-{chat_id[:8]}",
     ).start()
@@ -189,6 +201,7 @@ def _dispatch(
     model: str,
     user_msg_id: Optional[str],
     parent_id: Optional[str],
+    trace_id: Optional[str] = None,
 ) -> None:
     """Daemon-thread body.  Lazy-imports ``_do_query`` and calls it.
 
@@ -202,6 +215,13 @@ def _dispatch(
     Wraps the call in ``try/except`` so a daemon-thread death does not
     surface as ``unraisable exception`` on stderr — instead routes to
     ``log.warn`` with a ``[VoiceMerge]`` prefix.
+
+    ``trace_id`` (round-3 MUST-FIX from stats audit): propagated so the
+    merged dispatch shares an id with the head fragment's user-side
+    log entry — ``/stats`` duration pairing can then resolve the pair
+    instead of falling back to FIFO (which the merge path scrambles
+    by interleaving multiple per-fragment user entries before one
+    merged assistant entry).
     """
     try:
         from larkhelm.handlers._query import _do_query  # lazy import
@@ -211,6 +231,7 @@ def _dispatch(
             model,
             user_msg_id=user_msg_id,
             parent_id=parent_id,
+            trace_id=trace_id,
         )
     except Exception as e:
         try:

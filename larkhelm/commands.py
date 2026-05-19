@@ -759,6 +759,20 @@ def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
                 _pending_fifo = None
             if paired_start is not None:
                 _accept_duration(ts, paired_start)
+    # Round-3 review NICE-TO-HAVE: orphan trace_ids (user logged with
+    # an id but no matching assistant entry by end of the scan) and
+    # leftover FIFO entries surface as silent under-counts in the
+    # duration average. Emit a single debug-log line so operators
+    # bisecting "/stats numbers look wrong" can see the gap without
+    # diffing JSONL by hand. Cheap path; only logs when non-zero.
+    _orphan_traced = len(_pending_by_trace)
+    _orphan_fifo = 1 if _pending_fifo is not None else 0
+    if _orphan_traced or _orphan_fifo:
+        _debug_log(
+            f"[stats] _cmd_stats({chat_id[:12]}) pairing leftovers: "
+            f"{_orphan_traced} trace_id orphans, {_orphan_fifo} FIFO orphan "
+            f"(user logged but no matching assistant/error before scan end)"
+        )
     avg = sum(durations) / len(durations) if durations else 0
 
     # Persistent stats across three time windows
