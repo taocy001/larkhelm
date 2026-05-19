@@ -1,6 +1,7 @@
 """larkhelm · KimiRunner — Kimi CLI subprocess runner."""
 import json
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -17,8 +18,13 @@ _KIMI_TOOL_MAP = {"Shell": "Bash", "FetchURL": "WebFetch", "SearchWeb": "WebSear
 # regex is the sole source of truth for session continuity. Pre-fix:
 # ``parse_stdout_event`` looked for ``ev.get("session_id")`` and never
 # matched → every kimi turn opened a fresh session, no memory carry-over.
+#
+# Round-1 review (Kimi 2026-05-19) P2: character class permissive enough
+# to accept base64-url style sids (alnum + ``-_=.+/``) if a future kimi
+# version switches encoding. Greedy ``\S+`` would over-capture into the
+# next stderr token, so stick with an explicit positive class.
 _KIMI_STDERR_SESSION_RE = re.compile(
-    r"To resume this session:\s*kimi\s+-r\s+([A-Za-z0-9_\-]+)"
+    r"To resume this session:\s*kimi\s+-r\s+([A-Za-z0-9_\-=.+/]+)"
 )
 
 
@@ -122,6 +128,15 @@ class KimiRunner(BaseProcessRunner):
         self._model = model
         self._extra_args = list(extra_args) if extra_args else []
         self._session_key = session_key or "kimi"
+        # Round-1 review (Kimi 2026-05-19) P2 — session-id race lock.
+        # ``_on_stderr_line`` runs on the stderr-drain thread while
+        # ``parse_stdout_event`` runs on the stdout-iterator thread.
+        # kimi 1.43 only emits sid on stderr today, but a future version
+        # that re-introduces ``session_id`` to stdout would race against
+        # the stderr regex. Single lock guards the (read _new_sid →
+        # write _new_sid → _save_sid) critical section in both call
+        # sites so the "first-match-wins" contract holds across threads.
+        self._sid_lock = threading.Lock()
         self._ctor_kwargs = dict(
             cancel_ev=cancel_ev, on_text=on_text, on_tool=on_tool,
             on_tool_result=on_tool_result, on_soft_timeout=on_soft_timeout,
@@ -164,17 +179,21 @@ class KimiRunner(BaseProcessRunner):
         kimi-cli stream-json stdout has no ``session_id`` envelope at all
         (verified against 1.43.x on 2026-05-19), so this stderr scrape is
         the only way to persist a session for `kimi -r SID` continuity.
-        Idempotent — first match wins per turn.
+        Idempotent — first match wins per turn, guarded by ``_sid_lock``
+        so a future stdout-side ``session_id`` event can't race this one.
         """
-        if self._new_sid:
-            return
         m = _KIMI_STDERR_SESSION_RE.search(line)
-        if m:
-            self._new_sid = m.group(1)
-            try:
-                _save_sid(self._ns, self._new_sid, self._session_key)
-            except Exception as e:
-                _debug_log(f"[Kimi] _save_sid failed: {e}")
+        if not m:
+            return
+        sid = m.group(1)
+        with self._sid_lock:
+            if self._new_sid:
+                return
+            self._new_sid = sid
+        try:
+            _save_sid(self._ns, sid, self._session_key)
+        except Exception as e:
+            _debug_log(f"[Kimi] _save_sid failed: {e}")
 
     def _extract_kimi_content_text(self, content) -> str:
         """Collect the visible-text bytes from a kimi 1.43 content payload.
@@ -197,11 +216,20 @@ class KimiRunner(BaseProcessRunner):
     def parse_stdout_event(self, ev: dict) -> bool:
         # Some hypothetical future kimi version may re-add ``session_id``
         # to stdout — keep the line, but the live source of truth is
-        # ``_on_stderr_line`` (see _KIMI_STDERR_SESSION_RE).
+        # ``_on_stderr_line`` (see _KIMI_STDERR_SESSION_RE). Use the
+        # same ``_sid_lock`` as the stderr path so a stdout-event and a
+        # stderr-line arriving on different threads cannot both win.
         cand_sid = ev.get("session_id") or ev.get("session")
-        if cand_sid and not self._new_sid:
-            self._new_sid = cand_sid
-            _save_sid(self._ns, cand_sid, self._session_key)
+        if cand_sid:
+            with self._sid_lock:
+                first_write = not self._new_sid
+                if first_write:
+                    self._new_sid = cand_sid
+            if first_write:
+                try:
+                    _save_sid(self._ns, cand_sid, self._session_key)
+                except Exception as e:
+                    _debug_log(f"[Kimi] _save_sid failed: {e}")
 
         role = ev.get("role", "")
         etype = ev.get("type", "")
@@ -235,13 +263,20 @@ class KimiRunner(BaseProcessRunner):
             is_error = bool(ev.get("is_error", False))
             # kimi 1.43 sends tool results as ``content: [{type:"text",
             # text:"..."}, ...]``. Pre-fix did ``str(content)`` on the
-            # list which produced an ugly Python repr blob; extract the
-            # text parts so the on_tool_result callback sees plain
-            # output. Fallback to str() for any unrecognized shape.
-            if isinstance(content, (str, list)):
-                pretty = self._extract_kimi_content_text(content) or (
-                    content if isinstance(content, str) else str(content)
-                )
+            # list which produced an ugly Python repr blob.
+            #
+            # Round-1 review (Kimi 2026-05-19) P0: previous fix used
+            # ``_extract(...) or str(content)`` which still produced
+            # ugly repr when the list contained only empty-text parts
+            # (a *legal* "command produced no output" tool result).
+            # ``or`` couldn't distinguish "extraction failed" from
+            # "extraction succeeded with empty string". Replace with
+            # type-dispatch: list → trust extraction (incl. ""),
+            # string → passthrough, other → repr.
+            if isinstance(content, list):
+                pretty = self._extract_kimi_content_text(content)
+            elif isinstance(content, str):
+                pretty = content
             else:
                 pretty = str(content)
             start_t = self._tool_start_times.get(tc_id, time.monotonic())

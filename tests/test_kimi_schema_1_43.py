@@ -250,6 +250,72 @@ class ParseToolResultTests(unittest.TestCase):
         self.assertFalse(is_error)
         self.assertGreaterEqual(elapsed, 0.0)
 
+    def test_empty_text_list_does_not_fall_back_to_repr(self):
+        """Round-1 review (Kimi 2026-05-19) P0:
+        ``content=[{"type":"text","text":""}]`` is a *legal* "command
+        produced no output" tool result. Pre-fix used ``extract(...) or
+        str(content)`` which couldn't distinguish "extraction failed"
+        from "extraction returned empty string" and produced the ugly
+        repr ``"[{'type': 'text', 'text': ''}]"`` in the user-facing
+        card. Pinning the type-dispatch fix: list always trusts the
+        extractor, never falls back to repr.
+        """
+        r = _make_runner()
+        r.parse_stdout_event({
+            "role": "tool",
+            "content": [{"type": "text", "text": ""}],
+            "tool_call_id": "tc_empty",
+        })
+        r.on_tool_result.assert_called_once()
+        pretty = r.on_tool_result.call_args.args[1]
+        self.assertEqual(pretty, "",
+                         f"empty-text-list must yield '', got {pretty!r}")
+
+    def test_string_content_passthrough(self):
+        """Legacy / hypothetical-future shape: ``content`` is a plain
+        string (not wrapped in a typed-parts list). Must passthrough
+        verbatim, NOT fall through to str() repr."""
+        r = _make_runner()
+        r.parse_stdout_event({
+            "role": "tool",
+            "content": "raw shell output\n",
+            "tool_call_id": "tc_str",
+        })
+        pretty = r.on_tool_result.call_args.args[1]
+        self.assertIn("raw shell output", pretty)
+        self.assertNotIn("type", pretty,
+                         "string passthrough must NOT wrap value in any list-shape repr")
+
+    def test_list_with_non_dict_elements_skipped(self):
+        """Defensive: a malformed envelope where ``content`` contains
+        non-dict elements must not crash. ``_extract_kimi_content_text``
+        guards with ``isinstance(c, dict)``."""
+        r = _make_runner()
+        r.parse_stdout_event({
+            "role": "tool",
+            "content": [
+                "loose string",  # not a dict
+                {"type": "text", "text": "real"},
+                None,             # not a dict
+            ],
+            "tool_call_id": "tc_mixed",
+        })
+        pretty = r.on_tool_result.call_args.args[1]
+        # Only the well-formed text part should be extracted.
+        self.assertEqual(pretty, "real", f"got {pretty!r}")
+
+    def test_assistant_string_content_streamed(self):
+        """Mirror of test_string_content_passthrough on the assistant
+        side: ``role:"assistant"`` with ``content`` as a bare string
+        (legacy / future fallback) must still stream via on_text."""
+        r = _make_runner()
+        r.parse_stdout_event({
+            "role": "assistant",
+            "content": "plain text reply",
+        })
+        self.assertEqual(r._result_text, "plain text reply")
+        r.on_text.assert_called_once_with("plain text reply", status="typing")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Session ID extraction (stderr)
@@ -290,6 +356,38 @@ class StderrSessionExtractionTests(unittest.TestCase):
             r._on_stderr_line("To resume this session: kimi -r bbbbbbbb")
         self.assertEqual(r._new_sid, "aaaaaaaa")
         self.assertEqual(save.call_count, 1)
+
+    def test_base64_url_style_sid_captured(self):
+        """Round-1 review (Kimi 2026-05-19) P2: char class permissive
+        enough to handle a hypothetical future kimi version using
+        base64-url ``[A-Za-z0-9+/=]`` session IDs without truncation."""
+        r = _make_runner()
+        sid = "AbC=123+xyz/QwE-_."
+        with patch("larkhelm.runner_kimi._save_sid") as save:
+            r._on_stderr_line(f"To resume this session: kimi -r {sid}")
+        self.assertEqual(r._new_sid, sid, "base64-url-style sid must not be truncated")
+        save.assert_called_once()
+
+    def test_stdout_session_id_backward_compat(self):
+        """If a future kimi version re-introduces ``session_id`` to stdout,
+        parse_stdout_event must honour it (single _save_sid call) and
+        a subsequent stderr resume-hint must NOT overwrite it
+        (first-match-wins across threads via _sid_lock)."""
+        r = _make_runner()
+        with patch("larkhelm.runner_kimi._save_sid") as save:
+            r.parse_stdout_event({
+                "role": "assistant",
+                "session_id": "stdout-sid-1",
+                "content": [{"type": "text", "text": "hi"}],
+            })
+            r._on_stderr_line("To resume this session: kimi -r stderr-sid-2")
+        self.assertEqual(r._new_sid, "stdout-sid-1",
+                         "stdout-emitted session_id must win over later stderr line")
+        self.assertEqual(save.call_count, 1,
+                         "second observation must not trigger a second _save_sid write")
+        # And the sid that was saved is the stdout one, not stderr.
+        saved_sid = save.call_args.args[1]
+        self.assertEqual(saved_sid, "stdout-sid-1")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
