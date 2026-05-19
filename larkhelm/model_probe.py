@@ -91,7 +91,13 @@ def _probe_kimi(spec) -> tuple[bool | None, str]:
            "--print", "--output-format", "stream-json", "--input-format", "stream-json"]
     if spec.model:
         cmd += ["--model", spec.model]
-    stdin_data = json.dumps({"type": "user", "message": "."}) + "\n"
+    # kimi 1.43 input schema: ``{"role":"user","content":"..."}`` (kosong
+    # Message format), NOT ``{"type":"user","message":"..."}``. Pre-fix
+    # sent the wrong shape so kimi-cli silently ignored stdin and exited
+    # with rc=0 + empty stdout, landing in Step-3 INDETERMINATE forever
+    # ("rc=0 but no stream-json event observed"). Verified against
+    # kimi-cli 1.43.x on 2026-05-19.
+    stdin_data = json.dumps({"role": "user", "content": "."}) + "\n"
     try:
         r = subprocess.run(cmd, input=stdin_data, capture_output=True,
                            text=True, timeout=PROBE_TIMEOUT)
@@ -101,9 +107,18 @@ def _probe_kimi(spec) -> tuple[bool | None, str]:
         # a successful response could legitimately contain the substring
         # "401" inside its content (e.g. the model echoing back something
         # about HTTP status codes). Trust the structured event.
+        #
+        # kimi 1.43 puts ``role`` at the TOP LEVEL of each event (not
+        # ``type``), and never emits a terminal ``result`` envelope —
+        # the only positive signal is ``role in {assistant, tool}``.
+        # We keep ``ev.get("type") in (system, assistant, result)`` as
+        # a backwards-compat fallback for hypothetical future kimi-cli
+        # versions that revert to the older Anthropic-style schema.
         for line in r.stdout.splitlines():
             try:
                 ev = json.loads(line)
+                if ev.get("role") in ("assistant", "tool"):
+                    return True, ""
                 if ev.get("type") in ("system", "assistant", "result"):
                     return True, ""
             except Exception:

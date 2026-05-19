@@ -12,6 +12,7 @@ __all__ = [
     "_token_stats", "_token_stats_lock", "_jsonl_lock",
     "record_token_usage", "get_token_stats", "get_token_stats_persistent",
     "record_crew_agent_tokens", "get_crew_agent_tokens", "evict_crew_agent_tokens",
+    "summarize_crew_agent_tokens_for_chat",
 ]
 
 # In-memory statistics (reset on restart)
@@ -56,12 +57,57 @@ def get_crew_agent_tokens(crew_ns: str) -> dict:
         return dict(_crew_agent_tokens.get(crew_ns, {}))
 
 
+def summarize_crew_agent_tokens_for_chat(chat_id: str) -> dict:
+    """Aggregate the in-memory crew-agent token counters for one chat.
+
+    Round-4 audit P1 (R4-1e): the `_crew_agent_tokens` dict was populated
+    by every `/crew` / `/dev` / `/plan` run but had no user-facing entry
+    point — CLAUDE.md promised "crew agent token independent tracking"
+    but `/stats` rendered nothing about it. This helper sums all entries
+    keyed by `chat_id__crew_*` so `/stats` can show "本进程 crew agents
+    消耗：N tokens / $X" at the card bottom. Process-local: values reset
+    on bridge restart (no JSONL persistence, by design — these are
+    rolled into the parent chat's `role=token` records by
+    `runner_base._record_tokens`, so we only surface them here as an
+    in-process drill-down).
+
+    Returns ``{}`` when no entries match. Otherwise returns
+    ``{"input_tokens", "output_tokens", "cache_read", "cache_create",
+       "cost_usd", "agents"}`` where ``agents`` is the count of distinct
+    crew_ns entries that contributed.
+    """
+    prefix = f"{chat_id}__crew_"
+    with _crew_agent_lock:
+        matched = [v for k, v in _crew_agent_tokens.items() if k.startswith(prefix)]
+    if not matched:
+        return {}
+    out = {
+        "input_tokens":  0, "output_tokens": 0,
+        "cache_read":    0, "cache_create":  0,
+        "cost_usd":      0.0,
+        "agents":        len(matched),
+    }
+    for entry in matched:
+        out["input_tokens"]  += entry.get("input_tokens", 0)
+        out["output_tokens"] += entry.get("output_tokens", 0)
+        out["cache_read"]    += entry.get("cache_read", 0)
+        out["cache_create"]  += entry.get("cache_create", 0)
+        out["cost_usd"]      += entry.get("cost_usd", 0.0)
+    return out
+
+
 def evict_crew_agent_tokens(crew_id_prefix: str) -> None:
     """Remove all crew agent token entries whose key starts with crew_id_prefix.
     Called after a crew run completes to free memory eagerly rather than waiting for LRU eviction.
+
+    Round-4 audit P1: previously used substring matching (``crew_id_prefix in k``),
+    violating the function's prefix contract. crew_id is currently a UUID so
+    collisions were unlikely, but a future move to semantic IDs (e.g. "abc"
+    vs "xx-abc-yy") would silently evict unrelated entries. Pinned by
+    test_evict_crew_agent_tokens_strict_prefix.
     """
     with _crew_agent_lock:
-        stale = [k for k in _crew_agent_tokens if crew_id_prefix in k]
+        stale = [k for k in _crew_agent_tokens if k.startswith(crew_id_prefix)]
         for k in stale:
             _crew_agent_tokens.pop(k, None)
 

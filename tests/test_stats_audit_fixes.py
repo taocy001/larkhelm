@@ -764,7 +764,10 @@ class TestStatsIntentDateArgument(unittest.TestCase):
 
         captured_date: list = []
 
-        def _fake_aggregate(date=None, path=None):
+        # ``**kw`` swallows the R4-1d ``chat_id`` kwarg without claiming a
+        # contract on it (separate tests in TestStatsIntentChatIdFilter
+        # pin the chat_id forwarding). Keeps this test focused on date.
+        def _fake_aggregate(date=None, path=None, **kw):
             captured_date.append(date)
             return {
                 "total": 0, "success_rate": 0.0, "avg_duration": 0.0,
@@ -800,7 +803,7 @@ class TestStatsIntentDateArgument(unittest.TestCase):
 
         captured_date: list = []
 
-        def _fake_aggregate(date=None, path=None):
+        def _fake_aggregate(date=None, path=None, **kw):
             captured_date.append(date)
             return {
                 "total": 0, "success_rate": 0.0, "avg_duration": 0.0,
@@ -1293,6 +1296,308 @@ class TestOverlappingCacheNoDoubleCount(unittest.TestCase):
         # = 94.84% → rendered as "94%" by the int() truncation.
         self.assertIn("（94%）", body,
             f"expected '（94%）' cache hit pct (11555/12184), got body:\n{body}"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# R4-1 audit fixes (round-4 stats wrap-up)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestEvictCrewAgentTokensStrictPrefix(unittest.TestCase):
+    """R4-1b: `evict_crew_agent_tokens(prefix)` previously used substring
+    matching (`prefix in k`), violating the function's prefix contract.
+    crew_id is currently a UUID so collisions were rare but pinning the
+    contract now keeps a future move to semantic IDs safe."""
+
+    def setUp(self):
+        # Snapshot then reset module-level state so per-test mutations
+        # don't bleed across tests.
+        self._snap = dict(token_stats._crew_agent_tokens)
+        token_stats._crew_agent_tokens.clear()
+
+    def tearDown(self):
+        token_stats._crew_agent_tokens.clear()
+        token_stats._crew_agent_tokens.update(self._snap)
+
+    def test_evict_only_keys_starting_with_prefix(self):
+        # Two entries: target shares the prefix exactly, distractor
+        # contains the prefix as a SUBSTRING but does NOT start with it.
+        token_stats.record_crew_agent_tokens(
+            "abc-uuid__agent_1", "claude", {"input_tokens": 10},
+        )
+        token_stats.record_crew_agent_tokens(
+            "xx-abc-uuid-yy__agent_1", "claude", {"input_tokens": 20},
+        )
+        token_stats.evict_crew_agent_tokens("abc-uuid")
+        # Target removed, distractor (with substring match only) preserved.
+        self.assertNotIn("abc-uuid__agent_1", token_stats._crew_agent_tokens,
+            "exact-prefix entry must be evicted"
+        )
+        self.assertIn("xx-abc-uuid-yy__agent_1", token_stats._crew_agent_tokens,
+            "substring-only match must NOT be evicted — pre-fix `prefix in k` "
+            "would have deleted this too, leaking eviction to unrelated entries"
+        )
+
+    def test_evict_empty_prefix_is_noop_on_empty_store(self):
+        token_stats.evict_crew_agent_tokens("nope-uuid")
+        self.assertEqual(len(token_stats._crew_agent_tokens), 0)
+
+
+class TestSummarizeCrewAgentTokensForChat(unittest.TestCase):
+    """R4-1e helper: aggregate the in-memory `_crew_agent_tokens` dict
+    for one chat. Powers the `/stats` card bottom "Crew Agents" line."""
+
+    def setUp(self):
+        self._snap = dict(token_stats._crew_agent_tokens)
+        token_stats._crew_agent_tokens.clear()
+
+    def tearDown(self):
+        token_stats._crew_agent_tokens.clear()
+        token_stats._crew_agent_tokens.update(self._snap)
+
+    def test_aggregates_matching_chat_entries(self):
+        # Two agents under one chat + one entry under a different chat
+        # which must NOT be included in the sum.
+        token_stats.record_crew_agent_tokens(
+            "chatA__crew_run1_agent_pm", "claude",
+            {"input_tokens": 100, "output_tokens": 50, "cost_usd": 0.01},
+        )
+        token_stats.record_crew_agent_tokens(
+            "chatA__crew_run1_agent_eng", "claude",
+            {"input_tokens": 200, "output_tokens": 75, "cost_usd": 0.02},
+        )
+        token_stats.record_crew_agent_tokens(
+            "chatB__crew_run9_agent_pm", "claude",
+            {"input_tokens": 999, "output_tokens": 999, "cost_usd": 9.99},
+        )
+        summary = token_stats.summarize_crew_agent_tokens_for_chat("chatA")
+        self.assertEqual(summary["agents"], 2)
+        self.assertEqual(summary["input_tokens"], 300)
+        self.assertEqual(summary["output_tokens"], 125)
+        # Cost rounds via float arithmetic; compare to 4 decimals.
+        self.assertAlmostEqual(summary["cost_usd"], 0.03, places=4)
+
+    def test_empty_when_no_match(self):
+        token_stats.record_crew_agent_tokens(
+            "other__crew_x_agent_1", "claude", {"input_tokens": 5},
+        )
+        self.assertEqual(
+            token_stats.summarize_crew_agent_tokens_for_chat("nobody"), {},
+            "no matching prefix must return {} so /stats can suppress the line"
+        )
+
+    def test_prefix_is_anchored_to_chat_id_double_underscore(self):
+        """Ensure `chatA` doesn't accidentally swallow `chatAB__crew_*`
+        (the prefix is `chatA__crew_`, NOT `chatA`)."""
+        token_stats.record_crew_agent_tokens(
+            "chatA__crew_x_agent_1", "claude", {"input_tokens": 10},
+        )
+        token_stats.record_crew_agent_tokens(
+            "chatAB__crew_x_agent_1", "claude", {"input_tokens": 99},
+        )
+        summary = token_stats.summarize_crew_agent_tokens_for_chat("chatA")
+        self.assertEqual(summary["input_tokens"], 10,
+            "chatAB__crew_* must NOT be summed into chatA's totals"
+        )
+
+
+class TestCmdStatsUserCountExcludesCrewPlan(unittest.TestCase):
+    """R4-1c: `/crew` and `/plan` commands write `role="user", model in
+    {crew,plan}` as command markers, not real conversation turns. They
+    must NOT count toward `今日对话` in `/stats`."""
+
+    def test_user_count_excludes_crew_plan_shell_markers(self):
+        from datetime import datetime as _dt
+        today = _dt.now().strftime("%Y-%m-%d")
+        fake_records = [
+            # 2 genuine user turns (model="" — legacy or claude/gemini).
+            {"ts": today + "T10:00:00", "role": "user", "model": ""},
+            {"ts": today + "T10:01:00", "role": "user", "model": "claude"},
+            # 3 command markers that must NOT count:
+            {"ts": today + "T10:02:00", "role": "user", "model": "crew"},
+            {"ts": today + "T10:03:00", "role": "user", "model": "plan"},
+            {"ts": today + "T10:04:00", "role": "user", "model": "shell"},
+        ]
+
+        captured: list = []
+        def _capture(chat_id, msg_id, title, body, color="blue", **kw):
+            captured.append({"body": body})
+
+        with patch("larkhelm.commands.send_card_reply", side_effect=_capture):
+            with patch("larkhelm.commands._read_logs", return_value=fake_records):
+                with patch("larkhelm.commands.get_token_stats_persistent",
+                           return_value={}):
+                    with patch("larkhelm.commands.get_token_stats",
+                               return_value={}):
+                        from larkhelm.commands import _cmd_stats
+                        _cmd_stats("oc_count", "msg_1")
+
+        self.assertEqual(len(captured), 1)
+        body = captured[0]["body"]
+        # Card formats the user count as "今日对话：**N** 次".
+        self.assertIn("今日对话：**2** 次", body,
+            "crew/plan/shell command markers must NOT inflate user_count; "
+            f"got body:\n{body}"
+        )
+
+
+class TestAggregateDailyChatIdFilter(unittest.TestCase):
+    """R4-1d: `aggregate_daily(chat_id=...)` must restrict to records
+    matching that chat_id. Without this, `/stats intent` leaks volume /
+    avg-duration from other chats — a cross-chat side channel."""
+
+    def setUp(self):
+        # Per-test JSONL file (avoid race with the shared DATA_DIR).
+        self._tmp = Path(tempfile.mkdtemp(prefix="agent_audit_chatid_"))
+        self._path = self._tmp / "agent_audit.jsonl"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _write(self, recs):
+        with self._path.open("a", encoding="utf-8") as f:
+            for r in recs:
+                f.write(json.dumps(r) + "\n")
+
+    def test_chat_id_filter_isolates_one_chat(self):
+        from larkhelm.agent_hub.agent_audit import aggregate_daily
+        today = "2026-05-19"
+        self._write([
+            # 2 records for chat A
+            {"ts": today + "T10:00:00", "chat_id": "A", "agent_type": "chat",
+             "success": True,  "duration_sec": 1.0, "cost_usd": 0.0},
+            {"ts": today + "T10:01:00", "chat_id": "A", "agent_type": "dev",
+             "success": False, "duration_sec": 2.0, "cost_usd": 0.0},
+            # 2 records for chat B — must be excluded
+            {"ts": today + "T10:02:00", "chat_id": "B", "agent_type": "crew",
+             "success": True,  "duration_sec": 100.0, "cost_usd": 0.0},
+            {"ts": today + "T10:03:00", "chat_id": "B", "agent_type": "crew",
+             "success": True,  "duration_sec": 200.0, "cost_usd": 0.0},
+        ])
+
+        a_only = aggregate_daily(date=today, path=self._path, chat_id="A")
+        self.assertEqual(a_only["total"], 2)
+        # A's avg_duration must NOT be polluted by B's huge entries.
+        self.assertAlmostEqual(a_only["avg_duration"], 1.5, places=2)
+        self.assertEqual(set(a_only["per_agent"].keys()), {"chat", "dev"},
+            "chat B's `crew` entries must NOT appear in A's per_agent")
+
+        b_only = aggregate_daily(date=today, path=self._path, chat_id="B")
+        self.assertEqual(b_only["total"], 2)
+        self.assertAlmostEqual(b_only["avg_duration"], 150.0, places=2)
+
+    def test_no_chat_id_keeps_global_aggregate(self):
+        """Default (chat_id=None) preserves the pre-fix behaviour for
+        CLI tooling / future admin endpoints."""
+        from larkhelm.agent_hub.agent_audit import aggregate_daily
+        today = "2026-05-19"
+        self._write([
+            {"ts": today + "T10:00:00", "chat_id": "A", "agent_type": "chat",
+             "success": True, "duration_sec": 1.0, "cost_usd": 0.0},
+            {"ts": today + "T10:01:00", "chat_id": "B", "agent_type": "chat",
+             "success": True, "duration_sec": 1.0, "cost_usd": 0.0},
+        ])
+        agg = aggregate_daily(date=today, path=self._path)
+        self.assertEqual(agg["total"], 2,
+            "chat_id=None must still aggregate across all chats")
+
+
+class TestCmdStatsIntentForwardsChatId(unittest.TestCase):
+    """R4-1d wiring: `_cmd_stats_intent` must pass the caller's chat_id
+    to `aggregate_daily`. Pin so future refactors can't drop the kwarg."""
+
+    def test_chat_id_forwarded_to_aggregate_daily(self):
+        from larkhelm.commands import _cmd_stats_intent
+
+        captured: dict = {}
+
+        def _fake_aggregate(date=None, path=None, chat_id=None):
+            captured["date"] = date
+            captured["chat_id"] = chat_id
+            return {
+                "total": 0, "success_rate": 0.0, "avg_duration": 0.0,
+                "total_cost": 0.0, "per_agent": {}, "date": "2026-05-19",
+            }
+
+        with patch("larkhelm.commands.send_card_reply"):
+            with patch("larkhelm.agent_hub.agent_audit.aggregate_daily",
+                       side_effect=_fake_aggregate):
+                _cmd_stats_intent("oc_target_chat", "msg_1")
+
+        self.assertEqual(captured.get("chat_id"), "oc_target_chat",
+            "_cmd_stats_intent must forward its chat_id to aggregate_daily; "
+            "otherwise the rendered card leaks cross-chat aggregates"
+        )
+
+
+class TestCmdStatsCrewAgentsLine(unittest.TestCase):
+    """R4-1e render test: when in-memory `_crew_agent_tokens` has entries
+    for the chat, `/stats` must append a `Crew Agents（本进程）` block
+    so users can see the drill-down CLAUDE.md promised."""
+
+    def setUp(self):
+        self._snap = dict(token_stats._crew_agent_tokens)
+        token_stats._crew_agent_tokens.clear()
+
+    def tearDown(self):
+        token_stats._crew_agent_tokens.clear()
+        token_stats._crew_agent_tokens.update(self._snap)
+
+    def test_crew_agents_line_appears_when_present(self):
+        # Seed two crew agent entries under chat "oc_x".
+        token_stats.record_crew_agent_tokens(
+            "oc_x__crew_run1_agent_pm", "claude",
+            {"input_tokens": 1000, "output_tokens": 500, "cost_usd": 0.05},
+        )
+        token_stats.record_crew_agent_tokens(
+            "oc_x__crew_run1_agent_eng", "claude",
+            {"input_tokens": 2000, "output_tokens": 800, "cost_usd": 0.10},
+        )
+
+        sent: list = []
+        def _capture(chat_id, msg_id, title, body, color="blue", **kw):
+            sent.append({"body": body})
+
+        with patch("larkhelm.commands.send_card_reply", side_effect=_capture):
+            with patch("larkhelm.commands._read_logs", return_value=[]):
+                with patch("larkhelm.commands.get_token_stats_persistent",
+                           return_value={}):
+                    with patch("larkhelm.commands.get_token_stats",
+                               return_value={}):
+                        from larkhelm.commands import _cmd_stats
+                        _cmd_stats("oc_x", "msg_1")
+
+        self.assertEqual(len(sent), 1)
+        body = sent[0]["body"]
+        self.assertIn("Crew Agents", body,
+            "Crew Agents block must appear when in-memory entries exist"
+        )
+        self.assertIn("2 agents", body, "agent count must surface")
+        # 1000+500+2000+800 = 4300 total tokens
+        self.assertIn("4,300", body, "summed token total must surface")
+        # 0.05+0.10 = 0.15 cost
+        self.assertIn("$0.1500", body, "summed cost must surface")
+
+    def test_crew_agents_line_suppressed_when_empty(self):
+        """No crew entries → no card block (don't add empty noise)."""
+        sent: list = []
+        def _capture(chat_id, msg_id, title, body, color="blue", **kw):
+            sent.append({"body": body})
+
+        with patch("larkhelm.commands.send_card_reply", side_effect=_capture):
+            with patch("larkhelm.commands._read_logs", return_value=[]):
+                with patch("larkhelm.commands.get_token_stats_persistent",
+                           return_value={}):
+                    with patch("larkhelm.commands.get_token_stats",
+                               return_value={}):
+                        from larkhelm.commands import _cmd_stats
+                        _cmd_stats("oc_empty", "msg_1")
+
+        self.assertEqual(len(sent), 1)
+        self.assertNotIn("Crew Agents", sent[0]["body"],
+            "empty in-memory store must NOT render a 'Crew Agents' block"
         )
 
 

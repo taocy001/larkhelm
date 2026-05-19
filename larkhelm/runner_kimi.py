@@ -1,5 +1,6 @@
 """larkhelm · KimiRunner — Kimi CLI subprocess runner."""
 import json
+import re
 import time
 from pathlib import Path
 
@@ -9,6 +10,16 @@ from larkhelm.chat_state import _save_sid
 from larkhelm.runner_base import BaseProcessRunner, _truncate_tool_result
 
 _KIMI_TOOL_MAP = {"Shell": "Bash", "FetchURL": "WebFetch", "SearchWeb": "WebSearch"}
+
+# kimi 1.43 emits the session ID **only** on stderr in the form
+#   "\nTo resume this session: kimi -r <uuid>\n"
+# No ``session_id`` field appears anywhere in stream-json stdout, so this
+# regex is the sole source of truth for session continuity. Pre-fix:
+# ``parse_stdout_event`` looked for ``ev.get("session_id")`` and never
+# matched → every kimi turn opened a fresh session, no memory carry-over.
+_KIMI_STDERR_SESSION_RE = re.compile(
+    r"To resume this session:\s*kimi\s+-r\s+([A-Za-z0-9_\-]+)"
+)
 
 
 def _estimate_tokens_cjk_aware(text: str) -> int:
@@ -146,7 +157,47 @@ class KimiRunner(BaseProcessRunner):
             return _build_kimi_stream_input(self.message, self.images)
         return json.dumps({"role": "user", "content": self.message})
 
+    def _on_stderr_line(self, line: str) -> None:
+        """Parse the "To resume this session: kimi -r <uuid>" hint that
+        kimi 1.43.x emits on stderr after each turn.
+
+        kimi-cli stream-json stdout has no ``session_id`` envelope at all
+        (verified against 1.43.x on 2026-05-19), so this stderr scrape is
+        the only way to persist a session for `kimi -r SID` continuity.
+        Idempotent — first match wins per turn.
+        """
+        if self._new_sid:
+            return
+        m = _KIMI_STDERR_SESSION_RE.search(line)
+        if m:
+            self._new_sid = m.group(1)
+            try:
+                _save_sid(self._ns, self._new_sid, self._session_key)
+            except Exception as e:
+                _debug_log(f"[Kimi] _save_sid failed: {e}")
+
+    def _extract_kimi_content_text(self, content) -> str:
+        """Collect the visible-text bytes from a kimi 1.43 content payload.
+
+        kimi 1.43 schema: ``content`` is either a string (rare / legacy)
+        or a list of typed parts ``[{"type": "think"|"text", ...}]``. We
+        only forward ``text`` parts to the user — ``think`` is the
+        model's private reasoning trace and shouldn't be streamed.
+        """
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(
+                c.get("text", "")
+                for c in content
+                if isinstance(c, dict) and c.get("type") == "text"
+            )
+        return ""
+
     def parse_stdout_event(self, ev: dict) -> bool:
+        # Some hypothetical future kimi version may re-add ``session_id``
+        # to stdout — keep the line, but the live source of truth is
+        # ``_on_stderr_line`` (see _KIMI_STDERR_SESSION_RE).
         cand_sid = ev.get("session_id") or ev.get("session")
         if cand_sid and not self._new_sid:
             self._new_sid = cand_sid
@@ -159,17 +210,11 @@ class KimiRunner(BaseProcessRunner):
             content = ev.get("content", "")
             tool_calls = ev.get("tool_calls") or []
 
-            if content and isinstance(content, str):
-                self._result_text += content
+            chunk = self._extract_kimi_content_text(content)
+            if chunk:
+                self._result_text += chunk
                 if self.on_text:
                     self.on_text(self._result_text, status="typing")
-            elif content and isinstance(content, list):
-                text_parts = [c.get("text", "") for c in content if c.get("type") == "text"]
-                chunk = "".join(text_parts)
-                if chunk:
-                    self._result_text += chunk
-                    if self.on_text:
-                        self.on_text(self._result_text, status="typing")
 
             for tc in tool_calls:
                 tc_id = tc.get("id", "")
@@ -188,12 +233,26 @@ class KimiRunner(BaseProcessRunner):
             tc_id = ev.get("tool_call_id", "")
             content = ev.get("content", "")
             is_error = bool(ev.get("is_error", False))
+            # kimi 1.43 sends tool results as ``content: [{type:"text",
+            # text:"..."}, ...]``. Pre-fix did ``str(content)`` on the
+            # list which produced an ugly Python repr blob; extract the
+            # text parts so the on_tool_result callback sees plain
+            # output. Fallback to str() for any unrecognized shape.
+            if isinstance(content, (str, list)):
+                pretty = self._extract_kimi_content_text(content) or (
+                    content if isinstance(content, str) else str(content)
+                )
+            else:
+                pretty = str(content)
             start_t = self._tool_start_times.get(tc_id, time.monotonic())
             elapsed = time.monotonic() - start_t
             if self.on_tool_result:
-                self.on_tool_result(tc_id, _truncate_tool_result(str(content), is_error), is_error, elapsed)
+                self.on_tool_result(tc_id, _truncate_tool_result(pretty, is_error), is_error, elapsed)
 
         elif etype == "result" or role == "result":
+            # Defensive: kimi 1.43 does NOT emit this envelope, but if a
+            # future version starts to, honour it and skip cleanup_extra
+            # estimation entirely.
             usage = ev.get("usage", {})
             cost = ev.get("total_cost_usd", 0.0)
             if usage:

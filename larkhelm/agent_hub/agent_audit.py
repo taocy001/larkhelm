@@ -74,13 +74,24 @@ def write_audit(result: AgentResult, intent: IntentResult, ctx: AgentContext) ->
         _safe_log(f"[agent_audit] write failed: {e}")
 
 
-def aggregate_daily(date: str | None = None, path: Path | None = None) -> dict:
+def aggregate_daily(
+    date: str | None = None,
+    path: Path | None = None,
+    chat_id: str | None = None,
+) -> dict:
     """Aggregate hit rate / latency / cost for a single date (default today).
 
     Returns a dict with ``date``, ``total``, ``per_agent``, ``avg_duration``,
     ``total_cost``, ``success_rate``. Returns zeroed stats if log missing.
     Corrupted lines (non-JSON) are skipped silently so a single bad line
     cannot break the whole report.
+
+    Round-4 audit P1 (R4-1d): when ``chat_id`` is provided, restrict the
+    aggregate to records whose ``chat_id`` field matches exactly. Without
+    this, ``/stats intent`` invoked in chat A leaked aggregate volume /
+    avg-duration for chats B, C, ... — a cross-chat side-channel that lets
+    an outside observer infer other groups' activity. ``None`` keeps the
+    global behaviour (used by CLI tooling / future admin endpoints).
     """
     p = path or _resolve_path()
     if date is None:
@@ -112,6 +123,8 @@ def aggregate_daily(date: str | None = None, path: Path | None = None) -> dict:
                     continue
                 ts = str(rec.get("ts", ""))
                 if not ts.startswith(date):
+                    continue
+                if chat_id is not None and rec.get("chat_id") != chat_id:
                     continue
                 agent = str(rec.get("agent_type", "unknown"))
                 total += 1

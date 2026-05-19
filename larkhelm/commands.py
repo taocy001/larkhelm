@@ -23,7 +23,10 @@ from larkhelm.concurrency import (
     _get_chat_lock, _trigger_cancel, _pop_pending,
     _cron_lock, _get_btw_lock, _reset_cancel,
 )
-from larkhelm.token_stats import get_token_stats, get_token_stats_persistent
+from larkhelm.token_stats import (
+    get_token_stats, get_token_stats_persistent,
+    summarize_crew_agent_tokens_for_chat,
+)
 from larkhelm.perm import revoke_yolo, is_yolo
 from larkhelm.cmd_doc import _cmd_doc, _cmd_doc_write_do
 from larkhelm.lark_client import (
@@ -662,7 +665,13 @@ def _cmd_stats_intent(chat_id: str, msg_id: str = None, date: str | None = None)
         send_card_reply(chat_id, msg_id, "📊 Intent 统计",
                         f"agent_hub 未启用或导入失败：{e}", color="orange")
         return
-    agg = aggregate_daily(date)
+    # Round-4 audit P1 (R4-1d): pass the current chat_id so the aggregate
+    # only reflects this chat's own intent dispatches. Pre-fix returned
+    # the GLOBAL aggregate across all chats — observer in chat A could
+    # infer activity volume / agent mix for chats B, C, ... by polling
+    # /stats intent. Now the only entry-point that hits the global path
+    # is the (future) admin CLI.
+    agg = aggregate_daily(date, chat_id=chat_id)
     if agg["total"] == 0:
         send_card_reply(chat_id, msg_id, f"📊 Intent 统计 · {agg['date']}",
                         "_当日没有 Agent 调度记录_", color="grey")
@@ -721,7 +730,20 @@ def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
     records = _read_logs(chat_id)
     today_records = [r for r in records if r["ts"].startswith(today)]
 
-    user_count  = sum(1 for r in today_records if r["role"] == "user")
+    # Round-4 audit P1 (R4-1c): /crew / /plan write ``role="user", model in
+    # {crew,plan}`` as a command marker, not a real conversation turn.
+    # Counting them as "对话" inflated the dialogue count by every command
+    # invocation. ``model=""`` (legacy records missing the field entirely)
+    # still counts — only filter on KNOWN non-conversation markers so old
+    # JSONL stays accurate. ``shell`` would never appear with role="user"
+    # in practice (commands.py:975 emits ``role="shell"``) but pin it
+    # here defensively.
+    _NON_CONVERSATION_MODELS = {"crew", "plan", "shell"}
+    user_count  = sum(
+        1 for r in today_records
+        if r["role"] == "user"
+        and r.get("model", "") not in _NON_CONVERSATION_MODELS
+    )
     error_count = sum(1 for r in today_records if r["role"] == "error")
 
     # Duration pairing — round-3 stats fixes:
@@ -811,6 +833,27 @@ def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
     if not stats_all and stats_mem:
         parts.append("---")
         parts.append(_fmt_token_block("⚡ 本次启动（内存）", stats_mem))
+
+    # Round-4 audit P1 (R4-1e): expose the in-memory per-crew-agent
+    # counter (CLAUDE.md promised this drill-down but had no UI hook).
+    # Counters reset on bridge restart so we label "本进程" to set the
+    # right expectation; the totals are also rolled up into the parent
+    # chat's persistent stats above, so this block is purely a per-agent
+    # split, not a separate accounting source.
+    crew_summary = summarize_crew_agent_tokens_for_chat(chat_id)
+    if crew_summary:
+        crew_total = (
+            crew_summary["input_tokens"] + crew_summary["output_tokens"]
+            + crew_summary["cache_read"] + crew_summary["cache_create"]
+        )
+        cost_val = crew_summary.get("cost_usd", 0.0)
+        cost_str = "—" if cost_val is None else f"${cost_val:.4f}"
+        parts.append("---")
+        parts.append(
+            f"**🤖 Crew Agents（本进程）**\n"
+            f"› {crew_summary['agents']} agents  合计 **{crew_total:,}** tokens  "
+            f"费用 **{cost_str}**"
+        )
 
     send_card_reply(chat_id, msg_id, "📊 Token 统计", "\n\n".join(parts), color="turquoise")
 
