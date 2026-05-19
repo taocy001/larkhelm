@@ -80,6 +80,11 @@ def _inject_doc_context(text: str, chat_id: str) -> str:
     the prompt. At most DOC_INJECT_MAX_DOCS documents are injected, each capped
     at DOC_INJECT_MAX_CHARS characters. Failures are silently skipped so the
     normal conversation is unaffected.
+
+    Successful reads are cached for ``DOC_INJECT_CACHE_TTL_SEC`` seconds per
+    (chat_id, doc_token) — see ``_context_cache.cached_doc_read``. Permission
+    / API errors propagate from the loader and are caught here (so the user
+    still sees the "no permission" hint on each retry).
     """
     from larkhelm.lark_client import (
         FeishuDocClient, parse_doc_url,
@@ -89,6 +94,7 @@ def _inject_doc_context(text: str, chat_id: str) -> str:
     if not urls:
         return text
     doc_client = FeishuDocClient()
+    cache_enabled = bool(getattr(_cfg, "DOC_INJECT_CACHE_ENABLED", True))
     injections = []
     for url in urls:
         if len(injections) >= _cfg.DOC_INJECT_MAX_DOCS:
@@ -97,7 +103,16 @@ def _inject_doc_context(text: str, chat_id: str) -> str:
         if ref is None:
             continue
         try:
-            result = doc_client.read(ref, max_chars=_cfg.DOC_INJECT_MAX_CHARS)
+            if cache_enabled:
+                from larkhelm._context_cache import cached_doc_read
+                result = cached_doc_read(
+                    chat_id, ref, _cfg.DOC_INJECT_MAX_CHARS,
+                    loader=lambda r=ref: doc_client.read(
+                        r, max_chars=_cfg.DOC_INJECT_MAX_CHARS
+                    ),
+                )
+            else:
+                result = doc_client.read(ref, max_chars=_cfg.DOC_INJECT_MAX_CHARS)
             label  = result.title or url
             injections.append(
                 f"[文档内容：《{label}》]\n{result.content}\n[/文档内容]"
@@ -195,36 +210,96 @@ def _run_backend_single(spec, chat_id: str, message: str, cwd: str, cancel_ev,
         save_history(provider, chat_id, new_history)
     elif provider == "gemini_cli":
         sid = _load_sid(chat_id, spec.id)
-        cli_extra = "\n\n".join(filter(None, [extra_system, recent_turns]))
+        cli_recent = _maybe_drop_recent_turns_for_cli(
+            chat_id, spec.id, sid, recent_turns, provider="gemini_cli",
+        )
+        cli_extra = "\n\n".join(filter(None, [extra_system, cli_recent]))
         cli_msg = f"[System]\n{cli_extra}\n\n[User Query]\n{message}" if (cli_extra and not sid) else message
         output = run_gemini(spec, chat_id, cli_msg, sid, cwd, cancel_ev,
                             on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
                             on_soft_timeout=on_soft_timeout)
     elif provider == "kimi_cli":
         sid = _load_sid(chat_id, spec.id)
-        cli_extra = "\n\n".join(filter(None, [extra_system, recent_turns]))
+        cli_recent = _maybe_drop_recent_turns_for_cli(
+            chat_id, spec.id, sid, recent_turns, provider="kimi_cli",
+        )
+        cli_extra = "\n\n".join(filter(None, [extra_system, cli_recent]))
         cli_msg = f"[System]\n{cli_extra}\n\n[User Query]\n{message}" if (cli_extra and not sid) else message
         output = run_kimi(spec, chat_id, cli_msg, sid, cwd, cancel_ev,
                           on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
                           on_soft_timeout=on_soft_timeout, images=images)
     elif provider == "deepseek_api":
-        # DeepSeek is HTTP + stateless but, unlike anthropic_api, the bridge
-        # does NOT load a history list on its behalf — DeepSeekRunner only sees
-        # the current turn + system prompt. So recent_turns is genuinely useful
-        # here and gets appended to the system channel.
-        sys_combined = "\n\n".join(filter(None, [extra_system, recent_turns]))
+        # DeepSeek is HTTP + stateless. P1 REQ-04: when load_history()
+        # returns a non-empty list, the runner is about to feed those
+        # structured messages back to the backend, so re-injecting them
+        # as recent_turns in the system channel is pure duplicate tokens.
+        recent_for_ds = _maybe_drop_recent_turns_for_deepseek(
+            chat_id, recent_turns, load_history_fn=load_history,
+        )
+        sys_combined = "\n\n".join(filter(None, [extra_system, recent_for_ds]))
         output = run_deepseek(spec, chat_id, message, sid=None, cwd=cwd,
                               cancel_ev=cancel_ev, on_text=on_text, on_tool=on_tool,
                               on_tool_result=on_tool_result, on_soft_timeout=on_soft_timeout,
                               system_prompt=sys_combined or None)
     else:  # claude_cli (default)
         sid = _load_sid(chat_id, spec.id)
-        cli_extra = "\n\n".join(filter(None, [extra_system, recent_turns]))
+        cli_recent = _maybe_drop_recent_turns_for_cli(
+            chat_id, spec.id, sid, recent_turns, provider="claude_cli",
+        )
+        cli_extra = "\n\n".join(filter(None, [extra_system, cli_recent]))
         output = run_claude(spec, chat_id, message, sid, cwd, cancel_ev,
                             on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
                             on_soft_timeout=on_soft_timeout, images=images, allow_retry=True,
                             system_prompt=cli_extra or None)
     return output
+
+
+def _maybe_drop_recent_turns_for_cli(
+    chat_id: str, spec_id: str, sid: str | None,
+    recent_turns: str, *, provider: str,
+) -> str:
+    """REQ-04: return ``""`` when the CLI session is already resumable
+    (``sid`` non-empty) AND ``CLI_SKIP_RECENT_TURNS_WHEN_SID`` is on, else
+    return ``recent_turns`` unchanged.
+
+    Resumed CLI sessions already carry the prior turns through
+    ``--resume``/``--session``; re-injecting them in the system channel
+    is pure duplicate input tokens (~500 tokens / call).
+    """
+    skip = bool(getattr(_cfg, "CLI_SKIP_RECENT_TURNS_WHEN_SID", True)) and bool(sid)
+    if skip and recent_turns:
+        _debug_log(
+            f"[Cache] {provider} skip recent_turns chat={chat_id[:8]} sid present"
+        )
+        return ""
+    return recent_turns
+
+
+def _maybe_drop_recent_turns_for_deepseek(
+    chat_id: str, recent_turns: str, *, load_history_fn,
+) -> str:
+    """REQ-04: drop ``recent_turns`` when ``load_history("deepseek_api", chat_id)``
+    has any turns AND ``CLI_SKIP_RECENT_TURNS_WHEN_SID`` is on.
+
+    The same flag governs both CLI sid and DeepSeek history because both
+    signals encode the same fact ("the backend will see these turns
+    structurally — no need to re-inject in the system channel").
+    """
+    if not bool(getattr(_cfg, "CLI_SKIP_RECENT_TURNS_WHEN_SID", True)):
+        return recent_turns
+    try:
+        history = load_history_fn("deepseek_api", chat_id)
+    except Exception as e:
+        _debug_log(f"[Cache] deepseek_api load_history probe failed: {e}")
+        return recent_turns
+    if history:
+        if recent_turns:
+            _debug_log(
+                f"[Cache] deepseek_api skip recent_turns chat={chat_id[:8]} "
+                f"history={len(history)}"
+            )
+        return ""
+    return recent_turns
 
 
 def _do_query_with_delegation(

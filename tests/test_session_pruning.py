@@ -325,8 +325,15 @@ class TestGetRecentTurnsPruning(_PruningIOBase):
         )
 
     def test_zero_regression_on_plain_dialog(self):
-        """Plain user/assistant text gets no pruning, no debug log, and the
-        dialog substring is preserved verbatim (subject to 400-char cap)."""
+        """Plain user/assistant text gets no pruning, no pruning-specific
+        debug log, and the dialog substring is preserved verbatim
+        (subject to 400-char cap).
+
+        The cached_recent_turns wrapper introduced for REQ-01 emits a
+        ``[Cache] recent_turns hit|miss`` line of its own; that's
+        orthogonal to the pruning logic this test guards. The assertion
+        therefore checks the *pruning* log line specifically.
+        """
         chat = "chat_plain"
         records = [
             {
@@ -339,13 +346,12 @@ class TestGetRecentTurnsPruning(_PruningIOBase):
             },
         ]
         self._write_jsonl(records)
-        before_log = self.debug_log.read_text(encoding="utf-8")
         result = _get_recent_turns(chat, max_turns=5, max_chars=100_000)
         after_log = self.debug_log.read_text(encoding="utf-8")
         self.assertIn("User: what is 2 + 2?", result)
         self.assertIn("Assistant: It is 4.", result)
-        # No pruning → no debug log
-        self.assertEqual(before_log, after_log)
+        # No pruning → no pruning-specific debug log
+        self.assertNotIn("_get_recent_turns pruned", after_log)
 
 
 # ── 4. Concurrency smoke test on PruningStats ─────────────────────────────

@@ -88,6 +88,11 @@ CLI --data-dir > LARKHELM_DATA_DIR env > /var/lib/larkhelm > ~/.local/share/lark
 | `memory_gc_interval_hours` | P3 REQ-08：MemoryGC daemon tick 周期（小时），默认 `6.0`；`0` = 走 P2 的 boot-only 一次性扫描 |
 | `crew_checkpoint_ttl_days` | P3 REQ-09：`.crew_workspace/*/crew_checkpoint.json` 孤儿清理 TTL，默认 `7.0` 天 |
 | `dev_stage_timeouts` | P3 REQ-10：`/dev` 单 stage 超时覆盖（秒），形如 `{"pm": 600, "implementer": 7200}`；未列出的 stage 走默认公式 |
+| `recent_turns_cache_enabled` | P1 REQ-01：`_get_recent_turns` 走 LRU 缓存（key = chat_id + max_turns + max_chars + dedup_prefix_hash + all.jsonl mtime_ns + size），默认 `true`；flip `false` 直走原 tail-read 路径用于 bisect |
+| `memory_legacy_cache_enabled` | P1 REQ-02：memory `_layer_global / _layer_project / _layer_session` 走 LRU 缓存（key = layer + path + mtime_ns），默认 `true`；包含 `global_slots` / `project_sections` 两个独立 layer，单层 LRU 容量 128 |
+| `doc_inject_cache_enabled` | P1 REQ-03：`_inject_doc_context` 走 TTL 缓存（key = chat_id + doc_type + token + max_chars），默认 `true`；`DocPermissionError` 与 `DocError` 不入缓存（用户可现场授权重试）|
+| `doc_inject_cache_ttl_sec` | P1 REQ-03：TTL 秒数，floor `1`（`0` 视为关闭，回退到默认 60s），默认 `60` |
+| `cli_skip_recent_turns_when_sid` | P1 REQ-04：CLI（claude/kimi/gemini）`sid` 非空时跳过 recent_turns 注入；`deepseek_api` 在 `load_history` 非空时同步跳过。默认 `true`；flip `false` 恢复每次注入（多花 ~500 input tokens / call）|
 
 > **超时层级说明**：
 > - `response_timeout`（软超时）：AI 响应无更新超过此时长，释放主锁但后台继续运行，默认 300s

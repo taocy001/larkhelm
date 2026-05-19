@@ -121,6 +121,9 @@ class LarkhelmMetricsRegistry:
             self.query_duration_seconds = None
             self.extract_buffer_flushes_total = None
             self.llm_router_circuit_state = None
+            self.recent_turns_cache_total = None
+            self.memory_layer_cache_total = None
+            self.doc_inject_cache_total = None
             return
 
         # Use a private registry so the larkhelm metrics don't collide with
@@ -183,6 +186,29 @@ class LarkhelmMetricsRegistry:
             "larkhelm_llm_router_circuit_state",
             "LLM router circuit-breaker state (0=closed,1=half_open,2=open)",
             ["backend"],
+            registry=self._registry,
+        )
+        # P1 context-cache counters (REQ-01..03). Each cache reports
+        # ``outcome`` ∈ {hit, miss, evict, invalidate, bypass}; the layer
+        # cache adds the layer name as a second label so global / project /
+        # session / global_slots / project_sections can be tuned
+        # independently.
+        self.recent_turns_cache_total = pc.Counter(
+            "larkhelm_recent_turns_cache_total",
+            "Recent-turns cache outcomes",
+            ["outcome"],
+            registry=self._registry,
+        )
+        self.memory_layer_cache_total = pc.Counter(
+            "larkhelm_memory_layer_cache_total",
+            "Memory layer cache outcomes",
+            ["layer", "outcome"],
+            registry=self._registry,
+        )
+        self.doc_inject_cache_total = pc.Counter(
+            "larkhelm_doc_inject_cache_total",
+            "Doc inject cache outcomes",
+            ["outcome"],
             registry=self._registry,
         )
 
@@ -393,6 +419,52 @@ def _maybe_inc_counter(counter: Any, snapshot_total: int) -> None:
     _counter_watermark[key] = snap
 
 
+def inc_recent_turns_cache(outcome: str) -> None:
+    """Bump ``larkhelm_recent_turns_cache_total{outcome}``.
+
+    ``outcome`` ∈ {hit, miss, evict, invalidate, bypass}. Never raises.
+    """
+    reg = get_registry()
+    if not reg.available or reg.recent_turns_cache_total is None:
+        return
+    try:
+        reg.recent_turns_cache_total.labels(outcome=outcome).inc()
+    except Exception as e:
+        safe_log(f"[Metrics] inc_recent_turns_cache failed (outcome={outcome}): {e}")
+
+
+def inc_memory_layer_cache(layer: str, outcome: str) -> None:
+    """Bump ``larkhelm_memory_layer_cache_total{layer, outcome}``.
+
+    ``layer`` ∈ {global, project, session, global_slots, project_sections};
+    ``outcome`` ∈ {hit, miss, evict, invalidate, bypass}. Never raises.
+    """
+    reg = get_registry()
+    if not reg.available or reg.memory_layer_cache_total is None:
+        return
+    try:
+        reg.memory_layer_cache_total.labels(layer=layer, outcome=outcome).inc()
+    except Exception as e:
+        safe_log(
+            f"[Metrics] inc_memory_layer_cache failed "
+            f"(layer={layer}, outcome={outcome}): {e}"
+        )
+
+
+def inc_doc_inject_cache(outcome: str) -> None:
+    """Bump ``larkhelm_doc_inject_cache_total{outcome}``.
+
+    ``outcome`` ∈ {hit, miss, evict, invalidate, bypass}. Never raises.
+    """
+    reg = get_registry()
+    if not reg.available or reg.doc_inject_cache_total is None:
+        return
+    try:
+        reg.doc_inject_cache_total.labels(outcome=outcome).inc()
+    except Exception as e:
+        safe_log(f"[Metrics] inc_doc_inject_cache failed (outcome={outcome}): {e}")
+
+
 __all__ = [
     "PrometheusNotInstalled",
     "LarkhelmMetricsRegistry",
@@ -404,4 +476,7 @@ __all__ = [
     "inc_extract_buffer_flush",
     "set_llm_router_circuit_state",
     "update_health_gauges",
+    "inc_recent_turns_cache",
+    "inc_memory_layer_cache",
+    "inc_doc_inject_cache",
 ]

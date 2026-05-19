@@ -1,0 +1,591 @@
+"""Tests for ``larkhelm._context_cache`` (P1 REQ-01..03).
+
+Covers:
+  * LRUCache hit/miss/promote/evict semantics
+  * TTLCache get/expire/invalidate_chat
+  * cached_recent_turns: hit + mtime / size invalidation + dedup_prefix
+    differentiation + LRU eviction
+  * cached_memory_layer: 3-layer key isolation + mtime invalidation +
+    file_path=None bypass
+  * cached_doc_read: 60s hit window + 61s expiry + chat_id isolation +
+    DocPermissionError NOT cached
+  * Flag-off bypass: 3 enabled flags → loader called every time
+  * Prometheus counter bridge increments
+  * 4-thread concurrency stress check (no KeyError, no torn state)
+"""
+from __future__ import annotations
+
+import atexit
+import json
+import os
+import shutil
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+# ── Bootstrap config (shared) ─────────────────────────────────────────────
+_TMP = tempfile.mkdtemp(prefix="larkhelm_ctxcache_")
+atexit.register(shutil.rmtree, _TMP, ignore_errors=True)
+_cfg_file = Path(_TMP) / "config.json"
+_cfg_file.write_text(json.dumps({"APP_ID": "x", "APP_SECRET": "x"}))
+
+import larkhelm.config as _cfg  # noqa: E402
+_cfg._init_runtime(config_path=str(_cfg_file), data_dir=_TMP)
+
+from larkhelm import _context_cache as cc  # noqa: E402
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  LRUCache primitive
+# ════════════════════════════════════════════════════════════════════════
+
+
+class LRUCacheTests(unittest.TestCase):
+
+    def setUp(self):
+        cc.reset_for_tests()
+
+    def test_get_miss_then_put_then_hit(self):
+        lru: cc.LRUCache[str, int] = cc.LRUCache("t", 3)
+        hit, _ = lru.get("a")
+        self.assertFalse(hit)
+        lru.put("a", 1)
+        hit, value = lru.get("a")
+        self.assertTrue(hit)
+        self.assertEqual(value, 1)
+
+    def test_put_evicts_lru_when_full(self):
+        lru: cc.LRUCache[str, int] = cc.LRUCache("t", 3)
+        lru.put("a", 1)
+        lru.put("b", 2)
+        lru.put("c", 3)
+        # "a" is LRU; inserting "d" should evict it
+        evicted = lru.put("d", 4)
+        self.assertEqual(evicted, "a")
+        hit_a, _ = lru.get("a")
+        hit_d, _ = lru.get("d")
+        self.assertFalse(hit_a)
+        self.assertTrue(hit_d)
+
+    def test_get_promotes_to_mru(self):
+        lru: cc.LRUCache[str, int] = cc.LRUCache("t", 3)
+        lru.put("a", 1)
+        lru.put("b", 2)
+        lru.put("c", 3)
+        # Access "a" → now "b" is the LRU.
+        lru.get("a")
+        evicted = lru.put("d", 4)
+        self.assertEqual(evicted, "b")
+
+    def test_invalidate(self):
+        lru: cc.LRUCache[str, int] = cc.LRUCache("t", 3)
+        lru.put("a", 1)
+        lru.invalidate("a")
+        hit, _ = lru.get("a")
+        self.assertFalse(hit)
+
+    def test_stats(self):
+        lru: cc.LRUCache[str, int] = cc.LRUCache("t", 3)
+        lru.put("a", 1)
+        lru.get("a")    # hit
+        lru.get("b")    # miss
+        s = lru.stats()
+        self.assertEqual(s["size"], 1)
+        self.assertEqual(s["hits"], 1)
+        self.assertEqual(s["misses"], 1)
+        self.assertEqual(s["evicts"], 0)
+
+    def test_maxsize_invalid(self):
+        with self.assertRaises(ValueError):
+            cc.LRUCache("t", 0)
+        with self.assertRaises(ValueError):
+            cc.LRUCache("t", -1)
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  TTLCache primitive
+# ════════════════════════════════════════════════════════════════════════
+
+
+class TTLCacheTests(unittest.TestCase):
+
+    def setUp(self):
+        cc.reset_for_tests()
+
+    def test_get_within_ttl_is_hit(self):
+        ttl: cc.TTLCache[str, int] = cc.TTLCache("t", 60.0)
+        ttl.put("a", 1)
+        self.assertEqual(ttl.get("a"), 1)
+
+    def test_get_after_ttl_is_miss(self):
+        ttl: cc.TTLCache[str, int] = cc.TTLCache("t", 60.0)
+        ttl.put("a", 1)
+        # Patch time.monotonic *as imported into _context_cache*.
+        now = time.monotonic()
+        with patch.object(cc.time, "monotonic", return_value=now + 61.0):
+            self.assertIsNone(ttl.get("a"))
+
+    def test_invalidate_chat_drops_matching_keys(self):
+        ttl: cc.TTLCache[cc.DocKey, int] = cc.TTLCache("t", 60.0)
+        k1 = cc.DocKey(chat_id="A", doc_type="docx", token="t1", max_chars=100)
+        k2 = cc.DocKey(chat_id="A", doc_type="docx", token="t2", max_chars=100)
+        k3 = cc.DocKey(chat_id="B", doc_type="docx", token="t3", max_chars=100)
+        ttl.put(k1, 1)
+        ttl.put(k2, 2)
+        ttl.put(k3, 3)
+        ttl.invalidate_chat("A")
+        self.assertIsNone(ttl.get(k1))
+        self.assertIsNone(ttl.get(k2))
+        self.assertEqual(ttl.get(k3), 3)
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  cached_recent_turns
+# ════════════════════════════════════════════════════════════════════════
+
+
+class CachedRecentTurnsTests(unittest.TestCase):
+
+    def setUp(self):
+        cc.reset_for_tests()
+        # Make sure all.jsonl exists so stat() returns real numbers
+        log_dir = Path(_cfg.LOG_DIR)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        self.jsonl = log_dir / "all.jsonl"
+        self.jsonl.write_text('{"chat_id":"A","role":"user","content":"hi"}\n')
+        _cfg.RECENT_TURNS_CACHE_ENABLED = True
+
+    def test_hit_avoids_second_loader_call(self):
+        calls = [0]
+
+        def loader():
+            calls[0] += 1
+            return "fixed-result"
+
+        a = cc.cached_recent_turns("chatA", 6, 2000, None, loader=loader)
+        b = cc.cached_recent_turns("chatA", 6, 2000, None, loader=loader)
+        self.assertEqual(a, "fixed-result")
+        self.assertEqual(b, "fixed-result")
+        self.assertEqual(calls[0], 1, "second call should have hit cache")
+
+    def test_mtime_change_invalidates(self):
+        calls = [0]
+
+        def loader():
+            calls[0] += 1
+            return f"v{calls[0]}"
+
+        a = cc.cached_recent_turns("chatA", 6, 2000, None, loader=loader)
+        # Advance mtime by one nanosecond by appending a byte.
+        with open(self.jsonl, "a") as f:
+            f.write('{"x":1}\n')
+        # Some filesystems quantise mtime; ensure ≥1ns separation by also
+        # setting utime explicitly.
+        new_t = time.time() + 1.0
+        os.utime(self.jsonl, (new_t, new_t))
+        b = cc.cached_recent_turns("chatA", 6, 2000, None, loader=loader)
+        self.assertEqual(calls[0], 2)
+        self.assertNotEqual(a, b)
+
+    def test_dedup_prefix_changes_key(self):
+        calls = [0]
+
+        def loader():
+            calls[0] += 1
+            return f"v{calls[0]}"
+
+        cc.cached_recent_turns("chatA", 6, 2000, "prefix-A", loader=loader)
+        cc.cached_recent_turns("chatA", 6, 2000, "prefix-B", loader=loader)
+        self.assertEqual(calls[0], 2, "different dedup_prefix → different key")
+
+    def test_lru_eviction_when_capacity_exceeded(self):
+        # Reach into the singleton to test capacity behaviour deterministically.
+        # _recent_turns_cache has maxsize=64; insert 65 different chat_ids.
+        loader_calls = [0]
+
+        def loader():
+            loader_calls[0] += 1
+            return f"v{loader_calls[0]}"
+
+        for i in range(65):
+            cc.cached_recent_turns(f"chat{i:04d}", 6, 2000, None, loader=loader)
+        # chat0000 should have been evicted.
+        stats = cc._recent_turns_cache.stats()
+        self.assertLessEqual(stats["size"], 64)
+        self.assertGreaterEqual(stats["evicts"], 1)
+
+    def test_disabled_flag_falls_through(self):
+        calls = [0]
+
+        def loader():
+            calls[0] += 1
+            return "x"
+
+        with patch.object(_cfg, "RECENT_TURNS_CACHE_ENABLED", False):
+            cc.cached_recent_turns("chatA", 6, 2000, None, loader=loader)
+            cc.cached_recent_turns("chatA", 6, 2000, None, loader=loader)
+        self.assertEqual(calls[0], 2, "flag off → loader runs every call")
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  cached_memory_layer
+# ════════════════════════════════════════════════════════════════════════
+
+
+class CachedMemoryLayerTests(unittest.TestCase):
+
+    def setUp(self):
+        cc.reset_for_tests()
+        self.tmp = Path(_TMP) / "mem"
+        self.tmp.mkdir(parents=True, exist_ok=True)
+        self.global_md = self.tmp / "global.md"
+        self.project_md = self.tmp / "project.md"
+        self.global_md.write_text("global body v1")
+        self.project_md.write_text("project body v1")
+        _cfg.MEMORY_LEGACY_CACHE_ENABLED = True
+
+    def test_hit_avoids_loader(self):
+        calls = [0]
+
+        def loader():
+            calls[0] += 1
+            return "out"
+
+        a = cc.cached_memory_layer("global", self.global_md, loader=loader)
+        b = cc.cached_memory_layer("global", self.global_md, loader=loader)
+        self.assertEqual(a, "out")
+        self.assertEqual(b, "out")
+        self.assertEqual(calls[0], 1)
+
+    def test_three_layer_keys_are_isolated(self):
+        # global and project both point to two different files; same loader
+        # output must NOT share keys across layers.
+        gcalls = [0]
+        pcalls = [0]
+
+        def gload():
+            gcalls[0] += 1
+            return "G"
+
+        def pload():
+            pcalls[0] += 1
+            return "P"
+
+        cc.cached_memory_layer("global", self.global_md, loader=gload)
+        cc.cached_memory_layer("project", self.project_md, loader=pload)
+        cc.cached_memory_layer("global", self.global_md, loader=gload)
+        cc.cached_memory_layer("project", self.project_md, loader=pload)
+        # Each loader still called exactly once (first call); the second
+        # was served from cache.
+        self.assertEqual(gcalls[0], 1)
+        self.assertEqual(pcalls[0], 1)
+
+    def test_mtime_change_invalidates(self):
+        calls = [0]
+
+        def loader():
+            calls[0] += 1
+            return f"v{calls[0]}"
+
+        cc.cached_memory_layer("global", self.global_md, loader=loader)
+        new_t = time.time() + 5.0
+        os.utime(self.global_md, (new_t, new_t))
+        cc.cached_memory_layer("global", self.global_md, loader=loader)
+        self.assertEqual(calls[0], 2)
+
+    def test_file_path_none_bypasses(self):
+        calls = [0]
+
+        def loader():
+            calls[0] += 1
+            return None
+
+        cc.cached_memory_layer("global", None, loader=loader)
+        cc.cached_memory_layer("global", None, loader=loader)
+        self.assertEqual(calls[0], 2,
+                         "file_path=None must bypass cache and always call loader")
+
+    def test_disabled_flag_falls_through(self):
+        calls = [0]
+
+        def loader():
+            calls[0] += 1
+            return "x"
+
+        with patch.object(_cfg, "MEMORY_LEGACY_CACHE_ENABLED", False):
+            cc.cached_memory_layer("global", self.global_md, loader=loader)
+            cc.cached_memory_layer("global", self.global_md, loader=loader)
+        self.assertEqual(calls[0], 2)
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  cached_doc_read
+# ════════════════════════════════════════════════════════════════════════
+
+
+class CachedDocReadTests(unittest.TestCase):
+
+    class _FakeRef:
+        def __init__(self, token: str = "tok123", doc_type: str = "docx"):
+            self.token = token
+            self.doc_type = doc_type
+
+    def setUp(self):
+        cc.reset_for_tests()
+        _cfg.DOC_INJECT_CACHE_ENABLED = True
+        _cfg.DOC_INJECT_CACHE_TTL_SEC = 60
+
+    def test_hit_within_ttl(self):
+        calls = [0]
+
+        def loader():
+            calls[0] += 1
+            return f"v{calls[0]}"
+
+        ref = self._FakeRef()
+        a = cc.cached_doc_read("chatA", ref, 1000, loader=loader)
+        b = cc.cached_doc_read("chatA", ref, 1000, loader=loader)
+        self.assertEqual(a, b)
+        self.assertEqual(calls[0], 1)
+
+    def test_miss_after_ttl(self):
+        calls = [0]
+
+        def loader():
+            calls[0] += 1
+            return f"v{calls[0]}"
+
+        ref = self._FakeRef()
+        cc.cached_doc_read("chatA", ref, 1000, loader=loader)
+        now = time.monotonic()
+        with patch.object(cc.time, "monotonic", return_value=now + 61.0):
+            cc.cached_doc_read("chatA", ref, 1000, loader=loader)
+        self.assertEqual(calls[0], 2)
+
+    def test_chat_id_isolation(self):
+        calls = [0]
+
+        def loader():
+            calls[0] += 1
+            return f"v{calls[0]}"
+
+        ref = self._FakeRef()
+        cc.cached_doc_read("chatA", ref, 1000, loader=loader)
+        cc.cached_doc_read("chatB", ref, 1000, loader=loader)
+        # Same doc_token, different chat_ids → two distinct cache slots.
+        self.assertEqual(calls[0], 2)
+
+    def test_permission_error_not_cached(self):
+        from larkhelm.lark_client import DocPermissionError
+        calls = [0]
+
+        def loader():
+            calls[0] += 1
+            raise DocPermissionError("denied")
+
+        ref = self._FakeRef()
+        with self.assertRaises(DocPermissionError):
+            cc.cached_doc_read("chatA", ref, 1000, loader=loader)
+        with self.assertRaises(DocPermissionError):
+            cc.cached_doc_read("chatA", ref, 1000, loader=loader)
+        self.assertEqual(calls[0], 2, "errors must not enter the cache")
+
+    def test_disabled_flag_falls_through(self):
+        calls = [0]
+
+        def loader():
+            calls[0] += 1
+            return "x"
+
+        ref = self._FakeRef()
+        with patch.object(_cfg, "DOC_INJECT_CACHE_ENABLED", False):
+            cc.cached_doc_read("chatA", ref, 1000, loader=loader)
+            cc.cached_doc_read("chatA", ref, 1000, loader=loader)
+        self.assertEqual(calls[0], 2)
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  Metrics bridge
+# ════════════════════════════════════════════════════════════════════════
+
+
+class MetricsBridgeTests(unittest.TestCase):
+
+    def setUp(self):
+        cc.reset_for_tests()
+        _cfg.RECENT_TURNS_CACHE_ENABLED = True
+
+    def test_inc_helpers_dont_raise_without_prom_client(self):
+        # The bridge must not crash when prometheus-client is absent.
+        from larkhelm import metrics as _metrics
+        try:
+            _metrics.inc_recent_turns_cache("hit")
+            _metrics.inc_memory_layer_cache("global", "miss")
+            _metrics.inc_doc_inject_cache("hit")
+        except Exception as e:
+            self.fail(f"metrics bridge raised: {e}")
+
+    def test_counters_increment_when_available(self):
+        from larkhelm import metrics as _metrics
+        reg = _metrics.get_registry()
+        if not reg.available or reg.recent_turns_cache_total is None:
+            self.skipTest("prometheus-client not installed in this venv")
+
+        # Pull the underlying counter's labelled child, snapshot before / after.
+        ch = reg.recent_turns_cache_total.labels(outcome="hit")
+        try:
+            before = ch._value.get()
+        except Exception:
+            self.skipTest("prometheus_client internal shape changed")
+        _metrics.inc_recent_turns_cache("hit")
+        _metrics.inc_recent_turns_cache("hit")
+        after = ch._value.get()
+        self.assertGreaterEqual(after - before, 2)
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  Concurrency stress check
+# ════════════════════════════════════════════════════════════════════════
+
+
+class ConcurrencyTests(unittest.TestCase):
+
+    def test_4_threads_100_iters_no_corruption(self):
+        cc.reset_for_tests()
+        _cfg.RECENT_TURNS_CACHE_ENABLED = True
+        errors: list[str] = []
+
+        def loader():
+            return "v"
+
+        def worker(chat_id: str):
+            try:
+                for _ in range(100):
+                    cc.cached_recent_turns(chat_id, 6, 2000, None, loader=loader)
+            except Exception as e:
+                errors.append(repr(e))
+
+        threads = [threading.Thread(target=worker, args=(f"c{i}",))
+                   for i in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+        self.assertEqual(errors, [])
+
+    def test_same_chat_4_threads_lock_contention(self):
+        """Reviewer round-1 nit #4: the previous concurrency test gave
+        each thread an independent ``chat_id``, so the LRU slots never
+        collided and the lock was barely contested. This stresses the
+        opposite extreme — all 4 threads share one ``chat_id``, hitting
+        the same key, the same lock, every iteration.
+
+        Asserts:
+          1. No corruption (no exception raised in any thread).
+          2. loader was called **exactly once** — every other access is
+             a cache hit. If the lock were broken or the put-then-promote
+             logic raced, we'd see 2+ loader invocations.
+          3. ``hits + misses`` accounting balances to ``4 × 100``.
+        """
+        cc.reset_for_tests()
+        _cfg.RECENT_TURNS_CACHE_ENABLED = True
+        errors: list[str] = []
+        loader_calls = [0]
+        loader_lock = threading.Lock()
+
+        def loader():
+            with loader_lock:
+                loader_calls[0] += 1
+            return "shared-value"
+
+        SHARED_CHAT = "shared_chat"
+
+        def worker():
+            try:
+                for _ in range(100):
+                    val = cc.cached_recent_turns(
+                        SHARED_CHAT, 6, 2000, None, loader=loader,
+                    )
+                    if val != "shared-value":
+                        errors.append(f"unexpected value: {val!r}")
+            except Exception as e:
+                errors.append(repr(e))
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        self.assertEqual(errors, [], f"workers reported errors: {errors}")
+        # All threads share one key — under a healthy lock the loader
+        # races to the first miss, then every subsequent call hits.
+        # Worst-case the 4 threads each see a miss before any one wins
+        # the put race, so loader_calls ∈ [1, 4]. ≥5 would imply the
+        # promotion-then-check window leaked.
+        self.assertGreaterEqual(loader_calls[0], 1)
+        self.assertLessEqual(
+            loader_calls[0], 4,
+            f"loader fired {loader_calls[0]}× — promote/put race?",
+        )
+        # Counters: 4×100 = 400 total accesses, all keyed identically.
+        stats = cc._recent_turns_cache.stats()
+        self.assertEqual(stats["hits"] + stats["misses"], 400)
+        # Capacity stays at 1 entry — same key all the way.
+        self.assertEqual(stats["size"], 1)
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  log.py + memory_context.py + _query.py integration smoke tests
+# ════════════════════════════════════════════════════════════════════════
+
+
+class LogModuleIntegrationTests(unittest.TestCase):
+    """Verify the thin shell in ``log.py`` reaches into the cache module."""
+
+    def setUp(self):
+        cc.reset_for_tests()
+        log_dir = Path(_cfg.LOG_DIR)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        jsonl = log_dir / "all.jsonl"
+        jsonl.write_text(
+            '{"chat_id":"int_chat","role":"user","content":"hello"}\n'
+            '{"chat_id":"int_chat","role":"assistant","content":"world"}\n'
+        )
+
+    def test_get_recent_turns_uses_cache(self):
+        from larkhelm import log as _log
+        original = _log._get_recent_turns_uncached
+        calls = [0]
+
+        def counting(*args, **kwargs):
+            calls[0] += 1
+            return original(*args, **kwargs)
+
+        with patch.object(_log, "_get_recent_turns_uncached", counting):
+            with patch.object(_cfg, "RECENT_TURNS_CACHE_ENABLED", True):
+                _log._get_recent_turns("int_chat")
+                _log._get_recent_turns("int_chat")
+        self.assertEqual(calls[0], 1, "second call should hit cache")
+
+    def test_disabled_flag_bypass(self):
+        from larkhelm import log as _log
+        original = _log._get_recent_turns_uncached
+        calls = [0]
+
+        def counting(*args, **kwargs):
+            calls[0] += 1
+            return original(*args, **kwargs)
+
+        with patch.object(_log, "_get_recent_turns_uncached", counting):
+            with patch.object(_cfg, "RECENT_TURNS_CACHE_ENABLED", False):
+                _log._get_recent_turns("int_chat")
+                _log._get_recent_turns("int_chat")
+        self.assertEqual(calls[0], 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

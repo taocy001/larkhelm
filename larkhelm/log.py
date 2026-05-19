@@ -17,7 +17,8 @@ import larkhelm.config as _cfg
 from larkhelm.concurrency import _jsonl_lock as _log_lock  # shared with token_stats.py
 
 __all__ = [
-    "_log_lock", "log_entry", "_read_logs", "_read_logs_tail", "_get_recent_turns",
+    "_log_lock", "log_entry", "_read_logs", "_read_logs_tail",
+    "_get_recent_turns", "_get_recent_turns_uncached",
     "_debug_log", "safe_log", "lazy_debug_log",
     "info", "warn", "error",
     "Level", "current_log_level",
@@ -602,6 +603,41 @@ def _match_dedup_prefix(turn_prefix: str, dedup_prefix: str) -> bool:
 
 
 def _get_recent_turns(
+    chat_id: str, max_turns: int = 6, max_chars: int = 2000,
+    *, dedup_prefix: str | None = None,
+) -> str:
+    """Cached wrapper — delegates to :func:`_get_recent_turns_uncached`.
+
+    Wraps the original tail-read implementation with the
+    ``_context_cache.cached_recent_turns`` LRU layer. The cache key
+    embeds ``(chat_id, max_turns, max_chars, dedup_prefix_hash,
+    all.jsonl mtime_ns + size)``, so any new ``log_entry`` write invalidates
+    the entry on the next read.
+
+    When ``cfg.RECENT_TURNS_CACHE_ENABLED`` is False the body bypasses the
+    cache and calls the uncached function directly (PR-prior byte-compat).
+    """
+    if not bool(getattr(_cfg, "RECENT_TURNS_CACHE_ENABLED", True)):
+        return _get_recent_turns_uncached(
+            chat_id, max_turns, max_chars, dedup_prefix=dedup_prefix,
+        )
+    try:
+        from larkhelm._context_cache import cached_recent_turns
+    except Exception:
+        # Cache module unavailable (early bootstrap / test mock) — fall
+        # back to the uncached path so the call still works.
+        return _get_recent_turns_uncached(
+            chat_id, max_turns, max_chars, dedup_prefix=dedup_prefix,
+        )
+    return cached_recent_turns(
+        chat_id, max_turns, max_chars, dedup_prefix,
+        loader=lambda: _get_recent_turns_uncached(
+            chat_id, max_turns, max_chars, dedup_prefix=dedup_prefix,
+        ),
+    )
+
+
+def _get_recent_turns_uncached(
     chat_id: str, max_turns: int = 6, max_chars: int = 2000,
     *, dedup_prefix: str | None = None,
 ) -> str:

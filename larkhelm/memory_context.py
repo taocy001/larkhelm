@@ -670,7 +670,65 @@ class MemoryContextBuilder:
             _debug_log(f"[Memory] should_include_project failed (fail-open): {e}")
             return True
 
+    # ── Layer entry points ──────────────────────────────────────────────
+    # Each ``_layer_*`` is a thin cache-aware shell over the matching
+    # ``_layer_*_uncached`` body. When ``MEMORY_LEGACY_CACHE_ENABLED`` is
+    # false (or the cache module fails to import), the shell drops straight
+    # through to the uncached function — preserving PR-prior behaviour.
+
+    def _legacy_cache_on(self) -> bool:
+        return bool(getattr(_cfg, "MEMORY_LEGACY_CACHE_ENABLED", True))
+
     def _layer_global(self) -> str | None:
+        if not self._legacy_cache_on():
+            return self._layer_global_uncached()
+        try:
+            from larkhelm._context_cache import cached_memory_layer
+            from larkhelm.memory import _global_memory_file
+            path = _global_memory_file(self.chat_id)
+        except Exception:
+            return self._layer_global_uncached()
+        return cached_memory_layer(
+            "global", path,
+            loader=lambda: self._layer_global_uncached(),
+        )
+
+    def _layer_project(self) -> str | None:
+        if not self.cwd:
+            return None
+        if not self._legacy_cache_on():
+            return self._layer_project_uncached()
+        try:
+            from larkhelm._context_cache import cached_memory_layer
+            from larkhelm.memory import _project_memory_file
+            # ``self.cwd`` already proven non-empty by the early-return
+            # above; the previous ``if self.cwd else None`` was a dead
+            # branch (reviewer round-1 nit #1).
+            path = _project_memory_file(self.cwd)
+        except Exception:
+            return self._layer_project_uncached()
+        return cached_memory_layer(
+            "project", path,
+            loader=lambda: self._layer_project_uncached(),
+        )
+
+    def _layer_session(self) -> str | None:
+        if not self._legacy_cache_on():
+            return self._layer_session_uncached()
+        try:
+            from larkhelm._context_cache import cached_memory_layer
+            from larkhelm.memory import _session_memory_file
+            path = _session_memory_file(self.chat_id)
+        except Exception:
+            return self._layer_session_uncached()
+        return cached_memory_layer(
+            "session", path,
+            loader=lambda: self._layer_session_uncached(),
+        )
+
+    # ── Layer bodies (cache-free implementations) ───────────────────────
+
+    def _layer_global_uncached(self) -> str | None:
         # P2 REQ-05.1: when the slot flag is on AND the file parses into
         # one or more non-empty slots, render via memory_global_slots so
         # the LLM prompt sees structured headings. Empty-slot dict + flag
@@ -679,8 +737,7 @@ class MemoryContextBuilder:
         try:
             from larkhelm import memory_global_slots as _mgs
             if _mgs.is_enabled():
-                slots = _mgs.load_global_slots(self.chat_id)
-                rendered = _mgs.render_for_context(slots)
+                rendered = self._cached_global_slots_rendered()
                 if rendered:
                     return rendered
         except Exception as e:
@@ -692,7 +749,34 @@ class MemoryContextBuilder:
             _debug_log(f"[Memory] _layer_global failed: {e}")
             return None
 
-    def _layer_project(self) -> str | None:
+    def _cached_global_slots_rendered(self) -> str:
+        """Slot parsing + render result, cached by file mtime.
+
+        The global_slots ``.md`` file is keyed on the SAME path used by
+        the free-form body, so an independent cache layer would collide.
+        We disambiguate by passing layer name ``"global_slots"``; the
+        cache key embeds layer + path so the two views coexist cleanly.
+        """
+        from larkhelm import memory_global_slots as _mgs
+        if not self._legacy_cache_on():
+            slots = _mgs.load_global_slots(self.chat_id)
+            return _mgs.render_for_context(slots)
+        try:
+            from larkhelm._context_cache import cached_memory_layer
+            from larkhelm.memory import _global_memory_file
+            path = _global_memory_file(self.chat_id)
+        except Exception:
+            slots = _mgs.load_global_slots(self.chat_id)
+            return _mgs.render_for_context(slots)
+        rendered = cached_memory_layer(
+            "global_slots", path,
+            loader=lambda: _mgs.render_for_context(
+                _mgs.load_global_slots(self.chat_id)
+            ),
+        )
+        return rendered or ""
+
+    def _layer_project_uncached(self) -> str | None:
         if not self.cwd:
             return None
         # P2 REQ-05.2: section-rendered body when the flag is on AND at
@@ -702,8 +786,7 @@ class MemoryContextBuilder:
         try:
             from larkhelm import memory_project_sections as _mps
             if _mps.is_enabled():
-                sections = _mps.load_project_sections(self.cwd)
-                rendered = _mps.render_for_context(sections)
+                rendered = self._cached_project_sections_rendered()
                 if rendered:
                     return rendered
         except Exception as e:
@@ -715,7 +798,29 @@ class MemoryContextBuilder:
             _debug_log(f"[Memory] _layer_project failed: {e}")
             return None
 
-    def _layer_session(self) -> str | None:
+    def _cached_project_sections_rendered(self) -> str:
+        from larkhelm import memory_project_sections as _mps
+        if not self.cwd:
+            return ""
+        if not self._legacy_cache_on():
+            sections = _mps.load_project_sections(self.cwd)
+            return _mps.render_for_context(sections)
+        try:
+            from larkhelm._context_cache import cached_memory_layer
+            from larkhelm.memory import _project_memory_file
+            path = _project_memory_file(self.cwd)
+        except Exception:
+            sections = _mps.load_project_sections(self.cwd)
+            return _mps.render_for_context(sections)
+        rendered = cached_memory_layer(
+            "project_sections", path,
+            loader=lambda: _mps.render_for_context(
+                _mps.load_project_sections(self.cwd)
+            ),
+        )
+        return rendered or ""
+
+    def _layer_session_uncached(self) -> str | None:
         try:
             from larkhelm.memory import load_memory
             raw = load_memory(self.chat_id)

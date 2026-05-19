@@ -85,6 +85,12 @@ class _RuntimeConfig:
     MEMORY_SESSION_SMART_COMPRESS:      bool = False
     MEMORY_GLOBAL_PROFILE_SLOT_ENABLED: bool = False
     MEMORY_PROJECT_SECTION_ENABLED:     bool = False
+    # Context-injection cache toggles (REQ-01..04)
+    RECENT_TURNS_CACHE_ENABLED:        bool = True
+    MEMORY_LEGACY_CACHE_ENABLED:       bool = True
+    DOC_INJECT_CACHE_ENABLED:          bool = True
+    DOC_INJECT_CACHE_TTL_SEC:          int = 60
+    CLI_SKIP_RECENT_TURNS_WHEN_SID:    bool = True
 
 # ── Runtime config (assigned by _init_runtime()) ────────────────────────
 CONFIG_PATH: Path
@@ -203,6 +209,19 @@ ADMIN_CHAT_ID: str = ""
 MEMORY_GC_INTERVAL_HOURS: float = 6.0
 CREW_CHECKPOINT_TTL_DAYS: float = 7.0
 DEV_STAGE_TIMEOUTS: "dict[str, int]" = {}
+
+# ── Context-injection cache flags (REQ-01..04) ────────────────────────────
+# All default to safe values: REQ-01..03 caches default ON because the
+# byte-compat guarantee already holds (loaders run identically; the cache
+# is purely a memoization layer). The CLI sid skip in REQ-04 also defaults
+# ON because the new behaviour mirrors what API backends already do via
+# load_history. Operators flip any of these off in config.json to bisect a
+# regression without redeploying.
+RECENT_TURNS_CACHE_ENABLED: bool = True
+MEMORY_LEGACY_CACHE_ENABLED: bool = True
+DOC_INJECT_CACHE_ENABLED: bool = True
+DOC_INJECT_CACHE_TTL_SEC: int = 60
+CLI_SKIP_RECENT_TURNS_WHEN_SID: bool = True
 # Single source of truth for accepted voice languages — referenced by both
 # config validation (_init_runtime) and the /voice command handler.
 _VOICE_LANG_WHITELIST: "frozenset[str]" = frozenset({"zh", "en", "auto"})
@@ -467,6 +486,9 @@ def _init_app_config() -> None:
     global CASCADE_BACKOFF_MAX_ATTEMPTS, PLAN_RETRY_STRATEGY
     global PLUGIN_REPORT_CARD_ENABLED, ADMIN_CHAT_ID
     global MEMORY_GC_INTERVAL_HOURS, CREW_CHECKPOINT_TTL_DAYS, DEV_STAGE_TIMEOUTS
+    global RECENT_TURNS_CACHE_ENABLED, MEMORY_LEGACY_CACHE_ENABLED
+    global DOC_INJECT_CACHE_ENABLED, DOC_INJECT_CACHE_TTL_SEC
+    global CLI_SKIP_RECENT_TURNS_WHEN_SID
 
     try:
         config = json.loads(CONFIG_PATH.read_text())
@@ -909,6 +931,34 @@ def _init_app_config() -> None:
     except (TypeError, ValueError):
         CREW_CHECKPOINT_TTL_DAYS = 7.0
 
+    # Context-injection cache flags (REQ-01..04). Defaults preserve PR-prior
+    # behaviour: caches on (loaders byte-identical, just memoized) and the
+    # CLI sid skip on (mirrors what API backends already do).
+    config.setdefault("recent_turns_cache_enabled", True)
+    config.setdefault("memory_legacy_cache_enabled", True)
+    config.setdefault("doc_inject_cache_enabled", True)
+    config.setdefault("doc_inject_cache_ttl_sec", 60)
+    config.setdefault("cli_skip_recent_turns_when_sid", True)
+
+    RECENT_TURNS_CACHE_ENABLED = bool(
+        config.get("recent_turns_cache_enabled", True)
+    )
+    MEMORY_LEGACY_CACHE_ENABLED = bool(
+        config.get("memory_legacy_cache_enabled", True)
+    )
+    DOC_INJECT_CACHE_ENABLED = bool(
+        config.get("doc_inject_cache_enabled", True)
+    )
+    try:
+        DOC_INJECT_CACHE_TTL_SEC = max(
+            1, int(config.get("doc_inject_cache_ttl_sec", 60) or 60),
+        )
+    except (TypeError, ValueError):
+        DOC_INJECT_CACHE_TTL_SEC = 60
+    CLI_SKIP_RECENT_TURNS_WHEN_SID = bool(
+        config.get("cli_skip_recent_turns_when_sid", True)
+    )
+
     _raw_timeouts = config.get("dev_stage_timeouts") or {}
     _clean_timeouts: "dict[str, int]" = {}
     if isinstance(_raw_timeouts, dict):
@@ -1018,6 +1068,11 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         MEMORY_SESSION_SMART_COMPRESS=MEMORY_SESSION_SMART_COMPRESS,
         MEMORY_GLOBAL_PROFILE_SLOT_ENABLED=MEMORY_GLOBAL_PROFILE_SLOT_ENABLED,
         MEMORY_PROJECT_SECTION_ENABLED=MEMORY_PROJECT_SECTION_ENABLED,
+        RECENT_TURNS_CACHE_ENABLED=RECENT_TURNS_CACHE_ENABLED,
+        MEMORY_LEGACY_CACHE_ENABLED=MEMORY_LEGACY_CACHE_ENABLED,
+        DOC_INJECT_CACHE_ENABLED=DOC_INJECT_CACHE_ENABLED,
+        DOC_INJECT_CACHE_TTL_SEC=DOC_INJECT_CACHE_TTL_SEC,
+        CLI_SKIP_RECENT_TURNS_WHEN_SID=CLI_SKIP_RECENT_TURNS_WHEN_SID,
     )
 
 

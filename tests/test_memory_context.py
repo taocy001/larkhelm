@@ -205,6 +205,16 @@ class DedupRecentTurnsTests(unittest.TestCase):
 
 class MemoryContextBuilderTests(unittest.TestCase):
 
+    def setUp(self):
+        # The memory-layer LRU cache is keyed on (layer, path, mtime_ns).
+        # These tests mock ``load_global_memory`` / ``load_project_memory`` /
+        # ``load_memory`` to return *different* strings for the same
+        # (file-missing) path; without a reset the second test would hit
+        # the prior test's cached value. ``_context_cache.reset_for_tests``
+        # is the canonical reset hook.
+        from larkhelm import _context_cache as _cc
+        _cc.reset_for_tests()
+
     def test_default_args_equivalent_to_legacy(self):
         """``MemoryContextBuilder(chat, cwd).build()`` with no other args
         must produce the same string as the legacy ``get_memory_context``."""
