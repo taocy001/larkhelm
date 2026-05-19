@@ -11,6 +11,52 @@ from larkhelm.runner_base import BaseProcessRunner, _truncate_tool_result
 _KIMI_TOOL_MAP = {"Shell": "Bash", "FetchURL": "WebFetch", "SearchWeb": "WebSearch"}
 
 
+def _estimate_tokens_cjk_aware(text: str) -> int:
+    """Mixed-CJK token estimator for the ``cleanup_extra`` fallback path.
+
+    Background — round-3 review R3-4
+    --------------------------------
+    The Kimi CLI never emits a usage envelope on stdout (see ``cleanup_extra``
+    below), so token counts are estimated from raw text length. The original
+    formula ``len(text) // 4`` is the rough Anthropic / OpenAI BPE
+    tokens-per-char heuristic for English text — but it under-counts Chinese
+    by ~4×. In BPE / SentencePiece tokenizers each CJK ideograph typically
+    occupies one token (occasionally split into 2 across rare-char
+    boundaries), so a 500-character zh response was being recorded as ~125
+    tokens when the real cost is closer to 500. For a bilingual user this
+    silently halved-to-quartered the "monthly kimi tokens" display.
+
+    Heuristic
+    ---------
+    Split chars into two buckets and apply separate ratios:
+
+    * **CJK** (CJK Unified Ideographs + Hiragana/Katakana ranges): 1 token
+      per char. Slight over-count for the few rare ideographs that get split,
+      but right order-of-magnitude for everyday text.
+    * **Non-CJK** (Latin / digits / punctuation / spaces): retain ``// 4``
+      from the original heuristic — backward-compatible for pure-English
+      prompts, so the existing TestKimiCleanupExtraEstimate fixtures still
+      pass without numeric drift.
+
+    Empty / whitespace-only input returns ``0``. Caller is responsible for
+    the ``max(0, …)`` clamp + the ``estimated=True`` flag.
+    """
+    if not text:
+        return 0
+    cjk = 0
+    for c in text:
+        # CJK Unified Ideographs: U+4E00–U+9FFF
+        # Hiragana: U+3040–U+309F; Katakana: U+30A0–U+30FF
+        # (CJK Ext-A U+3400–U+4DBF excluded — rare in chat traffic,
+        # and the BPE split rate there is high enough that the 1:1
+        # heuristic would over-count. Acceptable miss in the cleanup
+        # fallback path; precise counts come from a real usage envelope.)
+        if "一" <= c <= "鿿" or "぀" <= c <= "ヿ":
+            cjk += 1
+    non_cjk = len(text) - cjk
+    return cjk + non_cjk // 4
+
+
 def _build_kimi_stream_input(text: str, image_paths: list[str]) -> str:
     """Build multimodal stdin for Kimi --input-format stream-json."""
     import base64
@@ -171,8 +217,13 @@ class KimiRunner(BaseProcessRunner):
         # at least an estimate the user's "本月 kimi tokens" stays at
         # 0 forever, masking real usage entirely.
         #
-        # Best-effort fallback: estimate via char-count / 4 (rough
-        # tokens-per-char heuristic for mixed CJK + ASCII). Marked
+        # Best-effort fallback: estimate via ``_estimate_tokens_cjk_aware``
+        # which keeps the original ``len // 4`` for ASCII / Latin chars
+        # but counts each CJK ideograph + kana char as ~1 token. The
+        # naive ``len(text) // 4`` formula under-counted Chinese by ~4×
+        # (BPE / SentencePiece typically gives 1 token per CJK char),
+        # so bilingual users saw their "本月 kimi tokens" silently
+        # halved-to-quartered. Round-3 review R3-4 fix. Marked
         # ``estimated=True`` in the JSONL record so downstream tooling
         # can distinguish from precise SDK-reported counts. cache_read
         # and cache_create stay 0 — there's no schema to read them from
@@ -189,8 +240,8 @@ class KimiRunner(BaseProcessRunner):
             if not text and not prompt:
                 return
             self._record_tokens("kimi", {
-                "input_tokens":  max(0, len(prompt) // 4),
-                "output_tokens": max(0, len(text)   // 4),
+                "input_tokens":  max(0, _estimate_tokens_cjk_aware(prompt)),
+                "output_tokens": max(0, _estimate_tokens_cjk_aware(text)),
                 "cache_read":    0,
                 "cache_create":  0,
                 "estimated":     True,

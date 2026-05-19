@@ -279,6 +279,106 @@ class TestKimiCleanupExtraEstimate(unittest.TestCase):
         )
 
 
+class TestKimiCJKEstimator(unittest.TestCase):
+    """Round-3 follow-up P1 (R3-4): the Kimi cleanup_extra fallback
+    formula was ``len(text) // 4`` for both English and CJK. That
+    under-counted Chinese text by ~4× (BPE / SentencePiece typically
+    gives 1 token per CJK ideograph), so bilingual users saw their
+    monthly token totals silently halved-to-quartered.
+
+    The new ``_estimate_tokens_cjk_aware`` heuristic:
+
+    * English / Latin / digits / punctuation — keep ``// 4`` (backward
+      compatible with prior tests' magnitudes).
+    * CJK Unified Ideographs (U+4E00–U+9FFF) + Hiragana/Katakana
+      (U+3040–U+30FF) — 1 token per char.
+    * Mixed content — proportional split.
+
+    These tests pin the formula across the three regimes so any
+    accidental regression to ``len // 4`` (or another over-eager
+    "simplification") fires immediately."""
+
+    def test_pure_english_matches_legacy_divide_by_four(self):
+        from larkhelm.runner_kimi import _estimate_tokens_cjk_aware
+        # 100-char ASCII string → 25 tokens (legacy ``// 4`` floor).
+        text = "Hello kimi! " * 10  # 12 * 10 = 120 chars
+        self.assertEqual(_estimate_tokens_cjk_aware(text), len(text) // 4,
+            "pure ASCII input must keep the original `// 4` ratio so the "
+            "pre-fix TestKimiCleanupExtraEstimate magnitudes still hold"
+        )
+
+    def test_pure_cjk_counts_one_token_per_char(self):
+        from larkhelm.runner_kimi import _estimate_tokens_cjk_aware
+        text = "你好世界这是一段中文消息"  # 12 chars, all CJK
+        self.assertEqual(_estimate_tokens_cjk_aware(text), len(text),
+            "pure CJK input must count 1 token per char — the prior "
+            "`len // 4` formula under-counted by ~4×, silently shrinking "
+            "the user's monthly kimi token total"
+        )
+
+    def test_mixed_content_proportional_split(self):
+        from larkhelm.runner_kimi import _estimate_tokens_cjk_aware
+        # 4 CJK chars + 16 ASCII chars (incl. spaces & punctuation).
+        text = "中文 hello kimi mix"
+        cjk_count = sum(1 for c in text if "一" <= c <= "鿿"
+                                         or "぀" <= c <= "ヿ")
+        non_cjk = len(text) - cjk_count
+        expected = cjk_count + non_cjk // 4
+        self.assertEqual(_estimate_tokens_cjk_aware(text), expected,
+            "mixed content must split into CJK (1 token/char) + non-CJK "
+            "(// 4) buckets; this guards against accidental reversion to "
+            "a single uniform divisor"
+        )
+        # Sanity: result must be strictly larger than the legacy
+        # `len // 4` formula whenever CJK chars are present (this is
+        # the whole point of the fix).
+        self.assertGreater(_estimate_tokens_cjk_aware(text), len(text) // 4,
+            "any input with CJK chars must produce MORE tokens than the "
+            "legacy `// 4` formula — otherwise the fix is doing nothing"
+        )
+
+    def test_empty_input_returns_zero(self):
+        from larkhelm.runner_kimi import _estimate_tokens_cjk_aware
+        self.assertEqual(_estimate_tokens_cjk_aware(""), 0)
+        # Whitespace-only: 4 spaces → 4 // 4 = 1 (acceptable cleanup
+        # noise). Just pin "doesn't crash and stays small".
+        self.assertLessEqual(_estimate_tokens_cjk_aware("    "), 1)
+
+    def test_cleanup_extra_uses_cjk_aware_estimator(self):
+        """End-to-end: Kimi cleanup_extra fed a Chinese prompt + reply
+        records substantially more tokens than the legacy `len // 4`
+        formula would have produced."""
+        from larkhelm.runner_kimi import KimiRunner
+
+        captured: list = []
+        with patch.object(KimiRunner, "_record_tokens",
+                          lambda self, model, usage, cost: captured.append(
+                              dict(usage))):
+            r = KimiRunner.__new__(KimiRunner)
+            r._tokens_recorded = False
+            # 40 CJK chars input, 60 CJK chars output.
+            r.message = "你好" * 20         # 40 chars
+            r._result_text = "回答内容" * 15  # 60 chars
+            r.cleanup_extra()
+
+        self.assertEqual(len(captured), 1)
+        usage = captured[0]
+        # Legacy formula would have given 40//4=10 and 60//4=15.
+        # CJK-aware should give 40 and 60.
+        self.assertEqual(usage["input_tokens"], 40,
+            "Chinese prompt of 40 chars should record 40 tokens "
+            "(1 per CJK char), not 10 (legacy `len // 4`)"
+        )
+        self.assertEqual(usage["output_tokens"], 60,
+            "Chinese reply of 60 chars should record 60 tokens "
+            "(1 per CJK char), not 15 (legacy `len // 4`)"
+        )
+        self.assertTrue(usage.get("estimated"),
+            "estimated=True flag must still be present so downstream "
+            "tooling can distinguish from precise usage envelopes"
+        )
+
+
 class TestDeepSeekStreamOptions(unittest.TestCase):
     """Fix #2: DeepSeek's streaming body MUST set
     ``stream_options.include_usage=true``, otherwise the terminal SSE
@@ -643,6 +743,79 @@ class TestIntentCostLineSuppressedWhenZero(unittest.TestCase):
 
         self.assertEqual(len(sent), 1)
         self.assertIn("成本：$0.1234", sent[0]["body"])
+
+
+class TestStatsIntentDateArgument(unittest.TestCase):
+    """Round-3 follow-up P0 (R3-2): ``/stats intent 2026-05-15`` must
+    forward the optional date suffix to ``aggregate_daily`` so users can
+    inspect historical aggregates. Prior to this fix, ``_cmd_stats``
+    collapsed ``args.strip().lower()`` and matched the entire suffix
+    against the literal ``"intent"`` — anything past the word was either
+    silently dropped (when an exact match succeeded after stripping) or
+    routed to the token-stats path.
+
+    These tests pin the parser + downstream call: the date string must
+    arrive at ``aggregate_daily(date=<X>)`` verbatim, and the rendered
+    card title must surface ``agg['date']`` so users can confirm which
+    day they're looking at."""
+
+    def test_date_suffix_routed_to_aggregate_daily(self):
+        from larkhelm.commands import _cmd_stats
+
+        captured_date: list = []
+
+        def _fake_aggregate(date=None, path=None):
+            captured_date.append(date)
+            return {
+                "total": 0, "success_rate": 0.0, "avg_duration": 0.0,
+                "total_cost": 0.0, "per_agent": {},
+                "date": date or "2026-05-19",
+            }
+
+        sent: list = []
+        def _capture(chat_id, msg_id, title, body, color="blue", **kw):
+            sent.append({"title": title, "body": body})
+
+        with patch("larkhelm.commands.send_card_reply", side_effect=_capture):
+            with patch("larkhelm.agent_hub.agent_audit.aggregate_daily",
+                       side_effect=_fake_aggregate):
+                _cmd_stats("oc_test", "msg_1", args="intent 2026-05-15")
+
+        self.assertEqual(captured_date, ["2026-05-15"],
+            "date suffix `2026-05-15` must be forwarded verbatim to "
+            "aggregate_daily(date=...) — without this the user can never "
+            "inspect historical intent aggregates"
+        )
+        # Card title should surface the date so the user sees which day.
+        self.assertEqual(len(sent), 1)
+        self.assertIn("2026-05-15", sent[0]["title"],
+            "rendered card title must include the requested date so the "
+            "user can confirm the report period"
+        )
+
+    def test_no_date_suffix_defaults_to_today(self):
+        """Bare ``/stats intent`` (no date arg) must keep defaulting to
+        today — preserves the pre-fix behavior."""
+        from larkhelm.commands import _cmd_stats
+
+        captured_date: list = []
+
+        def _fake_aggregate(date=None, path=None):
+            captured_date.append(date)
+            return {
+                "total": 0, "success_rate": 0.0, "avg_duration": 0.0,
+                "total_cost": 0.0, "per_agent": {}, "date": "today-ish",
+            }
+
+        with patch("larkhelm.commands.send_card_reply"):
+            with patch("larkhelm.agent_hub.agent_audit.aggregate_daily",
+                       side_effect=_fake_aggregate):
+                _cmd_stats("oc_test", "msg_1", args="intent")
+
+        self.assertEqual(captured_date, [None],
+            "bare `/stats intent` must call aggregate_daily(date=None) "
+            "so the helper resolves to today — pre-fix default behavior"
+        )
 
 
 class TestCancelTimeoutPartialTokenRecording(unittest.TestCase):

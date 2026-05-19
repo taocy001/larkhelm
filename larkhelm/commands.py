@@ -698,9 +698,21 @@ def _cmd_stats_intent(chat_id: str, msg_id: str = None, date: str | None = None)
 
 def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
     """Display today / this-month / all-time token stats plus conversation activity for the current chat."""
-    sub = (args or "").strip().lower()
+    # Round-3 review P0 (R3-2): route `/stats intent [YYYY-MM-DD]` so the
+    # optional date suffix reaches `aggregate_daily(date=...)`. The prior
+    # `args.strip().lower()` collapsed the entire suffix into `sub`, so any
+    # date argument was silently dropped and users could never inspect
+    # historical intent aggregates. Split on whitespace, take the first
+    # token as the subcommand and forward the rest verbatim (no lower()
+    # — ISO dates are case-irrelevant but keep the original casing for
+    # any future subcommand args).
+    parts = (args or "").split(None, 1)
+    sub = parts[0].lower() if parts else ""
+    sub_args = parts[1].strip() if len(parts) > 1 else ""
     if sub == "intent":
-        _cmd_stats_intent(chat_id, msg_id)
+        # sub_args is the optional `YYYY-MM-DD` date; empty → today.
+        date = sub_args or None
+        _cmd_stats_intent(chat_id, msg_id, date=date)
         return
     now   = datetime.now()
     today = now.strftime("%Y-%m-%d")
