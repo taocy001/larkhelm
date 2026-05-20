@@ -19,6 +19,21 @@ business module (``memory_context``, ``lark_client``, ``log``, etc.).
 The two cache primitives are generic; the three high-level helpers
 receive a ``loader`` callback that the caller supplies, so the cache
 never knows what the loader actually does.
+
+Known backlog items (round-1 reviewer kimi 2026-05-20, **non-blocking**):
+  * ``TTLCache`` has no ``maxsize`` cap — relies on the 60s TTL +
+    lazy eviction on read + ``invalidate_chat`` for sweep. Current
+    worst case (50 chats × 5 docs each × ~few KB) is bounded by
+    natural usage, but a long-running large-scale instance might
+    want either an LRU eviction layer on top, or a periodic
+    background sweeper. Track as a future feature, not a defect.
+  * ``MemoryContextBuilder._layer_*`` fallback path re-attempts
+    ``import larkhelm._context_cache`` on every call when the
+    cache module is missing. Python doesn't cache failed imports,
+    so an absent module costs a fresh ImportError per request.
+    The cache module being absent is a deployment defect (it ships
+    with the package), so this path realistically never fires —
+    documenting for completeness only.
 """
 from __future__ import annotations
 
@@ -80,11 +95,15 @@ class DocCachedEntry:
     def __init__(self, *, payload: Any, fetched_at: float | None = None) -> None:
         # frozen=True forces us to use object.__setattr__ here; this is
         # the documented pattern for back-compat keyword arguments on a
-        # frozen dataclass. ``fetched_at`` is accepted but discarded.
+        # frozen dataclass. ``fetched_at`` is accepted purely for
+        # backwards compatibility with the pre-cleanup constructor and
+        # is intentionally discarded (TTLCache stamps its own monotonic
+        # timestamp). Reviewer round-1 nit follow-up: kimi flagged the
+        # earlier ``del fetched_at`` as semantically misleading (``del``
+        # implies a lifetime release the name doesn't actually have),
+        # so we omit it; the project's ruff config doesn't enable
+        # ARG002 (unused-argument) today, so no lint suppression needed.
         object.__setattr__(self, "payload", payload)
-        # Silence "unused argument" linting without changing the public
-        # constructor signature.
-        del fetched_at
 
 
 # ── Generic primitives ─────────────────────────────────────────────────────
