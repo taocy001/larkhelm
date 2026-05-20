@@ -36,6 +36,7 @@ class BackendSpec:
     extra_args: list[str] = dataclasses.field(default_factory=list)  # extra CLI flags (e.g. ["--thinking"])
     healthy: bool = True
     enabled: bool = True
+    free_tier_ok: bool = True        # if False, probe rejects free-tier model responses (e.g. gemini *-preview)
     last_error: str | None = None  # last health_check failure reason
     description: str = ""  # natural-language description for L2 intent classifier prompt
     trigger_phrases: list[str] = dataclasses.field(default_factory=list)  # keyword triggers for L1 heuristic routing
@@ -191,6 +192,7 @@ class BackendRegistry:
                     extra_args=list(extra_args),
                     healthy=True,
                     enabled=enabled,
+                    free_tier_ok=bool(s.get("free_tier_ok", True)),
                     description=description,
                     trigger_phrases=trigger_phrases,
                     intent_examples=intent_examples,

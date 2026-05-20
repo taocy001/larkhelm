@@ -205,40 +205,9 @@ def _cmd_status(chat_id: str, msg_id: str = None):
     s_c = _load_sid(chat_id, "claude")
     s_g = _load_sid(chat_id, "gemini")
     cwd = _get_cwd(chat_id)
-    model = _get_chat_model(chat_id)
-
-    def _ver(cmd):
-        try:
-            r = subprocess.run([cmd, "--version"], capture_output=True, timeout=15, text=True)
-            return (r.stdout.strip() or r.stderr.strip()).split("\n")[0] if r.returncode == 0 else None
-        except Exception as e:
-            _debug_log(f"[status] version probe failed for {cmd!r}: {e}")
-            return None
 
     s_k = _load_sid(chat_id, "kimi")
     s_d = _load_sid(chat_id, "deepseek")
-    cv, gv, kv = _ver(_cfg.CLAUDE_CMD), _ver(_cfg.GEMINI_CMD), _ver(_cfg.KIMI_CMD)
-    # DeepSeek is HTTP — "version" is just the configured model + base URL host
-    if getattr(_cfg, "DEEPSEEK_API_KEY", ""):
-        _ds_host = (_cfg.DEEPSEEK_BASE_URL or "").replace("https://", "").replace("http://", "").split("/", 1)[0]
-        dv = f"{_cfg.DEEPSEEK_MODEL} @ {_ds_host}" if _ds_host else _cfg.DEEPSEEK_MODEL
-    else:
-        dv = None
-
-    def _cli_status(ver, sid, name):
-        if not ver:
-            return f"❌ {name} 不可用"
-        if sid:
-            # DeepSeek's "sid" is JSON history; show length instead of opaque hash
-            if name == "DeepSeek":
-                try:
-                    import json as _json
-                    n_msgs = len(_json.loads(sid))
-                    return f"✅ {name}  会话 **{n_msgs} 条历史**"
-                except Exception:
-                    pass
-            return f"✅ {name}  会话 **{sid[:12]}…**"
-        return f"✅ {name}  暂无会话"
 
     if _cfg.SKIP_PERMISSIONS:
         perm_status = "⏭️ 跳过（skip_permissions=true）"
@@ -317,6 +286,12 @@ def _cmd_status(chat_id: str, msg_id: str = None):
             # Enabled first (sorted by id), then disabled
             enabled = sorted([s for s in all_specs if s.enabled], key=lambda x: x.id)
             disabled = sorted([s for s in all_specs if not s.enabled], key=lambda x: x.id)
+            # Aggregate last-probe time across all specs → shown once in header
+            last_probed_all = max(
+                (getattr(s, "last_probed_at", 0.0) or 0.0 for s in all_specs),
+                default=0.0,
+            )
+            probe_note = f" · 上次检测 {_fmt_ago(last_probed_all, now)}" if last_probed_all else ""
             for s in enabled + disabled:
                 if not s.enabled:
                     icon = "⏸"
@@ -324,28 +299,27 @@ def _cmd_status(chat_id: str, msg_id: str = None):
                     icon = "✅"
                 else:
                     icon = "❌"
-                # Activity: prefer last_used_at (real traffic), fallback to last_probed_at
-                last_used = getattr(s, "last_used_at", 0.0) or 0.0
-                last_probed = getattr(s, "last_probed_at", 0.0) or 0.0
-                if last_used >= last_probed:
-                    activity = f"用 {_fmt_ago(last_used, now)}" if last_used else (f"探 {_fmt_ago(last_probed, now)}" if last_probed else "—")
-                else:
-                    activity = f"探 {_fmt_ago(last_probed, now)}"
+                # Session ID for CLI backends
+                sid_str = ""
+                if s.enabled and s.provider in ("claude_cli", "gemini_cli", "kimi_cli"):
+                    _sid = _load_sid(chat_id, s.id)
+                    if _sid:
+                        sid_str = f" 会话 **{_sid[:12]}…**"
                 # Failure pressure (sliding window for TRANSIENT)
                 fw = getattr(s, "failure_window", []) or []
                 fail_str = f" ⚠️{len(fw)}失败" if fw else ""
-                # Error detail
+                # Error detail or API history count
                 err_str = ""
                 if not s.healthy and s.enabled and s.last_error:
-                    err_str = f" _{s.last_error[:80]}_"
+                    err_str = f" _{s.last_error[:150]}_"
                 elif s.enabled and s.provider in _API_PROVIDERS:
                     hist_len = len(_load_hist(s.provider, chat_id))
                     if hist_len:
-                        err_str = f" `{hist_len}/{_MAX_HIST}msgs`"
-                spec_lines.append(f"  • {icon} **{s.id}** `{activity}`{fail_str}{err_str}")
-            disabled_note = f" · {len(disabled)} disabled" if disabled else ""
+                        err_str = f" `{hist_len}/{_MAX_HIST}条历史`"
+                spec_lines.append(f"  • {icon} **{s.id}**{sid_str}{fail_str}{err_str}")
+            disabled_note = f" · {len(disabled)} 个已停用" if disabled else ""
             backend_summary = (
-                f"**Backends** {n_healthy}/{n_enabled} healthy{disabled_note}\n"
+                f"**AI Backends** {n_healthy}/{n_enabled} 可用{probe_note}{disabled_note}\n"
                 + "\n".join(spec_lines)
             )
     except Exception as e:
@@ -360,25 +334,19 @@ def _cmd_status(chat_id: str, msg_id: str = None):
         from larkhelm.crew._backend_resolver import resolve_backend_preview
         preview = resolve_backend_preview()
         if preview:
-            preview_lines = [
-                f"  • **{name}** → `{bid}`"
-                for name, bid in preview.items()
-            ]
-            crew_backend_preview = (
-                "**Crew Backend 调度预览**\n" + "\n".join(preview_lines)
-            )
+            # Group profiles by resolved backend for a compact single-line summary
+            _by_backend: dict = {}
+            for _pname, _bid in preview.items():
+                _by_backend.setdefault(_bid, []).append(_pname)
+            _parts = [f"{'/'.join(profiles)} → {bid}" for bid, profiles in _by_backend.items()]
+            crew_backend_preview = "**路由预览** " + " · ".join(_parts)
     except Exception as e:
         _debug_log(f"[status] crew backend preview failed: {e}")
 
     lines = [
-        f"**模型** {model}　　**目录** {cwd}"
+        f"**目录** {cwd}"
         + (f"　　**会话名** {_get_chat_state(chat_id).get('name', '').replace('**','').replace('`','')}"
            if _get_chat_state(chat_id).get('name') else ""),
-        "",
-        _cli_status(cv, s_c, "Claude"),
-        _cli_status(gv, s_g, "Gemini"),
-        _cli_status(kv, s_k, "Kimi"),
-        _cli_status(dv, s_d, "DeepSeek"),
         "",
         f"**权限模式** {perm_status}",
         *([ crew_info ] if crew_info else []),
@@ -394,19 +362,10 @@ def _cmd_status(chat_id: str, msg_id: str = None):
     else:
         tips.append("💡 **/pickup** — 获取在终端接力会话的命令")
         tips.append("💡 **/reset** — 清除会话，开始全新对话")
-    # Use the same rotation constant as the button below so the tip text and
-    # the action button always agree on what "next model" means. Previously
-    # the tip ladder hardcoded its own (different) cycle: e.g. for kimi the
-    # tip said "/model claude" while the button said "/model deepseek".
-    _next_for_tip = _NEXT_MODEL_CYCLE.get(model, "claude")
-    tips.append(f"💡 **/model {_next_for_tip}** — 切换默认模型为 {_next_for_tip.capitalize()}")
-
     lines += tips
-    other_model = _NEXT_MODEL_CYCLE.get(model, "claude")
     buttons = [
         ("♻️ 重置会话", "/reset"),
         ("🔗 接入终端", "/pickup"),
-        (f"切换 {other_model}", f"/model {other_model}"),
     ]
     send_card_reply(chat_id, msg_id, "📊 运行状态", "\n".join(lines), color="turquoise", buttons=buttons, normalize=False)
 
@@ -432,42 +391,63 @@ def _cmd_help(chat_id: str, msg_id: str = None):
     #    voice / upgrade / btw) moved to a single "其他命令" line —
     #    discoverable but not crowding the high-frequency content.
     body = (
-        f"**当前模型:** {model}　　发消息直接提问，命令均以 `/` 开头\n"
+        "发消息直接提问，命令均以 `/` 开头\n"
         "\n"
         "**🧭 任务怎么选**\n"
         "💬 直接发消息 — 单轮问答 / 闲聊 / 代码片段解释\n"
         "🛠 **/dev** <需求> — 软件工程流水线（PM→架构→工程→QA→审查），产物通常一次 commit\n"
         "🤖 **/crew** <需求> — 动态规划，Manager 自动分解任务多 Agent 并行\n"
-        "🧭 **/plan** — 多阶段串行：`[dev]` `[review]` `[fix]` `[test]`，每步确认；支持飞书文档 URL\n"
+        "📋 **/plan** — 多阶段串行：`[dev]` `[review]` `[fix]` `[test]`，每步确认；支持飞书文档 URL\n"
         "💡 不确定时 → 直接发消息让 AI 判断\n"
         "\n"
         "---\n"
         "\n"
         "**🚀 常用**\n"
-        f"**/reset** 重置会话　　**/cancel** 取消当前　　**/model {other}** 切换到 {other}\n"
-        "**/cd 路径** 切换目录　　**/pwd** 当前目录　　**/ls** [路径] 列目录　　**/run** 命令（30s）\n"
-        "**/pickup** 终端接力　　**/status** 运行状态　　**/rename** <名称> 命名会话\n"
-        "**/history** [all] 最近 10 条　　**/stats** 今日统计\n"
+        "**/reset** — 重置会话\n"
+        "**/cancel** — 取消当前查询\n"
+        "**/cd 路径** — 切换目录\n"
+        "**/pwd** — 当前目录\n"
+        "**/ls [路径]** — 列目录\n"
+        "**/run 命令** — 执行 Shell（30s）\n"
+        "**/pickup** — 终端接力\n"
+        "**/status** — 运行状态\n"
+        "**/rename <名称>** — 命名会话\n"
+        "**/history [all]** — 最近 10 条记录\n"
+        "**/stats** — 今日统计\n"
         "\n"
-        "**🎯 单条消息指定 backend**（本条生效，不改默认）：\n"
-        "**/c** **/g** **/k** **/d** <消息> — Claude / Gemini / Kimi / DeepSeek\n"
+        "**🎯 与指定模型对话**\n"
+        "**/c <消息>** — Claude\n"
+        "**/g <消息>** — Gemini\n"
+        "**/k <消息>** — Kimi\n"
+        "**/d <消息>** — DeepSeek\n"
         "\n"
         "**🔒 Backend 锁定**\n"
-        "**/lock** 列出所有 backend 及健康状态　　**/lock** <id> 持久锁定　　**/lock off** 解锁\n"
-        "**/model** <id> 等价于 /lock\n"
+        "**/lock** — 列出所有 backend 及健康状态\n"
+        "**/lock <id>** — 持久锁定某个 backend\n"
+        "**/lock off** — 解锁\n"
         "\n"
         "**♻️ 重置细分**\n"
-        "**/reset** claude · gemini · kimi · deepseek — 单独重置某个 backend 会话\n"
-        "**/reset perm** 权限审批　　**/reset memory** 清除会话记忆（全局/项目保留）\n"
+        "**/reset** claude | gemini | kimi | deepseek — 单独重置某 backend 会话\n"
+        "**/reset perm** — 权限审批\n"
+        "**/reset memory** — 清除会话记忆（全局/项目保留）\n"
         "\n"
         "**🧠 记忆系统**（每 10 轮自动从对话中提取，无需手工维护）\n"
-        "**/memory** 查看三层（全局/项目/会话）　　**/memory observe** 容量与健康度\n"
-        "**/memory set global|project** <内容> — 手动覆盖偏好 / 项目记忆\n"
-        "**/memory update** 立即触发摘要 + 抽取　　**/memory clear** session|project|global|all\n"
-        "**/memory list** · **/memory gc** [天数] [apply]　　**/memory export** · **/memory import** [file_key]\n"
+        "**/memory** — 查看三层（全局/项目/会话）\n"
+        "**/memory observe** — 容量与健康度\n"
+        "**/memory set** global | project <内容> — 手动覆盖偏好/项目记忆\n"
+        "**/memory update** — 立即触发摘要 + 抽取\n"
+        "**/memory clear** session | project | global | all — 清除指定记忆层\n"
+        "**/memory list** — 列出记忆文件\n"
+        "**/memory gc [天数] [apply]** — 清理过期记忆\n"
+        "**/memory export** — 导出记忆 zip\n"
+        "**/memory import [file_key]** — 导入记忆 zip\n"
         "\n"
-        "**📦 其他命令** ：**/doc** read/append/write/create/setfolder · **/voice** [status|lang …] · "
-        "**/cron** add/list/del · **/btw** <问题>（快问，不占主锁） · **/upgrade**"
+        "**📦 其他命令**\n"
+        "**/doc** read | append | write | create | setfolder — 飞书文档读写\n"
+        "**/voice** status | lang … — 语音转写设置\n"
+        "**/cron** add | list | del — 定时任务\n"
+        "**/btw <问题>** — 快问，不占主锁\n"
+        "**/upgrade** — 更新 larkhelm\n"
     )
     # Button label = ``→ {backend_name}``: the arrow conveys "switch to"
     # without spending 4 visual cols on the verb "切换". DeepSeek (8 ASCII)
@@ -476,7 +456,7 @@ def _cmd_help(chat_id: str, msg_id: str = None):
     buttons = [
         ("重置", "/reset"),
         ("取消", "/cancel"),
-        (f"→ {other}", f"/model {other}"),
+        (f"→ {other}", f"/lock {other}"),
     ]
     send_card_reply(chat_id, msg_id, "📖 帮助", body, color="blue", buttons=buttons, normalize=False)
 

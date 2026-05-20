@@ -13,7 +13,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from larkhelm.log import _debug_log
 
-PROBE_TIMEOUT = 12  # seconds per probe
+PROBE_TIMEOUT = 20  # seconds per probe
+# NOTE: gemini-cli in launchd/service context (no keychain session) falls back
+# from macOS Keychain to FileKeychain, adding ~10s of startup overhead before
+# the first stream-json event arrives. 20s gives a comfortable margin so the
+# free_tier_ok / model-name check can run cleanly instead of landing on the
+# indeterminate timeout path.
 _MAX_WORKERS   = 4  # concurrent probes
 
 # Sentinel returned by CLI probes when the subprocess times out — meaning
@@ -33,31 +38,86 @@ PROBE_INDETERMINATE_TIMEOUT = (None, "subprocess timeout")
 # ── Per-provider probe functions ─────────────────────────────────────────────
 
 def _probe_gemini(spec) -> tuple[bool | None, str]:
+    """Stream-parse gemini's stdout to detect the first ``init`` event, then
+    terminate the process immediately.
+
+    Using ``subprocess.run(capture_output=True)`` blocks until gemini fully
+    finishes a session (tool calls, rate-limit retries, …) which takes far
+    longer than PROBE_TIMEOUT even when the ``init`` event arrives within ~10s.
+    Popen + select + readline lets us bail as soon as we have a verdict and
+    avoids leaving a long-running gemini process behind.
+    """
+    import select as _select
+    import time as _time
+
     cmd = [spec.command or "gemini"]
     if spec.model:
         cmd += ["-m", spec.model]
     cmd += ["-y", "-p", ".", "--output-format", "stream-json"]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=PROBE_TIMEOUT)
-        for line in r.stdout.splitlines():
-            try:
-                ev = json.loads(line)
-                if ev.get("type") in ("init", "result", "message"):
-                    return True, ""
-            except Exception:
-                pass
-        if r.returncode == 0:
-            return True, ""
-        err = r.stderr[:200].strip()
-        if "ModelNotFound" in err or "not found" in err.lower():
-            return False, f"model not found: {spec.model or '(default)'}"
-        return False, err
-    except subprocess.TimeoutExpired:
-        # Indeterminate — see PROBE_INDETERMINATE_TIMEOUT comment for why
-        # this is None and not True.
-        return PROBE_INDETERMINATE_TIMEOUT
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
     except Exception as e:
         return False, str(e)[:200]
+
+    result: tuple[bool | None, str] = PROBE_INDETERMINATE_TIMEOUT
+    deadline = _time.monotonic() + PROBE_TIMEOUT
+    try:
+        while _time.monotonic() < deadline:
+            remaining = max(0.0, deadline - _time.monotonic())
+            readable, _, _ = _select.select([proc.stdout], [], [], remaining)
+            if not readable:
+                break  # deadline elapsed
+            line = proc.stdout.readline()
+            if not line:
+                break  # process closed stdout (EOF)
+            try:
+                ev = json.loads(line)
+                if ev.get("type") == "init":
+                    used_model = ev.get("model", "")
+                    # free_tier_ok=False: reject models whose name contains "preview"
+                    # (Google's naming convention for free-tier / experimental models,
+                    # e.g. "gemini-3-flash-preview"). Paid models don't carry this suffix.
+                    if not getattr(spec, "free_tier_ok", True) and "preview" in used_model.lower():
+                        result = (False, f"free-tier model ({used_model}), subscription required")
+                    else:
+                        result = (True, "")
+                    break
+                if ev.get("type") in ("result", "message"):
+                    result = (True, "")
+                    break
+            except Exception:
+                pass
+
+        # If no structured event was seen, check whether the process exited
+        # cleanly on its own (rc=0 ⟹ treat as healthy).
+        if result is PROBE_INDETERMINATE_TIMEOUT:
+            rc = proc.poll()
+            if rc == 0:
+                result = (True, "")
+            elif rc is not None:
+                try:
+                    err = proc.stderr.read(200).strip()
+                except Exception:
+                    err = f"rc={rc}"
+                if "ModelNotFound" in err or "not found" in err.lower():
+                    result = (False, f"model not found: {spec.model or '(default)'}")
+                elif err:
+                    result = (False, err)
+    finally:
+        # Always terminate — we only needed the init event, not a full session.
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=1)
+        except Exception:
+            pass
+
+    return result
 
 
 def _probe_claude(spec) -> tuple[bool | None, str]:
@@ -386,28 +446,39 @@ def probe_spec(spec) -> tuple[bool | None, str]:
     """
     try:
         if spec.provider == "gemini_cli":
-            return _probe_gemini(spec)
+            result = _probe_gemini(spec)
         elif spec.provider == "claude_cli":
-            return _probe_claude(spec)
+            result = _probe_claude(spec)
         elif spec.provider == "kimi_cli":
-            return _probe_kimi(spec)
-        # API backends — prefer real probe, fall back to key-presence check
-        try:
-            from larkhelm import config as _cfg
-            real = bool(getattr(_cfg, "BACKEND_PROBE_API_REAL_CALL", True))
-        except Exception:
-            real = True
-        if not real:
-            return _probe_api(spec)
-        if spec.provider == "anthropic_api":
-            return _probe_anthropic_real(spec)
-        if spec.provider == "google_api":
-            return _probe_google_real(spec)
-        if spec.provider == "openai_compat_api":
-            return _probe_openai_compat_real(spec)
-        if spec.provider == "deepseek_api":
-            return _probe_deepseek_real(spec)
-        return _probe_api(spec)
+            result = _probe_kimi(spec)
+        else:
+            # API backends — prefer real probe, fall back to key-presence check
+            try:
+                from larkhelm import config as _cfg
+                real = bool(getattr(_cfg, "BACKEND_PROBE_API_REAL_CALL", True))
+            except Exception:
+                real = True
+            if not real:
+                result = _probe_api(spec)
+            elif spec.provider == "anthropic_api":
+                result = _probe_anthropic_real(spec)
+            elif spec.provider == "google_api":
+                result = _probe_google_real(spec)
+            elif spec.provider == "openai_compat_api":
+                result = _probe_openai_compat_real(spec)
+            elif spec.provider == "deepseek_api":
+                result = _probe_deepseek_real(spec)
+            else:
+                result = _probe_api(spec)
+
+        # free_tier_ok=False: fail closed on indeterminate probes.
+        # If we can't confirm the backend is NOT on a free tier, treat it as
+        # unavailable — avoids silently routing to a quota-limited free tier
+        # when the operator has explicitly opted out of free-tier usage.
+        ok, err = result
+        if ok is None and not getattr(spec, "free_tier_ok", True):
+            return False, f"probe inconclusive ({err}) — treated as unhealthy (free_tier_ok=false)"
+        return result
     except Exception as e:
         return False, str(e)[:200]
 
