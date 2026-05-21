@@ -12,7 +12,7 @@ chat_state, parent_id detection, or cancel-event plumbing in ways that
 don't generalise. Everything else lives here.
 
 Imports are deliberately lazy (inside handlers / inside ``_default_registrations``)
-so importing this module never drags in commands.py / cmd_doc.py / crew —
+so importing this module never drags in commands.py / doc_handlers.py / crew —
 keeping ``handlers/_message.py`` import time minimal.
 """
 from __future__ import annotations
@@ -337,7 +337,7 @@ def _default_registrations() -> None:
         sub_matches=("/history all",),
     ))
 
-    # ── /stats / /memory / /doc / /cron ────────────────────────────
+    # ── /stats / /memory / /cron ──────────────────────────────────
     def _h_stats(ctx: DispatchContext) -> None:
         from larkhelm.commands import _cmd_stats
         _cmd_stats(ctx.chat_id, ctx.msg_id, args=ctx.raw_args)
@@ -347,11 +347,6 @@ def _default_registrations() -> None:
         from larkhelm.commands import _cmd_memory
         _cmd_memory(ctx.chat_id, ctx.raw_args, ctx.msg_id, sender_open_id=ctx.sender_open_id)
     register(CommandSpec(name="/memory", handler=_h_memory, match_kind="prefix"))
-
-    def _h_doc(ctx: DispatchContext) -> None:
-        from larkhelm.cmd_doc import _cmd_doc
-        _cmd_doc(ctx.chat_id, ctx.raw_args)
-    register(CommandSpec(name="/doc", handler=_h_doc, match_kind="prefix"))
 
     def _h_cron(ctx: DispatchContext) -> None:
         from larkhelm.commands import _cmd_cron

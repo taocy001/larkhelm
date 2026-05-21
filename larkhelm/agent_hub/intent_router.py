@@ -67,11 +67,12 @@ def _reset_embedding_cache_for_tests() -> None:
 
 
 # ── Explicit slash-command prefixes mapped to agent_type ────────────────
+# Note: ``/doc`` was retired as a user-facing slash command (方案B). DocAgent
+# is still reachable via L1 trigger heuristics + L2 LLM intent classification.
 _EXPLICIT_PREFIXES: list[tuple[tuple[str, ...], str]] = [
     (("/dev",), "dev"),
     (("/crew",), "crew"),
     (("/plan",), "plan"),
-    (("/doc",), "doc"),
 ]
 
 

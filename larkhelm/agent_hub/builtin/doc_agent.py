@@ -1,4 +1,9 @@
-"""larkhelm · agent_hub.builtin.doc_agent — thin wrapper over ``_cmd_doc``."""
+"""larkhelm · agent_hub.builtin.doc_agent — thin wrapper over ``_cmd_doc``.
+
+After retiring the ``/doc`` user-facing slash command (方案B), the underlying
+dispatcher moved from ``cmd_doc`` → ``doc_handlers``. DocAgent is the only
+remaining caller of that natural-language entry point.
+"""
 from __future__ import annotations
 
 import time
@@ -13,7 +18,7 @@ class DocAgent(AgentExecutor):
     required_capabilities = ("tools",)
 
     def execute(self, intent: IntentResult, ctx: AgentContext) -> AgentResult:
-        from larkhelm.cmd_doc import _cmd_doc
+        from larkhelm.doc_handlers import _cmd_doc
 
         start = time.monotonic()
         try:

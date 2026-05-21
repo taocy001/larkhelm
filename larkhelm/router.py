@@ -6,7 +6,7 @@ Routing rules (priority high → low):
   2. has_doc_urls → get_by_tag(["tools"])  (also flips require_tools=True downstream)
   3. enable_cheap_routing + short message + no images/docs → get_by_tag(["cheap", "fast"])
      **NEW**: cheap routing is suppressed when ``_likely_needs_tools(message)``
-     so a short query like "看下 cmd_doc.py" / "grep foo" doesn't get sent to
+     so a short query like "看下 commands.py" / "grep foo" doesn't get sent to
      a text-only API backend (e.g. DeepSeek) that can't actually read files.
   4. user preference backend_id (chat_state) → registry.get(backend_id)
   5. config default_backend → orchestrator chain → first healthy enabled
@@ -81,7 +81,7 @@ def _likely_needs_tools(message: str) -> bool:
 
     Tuned for false-positive over false-negative: a chat about "Python
     development" without specific files / commands doesn't match (no
-    file extension or command verb), but "看一下 cmd_doc.py" / "grep
+    file extension or command verb), but "看一下 commands.py" / "grep
     -n foo" / a fenced code block does.
 
     Empty / blank messages → False (no tools needed for empty input).
@@ -178,7 +178,7 @@ def resolve_backend(
     # Rule 3: cheap routing for short messages.
     #
     # Suppressed when ``require_tools`` — e.g. user said "看一下
-    # cmd_doc.py" (short, but needs Read tool). Without this guard,
+    # commands.py" (short, but needs Read tool). Without this guard,
     # cheap routing happily picked DeepSeek API which has no tool-use
     # capability and produced confident wrong answers about files it
     # never read. (Approach C unification: same require_tools logic as

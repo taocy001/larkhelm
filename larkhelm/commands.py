@@ -28,7 +28,7 @@ from larkhelm.token_stats import (
     summarize_crew_agent_tokens_for_chat,
 )
 from larkhelm.perm import revoke_yolo, is_yolo
-from larkhelm.cmd_doc import _cmd_doc, _cmd_doc_write_do
+from larkhelm.doc_handlers import _cmd_doc_write_do  # backs the doc_write_confirm card button (DocAgent path)
 from larkhelm.lark_client import (
     send_card, send_card_reply, reply_card, _send_card_raw, _patch_card_raw, _reply_card_raw,
     react_to_message, delete_reaction,
@@ -442,12 +442,8 @@ def _cmd_help(chat_id: str, msg_id: str = None):
         "**/memory export** — 导出记忆 zip\n"
         "**/memory import [file_key]** — 导入记忆 zip\n"
         "\n"
-        "**📦 其他命令**\n"
-        "**/doc** read | append | write | create | setfolder — 飞书文档读写\n"
-        "**/voice** status | lang … — 语音转写设置\n"
-        "**/cron** add | list | del — 定时任务\n"
-        "**/btw <问题>** — 快问，不占主锁\n"
-        "**/upgrade** — 更新 larkhelm\n"
+        "**📦 其他命令** ：**/voice** [status|lang …] · "
+        "**/cron** add/list/del · **/btw** <问题>（快问，不占主锁） · **/upgrade**"
     )
     # Button label = ``→ {backend_name}``: the arrow conveys "switch to"
     # without spending 4 visual cols on the verb "切换". DeepSeek (8 ASCII)

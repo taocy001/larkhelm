@@ -113,7 +113,7 @@ larkhelm/
 │   ├── _query.py       (461 行)  - AI 查询流程（流式卡片更新、超时、取消）
 │   └── _card_action.py (186 行)  - 卡片按钮回调分发
 ├── commands.py         (893 行)  - 命令实现（/run, /cd, /ls 等核心命令）
-├── cmd_doc.py          (441 行)  - /doc 和 /doc wiki 子命令族
+├── doc_handlers.py     (441 行)  - 飞书文档/Wiki 读写 dispatcher（natural-language 入口，被 DocAgent 调用；用户面 /doc 已下线）
 ├── chat_state.py       (165 行)  - Per-chat 状态持久化（cwd/model/crons）
 ├── concurrency.py      (135 行)  - 并发原语（per-chat 锁、取消事件、信号量）
 ├── dedup.py            (34 行)   - 消息去重（OrderedDict 缓存）
@@ -319,8 +319,6 @@ cat updated.md | larkhelm doc write "https://feishu.cn/docx/xxxx"
 | `/btw <prompt>` | `_cmd_btw()` | commands.py:608 | Quick side question (bypasses main lock) |
 | `/crew <task>` | `cmd_crew()` | crew.py | Multi-agent collaborative planning |
 | `/dev <task>` | `cmd_dev()` | crew.py | Software engineering pipeline |
-| `/doc <sub>` | `_cmd_doc_*()` | cmd_doc.py | 读写飞书文档（read/write/append/list 等子命令） |
-| `/doc wiki <sub>` | `_cmd_doc_wiki_*()` | cmd_doc.py | 飞书 Wiki 操作（read/create/list 等） |
 | `/rename <名称>` | inline | handlers.py | 给当前会话命名 |
 | `/voice [status\|lang <zh\|en\|auto>]` | `_cmd_voice()` | commands.py | 查看 / 切换语音转写设置（卡片显示当前 engine + 状态）|
 | `/memory export` | `_cmd_memory()` | commands.py | 导出当前 chat 的所有持久化数据为 zip 文件，机器人回复文件消息 |

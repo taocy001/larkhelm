@@ -511,7 +511,7 @@ def handle_message(data: P2ImMessageReceiveV1):
 
         # ── Registry-driven dispatch (S1+S7) ──
         # Covers /reset, /status, /help, /pickup, /upgrade, /history, /stats,
-        # /memory, /doc, /cron, /crew, /dev, /plan, /pwd, /cd, /ls, /run,
+        # /memory, /cron, /crew, /dev, /plan, /pwd, /cd, /ls, /run,
         # /model (+ /lock alias), /voice. See command_registry._default_registrations.
         from larkhelm.command_registry import COMMAND_REGISTRY, DispatchContext
         _dctx = DispatchContext(chat_id=chat_id, msg_id=_mid, text=text, tl=tl,
