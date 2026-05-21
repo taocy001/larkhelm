@@ -209,8 +209,9 @@ class DefaultRegistrationsTests(unittest.TestCase):
         from larkhelm.command_registry import COMMAND_REGISTRY
         names = {s.name for s in COMMAND_REGISTRY.iter_visible()}
         # A representative subset — full coverage is in test_handlers_message_routing.
+        # /doc was retired in commit 7c9845c (方案B) — no longer in the registry.
         for expected in ("/status", "/help", "/reset", "/run", "/cd", "/ls",
-                         "/dev", "/crew", "/plan", "/memory", "/doc", "/cron",
+                         "/dev", "/crew", "/plan", "/memory", "/cron",
                          "/model", "/voice"):
             self.assertIn(expected, names, f"{expected} missing from default registry")
 

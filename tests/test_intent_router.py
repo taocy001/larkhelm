@@ -24,9 +24,13 @@ class TestExplicitPrefixes(unittest.TestCase):
         self.assertEqual(intent.agent_type, "crew")
         self.assertTrue(intent.is_explicit_command)
 
-    def test_doc_prefix(self):
+    def test_doc_prefix_retired(self):
+        # 方案B (commit 7c9845c) retired /doc as a user-facing slash command.
+        # The router must NOT recognise it as an explicit prefix anymore —
+        # falls through to L2 / fallback like any free-form text.
         intent = resolve_intent("/doc read https://x.feishu.cn/docx/abc")
-        self.assertEqual(intent.agent_type, "doc")
+        self.assertFalse(intent.is_explicit_command)
+        self.assertNotEqual(intent.layer, "L1")
 
 
 class TestL1Rules(unittest.TestCase):
@@ -49,6 +53,28 @@ class TestL1Rules(unittest.TestCase):
         intent = resolve_intent("把这段总结写到 https://feishu.cn/docx/abc",
                                 has_doc_urls=True)
         self.assertEqual(intent.agent_type, "doc")
+
+    def test_doc_url_with_new_doc_object_defers_to_l2(self):
+        # Regression for the wiki-link case where the user wants to *read*
+        # the URL'd doc and *write a brand-new document* (verb's object is
+        # the new doc, not the URL'd one). Must NOT land on DocAgent's L1
+        # rule — fall through to L2 LLM (or fallback in unit tests, since
+        # no cheap backend is registered).
+        text = (
+            "https://my.feishu.cn/wiki/Uu7Rwvcn 这是一篇超节点场景交换机OS中SUE功能的文档，"
+            "里面有很多观点是错误的，找出所有错误观点重新写一份正确的文档。"
+        )
+        intent = resolve_intent(text, has_doc_urls=True)
+        self.assertNotEqual(intent.agent_type, "doc")
+        self.assertNotEqual(intent.layer, "L1")
+
+    def test_doc_url_new_doc_short_form(self):
+        # Shorter variant: "写一份" + 文档 keyword in the same sentence.
+        intent = resolve_intent(
+            "看 https://feishu.cn/docx/abc 然后写一份新的总结",
+            has_doc_urls=True,
+        )
+        self.assertNotEqual(intent.agent_type, "doc")
 
 
 class TestL2Fallback(unittest.TestCase):

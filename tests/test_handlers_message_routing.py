@@ -82,8 +82,8 @@ _CASES = [
     ("/model claude",             "larkhelm.commands._cmd_lock",           "claude"),
     ("/lock kimi",                "larkhelm.commands._cmd_lock",           "kimi"),
     ("/voice status",             "larkhelm.commands._cmd_voice",          "status"),
-    # /doc — args land on the dispatcher
-    ("/doc read https://x",       "larkhelm.cmd_doc._cmd_doc",             "read"),
+    # /doc retired in 7c9845c (方案B) — no longer a user-facing slash command.
+    # DocAgent is reachable via intent router's L1 triggers + L2 LLM only.
 ]
 
 # Async commands are dispatched on a daemon thread; they need a small grace

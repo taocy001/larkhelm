@@ -123,7 +123,8 @@ class TestHelpCardLayout(unittest.TestCase):
             "/cd",        # cwd switch
             "/run",       # shell exec
             "/memory",    # memory subsystem
-            "/doc",       # Feishu doc ops
+            # /doc was retired in commit 7c9845c (方案B) — DocAgent is still
+            # reachable via L1 trigger heuristics + L2 LLM intent classification.
             "/cron",      # scheduled tasks
             "/status",    # runtime status
             "/history",   # conversation log

@@ -94,6 +94,19 @@ _DOC_TRIGGERS = (
     "write to feishu doc", "append to wiki",
 )
 
+# Guard for the ``has_doc_urls + write-verb`` L1 rule below: when the user's
+# text shows they want to read the URL'd doc and write a *brand-new* document
+# (e.g. "看 wiki 找出错误观点重新写一份正确的文档"), the verb's object is the
+# new document, not the URL'd one. Defer such cases to L2 LLM instead of
+# slamming them into DocAgent. Matches Chinese "一份/一篇/一个 (新|正确|完整|另) (的)? 文档/笔记/总结/稿/文章/wiki"
+# and English "a new doc/document/note/article/page/wiki".
+_NEW_DOC_OBJECT_RE = re.compile(
+    r"一?\s*[份篇个]\s*(?:新的?|正确的?|完整的?|另一?|另起的?)?\s*"
+    r"(?:文档|文稿|笔记|总结|稿|文章|wiki|doc|document|note|article|page)"
+    r"|a\s+new\s+(?:doc|document|note|article|page|wiki)",
+    re.IGNORECASE,
+)
+
 
 def _match_prefix(text_l: str) -> str | None:
     for prefixes, agent in _EXPLICIT_PREFIXES:
@@ -107,10 +120,14 @@ def _resolve_l1(text: str, images: list | None, has_doc_urls: bool) -> IntentRes
     t = text.lower()
 
     if has_doc_urls and any(k in text for k in ("写", "更新", "保存", "覆盖", "追加", "append", "write", "update")):
-        return IntentResult(
-            agent_type="doc", layer="L1", confidence=0.85,
-            reasoning="contains feishu doc URL + write verb", raw_text=text,
-        )
+        # Defer "read URL'd doc, write a NEW doc" intents to L2 LLM. The
+        # write verb's grammatical object is the new doc, not the URL'd one,
+        # so DocAgent (which writes back to the URL) is the wrong target.
+        if not _NEW_DOC_OBJECT_RE.search(text):
+            return IntentResult(
+                agent_type="doc", layer="L1", confidence=0.85,
+                reasoning="contains feishu doc URL + write verb", raw_text=text,
+            )
 
     for kw in _DOC_TRIGGERS:
         if kw in text or kw in t:
