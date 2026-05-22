@@ -91,11 +91,11 @@ def _line_key(raw: bytes) -> str:
 def _atomic_write(dest: Path, data: bytes) -> None:
     tmp = dest.with_suffix(dest.suffix + ".tmp")
     tmp.write_bytes(data)
-    os.replace(tmp, dest)
     try:
-        os.chmod(dest, 0o600)
+        os.chmod(tmp, 0o600)
     except Exception:
         pass
+    os.replace(tmp, dest)
 
 
 def _redact_config(raw: dict) -> dict:
