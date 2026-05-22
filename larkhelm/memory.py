@@ -1036,7 +1036,7 @@ def generate_memory(chat_id: str, recent_logs: str,
 # for project, chat_id-derived for global) so cross-chat contention is nil.
 
 def _session_hash(session_content: str) -> str:
-    return hashlib.md5((session_content or "").encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256((session_content or "").encode("utf-8")).hexdigest()
 
 
 def _should_skip_extract_by_hash(prev_fm: dict, session_content: str,
@@ -1044,7 +1044,7 @@ def _should_skip_extract_by_hash(prev_fm: dict, session_content: str,
     """Return True iff the previous extract used the same session payload.
 
     Equivalence definition:
-      * ``last_extracted_session_hash`` matches md5(session_content)[:16] AND
+      * ``last_extracted_session_hash`` matches sha256(session_content) AND
       * ``abs(prev_len - cur_len) < len_tolerance`` (defends against rare
         hash false-positive on near-empty inputs).
 
@@ -1420,6 +1420,10 @@ def _cascade_extract(session_content: str, chat_id: str) -> None:
                 f"[Memory] cascade sem busy ({label}), abandoning extract for {chat_id[:8]}"
             )
             _cascade_inc_dropped()
+            # MEM-H3: clean up our cancel event so _active_cascade_cancels doesn't leak.
+            with _active_cancels_lock:
+                if _active_cascade_cancels.get(chat_id) is new_ev:
+                    _active_cascade_cancels.pop(chat_id, None)
             return
         _cascade_inc_active()
         try:
@@ -1663,7 +1667,7 @@ def _layer_meter_line(chars: int, max_chars: int) -> str:
     if max_chars <= 0:
         pct = 0
     else:
-        pct = chars * 100 // max_chars
+        pct = round(chars * 100 / max_chars)
     base = f"[{chars}/{max_chars} chars, {pct}%]"
     if pct >= _NEAR_LIMIT_PCT:
         base += " ⚠️ near limit"
@@ -1772,7 +1776,7 @@ def _aggregate_memory_observation(
     def _layer_stat(content: str | None, max_chars: int, path: Path | None) -> dict:
         chars = len(content or "")
         if max_chars > 0:
-            pct = chars * 100 // max_chars
+            pct = round(chars * 100 / max_chars)
         else:
             pct = 0
         updated_at: str | None = None

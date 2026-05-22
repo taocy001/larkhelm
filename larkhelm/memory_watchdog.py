@@ -71,16 +71,10 @@ def start_memory_watchdog(limit_mb: int, interval: int = CHECK_INTERVAL_SEC) -> 
 
         while True:
             try:
-                time.sleep(interval)
-            except Exception:
-                time.sleep(interval)
-
-            try:
                 rss = _rss_mb()
                 if rss <= 0:
-                    continue  # psutil unavailable; skip check
-
-                if rss >= limit_mb:
+                    pass  # psutil unavailable; skip check
+                elif rss >= limit_mb:
                     # ── Hard limit hit ────────────────────────────────────────
                     from larkhelm.log import error
                     error(
@@ -118,5 +112,10 @@ def start_memory_watchdog(limit_mb: int, interval: int = CHECK_INTERVAL_SEC) -> 
                     safe_log(f"[MemWatchdog] 监控循环异常: {exc}")
                 except Exception:
                     pass
+            # Sleep at the end so the first tick fires immediately at startup.
+            try:
+                time.sleep(interval)
+            except Exception:
+                time.sleep(interval)
 
     threading.Thread(target=_loop, daemon=True, name="memory-watchdog").start()

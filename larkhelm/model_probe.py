@@ -7,11 +7,30 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from larkhelm.log import _debug_log
+
+# Allowlist for spec.model — prevents CLI flag injection (e.g. "--config=/etc/shadow").
+# Permits alphanumerics, hyphens, dots, underscores, colons, slashes, @-signs
+# (all used in real model identifiers like "gemini-2.5-flash", "claude-opus-4-7").
+_MODEL_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9._:/@-]{0,150}$')
+
+
+def _safe_model(model: str, spec_id: str) -> str | None:
+    """Return model string if safe to pass as a CLI argument, else None."""
+    if not model:
+        return model
+    if model.startswith('-'):
+        _debug_log(f"[Probe] rejected model starting with '-' for {spec_id}: {model!r}")
+        return None
+    if not _MODEL_RE.match(model):
+        _debug_log(f"[Probe] rejected unsafe model string for {spec_id}: {model!r}")
+        return None
+    return model
 
 PROBE_TIMEOUT = 20  # seconds per probe
 # NOTE: gemini-cli in launchd/service context (no keychain session) falls back
@@ -52,7 +71,10 @@ def _probe_gemini(spec) -> tuple[bool | None, str]:
 
     cmd = [spec.command or "gemini"]
     if spec.model:
-        cmd += ["-m", spec.model]
+        safe = _safe_model(spec.model, spec.id)
+        if safe is None:
+            return False, f"unsafe model string: {spec.model!r}"
+        cmd += ["-m", safe]
     cmd += ["-y", "-p", ".", "--output-format", "stream-json"]
     try:
         proc = subprocess.Popen(
@@ -123,7 +145,10 @@ def _probe_gemini(spec) -> tuple[bool | None, str]:
 def _probe_claude(spec) -> tuple[bool | None, str]:
     cmd = [spec.command or "claude", "--print", "--verbose", "--output-format", "stream-json"]
     if spec.model:
-        cmd += ["--model", spec.model]
+        safe = _safe_model(spec.model, spec.id)
+        if safe is None:
+            return False, f"unsafe model string: {spec.model!r}"
+        cmd += ["--model", safe]
     cmd += ["-p", "."]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=PROBE_TIMEOUT)
@@ -150,7 +175,10 @@ def _probe_kimi(spec) -> tuple[bool | None, str]:
     cmd = [spec.command or "kimi",
            "--print", "--output-format", "stream-json", "--input-format", "stream-json"]
     if spec.model:
-        cmd += ["--model", spec.model]
+        safe = _safe_model(spec.model, spec.id)
+        if safe is None:
+            return False, f"unsafe model string: {spec.model!r}"
+        cmd += ["--model", safe]
     # kimi 1.43 input schema: ``{"role":"user","content":"..."}`` (kosong
     # Message format), NOT ``{"type":"user","message":"..."}``. Pre-fix
     # sent the wrong shape so kimi-cli silently ignored stdin and exited

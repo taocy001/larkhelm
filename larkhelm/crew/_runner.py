@@ -865,7 +865,7 @@ def _wait_for_breakpoint(state: CrewState, agent_id: str) -> bool:
         if state.cancel_ev.is_set():
             _debug_log("[Crew] breakpoint wait interrupted by /cancel")
             break
-        if bp_ev.wait(timeout=2.0):   # wait returns True when the user has clicked
+        if bp_ev.wait(timeout=min(2.0, max(0.0, bp_deadline - time.time()))):  # clamp to avoid overshooting deadline
             break
     else:
         # Loop exited via condition (no break) — that's the timeout branch.
