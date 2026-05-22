@@ -119,8 +119,7 @@ class TestHelpCardLayout(unittest.TestCase):
             "/plan",      # multi-stage orchestration
             "/reset",     # session reset
             "/cancel",    # cancel current query
-            "/model",     # backend switch
-            "/lock",      # backend lock
+            "/lock",      # backend select / switch
             "/cd",        # cwd switch
             "/run",       # shell exec
             "/memory",    # memory subsystem
@@ -136,29 +135,13 @@ class TestHelpCardLayout(unittest.TestCase):
                 f"users can't discover it anymore"
             )
 
-    def test_help_body_shows_current_model_and_switch_target(self):
-        """The card's first line tells the user which model is active +
-        offers the switch button. Both pieces must be present."""
+    def test_help_body_shows_model_section_and_intro(self):
+        """The card body has an intro line and a per-model shortcut section."""
         cap = self._capture_help_call()
-        self.assertIn("当前模型", cap["body"])
-        # The switch button uses the compact "→ {backend}" form (the
-        # verb "切换" cost 4 visual cols for no information; the arrow
-        # conveys the same intent in 1-2). _NEXT_MODEL_CYCLE drives the
-        # backend name from the currently-active model; we monkey-
-        # patched it to "claude" so this just needs to find the arrow.
-        switch_buttons = [
-            (label, cmd) for (label, cmd) in cap["buttons"]
-            if label.startswith("→")
-        ]
-        self.assertEqual(
-            len(switch_buttons), 1,
-            f"exactly one '→ <backend>' button expected, got {cap['buttons']}"
-        )
-        switch_label, switch_cmd = switch_buttons[0]
-        self.assertTrue(
-            switch_cmd.startswith("/model "),
-            f"switch button cmd must be /model <id>: {switch_cmd!r}"
-        )
+        # Intro line must be present so users know how to start
+        self.assertIn("发消息直接提问", cap["body"])
+        # Per-model shortcut section must be discoverable
+        self.assertIn("与指定模型对话", cap["body"])
 
     def test_help_card_title_and_color(self):
         cap = self._capture_help_call()
