@@ -57,6 +57,36 @@ _OUTPUT_SENTINELS: tuple[str, ...] = (
 )
 
 
+def _strip_fenced_code_blocks(text: str) -> str:
+    """Remove ```...``` fenced blocks from ``text`` so downstream sentinel
+    scans only see narrative prose, not quoted evidence.
+
+    Motivation: documentation agents (QA, implementer-when-it-bails-out,
+    reviewer) legitimately quote upstream corrupt output inside a code
+    fence as evidence — see ``changes.md`` lines 22-35 of the 2026-05-22
+    failure where the implementer embedded the full ``<｜｜DSML｜｜...>``
+    block to explain why it couldn't proceed. Without this strip, those
+    fenced quotes would trip the sentinel detector and the validator
+    would mark legitimate bail-out reports as FAILED.
+
+    Tradeoff: a malicious / sloppy backend could wrap its own leaked
+    tool-call output in a pseudo-fence to bypass detection. Considered
+    out of scope — the realistic adversary is "fenced quoted evidence",
+    not "adversarially-crafted fence wrapper".
+    """
+    if "```" not in text:
+        return text
+    out: list[str] = []
+    in_fence = False
+    for line in text.split("\n"):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue   # drop the fence marker itself too
+        if not in_fence:
+            out.append(line)
+    return "\n".join(out)
+
+
 def _validate_output_artifact(state: CrewState, agent_id: str, result: str) -> str:
     """Return a short problem description if the agent's output artifact is
     structurally corrupt, or "" if it looks OK.
@@ -64,9 +94,11 @@ def _validate_output_artifact(state: CrewState, agent_id: str, result: str) -> s
     Two failure modes covered:
       1. Tool-call protocol tokens leaked into the artifact (see
          ``_OUTPUT_SENTINELS``). Downstream stages would parse these as
-         markdown content and silently produce garbage.
+         markdown content and silently produce garbage. Sentinels inside
+         fenced code blocks are ignored — see ``_strip_fenced_code_blocks``.
       2. ``.json`` ``output_file`` that is not parseable JSON. Downstream
-         stages crash on ``json.load`` mid-wave.
+         stages crash on ``json.load`` mid-wave. JSON validation does NOT
+         strip fences (the whole file must parse).
 
     Scans the on-disk artifact when present (post Write tool) and falls back
     to the in-memory ``result`` otherwise. Only inspects the first 8 KiB —
@@ -95,16 +127,64 @@ def _validate_output_artifact(state: CrewState, agent_id: str, result: str) -> s
         candidates.append(("result", result))
 
     for label, content in candidates:
-        head = content[:8192]
+        # Sentinel scan: strip fences first so legitimate quoted evidence
+        # in docs (QA / implementer bail-out / review) does not trip.
+        prose = _strip_fenced_code_blocks(content)
+        head = prose[:8192]
         for s in _OUTPUT_SENTINELS:
             if s in head:
                 return f"{label} contains tool-call sentinel {s!r}"
+        # JSON validation runs on the full content — the file is supposed
+        # to be parseable end-to-end, fences would already invalidate it.
         if spec.output_file and spec.output_file.endswith(".json"):
             try:
                 json.loads(content)
             except Exception as e:
                 return f"{label} is not valid JSON: {type(e).__name__}: {str(e)[:120]}"
     return ""
+
+
+def _quarantine_invalid_output(state: CrewState, agent_id: str) -> None:
+    """Rename a validation-failed ``output_file`` to ``<name>.invalid`` so
+    the scheduler's partial-delivery rule (``_get_failed_dep``) does not
+    interpret the corrupt file as "delivered" and let downstream agents run.
+
+    Background: ``_get_failed_dep`` treats a FAILED upstream as non-blocking
+    when its ``output_file`` exists and is non-empty (designed for the
+    OOM-after-Write case where the artifact was atomically committed before
+    the agent process died). That rule has no way to know that the file
+    contents are structurally invalid — when our validator catches a
+    tool-call leak, we have to invalidate the file ourselves, otherwise the
+    crew cascades the same corruption through architect → implementer →
+    QA → reviewer (observed 2026-05-22 dev failure).
+
+    Atomic ``os.replace`` keeps the original bytes available for user
+    inspection at the new ``.invalid`` path instead of deleting them.
+    Failures here are logged and swallowed — quarantine is best-effort;
+    the FAILED status itself still gets emitted by ``emit_agent_failure``.
+    """
+    try:
+        spec = state.agents[agent_id].spec
+    except Exception:
+        return
+    if not spec.output_file:
+        return
+    try:
+        from larkhelm.chat_state import _get_cwd
+        cwd = _get_cwd(state.chat_id)
+        out_path = Path(cwd) / ".crew_workspace" / spec.output_file
+        if not out_path.exists():
+            return
+        invalid_path = out_path.with_suffix(out_path.suffix + ".invalid")
+        import os as _os
+        _os.replace(out_path, invalid_path)
+        warn(
+            f"[Crew] {agent_id} quarantined invalid output: "
+            f"{spec.output_file} → {invalid_path.name} "
+            f"(inspect this file to see what the backend produced)"
+        )
+    except Exception as e:
+        _debug_log(f"[Crew] {agent_id} quarantine failed: {e}")
 
 
 def _crew_owner_open_id(state: CrewState) -> str:
@@ -825,6 +905,11 @@ def _run_agent_wrapper(state: CrewState, agent_id: str) -> None:
                     f"output artifact contract violation: {artifact_issue}"
                 )
                 validate_failure = True
+                # Quarantine the corrupt file BEFORE breaking out, so the
+                # scheduler's partial-delivery rule does not see a
+                # nominally-present output_file and let downstream agents
+                # cascade-read the garbage (regression observed 2026-05-22).
+                _quarantine_invalid_output(state, agent_id)
                 break
             # Sync output_file before updating state to avoid holding the lock during IO
             feishu_url = _sync_output_file(state, agent_id)
