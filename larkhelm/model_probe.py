@@ -32,6 +32,22 @@ def _safe_model(model: str, spec_id: str) -> str | None:
         return None
     return model
 
+
+def _safe_command(command: str, spec_id: str) -> str | None:
+    """Return command if safe to use as a subprocess executable, else None.
+
+    Rejects strings containing whitespace — with shell=False, a whitespace-
+    containing command would cause FileNotFoundError at best, and could
+    mislead code that splits the command string.  Path traversal in an
+    executable field is an admin-config concern, not addressed here.
+    """
+    if not command:
+        return command
+    if any(c in command for c in (' ', '\t', '\n', ';', '|', '&')):
+        _debug_log(f"[Probe] rejected command with shell metacharacters for {spec_id}: {command!r}")
+        return None
+    return command
+
 PROBE_TIMEOUT = 20  # seconds per probe
 # NOTE: gemini-cli in launchd/service context (no keychain session) falls back
 # from macOS Keychain to FileKeychain, adding ~10s of startup overhead before
@@ -69,7 +85,10 @@ def _probe_gemini(spec) -> tuple[bool | None, str]:
     import select as _select
     import time as _time
 
-    cmd = [spec.command or "gemini"]
+    _cmd_bin = _safe_command(spec.command, spec.id) if spec.command else "gemini"
+    if _cmd_bin is None:
+        return False, f"unsafe command string: {spec.command!r}"
+    cmd = [_cmd_bin]
     if spec.model:
         safe = _safe_model(spec.model, spec.id)
         if safe is None:
@@ -143,7 +162,10 @@ def _probe_gemini(spec) -> tuple[bool | None, str]:
 
 
 def _probe_claude(spec) -> tuple[bool | None, str]:
-    cmd = [spec.command or "claude", "--print", "--verbose", "--output-format", "stream-json"]
+    _cmd_bin = _safe_command(spec.command, spec.id) if spec.command else "claude"
+    if _cmd_bin is None:
+        return False, f"unsafe command string: {spec.command!r}"
+    cmd = [_cmd_bin, "--print", "--verbose", "--output-format", "stream-json"]
     if spec.model:
         safe = _safe_model(spec.model, spec.id)
         if safe is None:
@@ -172,7 +194,10 @@ def _probe_claude(spec) -> tuple[bool | None, str]:
 
 
 def _probe_kimi(spec) -> tuple[bool | None, str]:
-    cmd = [spec.command or "kimi",
+    _cmd_bin = _safe_command(spec.command, spec.id) if spec.command else "kimi"
+    if _cmd_bin is None:
+        return False, f"unsafe command string: {spec.command!r}"
+    cmd = [_cmd_bin,
            "--print", "--output-format", "stream-json", "--input-format", "stream-json"]
     if spec.model:
         safe = _safe_model(spec.model, spec.id)
