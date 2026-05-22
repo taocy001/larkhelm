@@ -241,12 +241,24 @@ def _auto_discover_cli() -> list[dict]:
 
     Returns list of BackendSpec dicts (without 'role' — inferred by BackendRegistry.load()).
     Only includes CLIs found via shutil.which().
+
+    ``capability_scores`` keys MUST match the keys used by
+    ``TASK_PROFILES`` in ``crew/_backend_resolver.py``
+    (``reasoning`` / ``coding`` / ``tools`` / ``long_context`` / ``chat``).
+    Without these, ``rank_for_task`` falls back to a tag-intersection
+    score that ties every backend at 0 or 1, then breaks the tie on
+    ``spec.id`` alphabetical order — which means every profile would
+    resolve to ``claude`` regardless of capability fit.
     """
     known = [
-        {"id": "claude",    "provider": "claude_cli", "display_name": "Claude",    "tags": ["vision", "tools"], "command": "claude"},
-        {"id": "gemini",    "provider": "gemini_cli", "display_name": "Gemini",    "tags": ["tools"],           "command": "gemini"},
-        {"id": "kimi",      "provider": "kimi_cli",   "display_name": "Kimi",      "tags": ["vision", "tools"], "command": "kimi"},
-        {"id": "kimi-code", "provider": "kimi_cli",   "display_name": "Kimi-Code", "tags": ["tools"],           "command": "kimi-code"},
+        {"id": "claude",    "provider": "claude_cli", "display_name": "Claude",    "tags": ["vision", "tools"], "command": "claude",
+         "capability_scores": {"reasoning": 0.95, "coding": 0.95, "tools": 0.95, "long_context": 0.90, "chat": 0.85}},
+        {"id": "gemini",    "provider": "gemini_cli", "display_name": "Gemini",    "tags": ["tools"],           "command": "gemini",
+         "capability_scores": {"reasoning": 0.90, "coding": 0.85, "tools": 0.85, "long_context": 0.95, "chat": 0.80}},
+        {"id": "kimi",      "provider": "kimi_cli",   "display_name": "Kimi",      "tags": ["vision", "tools"], "command": "kimi",
+         "capability_scores": {"reasoning": 0.80, "coding": 0.85, "tools": 0.85, "long_context": 0.85, "chat": 0.95}},
+        {"id": "kimi-code", "provider": "kimi_cli",   "display_name": "Kimi-Code", "tags": ["tools"],           "command": "kimi-code",
+         "capability_scores": {"reasoning": 0.75, "coding": 0.95, "tools": 0.90, "long_context": 0.80, "chat": 0.65}},
     ]
     return [spec for spec in known if shutil.which(spec["command"])]
 
@@ -256,6 +268,11 @@ def _auto_discover_http() -> list[dict]:
 
     Currently DeepSeek only. Mirrors ``_auto_discover_cli`` shape so callers can
     treat both the same way.
+
+    Tags intentionally omit ``tools`` — the HTTP runner does not implement
+    function calling, so ``rank_for_task`` must filter DeepSeek out of any
+    profile with ``require_tools=True`` (planner stays unaffected; engineer /
+    qa stay tool-bound; chat / reviewer remain eligible).
     """
     out: list[dict] = []
 
@@ -274,6 +291,10 @@ def _auto_discover_http() -> list[dict]:
             "model":        config.get("deepseek_model", "deepseek-chat") or "deepseek-chat",
             "api_key":      ds_key,
             "base_url":     config.get("deepseek_base_url", "https://api.deepseek.com") or "https://api.deepseek.com",
+            "capability_scores": {"reasoning": 0.75, "coding": 0.80, "long_context": 0.65, "chat": 0.85},
+            "latency_tier":      "fast",
+            "cost_per_1k_input":  0.00014,
+            "cost_per_1k_output": 0.00220,
         })
     return out
 
