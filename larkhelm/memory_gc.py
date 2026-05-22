@@ -223,7 +223,20 @@ class MemoryGCRunner:
         except Exception as e:
             _debug_log(f"[MemoryGC] stat failed for {path.name}: {e}")
             return False
-        return mtime < cutoff
+        if mtime >= cutoff:
+            return False
+        # MEM-H9: skip sessions whose chat is currently loaded in memory
+        # (turn_count > 0 means the chat has been active since last restart).
+        stem = path.stem  # "session_<chat_id>"
+        if stem.startswith("session_"):
+            chat_id_candidate = stem[len("session_"):]
+            try:
+                from larkhelm.chat_state import _get_turn_count
+                if _get_turn_count(chat_id_candidate) > 0:
+                    return False
+            except Exception:
+                pass
+        return True
 
     def _loop(self) -> None:
         while True:

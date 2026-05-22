@@ -126,8 +126,11 @@ def _get_turn_count(chat_id: str) -> int:
 
 def _increment_turn_count(chat_id: str) -> int:
     with _state_lock:
-        new_count = _get_chat_state(chat_id).get("turn_count", 0) + 1
-        _chat_state_store.setdefault(chat_id, {})["turn_count"] = new_count
+        # Access _chat_state_store directly to avoid nested _get_chat_state()
+        # call inside the same RLock (defensive: keeps correct if lock type changes).
+        state = _chat_state_store.setdefault(chat_id, {})
+        new_count = state.get("turn_count", 0) + 1
+        state["turn_count"] = new_count
         _save_state()
     return new_count
 
