@@ -985,7 +985,8 @@ def _is_useful_summary(text: str | None) -> bool:
 
 
 def generate_memory(chat_id: str, recent_logs: str,
-                    existing_memory: str | None = None) -> str:
+                    existing_memory: str | None = None,
+                    cancel_ev: "threading.Event | None" = None) -> str:
     """Generate a session memory summary. Returns Markdown (≤SESSION_MAX_CHARS).
 
     Raises ``ValueError`` when the LLM output fails ``_is_useful_summary``
@@ -1013,7 +1014,8 @@ def generate_memory(chat_id: str, recent_logs: str,
         # whichever backend is tagged ``cheap``) when healthy. Summary quality
         # for compressing 10K-char dialog → 2K-char paragraph is roughly
         # equivalent across modern LLMs but pricing differs ~30×.
-        result = _run_one_shot(prompt, ns=f"{chat_id}__memory_session", prefer_cheap=True)
+        result = _run_one_shot(prompt, ns=f"{chat_id}__memory_session", prefer_cheap=True,
+                               cancel_ev=cancel_ev)
     except Exception as e:
         _debug_log(f"[Memory] generate_memory error {chat_id}: {e}")
         raise
@@ -1540,10 +1542,12 @@ def maybe_auto_update(chat_id: str, force: bool = False,
 
             result: list[str | None] = [None]
             err: list[Exception | None] = [None]
+            _gen_cancel = threading.Event()
 
             def _gen():
                 try:
-                    result[0] = generate_memory(chat_id, log_text, existing_memory=existing)
+                    result[0] = generate_memory(chat_id, log_text, existing_memory=existing,
+                                                cancel_ev=_gen_cancel)
                 except Exception as e:
                     err[0] = e
 
@@ -1552,6 +1556,7 @@ def maybe_auto_update(chat_id: str, force: bool = False,
             gen_t.join(timeout=MEMORY_GENERATION_TIMEOUT)
             if gen_t.is_alive():
                 _debug_log(f"[Memory] generate_memory timed out ({MEMORY_GENERATION_TIMEOUT}s) for {chat_id[:8]}")
+                _gen_cancel.set()  # MEM-H5: stop ghost thread from burning LLM tokens
                 _notify(False, None, f"timed_out_{MEMORY_GENERATION_TIMEOUT}s")
                 return
             if err[0]:

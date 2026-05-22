@@ -680,11 +680,17 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             if pending:
                 p_msg, p_model, p_user_msg_id, *_ = pending
                 _debug_log(f"[Queue/SoftTimeout] processing queued message: {p_msg[:60]}")
-                threading.Thread(
-                    target=_do_query,
-                    args=(chat_id, p_msg, p_model, p_user_msg_id),
-                    daemon=True, name=f"query-{chat_id[:8]}",
-                ).start()
+                try:
+                    threading.Thread(
+                        target=_do_query,
+                        args=(chat_id, p_msg, p_model, p_user_msg_id),
+                        daemon=True, name=f"query-{chat_id[:8]}",
+                    ).start()
+                except Exception as _te:
+                    # LOGIC-C5: thread creation failed (e.g. OOM); re-push so the
+                    # message isn't silently lost. Next incoming message will retry.
+                    _debug_log(f"[Queue/SoftTimeout] thread start failed, re-queueing: {_te}")
+                    _set_pending(chat_id, p_msg, p_model, p_user_msg_id)
 
         # ── Heartbeat thread ─────────────────────────────────────
         _stop_hb = threading.Event()
