@@ -351,11 +351,7 @@ def _cmd_status(chat_id: str, msg_id: str = None):
         tips.append("💡 **/pickup** — 获取在终端接力会话的命令")
         tips.append("💡 **/reset** — 清除会话，开始全新对话")
     lines += tips
-    buttons = [
-        ("♻️ 重置会话", "/reset"),
-        ("🔗 接入终端", "/pickup"),
-    ]
-    send_card_reply(chat_id, msg_id, "📊 运行状态", "\n".join(lines), color="turquoise", buttons=buttons, normalize=False)
+    send_card_reply(chat_id, msg_id, "📊 运行状态", "\n".join(lines), color="turquoise", normalize=False)
 
 
 def _cmd_help(chat_id: str, msg_id: str = None):
@@ -414,11 +410,7 @@ def _cmd_help(chat_id: str, msg_id: str = None):
         "**📦 其他命令** ：**/voice** [status|lang …] · "
         "**/cron** add/list/del · **/btw** <问题>（快问，不占主锁） · **/upgrade**"
     )
-    buttons = [
-        ("重置", "/reset"),
-        ("取消", "/cancel"),
-    ]
-    send_card_reply(chat_id, msg_id, "📖 帮助", body, color="blue", buttons=buttons, normalize=False)
+    send_card_reply(chat_id, msg_id, "📖 帮助", body, color="blue", normalize=False)
 
 
 def _cmd_pickup(chat_id: str, msg_id: str = None):
