@@ -898,7 +898,6 @@ def _run_one_shot(prompt: str, ns: str, prefer_cheap: bool = False,
     def _on_text(text: str, status: str = "typing") -> None:
         if _midflight_check is not None:
             _midflight_check(text, status)
-        collected.clear()
         collected.append(text)
 
     try:
@@ -1588,6 +1587,7 @@ def maybe_auto_update(chat_id: str, force: bool = False,
 # if multiple milestones fire close together. Cheap-LLM cost is bounded and
 # the summarizer has nothing useful to say about deltas <60s apart anyway.
 _MILESTONE_DEBOUNCE_SEC = 60
+_MILESTONE_TS_TTL = 3600  # evict entries older than 1h to bound dict size
 _last_milestone_ts: dict[str, float] = {}
 _milestone_meta = threading.Lock()
 
@@ -1638,6 +1638,11 @@ def record_milestone(chat_id: str, kind: str, summary: str = "") -> None:
             )
             return
         _last_milestone_ts[chat_id] = now
+        # Evict stale entries to bound dict size (MEM-H8).
+        if len(_last_milestone_ts) > 500:
+            cutoff = now - _MILESTONE_TS_TTL
+            for _cid in [k for k, v in _last_milestone_ts.items() if v < cutoff]:
+                del _last_milestone_ts[_cid]
 
     try:
         maybe_auto_update(chat_id, force=True)

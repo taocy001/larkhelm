@@ -548,9 +548,12 @@ def _compute_idf(slices: list[MemorySlice]) -> tuple[dict[str, float], float]:
     df: dict[str, int] = {}
     total_len = 0
     for s in slices:
-        terms = set(_tokenise(s.title)) | set(_tokenise(s.body))
-        terms |= set(_tokenise(" ".join(s.keywords)))
-        total_len += sum(1 for _ in _TOKEN_RE.findall(s.title + " " + s.body))
+        toks_title = _tokenise(s.title)
+        toks_body = _tokenise(s.body)
+        toks_kw = _tokenise(" ".join(s.keywords))
+        terms = set(toks_title) | set(toks_body) | set(toks_kw)
+        # Mirror the dl computation in _bm25_lite_score so avgdl is consistent (MEM-H7).
+        total_len += len(toks_title) + len(toks_body) + len(toks_kw)
         for t in terms:
             df[t] = df.get(t, 0) + 1
     avgdl = total_len / n if n else 0.0

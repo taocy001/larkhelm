@@ -493,6 +493,17 @@ def _init_app_config() -> None:
     global CLI_SKIP_RECENT_TURNS_WHEN_SID
 
     try:
+        # SEC-H1: warn when config file is world-readable (contains APP_SECRET).
+        try:
+            _mode = CONFIG_PATH.stat().st_mode & 0o777
+            if _mode & 0o077:  # group or world bits set
+                print(
+                    f"⚠️  安全警告: {CONFIG_PATH} 权限为 {oct(_mode)}，"
+                    "建议改为 600（仅本人可读）: "
+                    f"chmod 600 {CONFIG_PATH}"
+                )
+        except OSError:
+            pass
         config = json.loads(CONFIG_PATH.read_text())
         APP_ID     = config["APP_ID"]
         APP_SECRET = config["APP_SECRET"]
@@ -738,7 +749,10 @@ def _init_app_config() -> None:
     config.setdefault("embedding_http_timeout_sec", 5.0)
     config.setdefault("embedding_traffic", 0.0)             # Stage B gradual rollout, orthogonal to memory_retriever_traffic
     config.setdefault("embedding_enabled", False)           # Stage B master switch
-    config.setdefault("memory_stale_window_days", 90)       # how far back to look for "never hit"
+    # MEM-C2: stale window must not exceed audit retention (30d) — audit records
+    # older than retain_days are deleted, so slices can't be validated as "hit"
+    # beyond that horizon and would be wrongly marked stale.
+    config.setdefault("memory_stale_window_days", 30)       # how far back to look for "never hit"
     config.setdefault("memory_stale_decay", 0.5)            # stale relevance multiplier
     config.setdefault("memory_audit_rotate_max_mb", 32)     # per-file rollover threshold
     config.setdefault("memory_audit_retain_days", 30)       # unlink rotated files older than this
