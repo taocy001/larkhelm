@@ -506,8 +506,6 @@ def _build_plan_card(state: MultiPlanState) -> str:
         if state.last_step_failed:
             buttons.append(("🔄 重试本步", f"plan_retry:{state.plan_id}"))
         buttons.append(("▶ 继续", f"plan_continue:{state.plan_id}"))
-        if not state.last_step_failed:
-            buttons.append(("⏭ 跳过下一步", f"plan_skip:{state.plan_id}"))
         buttons.append(("🛑 取消", f"plan_cancel:{state.plan_id}"))
         return _make_card(title, body, color=color, buttons=buttons)
 

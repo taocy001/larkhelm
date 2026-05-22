@@ -53,18 +53,6 @@ _SENSITIVE_ENV_PREFIXES = frozenset({
 })
 
 
-# Model-rotation cycle for the "切换模型" button in /status and /help.
-# Single source of truth — historically duplicated literally across both
-# command bodies; kept module-level so future additions (e.g. a new
-# provider) need exactly one edit.
-_NEXT_MODEL_CYCLE = {
-    "claude":   "gemini",
-    "gemini":   "kimi",
-    "kimi":     "deepseek",
-    "deepseek": "claude",
-}
-
-
 def _run_shell(chat_id: str, cmd: str) -> tuple[str, str, int]:
     import os as _os
     cwd = _get_cwd(chat_id)
@@ -371,25 +359,6 @@ def _cmd_status(chat_id: str, msg_id: str = None):
 
 
 def _cmd_help(chat_id: str, msg_id: str = None):
-    model = _get_chat_model(chat_id)
-    other = _NEXT_MODEL_CYCLE.get(model, "claude")
-    # Help card layout rationale (重梳，2026-05-19):
-    #
-    # 1. Buttons: trimmed from 5 to 3. Feishu wraps multi-button rows in
-    #    a single ``column_set`` with ``width: "auto"`` (see
-    #    ``card_builder._make_buttons_block``), splitting available
-    #    width evenly. At 5 columns each button got ~⅕ of the card
-    #    width (~60 px on mobile); emoji-prefixed labels collapsed to
-    #    ``...``. 3 columns gives each button ~⅓ width, enough for
-    #    4–5 Chinese characters without ellipsis.
-    # 2. Labels: dropped emoji prefixes — they cost double-width and
-    #    don't add information beyond the 2-character verb.
-    # 3. Body: deduped — the "多 Agent 协作" section was a verbose
-    #    restatement of the decision tree above it; collapsed into the
-    #    tree. "单条消息指定模型" expanded over 4 lines for the same
-    #    pattern → collapsed to 1. Low-frequency commands (cron / doc /
-    #    voice / upgrade / btw) moved to a single "其他命令" line —
-    #    discoverable but not crowding the high-frequency content.
     body = (
         "发消息直接提问，命令均以 `/` 开头\n"
         "\n"
@@ -445,14 +414,9 @@ def _cmd_help(chat_id: str, msg_id: str = None):
         "**📦 其他命令** ：**/voice** [status|lang …] · "
         "**/cron** add/list/del · **/btw** <问题>（快问，不占主锁） · **/upgrade**"
     )
-    # Button label = ``→ {backend_name}``: the arrow conveys "switch to"
-    # without spending 4 visual cols on the verb "切换". DeepSeek (8 ASCII)
-    # is the longest possible suffix; arrow + space + 8 = 10 visual cols,
-    # comfortably inside the ⅓-column slot Feishu allocates for 3 buttons.
     buttons = [
         ("重置", "/reset"),
         ("取消", "/cancel"),
-        (f"→ {other}", f"/lock {other}"),
     ]
     send_card_reply(chat_id, msg_id, "📖 帮助", body, color="blue", buttons=buttons, normalize=False)
 
