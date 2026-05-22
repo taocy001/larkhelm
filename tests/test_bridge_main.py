@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import signal
+import sys
 import types
 from pathlib import Path
 
@@ -198,6 +199,24 @@ def test_post_init_notify_sends_restart_card(monkeypatch, tmp_path, fake_cfg):
     assert sent and sent[0][0] == "oc_x"
 
 
+# ── _handle_sigterm ──────────────────────────────────────────────────────
+
+
+def test_sigterm_handler_does_not_exit(monkeypatch):
+    """AC-05: _handle_sigterm must not call sys.exit and must only set shutting_down."""
+    import larkhelm.concurrency as _conc
+
+    exit_called: list = []
+    monkeypatch.setattr(sys, "exit", lambda code=0: exit_called.append(code))
+    # Reset the flag so we can assert it was set by the handler.
+    monkeypatch.setattr(_conc, "_shutting_down", False)
+
+    _br._handle_sigterm(signal.SIGTERM, None)
+
+    assert exit_called == [], "sys.exit must not be called from the signal handler"
+    assert _conc.is_shutting_down(), "set_shutting_down() must be called"
+
+
 # ── main() composition order ─────────────────────────────────────────────
 
 
@@ -237,6 +256,14 @@ def test_main_invokes_helpers_in_order(monkeypatch, tmp_path, fake_cfg):
                         lambda c: order.append("threads"))
     monkeypatch.setattr(_br, "_post_init_notify",
                         lambda c: order.append("notify"))
+    # _make_interruptible_select returns a truthy sentinel so main() takes
+    # the direct ws_client.start() path (not the daemon-thread fallback).
+    monkeypatch.setattr(_br, "_make_interruptible_select",
+                        lambda: object())
+    monkeypatch.setattr(_br, "_run_shutdown_sequence",
+                        lambda: order.append("shutdown_seq") or {})
+    # Reset the executed guard so re-running the test doesn't skip the sequence.
+    monkeypatch.setattr(_br, "_shutdown_sequence_executed", False)
 
     class _FakeWS:
         def __init__(self, *a, **kw):
@@ -253,5 +280,115 @@ def test_main_invokes_helpers_in_order(monkeypatch, tmp_path, fake_cfg):
         "init_runtime", "pid_lock", "rotate", "load_global",
         "clients", "handlers",
         "signal", "threads", "notify",
-        "ws_start",
+        "ws_start", "shutdown_seq",
     ]
+
+
+def test_main_cleanup_sequence_on_shutdown(monkeypatch, tmp_path, fake_cfg):
+    """AC-06: _run_shutdown_sequence is called after ws_client.start() returns."""
+    import larkhelm.config as _cfg
+
+    sequence: list[str] = []
+
+    monkeypatch.setattr(_cfg, "DATA_DIR", tmp_path, raising=False)
+    for attr in ("APP_ID", "APP_SECRET", "CLAUDE_CMD", "GEMINI_CMD",
+                 "DEFAULT_MODEL", "DEFAULT_CWD", "RESPONSE_TIMEOUT",
+                 "ALLOWED_CHATS"):
+        monkeypatch.setattr(_cfg, attr, getattr(fake_cfg, attr), raising=False)
+
+    monkeypatch.setattr(_br, "_init_runtime", lambda *a, **kw: None)
+    monkeypatch.setattr(_br, "_install_pid_lock", lambda d: True)
+    monkeypatch.setattr(_br, "rotate_jsonl_if_needed", lambda: None)
+    monkeypatch.setattr(_br, "_load_global_state", lambda: None)
+    monkeypatch.setattr(_br, "_initialise_clients",
+                        lambda c: types.SimpleNamespace())
+    monkeypatch.setattr(_br, "_register_handlers", lambda c: "evh")
+    monkeypatch.setattr(_br, "_install_signal_handlers", lambda: None)
+    monkeypatch.setattr(_br, "_start_background_threads", lambda c: None)
+    monkeypatch.setattr(_br, "_post_init_notify", lambda c: None)
+    monkeypatch.setattr(_br, "_make_interruptible_select", lambda: object())
+    monkeypatch.setattr(_br, "_run_shutdown_sequence",
+                        lambda: sequence.append("shutdown_seq") or {})
+    monkeypatch.setattr(_br, "_shutdown_sequence_executed", False)
+
+    class _FakeWS:
+        def __init__(self, *a, **kw):
+            pass
+
+        def start(self):
+            sequence.append("ws_start")
+
+    import lark_oapi.ws as _ws
+    monkeypatch.setattr(_ws, "Client", _FakeWS)
+
+    _br.main()
+
+    assert "ws_start" in sequence, "ws_client.start() must be called"
+    assert "shutdown_seq" in sequence, "_run_shutdown_sequence must be called"
+    ws_idx = sequence.index("ws_start")
+    seq_idx = sequence.index("shutdown_seq")
+    assert seq_idx > ws_idx, "_run_shutdown_sequence must be called after ws_client.start()"
+
+
+def test_main_uses_daemon_thread_fallback_when_select_unavailable(monkeypatch, tmp_path, fake_cfg):
+    """When _make_interruptible_select() returns None, main() exits via the is_shutting_down() poll."""
+    import larkhelm.config as _cfg
+    import larkhelm.concurrency as _conc
+
+    sequence: list[str] = []
+
+    monkeypatch.setattr(_cfg, "DATA_DIR", tmp_path, raising=False)
+    for attr in ("APP_ID", "APP_SECRET", "CLAUDE_CMD", "GEMINI_CMD",
+                 "DEFAULT_MODEL", "DEFAULT_CWD", "RESPONSE_TIMEOUT",
+                 "ALLOWED_CHATS"):
+        monkeypatch.setattr(_cfg, attr, getattr(fake_cfg, attr), raising=False)
+
+    monkeypatch.setattr(_br, "_init_runtime", lambda *a, **kw: None)
+    monkeypatch.setattr(_br, "_install_pid_lock", lambda d: True)
+    monkeypatch.setattr(_br, "rotate_jsonl_if_needed", lambda: None)
+    monkeypatch.setattr(_br, "_load_global_state", lambda: None)
+    monkeypatch.setattr(_br, "_initialise_clients", lambda c: types.SimpleNamespace())
+    monkeypatch.setattr(_br, "_register_handlers", lambda c: "evh")
+    monkeypatch.setattr(_br, "_install_signal_handlers", lambda: None)
+    monkeypatch.setattr(_br, "_start_background_threads", lambda c: None)
+    monkeypatch.setattr(_br, "_post_init_notify", lambda c: None)
+    # Return None to trigger the daemon-thread fallback path
+    monkeypatch.setattr(_br, "_make_interruptible_select", lambda: None)
+    monkeypatch.setattr(_br, "_run_shutdown_sequence",
+                        lambda: sequence.append("shutdown_seq") or {})
+    monkeypatch.setattr(_br, "_shutdown_sequence_executed", False)
+    # Pre-set shutting_down so the polling loop exits immediately without sleeping
+    monkeypatch.setattr(_conc, "_shutting_down", True)
+
+    class _FakeWS:
+        def __init__(self, *a, **kw):
+            pass
+
+        def start(self):
+            sequence.append("ws_start")  # called from daemon thread, may race
+
+    import lark_oapi.ws as _ws
+    monkeypatch.setattr(_ws, "Client", _FakeWS)
+
+    _br.main()
+
+    # Shutdown sequence must be called in the fallback path too
+    assert "shutdown_seq" in sequence, "_run_shutdown_sequence must be called after fallback loop"
+
+
+def test_run_shutdown_sequence_is_idempotent(monkeypatch):
+    """_run_shutdown_sequence returns {} on second call without re-running steps."""
+    import time as _time
+
+    monkeypatch.setattr(_br, "_shutdown_sequence_executed", False)
+    # Speed up wait_for_idle which is bound into the bridge module at import time
+    monkeypatch.setattr(_br, "wait_for_idle", lambda timeout=120.0: True)
+    monkeypatch.setattr(_time, "sleep", lambda s: None)
+
+    result1 = _br._run_shutdown_sequence()
+    assert isinstance(result1, dict) and "final_status" in result1, \
+        "First call must return a non-empty result dict with final_status"
+
+    # Idempotency guard must prevent re-execution
+    result2 = _br._run_shutdown_sequence()
+    assert result2 == {}, "Second call must return empty dict (idempotency guard)"

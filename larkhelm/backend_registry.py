@@ -516,6 +516,21 @@ class BackendRegistry:
                 spec.last_error = f"transient×{len(spec.failure_window)}: {str(err)[:200]}"
             return category
 
+    def mark_unhealthy(self, spec_id: str, reason: str) -> None:
+        """[INTERNAL / LEGACY] Mark a backend as unhealthy under the registry lock.
+
+        Deprecated for business-code use.  New code should call
+        ``record_call_failure()`` which provides error classification and
+        transient sliding-window protection.
+
+        Retained for emergency manual override and legacy test fixtures.
+        """
+        with self._lock:
+            spec = self._specs.get(spec_id)
+            if spec is not None:
+                spec.healthy = False
+                spec.last_error = str(reason)[:200]
+
     def all_enabled(self) -> list[BackendSpec]:
         with self._lock:
             return [s for s in self._specs.values() if s.enabled]

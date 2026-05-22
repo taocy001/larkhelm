@@ -20,7 +20,57 @@ BTW_TIMEOUT = 120  # /btw quick-answer timeout (seconds)
 
 _LOCK_CACHE_MAX = 500  # LRU cap to prevent _chat_locks / _btw_locks from growing unboundedly
 
-_chat_locks: OrderedDict[str, threading.Lock] = OrderedDict()
+
+class _ChatLock:
+    """threading.Lock wrapper that records holder thread ident and acquisition time.
+
+    LOGIC-C1: if a daemon thread holding a per-chat lock crashes without
+    releasing (e.g. SIGKILL mid-query), the ordinary threading.Lock stays
+    permanently locked, making that chat unresponsive until bridge restart.
+    By tracking the holder thread ident we can detect dead-holder staleness
+    in wait_for_idle and replace the lock object so new queries can proceed.
+    """
+    __slots__ = ("_lock", "_holder_ident", "_acq_mono")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._holder_ident: int | None = None
+        self._acq_mono: float = 0.0
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if timeout >= 0:
+            result = self._lock.acquire(blocking=blocking, timeout=timeout)
+        else:
+            result = self._lock.acquire(blocking=blocking)
+        if result:
+            self._holder_ident = threading.current_thread().ident
+            self._acq_mono = time.monotonic()
+        return result
+
+    def release(self) -> None:
+        self._holder_ident = None
+        self._acq_mono = 0.0
+        self._lock.release()
+
+    def __enter__(self) -> "_ChatLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.release()
+
+    def is_stale(self, hard_timeout: float) -> bool:
+        """True iff locked AND (holder thread is dead OR held longer than 2×hard_timeout)."""
+        ident = self._holder_ident
+        if ident is None:
+            return False  # not held
+        held = time.monotonic() - self._acq_mono
+        if held > max(hard_timeout * 2, 300):
+            return True
+        return not any(t.ident == ident and t.is_alive() for t in threading.enumerate())
+
+
+_chat_locks: OrderedDict[str, _ChatLock] = OrderedDict()
 _chat_locks_meta = threading.Lock()
 
 _btw_locks: OrderedDict[str, threading.Lock] = OrderedDict()
@@ -43,12 +93,30 @@ _jsonl_lock = threading.Lock()
 _shutting_down = False
 
 
-def _get_chat_lock(chat_id: str) -> threading.Lock:
+def _get_chat_lock(chat_id: str) -> _ChatLock:
     with _chat_locks_meta:
         if chat_id in _chat_locks:
+            lock = _chat_locks[chat_id]
+            # LOGIC-C1: stale detection — only needed when lock is actively held
+            if lock._holder_ident is not None:
+                try:
+                    from larkhelm.config import HARD_TIMEOUT as _HARD_TIMEOUT
+                    _stale_limit: float = float(_HARD_TIMEOUT)
+                except Exception:
+                    _stale_limit = 21600.0  # 6h default
+                if lock.is_stale(_stale_limit):
+                    try:
+                        from larkhelm.log import warn
+                        warn(
+                            f"[Concurrency] stale lock for chat {chat_id[:8]}, "
+                            "replacing (holder thread dead or lock held too long)"
+                        )
+                    except Exception:
+                        pass
+                    _chat_locks[chat_id] = _ChatLock()
             _chat_locks.move_to_end(chat_id)
         else:
-            _chat_locks[chat_id] = threading.Lock()
+            _chat_locks[chat_id] = _ChatLock()
             if len(_chat_locks) > _LOCK_CACHE_MAX:
                 # Only evict if the LRU lock is not held; skip eviction otherwise
                 # to prevent a new caller from getting a different lock object for the same chat_id.
@@ -123,10 +191,34 @@ def wait_for_idle(timeout: float = 120.0) -> bool:
     """Wait until all per-chat locks are released and no AI subprocesses are active, up to timeout seconds.
     Checks both per-chat locks (normal queries) and the global subprocess semaphore (including soft-timeout background processes).
     Returns True if all tasks finished, False on timeout.
+
+    LOGIC-C1: each iteration also scans for stale locks (holder thread dead or
+    held > 2×hard_timeout) and replaces them with fresh _ChatLock instances so
+    new queries can proceed without a full bridge restart.
     """
     from larkhelm.ai_runner import active_proc_count
+    try:
+        from larkhelm.config import HARD_TIMEOUT as _ht
+        _stale_limit: float = float(_ht)
+    except Exception:
+        _stale_limit = 21600.0  # 6h default
+
     deadline = time.time() + timeout
     while time.time() < deadline:
+        # Replace stale locks before counting — a replaced lock is immediately free.
+        with _chat_locks_meta:
+            for cid, lock in list(_chat_locks.items()):
+                if lock.is_stale(_stale_limit):
+                    try:
+                        from larkhelm.log import warn
+                        warn(
+                            f"[Concurrency] stale lock for chat {cid[:8]}, "
+                            "replacing (holder thread dead or lock held too long)"
+                        )
+                    except Exception:
+                        pass
+                    _chat_locks[cid] = _ChatLock()
+
         with _chat_locks_meta:
             locks = list(_chat_locks.values())
         busy_count = 0

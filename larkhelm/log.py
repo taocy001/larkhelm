@@ -15,6 +15,7 @@ from typing import Any
 
 import larkhelm.config as _cfg
 from larkhelm.concurrency import _jsonl_lock as _log_lock  # shared with token_stats.py
+from larkhelm.secure_io import secure_open
 
 __all__ = [
     "_log_lock", "log_entry", "_read_logs", "_read_logs_tail",
@@ -262,10 +263,11 @@ def log_entry(
         "tool": "**工具**", "error": "**错误**", "shell": "**Shell**",
         "reset": "**♻️ 会话重置**",
     }.get(role, f"**{role}**")
-    md_line = f"\n### {now.strftime('%H:%M:%S')} {role_label}\n\n{content}\n"
+    redacted = redact_error(content)
+    md_line = f"\n### {now.strftime('%H:%M:%S')} {role_label}\n\n{redacted}\n"
     record = {
         "ts":       now.isoformat(timespec="seconds"),
-        "chat_id":  chat_id, "role": role, "content": content, "model": model,
+        "chat_id":  chat_id, "role": role, "content": redacted, "model": model,
         "is_error": role == "error",
     }
     if trace_id:
@@ -284,15 +286,15 @@ def log_entry(
                         part_label = f" (part {n + 1})"
                     except ValueError:
                         part_label = ""
-                with p.open("a", encoding="utf-8") as f:
+                with secure_open(p, "a", "utf-8") as f:
                     f.write(f"# {chat_id}  —  {date_str}{part_label}\n")
-            with p.open("a", encoding="utf-8") as f:
+            with secure_open(p, "a", "utf-8") as f:
                 f.write(md_line)
         except OSError as e:
             print(f"[Log] MD 写入失败: {e}", file=sys.stderr)
         try:
             _cfg.LOG_DIR.mkdir(parents=True, exist_ok=True)
-            with (_cfg.LOG_DIR / "all.jsonl").open("a", encoding="utf-8") as f:
+            with secure_open(_cfg.LOG_DIR / "all.jsonl", "a", "utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
         except OSError as e:
             print(f"[Log] JSONL 写入失败: {e}", file=sys.stderr)
@@ -777,7 +779,7 @@ def _log_at(level: Level, msg: str) -> None:
     should_rotate = False
     with _log_lock:
         try:
-            with _cfg.DEBUG_LOG.open("a", encoding="utf-8") as f:
+            with secure_open(_cfg.DEBUG_LOG, "a", "utf-8") as f:
                 f.write(line)
         except Exception:
             pass

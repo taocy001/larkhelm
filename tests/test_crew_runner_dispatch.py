@@ -431,6 +431,141 @@ def test_synthesize_returns_fallback_when_no_parts(
 
 
 # ─────────────────────────────────────────────────────────────────────────
+#  TOKEN-C2: _synthesize records token usage under state.chat_id
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_synthesize_records_token_usage_under_chat_id(
+    init_test_config, fake_agent_spec, fake_card_sender,
+    fake_backend_registry, monkeypatch,
+):
+    """TOKEN-C2 AC-01: synthesis token usage is recorded under state.chat_id,
+    not the internal synth_ns."""
+    from larkhelm.crew_types import AgentStatus
+    specs = [
+        fake_agent_spec(id="a", task_profile="engineer"),
+        fake_agent_spec(id="b", task_profile="engineer"),
+    ]
+    state = _make_state(specs, chat_id="real_chat", synthesis_prompt="Synth:")
+    for aid in ("a", "b"):
+        state.agents[aid].status = AgentStatus.DONE
+        state.agents[aid].result = f"result {aid}"
+
+    FAKE_USAGE = {"input_tokens": 100, "output_tokens": 50, "cache_read": 10, "cache_create": 0}
+
+    recorded: list[tuple] = []
+
+    def fake_claude(**kwargs):
+        if kwargs.get("usage_holder") is not None:
+            kwargs["usage_holder"].update(FAKE_USAGE)
+        return "synthesized"
+
+    def fake_record(chat_id, model, usage):
+        recorded.append((chat_id, model, dict(usage)))
+
+    import larkhelm.backend_cli as _bc
+    monkeypatch.setattr(_bc, "run_claude", fake_claude)
+    import larkhelm.perm as _perm
+    monkeypatch.setattr(_perm, "grant_yolo", lambda ns: None, raising=False)
+    monkeypatch.setattr(_perm, "revoke_yolo", lambda ns: None, raising=False)
+    import larkhelm.token_stats as _ts
+    monkeypatch.setattr(_ts, "record_token_usage", fake_record)
+
+    from larkhelm.crew._runner import _synthesize
+    result = _synthesize(state)
+    assert result == "synthesized"
+
+    assert len(recorded) == 1, f"expected exactly 1 record_token_usage call, got {recorded}"
+    chat_id_recorded, model_recorded, usage_recorded = recorded[0]
+    assert chat_id_recorded == "real_chat", (
+        f"token usage must be recorded under state.chat_id='real_chat', got {chat_id_recorded!r}"
+    )
+    assert usage_recorded["input_tokens"] == 100
+
+
+def test_synthesize_suppress_prevents_runner_from_recording(
+    init_test_config, fake_agent_spec, fake_card_sender,
+    fake_backend_registry, monkeypatch,
+):
+    """TOKEN-C2 AC-02 / no-duplicate: suppress_token_recording=True is passed to
+    backend so the runner itself does NOT call record_token_usage. Only one
+    call total (from _synthesize's explicit record) should be observed."""
+    from larkhelm.crew_types import AgentStatus
+    specs = [
+        fake_agent_spec(id="x", task_profile="engineer"),
+        fake_agent_spec(id="y", task_profile="engineer"),
+    ]
+    state = _make_state(specs, synthesis_prompt="Synth:")
+    for aid in ("x", "y"):
+        state.agents[aid].status = AgentStatus.DONE
+        state.agents[aid].result = "ok"
+
+    suppress_seen: list[bool] = []
+
+    def fake_claude(**kwargs):
+        suppress_seen.append(kwargs.get("suppress_token_recording", False))
+        if kwargs.get("usage_holder") is not None:
+            kwargs["usage_holder"].update({"input_tokens": 5, "output_tokens": 3})
+        return "done"
+
+    recorded: list[tuple] = []
+
+    import larkhelm.backend_cli as _bc
+    monkeypatch.setattr(_bc, "run_claude", fake_claude)
+    import larkhelm.perm as _perm
+    monkeypatch.setattr(_perm, "grant_yolo", lambda ns: None, raising=False)
+    monkeypatch.setattr(_perm, "revoke_yolo", lambda ns: None, raising=False)
+    import larkhelm.token_stats as _ts
+    monkeypatch.setattr(_ts, "record_token_usage",
+                        lambda cid, model, usage: recorded.append((cid, model, usage)))
+
+    from larkhelm.crew._runner import _synthesize
+    _synthesize(state)
+
+    assert suppress_seen == [True], (
+        f"suppress_token_recording must be True when calling backend, got {suppress_seen}"
+    )
+    assert len(recorded) == 1, f"expected exactly 1 record call (from _synthesize), got {len(recorded)}"
+
+
+def test_synthesize_exception_skips_record_token_usage(
+    init_test_config, fake_agent_spec, fake_card_sender,
+    fake_backend_registry, monkeypatch,
+):
+    """TOKEN-C2 AC-07: if backend raises, record_token_usage is NOT called."""
+    from larkhelm.crew_types import AgentStatus
+    specs = [
+        fake_agent_spec(id="a", task_profile="engineer"),
+        fake_agent_spec(id="b", task_profile="engineer"),
+    ]
+    state = _make_state(specs, synthesis_prompt="Synth:")
+    for aid in ("a", "b"):
+        state.agents[aid].status = AgentStatus.DONE
+        state.agents[aid].result = "ok"
+
+    def fake_claude_raises(**kwargs):
+        raise RuntimeError("orchestrator down")
+
+    recorded: list[tuple] = []
+
+    import larkhelm.backend_cli as _bc
+    monkeypatch.setattr(_bc, "run_claude", fake_claude_raises)
+    import larkhelm.perm as _perm
+    monkeypatch.setattr(_perm, "grant_yolo", lambda ns: None, raising=False)
+    monkeypatch.setattr(_perm, "revoke_yolo", lambda ns: None, raising=False)
+    import larkhelm.token_stats as _ts
+    monkeypatch.setattr(_ts, "record_token_usage",
+                        lambda cid, model, usage: recorded.append((cid, model, usage)))
+
+    from larkhelm.crew._runner import _synthesize
+    with pytest.raises(RuntimeError, match="orchestrator down"):
+        _synthesize(state)
+
+    assert recorded == [], (
+        f"record_token_usage must NOT be called when backend raises, got {recorded}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────
 #  _execute_from (resume path)
 # ─────────────────────────────────────────────────────────────────────────
 

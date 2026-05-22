@@ -60,6 +60,7 @@ class QuerySession:
     parent_id: "str | None" = None
     force_backend_id: "str | None" = None
     trace_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    sender_open_id: "str | None" = None  # MEM-C1: forwarded to global memory lookup
 
     # Mutable state populated during run()
     mid: "str | None" = None
@@ -124,6 +125,7 @@ class QuerySession:
                     self.message, self.chat_id, cwd,
                     doc_auto_inject=_cfg.DOC_AUTO_INJECT,
                     has_doc_urls=has_doc_urls,
+                    sender_open_id=self.sender_open_id,
                 )
                 self.message = enriched
                 recent_turns = "\n".join(deduped)
@@ -242,6 +244,7 @@ class QuerySession:
     ) -> "str | None":
         from larkhelm.router import resolve_backend, LockedBackendUnavailableError
         from larkhelm.backend_registry import BACKEND_REGISTRY
+        from larkhelm.health_signals import NO_HEALTH_UPDATE
         from larkhelm.handlers._query import (
             _run_backend_single, _do_query_with_delegation,
         )
@@ -331,11 +334,10 @@ class QuerySession:
                 _debug_log(
                     f"[{self.trace_id}][QuerySession] backend {attempt_spec.id} failed: {e}"
                 )
-                attempt_spec.healthy = False
-                attempt_spec.last_error = str(e)[:200]
+                category = BACKEND_REGISTRY.record_call_failure(attempt_spec.id, str(e))
                 last_err = e
                 remaining = [s for s in chain if s.healthy and s.id != attempt_spec.id]
-                if remaining:
+                if remaining and category not in NO_HEALTH_UPDATE:
                     cs.set_current_text(
                         f"> ⚠️ {attempt_spec.display_name} 不可用，"
                         f"切换至 {remaining[0].display_name}..."

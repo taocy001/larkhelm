@@ -74,6 +74,8 @@ def run_claude(
     session_namespace: str = None,
     allow_retry: bool = False,
     system_prompt: str | None = None,
+    suppress_token_recording: bool = False,
+    usage_holder: dict | None = None,
 ) -> str:
     try:
         out = _spawn_claude_proc(
@@ -95,6 +97,8 @@ def run_claude(
             extra_args=spec.extra_args or None,
             session_key=spec.id,
             system_prompt=system_prompt,
+            suppress_token_recording=suppress_token_recording,
+            usage_holder=usage_holder,
         )
     except Exception as e:
         _record_outcome(spec.id, e)
@@ -116,6 +120,8 @@ def run_gemini(
     on_soft_timeout=None,
     images: list = None,
     use_session: bool = True,
+    suppress_token_recording: bool = False,
+    usage_holder: dict | None = None,
 ) -> str:
     try:
         out = _spawn_gemini_proc(
@@ -133,6 +139,8 @@ def run_gemini(
             model=spec.model or None,
             extra_args=spec.extra_args or None,
             session_key=spec.id,
+            suppress_token_recording=suppress_token_recording,
+            usage_holder=usage_holder,
         )
     except Exception as e:
         _record_outcome(spec.id, e)
@@ -159,6 +167,8 @@ def run_deepseek(
     use_session: bool = True,
     record_under: str = None,
     system_prompt: str | None = None,
+    suppress_token_recording: bool = False,
+    usage_holder: dict | None = None,
 ) -> str:
     """Bridge BackendSpec → DeepSeekRunner. Despite the module name, this is
     HTTP, not CLI; placed here to mirror the run_claude/run_kimi/run_gemini
@@ -185,6 +195,8 @@ def run_deepseek(
             base_url=spec.base_url or None,
             session_key=spec.id,
             system_prompt=system_prompt,
+            suppress_token_recording=suppress_token_recording,
+            usage_holder=usage_holder,
         )
     except Exception as e:
         _record_outcome(spec.id, e)
@@ -208,6 +220,8 @@ def run_kimi(
     images: list = None,
     session_namespace: str = None,
     allow_retry: bool = False,
+    suppress_token_recording: bool = False,
+    usage_holder: dict | None = None,
 ) -> str:
     try:
         out = _spawn_kimi_proc(
@@ -228,6 +242,8 @@ def run_kimi(
             model=spec.model or None,
             extra_args=spec.extra_args or None,
             session_key=spec.id,
+            suppress_token_recording=suppress_token_recording,
+            usage_holder=usage_holder,
         )
     except Exception as e:
         _record_outcome(spec.id, e)

@@ -247,10 +247,15 @@ def _run_backend_single(spec, chat_id: str, message: str, cwd: str, cancel_ev,
             chat_id, spec.id, sid, recent_turns, provider="claude_cli",
         )
         cli_extra = "\n\n".join(filter(None, [extra_system, cli_recent]))
+        # CTX-C1: omit system_prompt on resumed sessions (sid != None) — the
+        # session already contains the context from the first turn and Claude
+        # CLI re-applies --system-prompt on every --resume call, causing
+        # memory context to accumulate linearly (one extra copy per turn).
+        # Gemini/Kimi already guard with `if (cli_extra and not sid)`.
         output = run_claude(spec, chat_id, message, sid, cwd, cancel_ev,
                             on_text=on_text, on_tool=on_tool, on_tool_result=on_tool_result,
                             on_soft_timeout=on_soft_timeout, images=images, allow_retry=True,
-                            system_prompt=cli_extra or None)
+                            system_prompt=cli_extra if (cli_extra and not sid) else None)
     return output
 
 
@@ -437,7 +442,8 @@ def _post_query_memory_hook(chat_id: str, trace_id: str) -> None:
 def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
               images: list = None, parent_id: str | None = None,
               force_backend_id: str | None = None,
-              trace_id: str | None = None):
+              trace_id: str | None = None,
+              sender_open_id: str | None = None):
     # P1-1 PR2: opt-in dispatch to the QuerySession rewrite. Default OFF so
     # existing behaviour is byte-identical until the flag flips.
     #
@@ -457,6 +463,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 chat_id=chat_id, message=message, model=model,
                 user_msg_id=user_msg_id, images=images,
                 parent_id=parent_id, force_backend_id=force_backend_id,
+                sender_open_id=sender_open_id,
             )
         except Exception as _v2_setup_err:
             # Pre-side-effect failure (import / __init__) → legacy fallback is safe.
@@ -801,6 +808,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                     recent_turns=recent_turns_list,
                     has_doc_urls=has_doc_urls,
                     intent=_pending_intent,
+                    sender_open_id=sender_open_id,
                 )
             except Exception as _mem_err:
                 _debug_log(f"[{trace_id}][DoQuery] memory context error: {_mem_err}")
@@ -817,6 +825,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
 
             from larkhelm.router import resolve_backend, LockedBackendUnavailableError
             from larkhelm.backend_registry import BACKEND_REGISTRY
+            from larkhelm.health_signals import NO_HEALTH_UPDATE
             from larkhelm.backend_cli import run_claude, run_gemini, run_kimi
             from larkhelm.backend_api import run_anthropic, run_google, run_openai_compat
             from larkhelm.api_session import load_history, save_history
@@ -921,13 +930,12 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                     except TimeoutError:
                         raise
                     except Exception as _be:
-                        _debug_log(f"[{trace_id}][DoQuery] backend {attempt_spec.id} failed: {_be}, marking unhealthy")
-                        attempt_spec.healthy = False
-                        attempt_spec.last_error = str(_be)[:200]
+                        _debug_log(f"[{trace_id}][DoQuery] backend {attempt_spec.id} failed: {_be}")
+                        category = BACKEND_REGISTRY.record_call_failure(attempt_spec.id, str(_be))
                         last_err = _be
                         # Show brief failover notice to user if more backends remain
                         remaining = [s for s in chain if s.healthy and s.id != attempt_spec.id]
-                        if remaining:
+                        if remaining and category not in NO_HEALTH_UPDATE:
                             card_state.set_current_text(
                                 f"> ⚠️ {attempt_spec.display_name} 不可用，切换至 {remaining[0].display_name}..."
                             )

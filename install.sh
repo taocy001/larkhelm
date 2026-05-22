@@ -136,6 +136,7 @@ mkdir -p "$LOG_DIR"
 if [[ ! -f "$CONFIG_PATH" ]]; then
     if [[ -f "$EXAMPLE_PATH" ]]; then
         cp "$EXAMPLE_PATH" "$CONFIG_PATH"
+        chmod 600 "$CONFIG_PATH"
         warn "已从模板创建配置文件：$CONFIG_PATH"
         warn "请填写 APP_ID 和 APP_SECRET 后重新运行此脚本或手动启动服务。"
     else

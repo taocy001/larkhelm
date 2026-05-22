@@ -18,6 +18,8 @@ import sys
 import threading
 from pathlib import Path
 
+from larkhelm.secure_io import secure_atomic_write
+
 
 @dataclasses.dataclass
 class _RuntimeConfig:
@@ -676,9 +678,7 @@ def _init_app_config() -> None:
         # Persist auto-detected value (first-run write-back)
         try:
             config["memory_limit_mb"] = MEMORY_LIMIT_MB
-            _tmp = CONFIG_PATH.with_suffix(".json.tmp")
-            _tmp.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(_tmp, CONFIG_PATH)
+            secure_atomic_write(CONFIG_PATH, json.dumps(config, ensure_ascii=False, indent=2))
             print(f"[config] memory_limit_mb 自动探测并写入: {MEMORY_LIMIT_MB} MB", file=sys.stderr)
         except Exception as _e:
             print(f"[config] memory_limit_mb 写回失败（不影响运行）: {_e}", file=sys.stderr)
@@ -1095,8 +1095,6 @@ def save_config_field(key: str, value) -> None:
         elif key == "default_wiki_parent_token":
             DEFAULT_WIKI_PARENT_TOKEN = value
         try:
-            _tmp = CONFIG_PATH.with_suffix(".json.tmp")
-            _tmp.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(_tmp, CONFIG_PATH)
+            secure_atomic_write(CONFIG_PATH, json.dumps(config, ensure_ascii=False, indent=2))
         except Exception as e:
             print(f"[config] 写入 config.json 失败: {e}")

@@ -50,6 +50,8 @@ def run_anthropic(
     extra_system: str = "",
     *,
     _anthropic_module: "Any | None" = None,
+    suppress_token_recording: bool = False,
+    usage_holder: "dict | None" = None,
 ) -> tuple[str, list[dict]]:
     """Stream via Anthropic SDK. See ``backend_api_streaming.AnthropicAdapter``.
 
@@ -61,6 +63,8 @@ def run_anthropic(
     return _run_streaming_api(
         adapter, spec, chat_id, message, history,
         cancel_ev=cancel_ev, on_text=on_text, extra_system=extra_system,
+        suppress_token_recording=suppress_token_recording,
+        usage_holder=usage_holder,
     )
 
 
@@ -74,6 +78,8 @@ def run_google(
     extra_system: str = "",
     *,
     _google_module: "Any | None" = None,
+    suppress_token_recording: bool = False,
+    usage_holder: "dict | None" = None,
 ) -> tuple[str, list[dict]]:
     """Stream via google-genai SDK. See ``backend_api_streaming.GoogleGenaiAdapter``.
 
@@ -84,6 +90,8 @@ def run_google(
     return _run_streaming_api(
         adapter, spec, chat_id, message, history,
         cancel_ev=cancel_ev, on_text=on_text, extra_system=extra_system,
+        suppress_token_recording=suppress_token_recording,
+        usage_holder=usage_holder,
     )
 
 
@@ -95,6 +103,8 @@ def run_openai_compat(
     cancel_ev: "Any | None" = None,
     on_text: Callable | None = None,
     extra_system: str = "",
+    suppress_token_recording: bool = False,
+    usage_holder: "dict | None" = None,
 ) -> tuple[str, list[dict]]:
     """Stream via OpenAI-compat SDK (DeepSeek etc.).
 
@@ -104,4 +114,6 @@ def run_openai_compat(
     return _run_streaming_api(
         adapter, spec, chat_id, message, history,
         cancel_ev=cancel_ev, on_text=on_text, extra_system=extra_system,
+        suppress_token_recording=suppress_token_recording,
+        usage_holder=usage_holder,
     )

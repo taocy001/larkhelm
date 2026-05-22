@@ -156,4 +156,5 @@ class CrewState:
     feishu_folder_token: str            = ""      # per-project Feishu folder token (Drive folder or Wiki node)
     feishu_folder_url:   str            = ""      # human-readable URL for the project folder
     output_file_urls:    dict           = dataclasses.field(default_factory=dict)  # output_file → feishu_doc_url
+    sender_open_id:      str            = ""      # open_id of the user who triggered this crew task
     # phase_commits: {agent_id → git_commit_hash} (populated in auto_commit mode)

@@ -110,7 +110,7 @@ class RecentTurnsRoutingTests(unittest.TestCase):
 
         def fake_run_claude(spec, chat_id, message, sid, cwd, cancel_ev, **kw):
             captured["message"] = message
-            captured["system_prompt"] = kw.get("system_prompt") or ""
+            captured["system_prompt"] = kw.get("system_prompt")
             return "ok"
 
         with patch("larkhelm.backend_cli.run_claude", side_effect=fake_run_claude), \
@@ -126,8 +126,8 @@ class RecentTurnsRoutingTests(unittest.TestCase):
             )
         # The system_prompt is NOT prefixed into ``message`` when resuming.
         self.assertEqual(captured["message"], "hi")
-        # system_prompt is still passed through to run_claude (it may use it
-        # internally; the bug being defended is the prefix-into-message one).
+        # On a resumed session, system_prompt must be None — not re-injected.
+        self.assertIsNone(captured["system_prompt"])
 
     def test_deepseek_path_receives_recent_turns(self):
         """DeepSeek runner doesn't load history, so recent_turns is genuine context."""

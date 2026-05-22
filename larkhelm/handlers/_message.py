@@ -453,6 +453,7 @@ def handle_message(data: P2ImMessageReceiveV1):
                             "user_msg_id": message.message_id,
                             "parent_id": parent_id,
                             "trace_id": voice_trace_id,
+                            "sender_open_id": sender_open_id,
                         },
                         daemon=True,
                         name=f"voice-query-{chat_id[:8]}",
@@ -513,7 +514,8 @@ def handle_message(data: P2ImMessageReceiveV1):
         # /memory, /doc, /cron, /crew, /dev, /plan, /pwd, /cd, /ls, /run,
         # /model (+ /lock alias), /voice. See command_registry._default_registrations.
         from larkhelm.command_registry import COMMAND_REGISTRY, DispatchContext
-        _dctx = DispatchContext(chat_id=chat_id, msg_id=_mid, text=text, tl=tl)
+        _dctx = DispatchContext(chat_id=chat_id, msg_id=_mid, text=text, tl=tl,
+                                sender_open_id=sender_open_id)
         if COMMAND_REGISTRY.dispatch(_dctx) == "handled":
             return
 
@@ -536,11 +538,11 @@ def handle_message(data: P2ImMessageReceiveV1):
             if not question:
                 send_card_reply(chat_id, _mid, "⚠️ 用法", "`/btw <问题>` — 快速追问（不占用主锁）", color="orange")
                 return
-            _cmd_btw(chat_id, question, message.message_id)
+            _cmd_btw(chat_id, question, message.message_id, sender_open_id=sender_open_id)
             return
         if _is_btw_reply(chat_id, getattr(message, "parent_id", None)):
             _register_btw_msg(chat_id, message.message_id)
-            _cmd_btw(chat_id, text, message.message_id)
+            _cmd_btw(chat_id, text, message.message_id, sender_open_id=sender_open_id)
             return
 
         # ── Phase 5: intent router (gated by flag + traffic %) ──
@@ -705,6 +707,14 @@ def handle_message(data: P2ImMessageReceiveV1):
         log_entry(chat_id, "user", prompt, model=target_model, trace_id=trace_id)
         _reset_cancel(chat_id)
         user_msg_id = message.message_id
+        # MEM-C1: propagate sender_open_id into the child thread via ContextVar so
+        # group-chat queries never read a neighbour's global memory file.
+        # Python threads inherit the parent's Context snapshot at start() time.
+        try:
+            from larkhelm.memory import _query_sender_open_id
+            _query_sender_open_id.set(sender_open_id or "")
+        except Exception:
+            pass
         # Doc injection and parent message fetch are done inside _do_query (background
         # thread) to avoid blocking the SDK event dispatch loop on Feishu API calls.
         threading.Thread(
@@ -716,6 +726,7 @@ def handle_message(data: P2ImMessageReceiveV1):
                 "parent_id": parent_id,
                 "force_backend_id": force_backend_id,
                 "trace_id": trace_id,
+                "sender_open_id": sender_open_id,
             },
             daemon=True,
             name=f"query-{chat_id[:8]}",

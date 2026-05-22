@@ -95,10 +95,12 @@ def _spawn_claude_proc(
     extra_args: list[str] | None = None,
     session_key: str | None = None,
     system_prompt: str | None = None,
+    suppress_token_recording: bool = False,
+    usage_holder: dict | None = None,
 ) -> str:
     """Spawn Claude as a streamed subprocess and return its final text."""
     from larkhelm.runner_claude import ClaudeRunner
-    return ClaudeRunner(
+    runner = ClaudeRunner(
         chat_id, message, sid, cwd,
         cancel_ev=cancel_ev, on_text=on_text, on_tool=on_tool,
         on_tool_result=on_tool_result, allow_retry=allow_retry,
@@ -106,7 +108,12 @@ def _spawn_claude_proc(
         images=images, session_namespace=session_namespace, command=command,
         model=model, extra_args=extra_args, session_key=session_key,
         system_prompt=system_prompt,
-    ).run()
+        suppress_token_recording=suppress_token_recording,
+    )
+    result = runner.run()
+    if usage_holder is not None:
+        usage_holder.update(runner._last_usage_seen or {})
+    return result
 
 
 def _spawn_kimi_proc(
@@ -127,17 +134,24 @@ def _spawn_kimi_proc(
     model: str | None = None,
     extra_args: list[str] | None = None,
     session_key: str | None = None,
+    suppress_token_recording: bool = False,
+    usage_holder: dict | None = None,
 ) -> str:
     """Spawn Kimi as a streamed subprocess and return its final text."""
     from larkhelm.runner_kimi import KimiRunner
-    return KimiRunner(
+    runner = KimiRunner(
         chat_id, message, sid, cwd,
         cancel_ev=cancel_ev, on_text=on_text, on_tool=on_tool,
         on_tool_result=on_tool_result, allow_retry=allow_retry,
         on_soft_timeout=on_soft_timeout, on_start=on_start,
         images=images, session_namespace=session_namespace, command=command,
         model=model, extra_args=extra_args, session_key=session_key,
-    ).run()
+        suppress_token_recording=suppress_token_recording,
+    )
+    result = runner.run()
+    if usage_holder is not None:
+        usage_holder.update(runner._last_usage_seen or {})
+    return result
 
 
 def _spawn_deepseek_proc(
@@ -163,13 +177,15 @@ def _spawn_deepseek_proc(
     api_key: str | None = None,
     base_url: str | None = None,
     system_prompt: str | None = None,
+    suppress_token_recording: bool = False,
+    usage_holder: dict | None = None,
 ) -> str:
     """Spawn a DeepSeek HTTP request via DeepSeekRunner.
 
     Despite the ``_proc`` suffix kept for naming symmetry with the subprocess
     runners, this is an HTTP call — there's no Popen.
     """
-    return DeepSeekRunner(
+    runner = DeepSeekRunner(
         chat_id, message, sid, cwd,
         cancel_ev=cancel_ev, on_text=on_text, on_tool=on_tool,
         on_tool_result=on_tool_result, allow_retry=allow_retry,
@@ -178,7 +194,12 @@ def _spawn_deepseek_proc(
         use_session=use_session, record_under=record_under,
         model=model, extra_args=extra_args, session_key=session_key,
         api_key=api_key, base_url=base_url, system_prompt=system_prompt,
-    ).run()
+        suppress_token_recording=suppress_token_recording,
+    )
+    result = runner.run()
+    if usage_holder is not None:
+        usage_holder.update(runner._last_usage_seen or {})
+    return result
 
 
 def _spawn_gemini_proc(
@@ -197,16 +218,23 @@ def _spawn_gemini_proc(
     model: str | None = None,
     extra_args: list[str] | None = None,
     session_key: str | None = None,
+    suppress_token_recording: bool = False,
+    usage_holder: dict | None = None,
 ) -> str:
     """Spawn Gemini as a streamed subprocess and return its final text."""
     from larkhelm.runner_gemini import GeminiRunner
-    return GeminiRunner(
+    runner = GeminiRunner(
         chat_id, message, sid, cwd,
         cancel_ev=cancel_ev, on_text=on_text, on_tool=on_tool,
         on_tool_result=on_tool_result, on_soft_timeout=on_soft_timeout,
         use_session=use_session, record_under=record_under, command=command,
         model=model, extra_args=extra_args, session_key=session_key,
-    ).run()
+        suppress_token_recording=suppress_token_recording,
+    )
+    result = runner.run()
+    if usage_holder is not None:
+        usage_holder.update(runner._last_usage_seen or {})
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────

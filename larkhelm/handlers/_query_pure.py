@@ -72,6 +72,7 @@ def inject_doc_and_memory(
     intent: Any = None,
     doc_auto_inject: bool,
     has_doc_urls: bool,
+    sender_open_id: "str | None" = None,
 ) -> tuple[str, str, list[str]]:
     """Combined doc-injection + memory-context build (pure-ish wrapper).
 
@@ -128,6 +129,7 @@ def inject_doc_and_memory(
                 recent_turns=recent_list,
                 has_doc_urls=has_doc_urls,
                 intent=intent,
+                sender_open_id=sender_open_id,
             )
         except Exception as e:
             _debug_log(f"[QueryPure] memory context error: {e}")

@@ -87,6 +87,8 @@ class StreamingAPIAdapter(Protocol):
         self, history: list[dict], message: str, response_text: str,
     ) -> list[dict]: ...
 
+    def extract_usage(self) -> dict: ...
+
 
 # ── Adapter implementations ───────────────────────────────────────────────
 
@@ -109,6 +111,7 @@ class AnthropicAdapter:
             self._anthropic = anthropic
         else:
             self._anthropic = anthropic_module
+        self._usage_raw: Any = None
 
     def build_client(self, spec: BackendSpec) -> Any:
         api_key = spec.api_key or os.environ.get("ANTHROPIC_API_KEY", "")
@@ -149,9 +152,30 @@ class AnthropicAdapter:
         return kwargs
 
     def iter_text_chunks(self, client: Any, request: dict) -> Iterator[str]:
+        self._usage_raw = None
         with client.messages.stream(**request) as stream:
             for chunk in stream.text_stream:
                 yield chunk
+            # Capture the raw usage object after all chunks are yielded.
+            try:
+                final = stream.get_final_message()
+                self._usage_raw = final.usage
+            except Exception:
+                pass
+
+    def extract_usage(self) -> dict:
+        try:
+            u = self._usage_raw
+            if u is None:
+                return {}
+            return {
+                "input_tokens":  getattr(u, "input_tokens", 0) or 0,
+                "output_tokens": getattr(u, "output_tokens", 0) or 0,
+                "cache_read":    getattr(u, "cache_read_input_tokens", 0) or 0,
+                "cache_create":  getattr(u, "cache_creation_input_tokens", 0) or 0,
+            }
+        except Exception:
+            return {}
 
     def format_history(
         self, history: list[dict], message: str, response_text: str,
@@ -184,6 +208,7 @@ class GoogleGenaiAdapter:
         else:
             self._genai = google_module.genai
             self._types = google_module.genai_types
+        self._usage_raw: Any = None
 
     def build_client(self, spec: BackendSpec) -> Any:
         api_key = spec.api_key or os.environ.get("GOOGLE_API_KEY", "")
@@ -215,11 +240,29 @@ class GoogleGenaiAdapter:
         }
 
     def iter_text_chunks(self, client: Any, request: dict) -> Iterator[str]:
+        self._usage_raw = None
         stream = client.models.generate_content_stream(
             model=request["model"], contents=request["contents"], config=request["config"],
         )
         for chunk in stream:
+            # usage_metadata is populated on the last chunk from Google Gen-AI.
+            if getattr(chunk, "usage_metadata", None):
+                self._usage_raw = chunk.usage_metadata
             yield chunk.text or ""
+
+    def extract_usage(self) -> dict:
+        try:
+            u = self._usage_raw
+            if u is None:
+                return {}
+            return {
+                "input_tokens":  getattr(u, "prompt_token_count", 0) or 0,
+                "output_tokens": getattr(u, "candidates_token_count", 0) or 0,
+                "cache_read":    getattr(u, "cached_content_token_count", 0) or 0,
+                "cache_create":  0,
+            }
+        except Exception:
+            return {}
 
     def format_history(
         self, history: list[dict], message: str, response_text: str,
@@ -245,6 +288,7 @@ class OpenAICompatAdapter:
             self._openai = openai
         else:
             self._openai = openai_module
+        self._usage_raw: Any = None
 
     def build_client(self, spec: BackendSpec) -> Any:
         api_key = spec.api_key or os.environ.get("OPENAI_API_KEY", "")
@@ -262,12 +306,17 @@ class OpenAICompatAdapter:
             messages.insert(0, {"role": "system", "content": extra_system})
         messages.append({"role": "user", "content": message})
         return {
-            "model":    spec.model or "gpt-4o",
-            "messages": messages,
-            "stream":   True,
+            "model":          spec.model or "gpt-4o",
+            "messages":       messages,
+            "stream":         True,
+            # stream_options=include_usage causes the last chunk to carry
+            # usage stats (TOKEN-C1); most OpenAI-compatible backends support
+            # this extension; unsupported ones silently ignore the field.
+            "stream_options": {"include_usage": True},
         }
 
     def iter_text_chunks(self, client: Any, request: dict) -> Iterator[str]:
+        self._usage_raw = None
         with client.chat.completions.create(**request) as stream:
             for chunk in stream:
                 # Streaming chunks may have empty ``choices`` (heartbeat
@@ -275,6 +324,29 @@ class OpenAICompatAdapter:
                 delta = chunk.choices[0].delta.content if chunk.choices else None
                 if delta:
                     yield delta
+                # Usage arrives in the final chunk when stream_options is set.
+                if hasattr(chunk, "usage") and chunk.usage:
+                    self._usage_raw = chunk.usage
+
+    def extract_usage(self) -> dict:
+        try:
+            u = self._usage_raw
+            if u is None:
+                return {}
+            cached = 0
+            try:
+                pd = getattr(u, "prompt_tokens_details", None)
+                cached = getattr(pd, "cached_tokens", 0) or 0
+            except Exception:
+                pass
+            return {
+                "input_tokens":  getattr(u, "prompt_tokens", 0) or 0,
+                "output_tokens": getattr(u, "completion_tokens", 0) or 0,
+                "cache_read":    cached,
+                "cache_create":  0,
+            }
+        except Exception:
+            return {}
 
     def format_history(
         self, history: list[dict], message: str, response_text: str,
@@ -297,6 +369,8 @@ def _run_streaming_api(
     cancel_ev: Any | None = None,
     on_text: Callable | None = None,
     extra_system: str = "",
+    suppress_token_recording: bool = False,
+    usage_holder: dict | None = None,
 ) -> tuple[str, list[dict]]:
     """Run a streaming API turn through the supplied adapter.
 
@@ -352,6 +426,20 @@ def _run_streaming_api(
         raise QueryCancelledError(
             f"Query cancelled during {adapter.provider_label} streaming"
         )
+
+    # TOKEN-C1 / TOKEN-C2: record token usage via Protocol method.
+    _adapter_usage = adapter.extract_usage()
+    if _adapter_usage:
+        if suppress_token_recording:
+            if usage_holder is not None:
+                usage_holder.update(_adapter_usage)
+        else:
+            try:
+                from larkhelm.token_stats import record_token_usage, resolve_record_chat_id
+                record_chat_id = resolve_record_chat_id(chat_id)
+                record_token_usage(record_chat_id, spec.model or spec.id, _adapter_usage)
+            except Exception as _ue:
+                safe_log(f"[{adapter.provider_label}] usage recording failed: {_ue}")
 
     updated_history = adapter.format_history(history, message, result_text)
     _record_outcome(spec.id, None)

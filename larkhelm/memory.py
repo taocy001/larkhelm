@@ -20,6 +20,7 @@ Auto-learning flow:
 """
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import os
 import re
@@ -32,7 +33,20 @@ from typing import Callable
 
 import larkhelm.config as _cfg
 from larkhelm.chat_state import _get_turn_count, _get_chat_state
-from larkhelm.log import _read_logs, _read_logs_tail, _debug_log
+from larkhelm.log import _read_logs, _read_logs_tail, _debug_log, warn
+
+# ── Per-request sender context (MEM-C1 group-chat fix) ───────────────────────
+#
+# In group chats the _chat_state_store["sender_open_id"] is overwritten by
+# every message, so reading it inside _global_memory_file() can return the
+# WRONG user's open_id if another message arrived while the current query was
+# still running. Python threads inherit the parent's contextvars context, so
+# setting this ContextVar in handle_message() BEFORE starting the _do_query
+# thread ensures each query sees the open_id of the message that triggered it.
+
+_query_sender_open_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_query_sender_open_id", default=""
+)
 
 # ── Storage root ─────────────────────────────────────────────────────────────
 
@@ -236,24 +250,37 @@ def _ensure_dir() -> None:
     MEMORY_HOME_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _global_memory_file(chat_id: str | None = None) -> Path | None:
+def _global_memory_file(chat_id: str | None = None, *,
+                        sender_open_id: str | None = None) -> Path | None:
     """Return global memory path keyed by sender_open_id.
 
-    Returns None when chat_id is absent or open_id cannot be determined,
+    Priority (MEM-C1 explicit-param upgrade):
+      1. Explicit ``sender_open_id`` argument (highest — eliminates race on group chats)
+      2. Per-request ContextVar ``_query_sender_open_id`` (set by handle_message)
+      3. chat_state ``sender_open_id`` field (last-resort fallback for cron/legacy paths)
+
+    Returns None when chat_id is absent or open_id cannot be determined
     so the global layer is skipped rather than shared across all group members.
     global_default.md is intentionally NOT used as a fallback.
     """
     _ensure_dir()
     if not chat_id:
         return None
-    try:
-        state = _get_chat_state(chat_id)
-        open_id = state.get("sender_open_id", "") or ""
-        if not open_id:
-            return None
-        return MEMORY_HOME_DIR / f"global_{open_id}.md"
-    except Exception:
+    open_id = (sender_open_id or "").strip()
+    if not open_id:
+        try:
+            open_id = _query_sender_open_id.get()
+        except Exception:
+            open_id = ""
+    if not open_id:
+        try:
+            state = _get_chat_state(chat_id)
+            open_id = state.get("sender_open_id", "") or ""
+        except Exception:
+            open_id = ""
+    if not open_id:
         return None
+    return MEMORY_HOME_DIR / f"global_{open_id}.md"
 
 
 def _project_memory_file(cwd: str) -> Path:
@@ -396,8 +423,16 @@ def _save_md(
     max_chars: int,
     extra_fm: str = "",
     extra_fm_pairs: dict[str, str] | None = None,
-) -> None:
+    *,
+    raise_on_error: bool = False,
+) -> bool:
     """Atomically write a memory file with YAML frontmatter, protected by a per-file lock.
+
+    Returns True if the file was written and atomically replaced successfully.
+    Returns False when raise_on_error=False and any disk error occurs.
+    Raises the original exception when raise_on_error=True.
+
+    chmod failures are logged but do NOT affect the return value.
 
     ``extra_fm_pairs`` is the structured form of ``extra_fm``: callers pass a
     ``{key: value}`` dict and the function renders each as a quoted YAML pair.
@@ -411,7 +446,7 @@ def _save_md(
     so 0644 default umask is unacceptable in shared environments.
     """
     if path is None:
-        return
+        return True
     lock = _get_file_write_lock(path)
     with lock:
         try:
@@ -453,14 +488,19 @@ def _save_md(
             except OSError:
                 shutil.move(str(tmp), str(path))
             _debug_log(f"[Memory] saved {path.name} ({len(body)} chars)")
+            return True
         except Exception as e:
-            _debug_log(f"[Memory] save error {path.name}: {e}")
+            if raise_on_error:
+                raise
+            warn(f"[Memory] write failed {path.name}: {e}")
+            return False
 
 
 # ── Public load/save API ──────────────────────────────────────────────────────
 
-def load_global_memory(chat_id: str | None = None) -> str | None:
-    path = _global_memory_file(chat_id)
+def load_global_memory(chat_id: str | None = None, *,
+                       sender_open_id: str | None = None) -> str | None:
+    path = _global_memory_file(chat_id, sender_open_id=sender_open_id)
     content = _load_md_body(path)
     if content is not None:
         _check_schema_version(path, _load_md_frontmatter(path))
@@ -468,9 +508,12 @@ def load_global_memory(chat_id: str | None = None) -> str | None:
 
 
 def save_global_memory(content: str, chat_id: str | None = None,
-                       extra_fm_pairs: dict[str, str] | None = None) -> None:
-    _save_md(_global_memory_file(chat_id), content, GLOBAL_MAX_CHARS,
-             extra_fm_pairs=extra_fm_pairs)
+                       extra_fm_pairs: dict[str, str] | None = None,
+                       *, sender_open_id: str | None = None,
+                       raise_on_error: bool = False) -> bool:
+    return _save_md(_global_memory_file(chat_id, sender_open_id=sender_open_id),
+                    content, GLOBAL_MAX_CHARS, extra_fm_pairs=extra_fm_pairs,
+                    raise_on_error=raise_on_error)
 
 
 def load_project_memory(cwd: str) -> str | None:
@@ -494,10 +537,12 @@ def load_project_memory(cwd: str) -> str | None:
 
 
 def save_project_memory(cwd: str, content: str,
-                        extra_fm_pairs: dict[str, str] | None = None) -> None:
+                        extra_fm_pairs: dict[str, str] | None = None,
+                        *, raise_on_error: bool = False) -> bool:
     canonical = str(Path(cwd).resolve())
-    _save_md(_project_memory_file(cwd), content, PROJECT_MAX_CHARS,
-             f'cwd: "{canonical}"\n', extra_fm_pairs=extra_fm_pairs)
+    return _save_md(_project_memory_file(cwd), content, PROJECT_MAX_CHARS,
+                    f'cwd: "{canonical}"\n', extra_fm_pairs=extra_fm_pairs,
+                    raise_on_error=raise_on_error)
 
 
 # ── Project-memory garbage collection (user-explicit /memory gc) ────────────
@@ -634,8 +679,11 @@ def gc_project_memory(threshold_days: int = _GC_DEFAULT_DAYS,
     }
 
 
-def load_memory(chat_id: str) -> str | None:
-    """Load session memory. Transparently migrates from old DATA_DIR location."""
+def load_memory(chat_id: str, *, raise_on_error: bool = False) -> str | None:
+    """Load session memory. Transparently migrates from old DATA_DIR location.
+
+    When raise_on_error=True, migration failures (save or unlink) propagate.
+    """
     path = _session_memory_file(chat_id)
     content = _load_md_body(path)
     if content is not None:
@@ -644,18 +692,23 @@ def load_memory(chat_id: str) -> str | None:
         old = _cfg.DATA_DIR / "memory" / f"{chat_id}.md"
         content = _load_md_body(old)
         if content is not None:
-            save_memory(chat_id, content)
+            save_memory(chat_id, content, raise_on_error=raise_on_error)
             try:
                 old.unlink(missing_ok=True)
             except Exception as e:
+                if raise_on_error:
+                    raise
                 _debug_log(f"[Memory] session file cleanup failed: {e}")
     return content
 
 
-def save_memory(chat_id: str, content: str) -> None:
+def save_memory(chat_id: str, content: str, *, raise_on_error: bool = False) -> bool:
+    """Save session memory. Returns True on success, False on failure.
+    If raise_on_error=True, propagates the underlying OSError."""
     turns = _get_turn_count(chat_id)
-    _save_md(_session_memory_file(chat_id), content, SESSION_MAX_CHARS,
-             f"chat_id: {chat_id}\nturns: {turns}\nversion: 1\n")
+    return _save_md(_session_memory_file(chat_id), content, SESSION_MAX_CHARS,
+                    f"chat_id: {chat_id}\nturns: {turns}\nversion: 1\n",
+                    raise_on_error=raise_on_error)
 
 
 # ── Context assembly ──────────────────────────────────────────────────────────
@@ -680,6 +733,7 @@ def get_memory_context_v2(
     recent_turns: list[str] | None = None,
     has_doc_urls: bool = False,
     intent=None,
+    sender_open_id: str | None = None,
 ) -> tuple[str, list[str]]:
     """Build memory context AND return deduped recent turns in one pass.
 
@@ -699,6 +753,7 @@ def get_memory_context_v2(
     builder_kwargs: dict = dict(
         query=query, recent_turns=recent_turns,
         has_doc_urls=has_doc_urls,
+        sender_open_id=sender_open_id,
     )
     if intent is not None:
         builder_kwargs["agent_type"] = getattr(intent, "agent_type", "chat") or "chat"
@@ -959,7 +1014,7 @@ def generate_memory(chat_id: str, recent_logs: str,
         # whichever backend is tagged ``cheap``) when healthy. Summary quality
         # for compressing 10K-char dialog → 2K-char paragraph is roughly
         # equivalent across modern LLMs but pricing differs ~30×.
-        result = _run_one_shot(prompt, ns=f"_mem_{chat_id}", prefer_cheap=True)
+        result = _run_one_shot(prompt, ns=f"{chat_id}__memory_session", prefer_cheap=True)
     except Exception as e:
         _debug_log(f"[Memory] generate_memory error {chat_id}: {e}")
         raise
@@ -1197,7 +1252,7 @@ def _run_one_shot_with_backoff(
     return ""
 
 
-def _try_extract_project(session_content: str, cwd: str,
+def _try_extract_project(session_content: str, cwd: str, chat_id: str = "",
                          cancel_ev: threading.Event | None = None) -> None:
     """Extract project facts from a fresh session summary → update project layer if new info found.
 
@@ -1223,7 +1278,7 @@ def _try_extract_project(session_content: str, cwd: str,
             existing=existing,
             session=session_content,
         )
-        ns = f"_proj_{hashlib.md5(cwd.encode()).hexdigest()[:8]}"
+        ns = f"{chat_id}__memory_project"
         if cancel_ev is not None and cancel_ev.is_set():
             _debug_log(f"[Memory] project extract cancelled pre-LLM for {cwd!r}")
             return
@@ -1270,14 +1325,15 @@ def _try_extract_project(session_content: str, cwd: str,
 
 
 def _try_extract_global(session_content: str, chat_id: str,
-                        cancel_ev: threading.Event | None = None) -> None:
+                        cancel_ev: threading.Event | None = None,
+                        *, sender_open_id: str | None = None) -> None:
     """Extract user preferences from a fresh session summary → update global layer if new info found."""
     try:
         if cancel_ev is not None and cancel_ev.is_set():
             _debug_log(f"[Memory] global extract cancelled before start for {chat_id[:8]}")
             record_extract_outcome("global", "cancelled")
             return
-        g_path = _global_memory_file(chat_id)
+        g_path = _global_memory_file(chat_id, sender_open_id=sender_open_id)
         if g_path is None:
             return  # no open_id (group chat) — skip global layer
         prev_fm = _load_md_frontmatter(g_path)
@@ -1293,7 +1349,7 @@ def _try_extract_global(session_content: str, chat_id: str,
             existing=existing,
             session=session_content,
         )
-        ns = f"_glob_{chat_id[:8]}"
+        ns = f"{chat_id}__memory_global"
         if cancel_ev is not None and cancel_ev.is_set():
             _debug_log(f"[Memory] global extract cancelled pre-LLM for {chat_id[:8]}")
             record_extract_outcome("global", "cancelled")
@@ -1316,7 +1372,7 @@ def _try_extract_global(session_content: str, chat_id: str,
         save_global_memory(result, chat_id=chat_id, extra_fm_pairs={
             "last_extracted_session_hash": _session_hash(session_content),
             "last_extracted_session_len":  str(len(session_content)),
-        })
+        }, sender_open_id=sender_open_id)
         _debug_log(f"[Memory] global layer auto-updated from session cascade ({len(result)} chars)")
         record_extract_outcome("global", "success")
     except Exception as e:
@@ -1402,7 +1458,7 @@ def _cascade_extract(session_content: str, chat_id: str) -> None:
         if cwd:
             threads.append(threading.Thread(
                 target=_coordinated,
-                args=(_try_extract_project, (session_content, cwd), "project"),
+                args=(_try_extract_project, (session_content, cwd, chat_id), "project"),
                 daemon=True,
                 name=f"memext-proj-{chat_id[:8]}",
             ))
@@ -1682,6 +1738,7 @@ def _aggregate_memory_observation(
     chat_id: str,
     *,
     now: datetime | None = None,
+    sender_open_id: str | None = None,
 ) -> dict:
     """Aggregate three-layer memory health metrics for ``chat_id``.
 
@@ -1729,7 +1786,7 @@ def _aggregate_memory_observation(
         }
 
     try:
-        g_content = load_global_memory(chat_id)
+        g_content = load_global_memory(chat_id, sender_open_id=sender_open_id)
     except Exception as e:
         _debug_log(f"[Memory] observe load_global failed: {e}")
         g_content = None
@@ -1744,7 +1801,7 @@ def _aggregate_memory_observation(
         _debug_log(f"[Memory] observe load_session failed: {e}")
         s_content = None
 
-    g_path = _global_memory_file(chat_id)
+    g_path = _global_memory_file(chat_id, sender_open_id=sender_open_id)
     p_path = _project_memory_file(cwd) if cwd else None
     s_path = _session_memory_file(chat_id)
 

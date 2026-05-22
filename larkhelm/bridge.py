@@ -36,7 +36,7 @@ import larkhelm.lark_client as _lc
 from larkhelm.config import _init_runtime
 from larkhelm.log import _debug_log, rotate_jsonl_if_needed
 from larkhelm.chat_state import _load_global_state, _state_lock, _chat_state_store
-from larkhelm.concurrency import _cron_lock, set_shutting_down, wait_for_idle
+from larkhelm.concurrency import _cron_lock, set_shutting_down, is_shutting_down, wait_for_idle
 from larkhelm.perm import _start_perm_server
 from larkhelm.handlers import handle_message, handle_card_action, handle_reaction_created
 
@@ -51,6 +51,10 @@ _pid_lock_fd: Optional[int] = None
 # Hooks that ``main()`` already installed — kept module-level so the test
 # suite can introspect (e.g. assert that the signal handler is registered).
 _signal_handlers_installed: bool = False
+
+# Guard that ensures _run_shutdown_sequence() executes at most once, even if
+# SIGTERM is delivered multiple times before ws_client.start() returns.
+_shutdown_sequence_executed: bool = False
 
 
 # ── PID lock ──────────────────────────────────────────────────────────────
@@ -85,43 +89,14 @@ def _acquire_pid_lock(data_dir) -> bool:
 # ── Signal handlers ───────────────────────────────────────────────────────
 
 
-def _handle_sigterm(signum, frame):
-    """Graceful shutdown: cancel crews, drain queries, exit cleanly."""
-    _debug_log("[Shutdown] 收到 SIGTERM，通知所有 crew 取消...")
+def _handle_sigterm(signum: int, frame: Any) -> None:
+    """Signal handler: set the shutting-down flag and return immediately.
+
+    Safety contract: no I/O, no lock acquisition, no sleep, no sys.exit.
+    Idempotent: repeated SIGTERM calls are safe (set_shutting_down is idempotent).
+    The actual cleanup sequence runs in main() after ws_client.start() returns.
+    """
     set_shutting_down()
-
-    # P1-3: stop health server early so the orchestrator stops routing
-    # traffic before we wait on in-flight queries.
-    try:
-        from larkhelm.health_server import stop_health_server
-        stop_health_server()
-    except Exception as _hs_err:
-        _debug_log(f"[HealthServer] stop failed (continuing): {_hs_err}")
-
-    # P2 REQ-06: flush any buffered extract updates so the SIGTERM doesn't
-    # drop a pending session-summary cascade. The 10s cap prevents a stuck
-    # backend from blocking shutdown indefinitely.
-    try:
-        from larkhelm import memory_extract_buffer as _meb
-        _meb.flush_all_for_shutdown(timeout_sec=10.0)
-    except Exception as _eb_err:
-        _debug_log(f"[ExtractBuffer] shutdown flush failed (continuing): {_eb_err}")
-
-    # First cancel all in-progress crews and update their cards
-    from larkhelm.crew import cancel_all_crews, wait_crews_done
-    cancel_all_crews(reason="服务即将重启")
-
-    # Wait for crew threads to exit (up to 30s)
-    crew_done = wait_crews_done(timeout=30.0)
-    _debug_log(f"[Shutdown] Crew 线程{'已全部退出' if crew_done else '等待超时，强制继续'}")
-
-    # Then wait for normal queries to finish (up to 60s)
-    idle = wait_for_idle(timeout=60.0)
-    if idle:
-        _debug_log("[Shutdown] 所有任务已完成，正常退出。")
-    else:
-        _debug_log("[Shutdown] 等待超时，强制退出。")
-    sys.exit(0)
 
 
 def _install_signal_handlers() -> None:
@@ -135,6 +110,111 @@ def _install_signal_handlers() -> None:
         return
     signal.signal(signal.SIGTERM, _handle_sigterm)
     _signal_handlers_installed = True
+
+
+# ── Interruptible select + shutdown sequence ──────────────────────────────
+
+
+def _make_interruptible_select() -> Optional[Any]:
+    """Monkey-patch lark_oapi.ws.client._select with a shutting-down-aware coroutine.
+
+    Returns the patched coroutine on success, or None if the attribute is absent
+    (SDK internal API changed), signalling main() to use the daemon-thread fallback.
+    """
+    import asyncio as _asyncio
+
+    async def _interruptible_select() -> None:
+        while not is_shutting_down():
+            await _asyncio.sleep(1.0)
+
+    try:
+        import lark_oapi.ws.client as _ws_client_mod
+        _ws_client_mod._select = _interruptible_select
+        return _interruptible_select
+    except AttributeError:
+        return None
+
+
+def _run_shutdown_sequence() -> dict:
+    """Execute the full graceful shutdown sequence after ws_client.start() returns.
+
+    Steps (each wrapped in try/except so a single failure doesn't abort the rest):
+      1. stop_health_server()
+      2. flush_all_for_shutdown(timeout_sec=10.0)
+      3. cancel_all_crews(reason="服务即将重启")
+      4. wait_crews_done(timeout=30.0)
+      5. wait_for_idle(timeout=60.0)
+      6. time.sleep(2)
+
+    Returns a dict with per-step outcomes for structured logging and test assertions:
+        {
+            "health_server_stopped": bool,
+            "buffer_flushed": bool,
+            "crews_cancelled": bool,
+            "crews_done": bool,
+            "idle_reached": bool,
+            "final_status": "clean" | "timeout",
+        }
+    """
+    global _shutdown_sequence_executed
+    if _shutdown_sequence_executed:
+        return {}
+    _shutdown_sequence_executed = True
+
+    result: dict = {
+        "health_server_stopped": False,
+        "buffer_flushed": False,
+        "crews_cancelled": False,
+        "crews_done": False,
+        "idle_reached": False,
+        "final_status": "clean",
+    }
+
+    try:
+        from larkhelm.health_server import stop_health_server
+        stop_health_server()
+        result["health_server_stopped"] = True
+    except Exception as e:
+        _debug_log(f"[HealthServer] stop failed (continuing): {e}")
+
+    try:
+        from larkhelm import memory_extract_buffer as _meb
+        _meb.flush_all_for_shutdown(timeout_sec=10.0)
+        result["buffer_flushed"] = True
+    except Exception as e:
+        _debug_log(f"[ExtractBuffer] shutdown flush failed (continuing): {e}")
+
+    try:
+        from larkhelm.crew import cancel_all_crews
+        cancel_all_crews(reason="服务即将重启")
+        result["crews_cancelled"] = True
+    except Exception as e:
+        _debug_log(f"[Shutdown] cancel_all_crews failed (continuing): {e}")
+
+    try:
+        from larkhelm.crew import wait_crews_done
+        done = wait_crews_done(timeout=30.0)
+        result["crews_done"] = done
+        _debug_log(f"[Shutdown] Crew 线程{'已全部退出' if done else '等待超时，强制继续'}")
+    except Exception as e:
+        _debug_log(f"[Shutdown] wait_crews_done failed (continuing): {e}")
+
+    try:
+        idle = wait_for_idle(timeout=60.0)
+        result["idle_reached"] = idle
+    except Exception as e:
+        _debug_log(f"[Shutdown] wait_for_idle failed (continuing): {e}")
+        idle = False
+
+    time.sleep(2)
+
+    if result["idle_reached"]:
+        _debug_log("[Shutdown] 清理完成，正常退出")
+    else:
+        result["final_status"] = "timeout"
+        _debug_log("[Shutdown] 清理完成（等待超时），正常退出")
+
+    return result
 
 
 # ── Client / handler wiring ───────────────────────────────────────────────
@@ -380,6 +460,12 @@ def _emit_plugin_load_report(cfg) -> None:
 def main(config_path: str = None, data_dir: str = None) -> None:
     """Bridge entry point. Composed from the six helpers above so each
     block can be unit-tested in isolation (see tests/test_bridge_main.py).
+
+    LOGIC-C3 changes:
+    1. Monkey-patches lark_oapi.ws.client._select before ws_client.start() so
+       the blocking loop exits promptly when SIGTERM sets shutting_down.
+    2. Calls _run_shutdown_sequence() after start() returns.
+    3. Returns normally; no sys.exit in the happy path.
     """
     import larkhelm.config as _cfg
 
@@ -408,7 +494,19 @@ def main(config_path: str = None, data_dir: str = None) -> None:
         event_handler=event_handler,
         log_level=lark.LogLevel.INFO,
     )
-    ws_client.start()
+
+    patched_select = _make_interruptible_select()
+    if patched_select is not None:
+        ws_client.start()
+    else:
+        # Fallback: SDK internal API changed; run WS client in a daemon thread
+        # and poll the shutting-down flag on the main thread.
+        t = threading.Thread(target=ws_client.start, daemon=True, name="ws-client")
+        t.start()
+        while not is_shutting_down():
+            time.sleep(1.0)
+
+    _run_shutdown_sequence()
 
 
 if __name__ == "__main__":

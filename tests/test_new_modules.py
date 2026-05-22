@@ -216,6 +216,109 @@ class TestConcurrency(unittest.TestCase):
         with concurrency._chat_locks_meta:
             self.assertLessEqual(len(concurrency._chat_locks), cap + 1)
 
+    def test_stale_lock_dead_holder_replaced(self):
+        """Dead holder thread: _get_chat_lock returns a new, acquirable lock."""
+        lock = concurrency._get_chat_lock("stale_dead_chat")
+        acquired = threading.Event()
+
+        def holder():
+            lock.acquire()
+            acquired.set()
+            # exits without releasing — simulates a crashed daemon thread
+
+        t = threading.Thread(target=holder, daemon=True)
+        t.start()
+        acquired.wait(timeout=2.0)
+        t.join(timeout=2.0)
+        self.assertFalse(t.is_alive(), "Holder thread should have exited")
+        self.assertIsNotNone(lock._holder_ident)
+
+        new_lock = concurrency._get_chat_lock("stale_dead_chat")
+        self.assertIsNot(new_lock, lock, "Stale lock should have been replaced")
+        self.assertTrue(new_lock.acquire(blocking=False), "New lock must be acquirable")
+        new_lock.release()
+
+    def test_stale_lock_held_too_long_replaced(self):
+        """Lock held beyond HARD_TIMEOUT is replaced even when holder is alive."""
+        try:
+            from larkhelm.config import HARD_TIMEOUT as _ht
+            hard_timeout = float(_ht)
+        except Exception:
+            hard_timeout = 21600.0
+
+        lock = concurrency._get_chat_lock("stale_overtime_chat")
+        lock.acquire()
+        # Backdate acquisition time to trigger the overtime condition (is_stale uses 2× threshold)
+        lock._acq_mono = time.monotonic() - hard_timeout * 2 - 1
+
+        new_lock = concurrency._get_chat_lock("stale_overtime_chat")
+        self.assertIsNot(new_lock, lock, "Overtime lock should have been replaced")
+        self.assertTrue(new_lock.acquire(blocking=False), "New lock must be acquirable")
+        new_lock.release()
+
+    def test_stale_lock_replacement_logs_warn(self):
+        """Replacement emits a warning containing the expected prefix and reason."""
+        lock = concurrency._get_chat_lock("stale_log_chat")
+        acquired = threading.Event()
+
+        def holder():
+            lock.acquire()
+            acquired.set()
+
+        t = threading.Thread(target=holder, daemon=True)
+        t.start()
+        acquired.wait(timeout=2.0)
+        t.join(timeout=2.0)
+        self.assertFalse(t.is_alive())
+
+        with patch("larkhelm.log.warn") as mock_warn:
+            concurrency._get_chat_lock("stale_log_chat")
+
+        self.assertTrue(mock_warn.called, "warn() should have been called on stale replacement")
+        msg = mock_warn.call_args[0][0]
+        self.assertIn("[Concurrency] stale lock for chat", msg)
+        self.assertIn("holder thread dead or lock held too long", msg)
+
+    def test_stale_lock_alive_holder_not_replaced(self):
+        """A lock held by an alive thread is NOT replaced."""
+        lock = concurrency._get_chat_lock("stale_alive_chat")
+        ready = threading.Event()
+        done = threading.Event()
+
+        def holder():
+            lock.acquire()
+            ready.set()
+            done.wait(timeout=5.0)
+            lock.release()
+
+        t = threading.Thread(target=holder, daemon=True)
+        t.start()
+        ready.wait(timeout=2.0)
+        try:
+            same_lock = concurrency._get_chat_lock("stale_alive_chat")
+            self.assertIs(same_lock, lock, "Live-holder lock must NOT be replaced")
+        finally:
+            done.set()
+            t.join(timeout=2.0)
+
+    def test_chatllock_is_stale_dead_holder(self):
+        """_ChatLock.is_stale() returns True when the holder thread is dead."""
+        from larkhelm.concurrency import _ChatLock
+        lock = _ChatLock()
+        # Assign an impossible thread ident so no live thread matches it.
+        lock._holder_ident = -999999
+        lock._acq_mono = time.monotonic() - 1.0  # held only 1 second
+
+        # With a large hard_timeout the time check won't fire;
+        # only the dead-thread check should trigger.
+        self.assertTrue(lock.is_stale(21600.0))
+
+    def test_chatllock_is_stale_not_held(self):
+        """_ChatLock.is_stale() returns False when the lock is not held."""
+        from larkhelm.concurrency import _ChatLock
+        lock = _ChatLock()
+        self.assertFalse(lock.is_stale(21600.0))
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  log.py

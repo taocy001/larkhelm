@@ -55,6 +55,7 @@ class ClaudeRunner(BaseProcessRunner):
         extra_args: list | None = None,
         session_key: str | None = None,
         system_prompt: str | None = None,
+        suppress_token_recording: bool = False,
     ) -> None:
         super().__init__(
             "claude", chat_id, message, sid, cwd,
@@ -62,6 +63,7 @@ class ClaudeRunner(BaseProcessRunner):
             on_tool_result=on_tool_result, on_soft_timeout=on_soft_timeout,
             on_start=on_start, allow_retry=allow_retry, images=images,
             session_namespace=session_namespace, command=command,
+            suppress_token_recording=suppress_token_recording,
         )
         self._model = model
         self._extra_args = list(extra_args) if extra_args else []
@@ -74,6 +76,7 @@ class ClaudeRunner(BaseProcessRunner):
             session_namespace=session_namespace, command=command,
             model=model, extra_args=extra_args, session_key=session_key,
             system_prompt=system_prompt,
+            suppress_token_recording=suppress_token_recording,
         )
 
     def build_args(self) -> list[str]:

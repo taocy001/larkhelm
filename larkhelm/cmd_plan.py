@@ -189,6 +189,7 @@ class MultiPlanState:
     last_step_failed: bool             = False        # True when entering waiting after a failure
     max_retries:     int               = 1            # auto-retries before notifying user
     no_confirm:      bool              = False        # skip between-step confirmations
+    sender_open_id:  str               = ""           # open_id of the user who triggered this plan (MEM-C1)
 
     def __post_init__(self) -> None:
         # Accept either ``PlanPhase`` or the raw string value at construction
@@ -556,7 +557,7 @@ _PLANNER_SYSTEM = """\
 
 def _auto_plan(requirement: str, chat_id: str,
                cancel_ev: threading.Event,
-               doc_context: str = "") -> tuple[str, list[PlanStep]]:
+               doc_context: str = "", *, sender_open_id: str = "") -> tuple[str, list[PlanStep]]:
     """Use Claude to generate a structured plan from a natural-language requirement."""
     import larkhelm.config as _cfg
     from larkhelm.ai_runner import _spawn_claude_proc
@@ -588,7 +589,8 @@ def _auto_plan(requirement: str, chat_id: str,
     _mem_ctx = ""
     try:
         from larkhelm.memory import get_memory_context_v2
-        _mem_ctx, _ = get_memory_context_v2(chat_id, cwd=cwd, query=requirement)
+        _mem_ctx, _ = get_memory_context_v2(chat_id, cwd=cwd, query=requirement,
+                                            sender_open_id=sender_open_id)
     except Exception as e:
         _debug_log(f"[Plan] memory load failed: {e}")
     _mem_prefix = f"\n\n[Background Context from Memory]\n{_mem_ctx}" if _mem_ctx else ""
@@ -641,6 +643,7 @@ def _run_dev_step(state: MultiPlanState, step: PlanStep, crew_id: str) -> bool:
             force_replan=True,  # each [dev] step re-runs PM/Architect for its specific requirement
             suppress_done_signal=True,  # plan signals done itself when all steps finish
             suppress_finalize=True,     # plan emits its own finalize card after all steps
+            sender_open_id=state.sender_open_id,
         )
         return not state.cancel_ev.is_set()
     except Exception as e:
@@ -727,6 +730,7 @@ def _run_single_agent_step(state: MultiPlanState, step: PlanStep) -> bool:
         card_mid=card_mid,
         cancel_ev=state.cancel_ev,
         phase="planned", kind="crew",
+        sender_open_id=state.sender_open_id,
     )
 
     try:
@@ -1043,7 +1047,8 @@ def _run_plan(state: MultiPlanState) -> None:
 
 # ── Entry point ──────────────────────────────────────────────────
 
-def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None) -> None:
+def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None, *,
+             sender_open_id: str = "") -> None:
     """/plan command entry point.
 
     Two modes:
@@ -1142,6 +1147,7 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None) -> None:
             trigger_msg_id=user_msg_id,
             max_retries=max_retries,
             no_confirm=no_confirm,
+            sender_open_id=sender_open_id,
         )
         # Show "generating" card immediately
         planning_card = _build_plan_card(state)
@@ -1161,7 +1167,8 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None) -> None:
         # Generate plan (blocking; runs in the plan-handler thread)
         try:
             title, steps = _auto_plan(requirement, chat_id, state.cancel_ev,
-                                      doc_context=_doc_context)
+                                      doc_context=_doc_context,
+                                      sender_open_id=sender_open_id)
         except Exception as e:
             _debug_log(f"[Plan] auto_plan error: {e}")
             with state.lock:
@@ -1220,6 +1227,7 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None) -> None:
         trigger_msg_id=user_msg_id,
         max_retries=max_retries,
         no_confirm=no_confirm,
+        sender_open_id=sender_open_id,
     )
 
     init_card = _build_plan_card(state)

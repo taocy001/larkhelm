@@ -166,6 +166,7 @@ class DeepSeekRunner:
         api_key: str | None = None,
         base_url: str | None = None,
         system_prompt: str | None = None,
+        suppress_token_recording: bool = False,
     ) -> None:
         self.chat_id = chat_id
         self.message = message
@@ -184,6 +185,7 @@ class DeepSeekRunner:
         self._api_key = api_key or getattr(_cfg, "DEEPSEEK_API_KEY", "") or ""
         self._base_url = (base_url or getattr(_cfg, "DEEPSEEK_BASE_URL", _DEFAULT_BASE_URL) or _DEFAULT_BASE_URL).rstrip("/")
         self._system_prompt = system_prompt or ""
+        self.suppress_token_recording = suppress_token_recording
 
         self._result_text: str = ""
         # Chain-of-thought stream from ``deepseek-reasoner`` arrives on
@@ -205,6 +207,7 @@ class DeepSeekRunner:
         # Cancel-path safety net in ``run()``'s finally consults this
         # before deciding to write an estimated record.
         self._tokens_recorded: bool = False
+        self._last_usage_seen: dict | None = None
         # Idle-timeout tracking — see ``BaseProcessRunner.__init__`` for
         # rationale. ``_consume_sse`` calls ``_touch_activity`` on every
         # SSE line so a slow but steadily-streaming DeepSeek response
@@ -220,18 +223,15 @@ class DeepSeekRunner:
 
     def _record_tokens(self, usage: dict, cost: float = 0.0) -> None:
         """Mirror BaseProcessRunner._record_tokens semantics for crew double-recording."""
-        # Mark recorded so the cancel-path safety net in ``run()``'s
-        # finally doesn't double-count this exact event.
         self._tokens_recorded = True
-        if self.record_under:
-            record_id = self.record_under
-        elif "__crew_" in self.chat_id:
-            record_id = self.chat_id.split("__crew_")[0]
-        else:
-            record_id = self.chat_id
         full_usage = {**usage, "cost_usd": cost}
+        # Always update so ai_runner can extract via usage_holder after run()
+        self._last_usage_seen = full_usage
+        if self.suppress_token_recording:
+            return  # recording deferred to caller (_synthesize)
         try:
-            from larkhelm.token_stats import record_token_usage
+            from larkhelm.token_stats import record_token_usage, resolve_record_chat_id
+            record_id = resolve_record_chat_id(self.chat_id, self.record_under)
             record_token_usage(record_id, "deepseek", full_usage)
         except Exception as e:
             _debug_log(f"[DeepSeek] token_stats update failed: {e}")

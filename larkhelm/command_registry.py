@@ -42,6 +42,7 @@ class DispatchContext:
     text: str           # original message text (preserves case)
     tl: str             # text.lower().strip() (cached so each spec doesn't re-lower)
     raw_args: str = ""
+    sender_open_id: str = ""  # open_id of the message sender (MEM-C1)
 
 
 @dataclass(frozen=True)
@@ -344,7 +345,7 @@ def _default_registrations() -> None:
 
     def _h_memory(ctx: DispatchContext) -> None:
         from larkhelm.commands import _cmd_memory
-        _cmd_memory(ctx.chat_id, ctx.raw_args, ctx.msg_id)
+        _cmd_memory(ctx.chat_id, ctx.raw_args, ctx.msg_id, sender_open_id=ctx.sender_open_id)
     register(CommandSpec(name="/memory", handler=_h_memory, match_kind="prefix"))
 
     def _h_doc(ctx: DispatchContext) -> None:
@@ -360,19 +361,19 @@ def _default_registrations() -> None:
     # ── /crew / /dev / /plan (async, error-carded) ─────────────────
     def _h_crew(ctx: DispatchContext) -> None:
         from larkhelm.crew import cmd_crew
-        cmd_crew(ctx.chat_id, ctx.raw_args, ctx.msg_id)
+        cmd_crew(ctx.chat_id, ctx.raw_args, ctx.msg_id, sender_open_id=ctx.sender_open_id)
     register(CommandSpec(name="/crew", handler=_h_crew, match_kind="prefix",
                          run_async=True, thread_label="Crew"))
 
     def _h_dev(ctx: DispatchContext) -> None:
         from larkhelm.crew import cmd_dev
-        cmd_dev(ctx.chat_id, ctx.raw_args, ctx.msg_id)
+        cmd_dev(ctx.chat_id, ctx.raw_args, ctx.msg_id, sender_open_id=ctx.sender_open_id)
     register(CommandSpec(name="/dev", handler=_h_dev, match_kind="prefix",
                          run_async=True, thread_label="Dev"))
 
     def _h_plan(ctx: DispatchContext) -> None:
         from larkhelm.cmd_plan import cmd_plan
-        cmd_plan(ctx.chat_id, ctx.raw_args, ctx.msg_id)
+        cmd_plan(ctx.chat_id, ctx.raw_args, ctx.msg_id, sender_open_id=ctx.sender_open_id)
     register(CommandSpec(name="/plan", handler=_h_plan, match_kind="prefix",
                          run_async=True, thread_label="Plan"))
 

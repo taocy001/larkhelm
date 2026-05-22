@@ -7,9 +7,11 @@ from datetime import datetime
 import larkhelm.config as _cfg
 from larkhelm.concurrency import _jsonl_lock
 from larkhelm.log import _debug_log
+from larkhelm.secure_io import secure_open
 
 __all__ = [
     "_token_stats", "_token_stats_lock", "_jsonl_lock",
+    "resolve_record_chat_id",
     "record_token_usage", "get_token_stats", "get_token_stats_persistent",
     "record_crew_agent_tokens", "get_crew_agent_tokens", "evict_crew_agent_tokens",
     "summarize_crew_agent_tokens_for_chat",
@@ -27,6 +29,27 @@ _token_stats_lock = threading.Lock()
 _CREW_AGENT_TOKENS_MAX = 2000
 _crew_agent_tokens: OrderedDict[str, dict] = OrderedDict()
 _crew_agent_lock = threading.Lock()
+
+
+def resolve_record_chat_id(chat_id: str, record_under: str | None = None) -> str:
+    """Return the chat_id under which token usage should be recorded.
+
+    Handles namespace stripping for crew-agent and memory-cascade namespaces:
+      * "abc__crew_X"         → "abc"
+      * "abc__memory_session" → "abc"
+      * "abc__memory_project" → "abc"
+      * "abc__memory_global"  → "abc"
+
+    ``record_under`` takes highest priority (used when a runner is explicitly
+    told to record under a different chat_id, e.g. plan-replay).
+    """
+    if record_under is not None:
+        return record_under
+    if "__crew_" in chat_id:
+        return chat_id.split("__crew_")[0]
+    if "__memory_" in chat_id:
+        return chat_id.split("__memory_")[0]
+    return chat_id
 
 
 def record_crew_agent_tokens(crew_ns: str, model: str, usage: dict) -> None:
@@ -159,7 +182,7 @@ def record_token_usage(chat_id: str, model: str, usage: dict) -> None:
     with _jsonl_lock:
         try:
             _cfg.LOG_DIR.mkdir(parents=True, exist_ok=True)
-            with (_cfg.LOG_DIR / "all.jsonl").open("a", encoding="utf-8") as f:
+            with secure_open(_cfg.LOG_DIR / "all.jsonl", "a") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception as e:
             print(f"[token_stats] JSONL write failed: {e}", file=__import__("sys").stderr)

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 from pathlib import Path
@@ -10,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import larkhelm.config as _cfg
 from larkhelm.log import _debug_log
+from larkhelm.secure_io import secure_atomic_write
 
 if TYPE_CHECKING:
     from larkhelm.agent_hub.intent_types import IntentResult
@@ -50,9 +50,7 @@ def _save_state() -> None:
         with _state_lock:
             data = json.dumps(_chat_state_store, ensure_ascii=False, indent=2)
             _cfg.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            tmp = _cfg.STATE_FILE.with_suffix(".json.tmp")
-            tmp.write_text(data, encoding="utf-8")
-            os.replace(tmp, _cfg.STATE_FILE)
+            secure_atomic_write(_cfg.STATE_FILE, data)
     except Exception as e:
         _debug_log(f"[State] 保存失败: {e}")
 
@@ -87,7 +85,7 @@ def _load_sid(chat_id: str, model: str) -> str | None:
 def _save_sid(chat_id: str, sid: str, model: str) -> None:
     try:
         _cfg.SESSION_DIR.mkdir(parents=True, exist_ok=True)
-        _sid_file(chat_id, model).write_text(sid)
+        secure_atomic_write(_sid_file(chat_id, model), sid)
     except Exception as e:
         _debug_log(f"[Session] 保存失败: {e}")
 

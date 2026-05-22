@@ -199,12 +199,41 @@ class TestSaveMd0600(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "global_x.md"
             with patch("os.chmod", side_effect=OSError("operation not supported")):
-                memory._save_md(path, "## Hi\n" + "x" * 100, max_chars=500)
+                result = memory._save_md(path, "## Hi\n" + "x" * 100, max_chars=500)
             self.assertTrue(path.exists())  # write completed
+            self.assertTrue(result is True)  # chmod failure must not affect return value
 
     def test_none_path_is_noop(self):
-        # Should not raise.
-        memory._save_md(None, "anything", max_chars=10)
+        # Should not raise, and returns True (intentional no-op is not a failure).
+        result = memory._save_md(None, "anything", max_chars=10)
+        self.assertTrue(result is True)
+
+    def test_returns_true_on_success(self):
+        """_save_md returns True when the file is written successfully."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session_z.md"
+            result = memory._save_md(path, "## Test\n" + "x" * 100, max_chars=500)
+            self.assertTrue(result is True)
+            self.assertTrue(path.exists())
+
+    def test_returns_false_on_write_error_silent_mode(self):
+        """raise_on_error=False (default): write failure returns False, never raises."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session_fail.md"
+            with patch("pathlib.Path.write_text", side_effect=OSError("no space left")):
+                result = memory._save_md(path, "## Test\n" + "x" * 100, max_chars=500,
+                                         raise_on_error=False)
+            self.assertFalse(result)
+            self.assertFalse(path.exists())
+
+    def test_raises_on_write_error_explicit_mode(self):
+        """raise_on_error=True: write failure propagates the original OSError."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session_raise.md"
+            with self.assertRaises(OSError):
+                with patch("pathlib.Path.write_text", side_effect=OSError("read-only fs")):
+                    memory._save_md(path, "## Test\n" + "x" * 100, max_chars=500,
+                                    raise_on_error=True)
 
     def test_atomic_replace_no_tmp_leftover(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1300,7 +1300,7 @@ def _cmd_cli_native(chat_id: str, model: str, cmd: str, msg_id: str = None):
                     color="orange")
 
 
-def _cmd_btw(chat_id: str, question: str, user_msg_id: str):
+def _cmd_btw(chat_id: str, question: str, user_msg_id: str, *, sender_open_id: str = ""):
     """Handle /btw side-question: uses main session if free, otherwise a dedicated btw session; replies in the original message thread."""
     chat_lock = _get_chat_lock(chat_id)
     btw_lock  = _get_btw_lock(chat_id)
@@ -1381,6 +1381,7 @@ def _cmd_btw(chat_id: str, question: str, user_msg_id: str):
                     _btw_mem_ctx, _ = get_memory_context_v2(
                         chat_id, cwd=cwd, query=question,
                         intent=_btw_intent,
+                        sender_open_id=sender_open_id,
                     )
                 except Exception as e:
                     _debug_log(f"[btw] memory load failed: {e}")
@@ -1604,7 +1605,7 @@ def _cmd_memory_diagnose(chat_id: str, args: str = "", msg_id: str = None) -> No
     send_card_reply(chat_id, msg_id, "🔍 记忆诊断", body, color="blue")
 
 
-def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None):
+def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open_id: str = ""):
     """/memory — show/set/clear/update/gc/export/import/status the three-tier memory system.
 
     /memory                        show all active layers
@@ -1775,7 +1776,7 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None):
     if sub == "observe":
         try:
             from larkhelm.memory import _aggregate_memory_observation
-            obs = _aggregate_memory_observation(chat_id)
+            obs = _aggregate_memory_observation(chat_id, sender_open_id=sender_open_id)
             title, body, color = _render_observe_card(obs)
             send_card_reply(chat_id, msg_id, title, body, color=color, normalize=False)
         except Exception as e:
@@ -1791,12 +1792,12 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None):
                             "`/memory set global <内容>` — 设置全局记忆（最多 500 字符）",
                             color="orange")
             return
-        if _global_memory_file(chat_id) is None:
+        if _global_memory_file(chat_id, sender_open_id=sender_open_id) is None:
             send_card_reply(chat_id, msg_id, "⚠️ 全局记忆不可用",
                             "当前会话无法识别发送者身份，全局记忆已跳过（群聊安全保护）。",
                             color="orange")
             return
-        save_global_memory(text, chat_id=chat_id)
+        save_global_memory(text, chat_id=chat_id, sender_open_id=sender_open_id)
         send_card_reply(chat_id, msg_id, "✅ 全局记忆已更新",
                         f"```\n{text[:200]}\n```", color="green")
         return
@@ -1825,7 +1826,7 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None):
                 _session_memory_file(chat_id).unlink(missing_ok=True)
                 deleted.append("会话")
             if layer in ("all", "global"):
-                _gf = _global_memory_file(chat_id)
+                _gf = _global_memory_file(chat_id, sender_open_id=sender_open_id)
                 if _gf:
                     _gf.unlink(missing_ok=True)
                 deleted.append("全局")
@@ -2006,11 +2007,11 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None):
         ts = (fm.get("updated_at") or "")[:16].replace("T", " ")
         return f" _(更新: {ts})_" if ts else ""
 
-    g = load_global_memory(chat_id)
+    g = load_global_memory(chat_id, sender_open_id=sender_open_id)
     p = load_project_memory(cwd)
     s = load_memory(chat_id)
 
-    _g_path = _global_memory_file(chat_id)
+    _g_path = _global_memory_file(chat_id, sender_open_id=sender_open_id)
     _p_path = _project_memory_file(cwd)
     _s_path = _session_memory_file(chat_id)
 

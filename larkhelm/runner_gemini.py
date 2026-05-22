@@ -29,6 +29,7 @@ class GeminiRunner(BaseProcessRunner):
         model: str | None = None,
         extra_args: list | None = None,
         session_key: str | None = None,
+        suppress_token_recording: bool = False,
     ) -> None:
         super().__init__(
             "gemini", chat_id, message, sid, cwd,
@@ -36,6 +37,7 @@ class GeminiRunner(BaseProcessRunner):
             on_tool_result=on_tool_result, on_soft_timeout=on_soft_timeout,
             allow_retry=allow_retry, images=images, session_namespace=session_namespace,
             use_session=use_session, record_under=record_under, command=command,
+            suppress_token_recording=suppress_token_recording,
         )
         self._model = model
         self._extra_args = list(extra_args) if extra_args else []
@@ -46,6 +48,7 @@ class GeminiRunner(BaseProcessRunner):
             allow_retry=allow_retry, images=images, session_namespace=session_namespace,
             use_session=use_session, record_under=record_under, command=command,
             model=model, extra_args=extra_args, session_key=session_key,
+            suppress_token_recording=suppress_token_recording,
         )
 
     @property

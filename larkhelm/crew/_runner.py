@@ -366,6 +366,7 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
             _crew_mem_ctx, _ = get_memory_context_v2(
                 state.chat_id, cwd=str(cwd), query=full_prompt,
                 intent=_crew_intent,
+                sender_open_id=state.sender_open_id,
             )
         except Exception as e:
             _debug_log(f"[Crew] memory load failed: {e}")
@@ -1363,6 +1364,8 @@ def _synthesize(state: CrewState) -> str:
     if _synth_spec is None:
         raise RuntimeError("No orchestrator backend available for synthesis")
     _API_PROVIDERS = ("anthropic_api", "google_api", "openai_compat_api")
+    usage_holder: dict = {}
+    model_label = _synth_spec.model or _synth_spec.id
     try:
         if _synth_spec.provider in _API_PROVIDERS:
             import larkhelm.backend_api as _bapi
@@ -1370,22 +1373,29 @@ def _synthesize(state: CrewState) -> str:
                    "google_api": _bapi.run_google,
                    "openai_compat_api": _bapi.run_openai_compat}[_synth_spec.provider]
             result, _ = _fn(spec=_synth_spec, chat_id=synth_ns, message=full_prompt,
-                            history=[], cancel_ev=synth_cancel, on_text=None)
+                            history=[], cancel_ev=synth_cancel, on_text=None,
+                            suppress_token_recording=True, usage_holder=usage_holder)
         elif _synth_spec.provider == "gemini_cli":
             from larkhelm.backend_cli import run_gemini as _bc_run_gemini
             result = _bc_run_gemini(spec=_synth_spec, chat_id=synth_ns, message=full_prompt,
                                     sid=None, cwd=cwd, cancel_ev=synth_cancel,
-                                    on_text=None, use_session=False)
+                                    on_text=None, use_session=False,
+                                    suppress_token_recording=True, usage_holder=usage_holder)
         elif _synth_spec.provider == "kimi_cli":
             from larkhelm.backend_cli import run_kimi as _bc_run_kimi
             result = _bc_run_kimi(spec=_synth_spec, chat_id=synth_ns, message=full_prompt,
-                                  sid=None, cwd=cwd, cancel_ev=synth_cancel, on_text=None)
+                                  sid=None, cwd=cwd, cancel_ev=synth_cancel, on_text=None,
+                                  suppress_token_recording=True, usage_holder=usage_holder)
         else:
             result = _bc_run_claude(
                 spec=_synth_spec, chat_id=synth_ns, message=full_prompt,
                 sid=None, cwd=cwd, cancel_ev=synth_cancel,
                 on_text=None, allow_retry=False, session_namespace=synth_ns,
+                suppress_token_recording=True, usage_holder=usage_holder,
             )
+        if usage_holder:
+            from larkhelm.token_stats import record_token_usage
+            record_token_usage(state.chat_id, model_label, usage_holder)
     finally:
         synth_cancel.set()
         revoke_yolo(synth_ns)

@@ -388,6 +388,7 @@ class MemoryContextBuilder:
         sub_intent: str = "",
         complexity: str = "medium",
         confidence: float = 0.0,
+        sender_open_id: str | None = None,
     ):
         self.chat_id = chat_id
         self.cwd = cwd
@@ -400,6 +401,7 @@ class MemoryContextBuilder:
         self.sub_intent = sub_intent or ""
         self.complexity = complexity or "medium"
         self.confidence = float(confidence or 0.0)
+        self.sender_open_id: str | None = sender_open_id or None
 
     # ── public entry points ────────────────────────────────────────────
 
@@ -685,7 +687,7 @@ class MemoryContextBuilder:
         try:
             from larkhelm._context_cache import cached_memory_layer
             from larkhelm.memory import _global_memory_file
-            path = _global_memory_file(self.chat_id)
+            path = _global_memory_file(self.chat_id, sender_open_id=self.sender_open_id)
         except Exception:
             return self._layer_global_uncached()
         return cached_memory_layer(
@@ -744,7 +746,7 @@ class MemoryContextBuilder:
             _debug_log(f"[Memory] _layer_global slot path failed (falling back): {e}")
         try:
             from larkhelm.memory import load_global_memory
-            return load_global_memory(self.chat_id)
+            return load_global_memory(self.chat_id, sender_open_id=self.sender_open_id)
         except Exception as e:
             _debug_log(f"[Memory] _layer_global failed: {e}")
             return None
@@ -759,19 +761,19 @@ class MemoryContextBuilder:
         """
         from larkhelm import memory_global_slots as _mgs
         if not self._legacy_cache_on():
-            slots = _mgs.load_global_slots(self.chat_id)
+            slots = _mgs.load_global_slots(self.chat_id, sender_open_id=self.sender_open_id)
             return _mgs.render_for_context(slots)
         try:
             from larkhelm._context_cache import cached_memory_layer
             from larkhelm.memory import _global_memory_file
-            path = _global_memory_file(self.chat_id)
+            path = _global_memory_file(self.chat_id, sender_open_id=self.sender_open_id)
         except Exception:
-            slots = _mgs.load_global_slots(self.chat_id)
+            slots = _mgs.load_global_slots(self.chat_id, sender_open_id=self.sender_open_id)
             return _mgs.render_for_context(slots)
         rendered = cached_memory_layer(
             "global_slots", path,
             loader=lambda: _mgs.render_for_context(
-                _mgs.load_global_slots(self.chat_id)
+                _mgs.load_global_slots(self.chat_id, sender_open_id=self.sender_open_id)
             ),
         )
         return rendered or ""

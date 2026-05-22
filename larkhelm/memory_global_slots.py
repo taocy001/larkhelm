@@ -110,7 +110,8 @@ def parse_body(body: str) -> dict[str, str]:
     return out
 
 
-def load_global_slots(chat_id: str | None) -> dict[str, str]:
+def load_global_slots(chat_id: str | None, *,
+                      sender_open_id: str | None = None) -> dict[str, str]:
     """Load the slot dict for ``chat_id``'s global memory.
 
     Returns the default-all-empty dict when the file doesn't exist OR is
@@ -119,14 +120,15 @@ def load_global_slots(chat_id: str | None) -> dict[str, str]:
     """
     # Lazy import to break the memory.py ↔ memory_global_slots.py cycle.
     from larkhelm import memory as _mem
-    path = _mem._global_memory_file(chat_id)
+    path = _mem._global_memory_file(chat_id, sender_open_id=sender_open_id)
     body = _mem._load_md_body(path)
     if body is None:
         return {s: "" for s in SLOT_NAMES}
     return parse_body(body)
 
 
-def save_global_slots(chat_id: str | None, slots: dict[str, str]) -> None:
+def save_global_slots(chat_id: str | None, slots: dict[str, str], *,
+                      sender_open_id: str | None = None) -> None:
     """Persist ``slots`` as a schema_version=2 file.
 
     Enforces SLOT_BUDGET on each slot before writing. Empty slots are
@@ -134,7 +136,7 @@ def save_global_slots(chat_id: str | None, slots: dict[str, str]) -> None:
     missing slots with empty strings on read).
     """
     from larkhelm import memory as _mem
-    path = _mem._global_memory_file(chat_id)
+    path = _mem._global_memory_file(chat_id, sender_open_id=sender_open_id)
     if path is None:
         return
 

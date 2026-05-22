@@ -337,6 +337,7 @@ class BaseProcessRunner(abc.ABC):
         command: str | None = None,
         use_session: bool = True,
         record_under: str | None = None,
+        suppress_token_recording: bool = False,
     ) -> None:
         self.backend_name = backend_name
         self.chat_id = chat_id
@@ -355,6 +356,7 @@ class BaseProcessRunner(abc.ABC):
         self.command = command
         self.use_session = use_session
         self.record_under = record_under
+        self.suppress_token_recording = suppress_token_recording
 
         self._tmp_files: list[str] = []
         self._result_text: str = ""
@@ -559,20 +561,15 @@ class BaseProcessRunner(abc.ABC):
             time.sleep(0.3)
 
     def _record_tokens(self, model: str, usage: dict, cost: float) -> None:
-        # Mark recorded so the cancel/timeout safety net in
-        # ``record_partial_tokens_if_needed`` doesn't double-count this
-        # exact event (called both from the normal ``result`` path AND
-        # — for ``estimated=True`` records — from the safety net itself).
         self._tokens_recorded = True
-        if self.record_under:
-            record_id = self.record_under
-        elif "__crew_" in self.chat_id:
-            record_id = self.chat_id.split("__crew_")[0]
-        else:
-            record_id = self.chat_id
         full_usage = {**usage, "cost_usd": cost}
+        # Always update so ai_runner can extract via usage_holder after run()
+        self._last_usage_seen = full_usage
+        if getattr(self, 'suppress_token_recording', False):
+            return  # recording deferred to caller (_synthesize)
         try:
-            from larkhelm.token_stats import record_token_usage
+            from larkhelm.token_stats import record_token_usage, resolve_record_chat_id
+            record_id = resolve_record_chat_id(self.chat_id, self.record_under)
             record_token_usage(record_id, model, full_usage)
         except Exception as e:
             _debug_log(f"[{self.backend_name}] token_stats update failed: {e}")
@@ -602,6 +599,8 @@ class BaseProcessRunner(abc.ABC):
 
         Safe to call multiple times — the flag short-circuits re-entries.
         """
+        if getattr(self, 'suppress_token_recording', False):
+            return  # recording deferred to caller
         if self._tokens_recorded:
             return
         usage = self._last_usage_seen
