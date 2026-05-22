@@ -215,6 +215,43 @@ def cleanup_temp_images(images: "list[str] | None") -> None:
             _debug_log(f"[QueryPure] temp image cleanup failed: {e}")
 
 
+def cleanup_temp_paths(paths: "list[str] | None") -> None:
+    """Unlink temporary file paths produced during a query.
+
+    Cleans paths under ``/tmp/`` (backward-compat with cleanup_temp_images)
+    and paths under ``SESSION_DIR/{chat_id}/files/`` (file-download cache).
+    Paths outside those two roots (e.g. ``SESSION_DIR/{chat_id}/imgs/``)
+    are skipped safely so the image cache is never deleted between queries.
+    """
+    if not paths:
+        return
+    # Resolve both roots so the prefix check is symlink-safe.
+    # On macOS /tmp → /private/tmp; resolving the root means the comparison
+    # works after realpath() expands the target path too.
+    _tmp_root = _os.path.realpath("/tmp")
+    try:
+        session_dir_str = _os.path.realpath(str(_cfg.SESSION_DIR))
+    except Exception:
+        session_dir_str = ""
+    for path in paths:
+        try:
+            if not path:
+                continue
+            p = _os.path.realpath(str(path))
+            is_tmp = p.startswith(_tmp_root + "/") or p == _tmp_root
+            is_session_files = bool(
+                session_dir_str
+                and p.startswith(session_dir_str)
+                and "/files/" in p
+            )
+            if is_tmp or is_session_files:
+                _os.unlink(p)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            _debug_log(f"[QueryPure] temp path cleanup failed: {e}")
+
+
 def extract_feishu_urls(text: str) -> list[str]:
     """Re-export of the URL extractor so callers needn't reach into _query."""
     return _FEISHU_URL_RE.findall(text)
@@ -227,5 +264,6 @@ __all__ = [
     "select_legacy_runner",
     "format_completion_card",
     "cleanup_temp_images",
+    "cleanup_temp_paths",
     "extract_feishu_urls",
 ]

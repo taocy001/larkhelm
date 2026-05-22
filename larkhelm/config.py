@@ -93,6 +93,12 @@ class _RuntimeConfig:
     DOC_INJECT_CACHE_ENABLED:          bool = True
     DOC_INJECT_CACHE_TTL_SEC:          int = 60
     CLI_SKIP_RECENT_TURNS_WHEN_SID:    bool = True
+    # File processing (M4.1)
+    FILE_ENABLED:          bool = True
+    MAX_FILE_SIZE_BYTES:   int = 10 * 1024 * 1024
+    FILE_TEXT_EXTENSIONS:  "frozenset[str]" = frozenset()
+    FILE_PDF_ENABLED:      bool = True
+    FILE_PDF_LIB:          str = "PyPDF2"
 
 # ── Runtime config (assigned by _init_runtime()) ────────────────────────
 CONFIG_PATH: Path
@@ -224,6 +230,17 @@ MEMORY_LEGACY_CACHE_ENABLED: bool = True
 DOC_INJECT_CACHE_ENABLED: bool = True
 DOC_INJECT_CACHE_TTL_SEC: int = 60
 CLI_SKIP_RECENT_TURNS_WHEN_SID: bool = True
+
+# ── File handling configuration ───────────────────────────────────────────
+FILE_ENABLED: bool = True
+MAX_FILE_SIZE_BYTES: int = 10 * 1024 * 1024   # 10 MB
+FILE_TEXT_EXTENSIONS: "frozenset[str]" = frozenset({
+    "txt", "md", "py", "js", "json", "yaml", "yml", "csv", "log",
+    "sh", "go", "rs", "java", "c", "cpp", "h", "ts", "tsx", "jsx",
+    "css", "html", "xml", "sql", "dockerfile", "toml", "ini", "cfg", "conf",
+})
+FILE_PDF_ENABLED: bool = True
+FILE_PDF_LIB: str = "PyPDF2"
 # Single source of truth for accepted voice languages — referenced by both
 # config validation (_init_runtime) and the /voice command handler.
 _VOICE_LANG_WHITELIST: "frozenset[str]" = frozenset({"zh", "en", "auto"})
@@ -515,6 +532,8 @@ def _init_app_config() -> None:
     global RECENT_TURNS_CACHE_ENABLED, MEMORY_LEGACY_CACHE_ENABLED
     global DOC_INJECT_CACHE_ENABLED, DOC_INJECT_CACHE_TTL_SEC
     global CLI_SKIP_RECENT_TURNS_WHEN_SID
+    global FILE_ENABLED, MAX_FILE_SIZE_BYTES, FILE_TEXT_EXTENSIONS
+    global FILE_PDF_ENABLED, FILE_PDF_LIB
 
     try:
         # SEC-H1: warn when config file is world-readable (contains APP_SECRET).
@@ -1002,6 +1021,31 @@ def _init_app_config() -> None:
         config.get("cli_skip_recent_turns_when_sid", True)
     )
 
+    # ── File handling configuration ────────────────────────────────────────
+    config.setdefault("file_enabled", True)
+    config.setdefault("max_file_size_bytes", 10 * 1024 * 1024)
+    config.setdefault("file_pdf_enabled", True)
+    config.setdefault("file_pdf_lib", "PyPDF2")
+
+    FILE_ENABLED = bool(config.get("file_enabled", True))
+    try:
+        MAX_FILE_SIZE_BYTES = max(1, int(config.get("max_file_size_bytes", 10 * 1024 * 1024) or 10 * 1024 * 1024))
+    except (TypeError, ValueError):
+        MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
+    _raw_file_exts = config.get("file_text_extensions")
+    if isinstance(_raw_file_exts, list):
+        FILE_TEXT_EXTENSIONS = frozenset(
+            str(e).lower().strip().lstrip(".") for e in _raw_file_exts if e
+        )
+    else:
+        FILE_TEXT_EXTENSIONS = frozenset({
+            "txt", "md", "py", "js", "json", "yaml", "yml", "csv", "log",
+            "sh", "go", "rs", "java", "c", "cpp", "h", "ts", "tsx", "jsx",
+            "css", "html", "xml", "sql", "dockerfile", "toml", "ini", "cfg", "conf",
+        })
+    FILE_PDF_ENABLED = bool(config.get("file_pdf_enabled", True))
+    FILE_PDF_LIB = str(config.get("file_pdf_lib", "PyPDF2") or "PyPDF2")
+
     _raw_timeouts = config.get("dev_stage_timeouts") or {}
     _clean_timeouts: "dict[str, int]" = {}
     if isinstance(_raw_timeouts, dict):
@@ -1116,6 +1160,11 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         DOC_INJECT_CACHE_ENABLED=DOC_INJECT_CACHE_ENABLED,
         DOC_INJECT_CACHE_TTL_SEC=DOC_INJECT_CACHE_TTL_SEC,
         CLI_SKIP_RECENT_TURNS_WHEN_SID=CLI_SKIP_RECENT_TURNS_WHEN_SID,
+        FILE_ENABLED=FILE_ENABLED,
+        MAX_FILE_SIZE_BYTES=MAX_FILE_SIZE_BYTES,
+        FILE_TEXT_EXTENSIONS=FILE_TEXT_EXTENSIONS,
+        FILE_PDF_ENABLED=FILE_PDF_ENABLED,
+        FILE_PDF_LIB=FILE_PDF_LIB,
     )
 
 

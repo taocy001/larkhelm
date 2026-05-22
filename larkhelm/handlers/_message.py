@@ -36,7 +36,7 @@ from larkhelm.concurrency import (
 from larkhelm.lark_client import (
     send_card, send_card_reply, _download_image, _download_message_file, update_card,
     REACTION_ACTIONS, _reply_index, _reply_index_lock,
-    _make_card, _patch_card_raw,
+    _make_card, _patch_card_raw, download_file_by_key,
 )
 from larkhelm.concurrency import is_shutting_down
 from larkhelm.handlers._query import _do_query
@@ -265,7 +265,7 @@ def handle_message(data: P2ImMessageReceiveV1):
                 _debug_log(f"[Post] parse error: {e}")
                 return
         elif message.message_type == "file":
-            # Memory import: user replied with a zip file after /memory import
+            # Parse file metadata common to all file branches.
             try:
                 file_meta = json.loads(message.content)
                 file_key = file_meta.get("file_key", "")
@@ -274,65 +274,113 @@ def handle_message(data: P2ImMessageReceiveV1):
                 return
             if not file_key:
                 return
+
+            # ── Branch 1: memory import (zip uploaded after /memory import) ──
             state = _get_chat_state(chat_id)
             _pending_ts = state.get("pending_memory_import")
-            # Accept both timestamp (new) and boolean True (legacy); expire after 10 minutes
             _PENDING_TTL = 600
-            if not _pending_ts:
-                return
-            if isinstance(_pending_ts, float) and time.time() - _pending_ts > _PENDING_TTL:
-                _set_chat_field(chat_id, "pending_memory_import", False)
-                send_card_reply(chat_id, message.message_id, "⏰ 等待超时",
-                                "导入等待已过期（10 分钟），请重新执行 `/memory import`。",
-                                color="orange")
-                return
-            # Only accept .zip files (validate before clearing flag so user can retry)
-            if not file_name.lower().endswith(".zip"):
-                send_card_reply(chat_id, message.message_id, "⚠️ 格式错误",
-                                "请发送 `.zip` 格式的导出文件。", color="orange")
-                return
-            _set_chat_field(chat_id, "pending_memory_import", False)
-            placeholder = send_card_reply(chat_id, message.message_id, "📥 导入中",
-                                          "正在下载并导入记忆数据…", color="grey")
-            try:
-                import tempfile
-                from pathlib import Path
-                from larkhelm.memory_io import import_memory
-                from larkhelm.lark_client import download_file_by_key
-                _fd, _tmp = tempfile.mkstemp(suffix=".zip", prefix=f"larkhelm_import_{chat_id[:8]}_")
-                os.close(_fd)
-                tmp_path = Path(_tmp)
-                ok = download_file_by_key(file_key, tmp_path)
-                if not ok:
-                    if placeholder:
-                        _patch_card_raw(placeholder, _make_card("❌ 下载失败",
-                                                                 "无法下载文件，请确认权限。",
-                                                                 color="red"))
+            if _pending_ts:
+                # Accept both timestamp (new) and boolean True (legacy); expire after 10 minutes
+                if isinstance(_pending_ts, float) and time.time() - _pending_ts > _PENDING_TTL:
+                    _set_chat_field(chat_id, "pending_memory_import", False)
+                    send_card_reply(chat_id, message.message_id, "⏰ 等待超时",
+                                    "导入等待已过期（10 分钟），请重新执行 `/memory import`。",
+                                    color="orange")
                     return
-                report = import_memory(tmp_path)
-                n_written = len(report["written"])
-                n_skipped = len(report["skipped"])
-                lines = [f"**导入成功：** {n_written} 个文件"]
-                if n_skipped:
-                    lines.append(f"**跳过：** {n_skipped} 个文件")
-                if report.get("warnings"):
-                    lines.append(f"**警告：** {'；'.join(report['warnings'])}")
-                color = "green" if not n_skipped else "orange"
-                body = "\n\n".join(lines)
-                if placeholder:
-                    _patch_card_raw(placeholder, _make_card("✅ 导入完成", body, color=color))
-                else:
-                    send_card_reply(chat_id, message.message_id, "✅ 导入完成", body, color=color)
+                # Only accept .zip files (validate before clearing flag so user can retry)
+                if not file_name.lower().endswith(".zip"):
+                    send_card_reply(chat_id, message.message_id, "⚠️ 格式错误",
+                                    "请发送 `.zip` 格式的导出文件。", color="orange")
+                    return
+                _set_chat_field(chat_id, "pending_memory_import", False)
+                placeholder = send_card_reply(chat_id, message.message_id, "📥 导入中",
+                                              "正在下载并导入记忆数据…", color="grey")
                 try:
-                    tmp_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-            except Exception as e:
-                _debug_log(f"[memory import file] failed: {e}")
-                if placeholder:
-                    _patch_card_raw(placeholder, _make_card("❌ 导入失败", str(e)[:300], color="red"))
-                else:
-                    send_card_reply(chat_id, message.message_id, "❌ 导入失败", str(e)[:300], color="red")
+                    import tempfile
+                    from pathlib import Path
+                    from larkhelm.memory_io import import_memory
+                    _fd, _tmp = tempfile.mkstemp(suffix=".zip", prefix=f"larkhelm_import_{chat_id[:8]}_")
+                    os.close(_fd)
+                    tmp_path = Path(_tmp)
+                    ok = download_file_by_key(file_key, tmp_path)
+                    if not ok:
+                        if placeholder:
+                            _patch_card_raw(placeholder, _make_card("❌ 下载失败",
+                                                                     "无法下载文件，请确认权限。",
+                                                                     color="red"))
+                        return
+                    report = import_memory(tmp_path)
+                    n_written = len(report["written"])
+                    n_skipped = len(report["skipped"])
+                    lines = [f"**导入成功：** {n_written} 个文件"]
+                    if n_skipped:
+                        lines.append(f"**跳过：** {n_skipped} 个文件")
+                    if report.get("warnings"):
+                        lines.append(f"**警告：** {'；'.join(report['warnings'])}")
+                    color = "green" if not n_skipped else "orange"
+                    body = "\n\n".join(lines)
+                    if placeholder:
+                        _patch_card_raw(placeholder, _make_card("✅ 导入完成", body, color=color))
+                    else:
+                        send_card_reply(chat_id, message.message_id, "✅ 导入完成", body, color=color)
+                    try:
+                        tmp_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    _debug_log(f"[memory import file] failed: {e}")
+                    if placeholder:
+                        _patch_card_raw(placeholder, _make_card("❌ 导入失败", str(e)[:300], color="red"))
+                    else:
+                        send_card_reply(chat_id, message.message_id, "❌ 导入失败", str(e)[:300], color="red")
+                return
+
+            # ── Branch 2: general file analysis (FILE_ENABLED gate) ──
+            if not getattr(_cfg, "FILE_ENABLED", True):
+                return
+
+            from larkhelm.file_handler import process_file as _process_file
+            _file_result = _process_file(file_key, file_name, chat_id, message.message_id)
+
+            if _file_result.warnings and not _file_result.has_content:
+                # Format rejected or all files failed — show warning and stop.
+                warn_body = "\n\n".join(_file_result.warnings)
+                send_card_reply(chat_id, message.message_id, "⚠️ 无法处理文件",
+                                warn_body, color="orange")
+                return
+
+            if not _file_result.has_content:
+                return
+
+            if _file_result.warnings:
+                warn_body = "\n\n".join(_file_result.warnings)
+                send_card_reply(chat_id, message.message_id, "⚠️ 部分文件处理失败",
+                                warn_body, color="orange")
+
+            _target_model = _get_chat_model(chat_id)
+            _file_text = f"[文件: {file_name}]"
+            _trace_id = uuid.uuid4().hex[:12]
+            log_entry(chat_id, "user", _file_text, model=_target_model, trace_id=_trace_id)
+            _reset_cancel(chat_id)
+            try:
+                from larkhelm.memory import _query_sender_open_id
+                _query_sender_open_id.set(sender_open_id or "")
+            except Exception:
+                pass
+            threading.Thread(
+                target=_do_query,
+                kwargs={
+                    "chat_id": chat_id,
+                    "message": _file_text,
+                    "model": _target_model,
+                    "user_msg_id": message.message_id,
+                    "files": _file_result.files,
+                    "trace_id": _trace_id,
+                    "sender_open_id": sender_open_id,
+                },
+                daemon=True,
+                name=f"file-query-{chat_id[:8]}",
+            ).start()
             return
 
         elif message.message_type == "audio":
