@@ -497,11 +497,16 @@ def _init_app_config() -> None:
         try:
             _mode = CONFIG_PATH.stat().st_mode & 0o777
             if _mode & 0o077:  # group or world bits set
-                print(
-                    f"⚠️  安全警告: {CONFIG_PATH} 权限为 {oct(_mode)}，"
-                    "建议改为 600（仅本人可读）: "
-                    f"chmod 600 {CONFIG_PATH}"
+                _perm_msg = (
+                    f"[Config] config file {CONFIG_PATH} has permissions {oct(_mode)}, "
+                    "recommend chmod 600 to protect APP_SECRET"
                 )
+                print(f"⚠️  安全警告: {_perm_msg}")
+                try:
+                    from larkhelm.log import warn as _log_warn
+                    _log_warn(_perm_msg)
+                except Exception:
+                    pass
         except OSError:
             pass
         config = json.loads(CONFIG_PATH.read_text())

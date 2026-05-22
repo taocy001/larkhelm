@@ -275,5 +275,65 @@ class TestMemoryLogPrefixConsistency(unittest.TestCase):
         )
 
 
+# ── 4. MEM-H6: _run_one_shot multi-chunk accumulation ────────────────────
+
+
+class TestRunOneShotChunkAccumulation(unittest.TestCase):
+    """MEM-H6: _on_text must accumulate ALL streaming chunks.
+    Before the fix, _on_text called collected.clear() before append(),
+    keeping only the last chunk. After the fix, all chunks accumulate."""
+
+    def test_all_chunks_joined_when_output_empty(self):
+        """When _dispatch_one_shot triggers on_text multiple times and returns ''
+        (or None), the fallback "".join(collected) must contain all chunks."""
+        from unittest.mock import patch, MagicMock
+        from larkhelm import memory
+        import larkhelm.backend_registry as _breg
+
+        chunks_seen = []
+
+        def _fake_dispatch(spec, ns, prompt, on_text):
+            on_text("chunk1")
+            on_text("chunk2")
+            on_text("chunk3")
+            chunks_seen.append("dispatched")
+            return ""  # empty output → fallback to collected
+
+        fake_spec = MagicMock()
+        fake_spec.id = "test_spec"
+        fake_spec.provider = "claude_cli"
+
+        with patch.object(_breg.BACKEND_REGISTRY, "get_by_tag", return_value=None), \
+             patch.object(_breg.BACKEND_REGISTRY, "get_orchestrator", return_value=fake_spec), \
+             patch.object(memory, "_dispatch_one_shot", side_effect=_fake_dispatch):
+            result = memory._run_one_shot("test prompt", ns="test_ns")
+
+        self.assertEqual(result, "chunk1chunk2chunk3",
+                         "all streaming chunks must be concatenated, not just the last one")
+        self.assertEqual(chunks_seen, ["dispatched"])
+
+    def test_output_takes_priority_over_collected(self):
+        """When _dispatch_one_shot returns a non-empty string, it wins over
+        collected — verifies the 'output or "".join(collected)' precedence."""
+        from unittest.mock import patch, MagicMock
+        from larkhelm import memory
+        import larkhelm.backend_registry as _breg
+
+        def _fake_dispatch(spec, ns, prompt, on_text):
+            on_text("streaming_chunk")
+            return "direct_output"
+
+        fake_spec = MagicMock()
+        fake_spec.id = "test_spec"
+        fake_spec.provider = "claude_cli"
+
+        with patch.object(_breg.BACKEND_REGISTRY, "get_by_tag", return_value=None), \
+             patch.object(_breg.BACKEND_REGISTRY, "get_orchestrator", return_value=fake_spec), \
+             patch.object(memory, "_dispatch_one_shot", side_effect=_fake_dispatch):
+            result = memory._run_one_shot("test prompt", ns="test_ns")
+
+        self.assertEqual(result, "direct_output")
+
+
 if __name__ == "__main__":
     unittest.main()
