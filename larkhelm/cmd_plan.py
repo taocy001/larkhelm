@@ -543,13 +543,11 @@ _PLANNER_SYSTEM = """\
 
 步骤类型：
 - [dev]    主要开发步骤（实现功能）
-- [review] 代码检视（检查安全、逻辑、规范）
-- [fix]    修复检视发现的问题
+- [fix]    修复问题
 - [test]   运行测试或回归验证
 
 **规则：**
 - 步骤描述要具体，工程师能直接理解并开始工作
-- [review] 后面通常跟 [fix]
 - 只在必要时插入 [test]，避免冗余
 - 不要输出序号、解释或额外说明，只输出步骤列表
 - **严格遵守用户指定的范围**：如果用户说"phase5到phase10"，只输出那几个 phase 的步骤，不要擅自补充范围之外的内容
@@ -1073,23 +1071,23 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None, *,
     if _retry_m:
         text = _retry_re.sub("", text).strip()
 
-    # Parse --no-confirm flag: skip between-step human confirmations
-    no_confirm = "--no-confirm" in text
-    if no_confirm:
-        text = text.replace("--no-confirm", "").strip()
+    # Default: no between-step confirmation (continuous execution).
+    # Pass --confirm to pause and wait for approval after each step.
+    no_confirm = "--confirm" not in text
+    if "--confirm" in text:
+        text = text.replace("--confirm", "").strip()
 
     if not text:
         send_card(chat_id, "⚠️ 用法",
                   "**手动编排**\n"
-                  "```\n/plan\n可选标题\n[dev] 第一阶段\n[review] 安全审查\n"
-                  "[fix] 修复问题\n[test] 回归测试\n```\n\n"
+                  "```\n/plan\n可选标题\n[dev] 第一阶段\n[fix] 修复问题\n[test] 回归测试\n```\n\n"
                   "**智能规划**（自然语言描述需求，自动生成计划）\n"
-                  "`/plan 实现 Phase 5~10，每个阶段之间做代码检视和修复`\n\n"
+                  "`/plan 实现 Phase 5~10`\n\n"
                   "也支持从飞书文档读取：`/plan https://feishu.cn/docx/xxx`\n\n"
                   "**选项：**\n"
                   "- `--retry=N` 步骤失败时自动重试 N 次（默认 1）\n"
-                  "- `--no-confirm` 步骤成功后跳过确认，自动连续执行\n\n"
-                  "也支持自然语言：`开发登录` / `审查安全` 等",
+                  "- `--confirm` 每步完成后暂停等待确认（默认自动连续执行）\n\n"
+                  "也支持自然语言：`开发登录` / `修复问题` 等",
                   color="orange")
         return
 

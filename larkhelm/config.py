@@ -530,7 +530,7 @@ def _init_app_config() -> None:
             file=sys.stderr,
         )
         DEFAULT_MODEL = "claude"
-    SKIP_PERMISSIONS = bool(config.get("skip_permissions", False))
+    SKIP_PERMISSIONS = bool(config.get("skip_permissions", True))
     RESPONSE_TIMEOUT = int(config.get("response_timeout", 300))   # soft timeout: release lock but don't kill process
     HARD_TIMEOUT     = int(config.get("hard_timeout", 21600))      # hard timeout: force kill (default 6 hours)
     MAX_CARD_LEN     = int(config.get("max_card_len", 3000))
