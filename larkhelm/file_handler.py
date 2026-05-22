@@ -14,12 +14,50 @@ Public API:
 from __future__ import annotations
 
 import os
+import re
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 import larkhelm.config as _cfg
 from larkhelm.log import _debug_log, warn
+
+# ── Session-level file dedup cache ──────────────────────────────────────────
+# Keyed by (chat_id, file_key); evicts LRU entries beyond the cap.
+# Prevents repeated download + extraction for the same attachment.
+_DEDUP_CACHE_MAX = 200
+_file_cache: "OrderedDict[tuple[str, str], ExtractedFile]" = OrderedDict()
+_file_cache_lock = threading.Lock()
+
+
+def _cache_get(chat_id: str, file_key: str) -> "ExtractedFile | None":
+    key = (chat_id, file_key)
+    with _file_cache_lock:
+        entry = _file_cache.get(key)
+        if entry is None:
+            return None
+        _file_cache.move_to_end(key)
+        # Return a shallow copy so the caller cannot mutate the cached instance.
+        import dataclasses as _dc
+        return _dc.replace(entry)
+
+
+def _cache_set(chat_id: str, file_key: str, extracted: "ExtractedFile") -> None:
+    key = (chat_id, file_key)
+    with _file_cache_lock:
+        _file_cache[key] = extracted
+        _file_cache.move_to_end(key)
+        while len(_file_cache) > _DEDUP_CACHE_MAX:
+            _file_cache.popitem(last=False)
+
+
+# ── AI output file marker regex ──────────────────────────────────────────────
+_FILE_MARKER_RE = re.compile(
+    r"<!--FILE:([^\s>]+?)-->([\s\S]*?)<!--/FILE-->",
+    re.DOTALL,
+)
 
 
 @dataclass
@@ -95,6 +133,17 @@ class FileProcessor:
             if not getattr(_cfg, "FILE_ENABLED", True):
                 return result
 
+            # Check session-level dedup cache before downloading.
+            _cached = _cache_get(chat_id, file_key)
+            if _cached is not None:
+                _debug_log(f"[FileProcessor] cache hit file_key={file_key!r} file={file_name!r}")
+                result.files.append(_cached)
+                if _cached.content is not None:
+                    result.blocks.append(
+                        self._build_block(_cached.file_name, _cached.ext, _cached.content)
+                    )
+                return result
+
             ext = Path(file_name).suffix.lower().lstrip(".")
             text_exts: frozenset[str] = getattr(_cfg, "FILE_TEXT_EXTENSIONS", self.TEXT_EXTENSIONS)
             pdf_enabled: bool = getattr(_cfg, "FILE_PDF_ENABLED", True)
@@ -142,6 +191,7 @@ class FileProcessor:
                 content=content,
                 error=None if content is not None else "内容提取失败",
             )
+            _cache_set(chat_id, file_key, extracted)
             result.files.append(extracted)
 
             if content is not None:
@@ -276,6 +326,28 @@ def files_to_prompt_fragment(files: "list[ExtractedFile]") -> str:
     return "[用户上传了以下文件]\n\n" + "\n\n".join(blocks) + "\n\n---\n\n"
 
 
+def extract_file_markers(text: str) -> "tuple[str, list[tuple[str, str]]]":
+    """Scan AI output for ``<!--FILE:name-->content<!--/FILE-->`` markers.
+
+    Returns ``(cleaned_text, [(filename, content), ...])``. Markers are removed
+    from the returned text; the content of each marker becomes a file to be
+    sent via ``send_text_as_file``. Empty filename or empty content are ignored.
+    """
+    found: list[tuple[str, str]] = []
+
+    def _replace(m: re.Match) -> str:
+        # Path.name strips any directory components (../../etc/passwd → passwd)
+        # so a misbehaving model cannot traverse outside the temp dir.
+        filename = Path(m.group(1).strip()).name
+        content = m.group(2).strip()
+        if filename and content:
+            found.append((filename, content))
+        return ""
+
+    cleaned = _FILE_MARKER_RE.sub(_replace, text).strip()
+    return cleaned, found
+
+
 __all__ = [
     "ExtractedFile",
     "FileProcessResult",
@@ -283,4 +355,5 @@ __all__ = [
     "process_file",
     "build_file_prompt_blocks",
     "files_to_prompt_fragment",
+    "extract_file_markers",
 ]

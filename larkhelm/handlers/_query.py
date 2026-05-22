@@ -440,7 +440,8 @@ def _post_query_memory_hook(chat_id: str, trace_id: str) -> None:
 
 
 def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
-              images: list = None, parent_id: str | None = None,
+              images: list = None, files: list = None,
+              parent_id: str | None = None,
               force_backend_id: str | None = None,
               trace_id: str | None = None,
               sender_open_id: str | None = None):
@@ -461,7 +462,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             from larkhelm.handlers._query_session import QuerySession
             _session = QuerySession(
                 chat_id=chat_id, message=message, model=model,
-                user_msg_id=user_msg_id, images=images,
+                user_msg_id=user_msg_id, images=images, files=files,
                 parent_id=parent_id, force_backend_id=force_backend_id,
                 sender_open_id=sender_open_id,
             )
@@ -745,6 +746,18 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 except Exception as _pe:
                     _debug_log(f"[{trace_id}][DoQuery] parent fetch error: {_pe}")
 
+            # ── File content injection ───────────────────────────────────────
+            # Prepend extracted file blocks before doc injection so file content
+            # is in scope when Feishu doc URLs are resolved.
+            if files:
+                try:
+                    from larkhelm.file_handler import files_to_prompt_fragment
+                    _file_prefix = files_to_prompt_fragment(files)
+                    if _file_prefix:
+                        message = _file_prefix + message
+                except Exception as _fe:
+                    _debug_log(f"[{trace_id}][DoQuery] file inject error: {_fe}")
+
             # ── Doc injection + memory context ───────────────────────────────
             # Doc injection runs here (background thread, not SDK event callback) to avoid
             # blocking the event dispatch loop. Applied to the original message so memory
@@ -954,6 +967,16 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             elapsed = _fmt_elapsed(time.time() - start)
             if not output:
                 output = "✅ 完成（无文本输出）"
+
+            # Strip <!--FILE:name-->...<!--/FILE--> markers before logging so
+            # the log and card both show clean text. Files are sent after final card.
+            _auto_files: list[tuple[str, str]] = []
+            try:
+                from larkhelm.file_handler import extract_file_markers
+                output, _auto_files = extract_file_markers(output)
+            except Exception as _mfe:
+                _debug_log(f"[DoQuery] extract_file_markers failed: {_mfe}")
+
             log_model = successful_spec.id if successful_spec is not None else model
             log_entry(chat_id, "assistant", output, model=log_model, trace_id=trace_id)
 
@@ -1048,6 +1071,16 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             if mid:
                 _index_reply(mid, chat_id, message, model)
 
+            # Auto-send files extracted from AI output markers.
+            if _auto_files:
+                try:
+                    from larkhelm.lark_client import send_text_as_file
+                    for _af_name, _af_content in _auto_files:
+                        send_text_as_file(chat_id, _af_content, _af_name,
+                                          msg_id=user_msg_id)
+                except Exception as _afe:
+                    _debug_log(f"[DoQuery] auto file send failed: {_afe}")
+
         except QueryCancelledError:
             _stop_hb.set()
             with card_state.card_patch_lock: pass   # drain any in-flight heartbeat patch first
@@ -1130,3 +1163,10 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                         _os.unlink(_img)
                 except Exception as e:
                     _debug_log(f"[query] temp image cleanup failed: {e}")
+        # Clean up file downloads for this query.
+        if files:
+            try:
+                from larkhelm.handlers._query_pure import cleanup_temp_paths
+                cleanup_temp_paths([f.path for f in files])
+            except Exception as _cte:
+                _debug_log(f"[query] file temp cleanup failed: {_cte}")

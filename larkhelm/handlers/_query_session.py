@@ -57,6 +57,7 @@ class QuerySession:
     model: str
     user_msg_id: "str | None" = None
     images: "list | None" = None
+    files: "list | None" = None   # list[ExtractedFile] from file_handler
     parent_id: "str | None" = None
     force_backend_id: "str | None" = None
     trace_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
@@ -120,6 +121,18 @@ class QuerySession:
 
             try:
                 self._inject_parent_context()
+
+                # File content injection: prepend file blocks before doc injection
+                # so file content is in scope when doc URLs are resolved.
+                if self.files:
+                    try:
+                        from larkhelm.file_handler import files_to_prompt_fragment
+                        _file_prefix = files_to_prompt_fragment(self.files)
+                        if _file_prefix:
+                            self.message = _file_prefix + self.message
+                    except Exception as _fe:
+                        _debug_log(f"[{self.trace_id}][QuerySession] file inject error: {_fe}")
+
                 has_doc_urls = bool(_query_pure.extract_feishu_urls(self.message))
                 enriched, memory_ctx, deduped = _query_pure.inject_doc_and_memory(
                     self.message, self.chat_id, cwd,
@@ -153,6 +166,7 @@ class QuerySession:
             if not self.lock_released:
                 self._drain_pending_queue()
             _query_pure.cleanup_temp_images(self.images)
+            _query_pure.cleanup_temp_paths([f.path for f in (self.files or [])])
 
     # ─────────────────────────────────────────────────────────────────
     # Stage helpers
@@ -378,6 +392,15 @@ class QuerySession:
         elapsed = _fmt_elapsed(time.time() - self.start_time)
         if not output:
             output = "✅ 完成（无文本输出）"
+
+        # Strip <!--FILE:name-->...<!--/FILE--> markers before logging (mirrors legacy path).
+        _auto_files: list[tuple[str, str]] = []
+        try:
+            from larkhelm.file_handler import extract_file_markers
+            output, _auto_files = extract_file_markers(output)
+        except Exception as _mfe:
+            _debug_log(f"[QuerySession] extract_file_markers failed: {_mfe}")
+
         log_model = (
             self.successful_spec.id
             if self.successful_spec is not None else self.model
@@ -459,6 +482,16 @@ class QuerySession:
 
         if self.mid:
             _index_reply(self.mid, self.chat_id, self.message, self.model)
+
+        # Auto-send files extracted from AI output markers.
+        if _auto_files:
+            try:
+                from larkhelm.lark_client import send_text_as_file
+                for _af_name, _af_content in _auto_files:
+                    send_text_as_file(self.chat_id, _af_content, _af_name,
+                                      msg_id=self.user_msg_id)
+            except Exception as _afe:
+                _debug_log(f"[QuerySession] auto file send failed: {_afe}")
 
     def on_cancel(self) -> None:
         assert self.card_state is not None
