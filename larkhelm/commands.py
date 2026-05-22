@@ -190,12 +190,7 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
 
 
 def _cmd_status(chat_id: str, msg_id: str = None):
-    s_c = _load_sid(chat_id, "claude")
-    s_g = _load_sid(chat_id, "gemini")
     cwd = _get_cwd(chat_id)
-
-    s_k = _load_sid(chat_id, "kimi")
-    s_d = _load_sid(chat_id, "deepseek")
 
     if _cfg.SKIP_PERMISSIONS:
         perm_status = "⏭️ 跳过（skip_permissions=true）"
@@ -344,13 +339,6 @@ def _cmd_status(chat_id: str, msg_id: str = None):
         "",
     ]
 
-    tips = []
-    if not s_c and not s_g and not s_k and not s_d:
-        tips.append("💡 直接发消息开始第一次对话，会自动建立会话")
-    else:
-        tips.append("💡 **/pickup** — 获取在终端接力会话的命令")
-        tips.append("💡 **/reset** — 清除会话，开始全新对话")
-    lines += tips
     send_card_reply(chat_id, msg_id, "📊 运行状态", "\n".join(lines), color="turquoise", normalize=False)
 
 
@@ -407,8 +395,11 @@ def _cmd_help(chat_id: str, msg_id: str = None):
         "**/memory export** — 导出记忆 zip\n"
         "**/memory import [file_key]** — 导入记忆 zip\n"
         "\n"
-        "**📦 其他命令** ：**/voice** [status|lang …] · "
-        "**/cron** add/list/del · **/btw** <问题>（快问，不占主锁） · **/upgrade**"
+        "**📦 其他命令**\n"
+        "**/voice** [status|lang …] — 语音转写设置\n"
+        "**/cron** add | list | del — 定时任务\n"
+        "**/btw** <问题> — 快问，不占主锁\n"
+        "**/upgrade** — 更新 larkhelm"
     )
     send_card_reply(chat_id, msg_id, "📖 帮助", body, color="blue", normalize=False)
 
