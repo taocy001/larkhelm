@@ -405,6 +405,46 @@ def download_file_by_key(file_key: str, out_path: Path) -> bool:
         return False
 
 
+def send_text_as_file(
+    chat_id: str,
+    text: str,
+    file_name: str,
+    msg_id: "str | None" = None,
+) -> "str | None":
+    """Write text to a temp file, upload it to Feishu, and send as a file message.
+
+    Returns the Feishu message_id, or None on any failure.
+    """
+    import os as _os_mod
+    import tempfile
+    tmp_path: "str | None" = None
+    try:
+        suffix = Path(file_name).suffix or ".txt"
+        fd, tmp_raw = tempfile.mkstemp(suffix=suffix)
+        try:
+            _os_mod.write(fd, text.encode("utf-8"))
+        finally:
+            _os_mod.close(fd)
+        # Rename so Feishu shows the correct original filename, not the random temp name.
+        final_tmp = Path(tmp_raw).parent / file_name
+        Path(tmp_raw).rename(final_tmp)
+        tmp_path = str(final_tmp)
+        file_key = upload_file_to_feishu(Path(tmp_path))
+        if not file_key:
+            _debug_log(f"[SendTextAsFile] upload failed for {file_name}")
+            return None
+        return send_file_message(chat_id, file_key, msg_id)
+    except Exception as e:
+        _debug_log(f"[SendTextAsFile] exception: {e}")
+        return None
+    finally:
+        if tmp_path:
+            try:
+                _os_mod.unlink(tmp_path)
+            except Exception:
+                pass
+
+
 def send_file_message(chat_id: str, file_key: str, msg_id: str = None) -> str | None:
     """Send a file message to a chat; returns message_id or None."""
     if client is None:

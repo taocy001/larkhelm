@@ -124,6 +124,8 @@ class LarkhelmMetricsRegistry:
             self.recent_turns_cache_total = None
             self.memory_layer_cache_total = None
             self.doc_inject_cache_total = None
+            self.file_downloads_total = None
+            self.file_extract_errors_total = None
             return
 
         # Use a private registry so the larkhelm metrics don't collide with
@@ -209,6 +211,18 @@ class LarkhelmMetricsRegistry:
             "larkhelm_doc_inject_cache_total",
             "Doc inject cache outcomes",
             ["outcome"],
+            registry=self._registry,
+        )
+        self.file_downloads_total = pc.Counter(
+            "larkhelm_file_downloads_total",
+            "File download attempts",
+            ["ext", "outcome"],
+            registry=self._registry,
+        )
+        self.file_extract_errors_total = pc.Counter(
+            "larkhelm_file_extract_errors_total",
+            "File content extraction errors",
+            ["ext", "error_type"],
             registry=self._registry,
         )
 
@@ -465,6 +479,34 @@ def inc_doc_inject_cache(outcome: str) -> None:
         safe_log(f"[Metrics] inc_doc_inject_cache failed (outcome={outcome}): {e}")
 
 
+def inc_file_download(ext: str, outcome: str) -> None:
+    """Bump ``larkhelm_file_downloads_total{ext, outcome}``.
+
+    ``outcome`` ∈ {success, rejected, failed}. Never raises.
+    """
+    reg = get_registry()
+    if not reg.available or reg.file_downloads_total is None:
+        return
+    try:
+        reg.file_downloads_total.labels(ext=ext, outcome=outcome).inc()
+    except Exception as e:
+        safe_log(f"[Metrics] inc_file_download failed (ext={ext}, outcome={outcome}): {e}")
+
+
+def inc_file_extract_error(ext: str, error_type: str) -> None:
+    """Bump ``larkhelm_file_extract_errors_total{ext, error_type}``.
+
+    ``error_type`` ∈ {missing_lib, decode, io, unknown}. Never raises.
+    """
+    reg = get_registry()
+    if not reg.available or reg.file_extract_errors_total is None:
+        return
+    try:
+        reg.file_extract_errors_total.labels(ext=ext, error_type=error_type).inc()
+    except Exception as e:
+        safe_log(f"[Metrics] inc_file_extract_error failed (ext={ext}, error_type={error_type}): {e}")
+
+
 __all__ = [
     "PrometheusNotInstalled",
     "LarkhelmMetricsRegistry",
@@ -479,4 +521,6 @@ __all__ = [
     "inc_recent_turns_cache",
     "inc_memory_layer_cache",
     "inc_doc_inject_cache",
+    "inc_file_download",
+    "inc_file_extract_error",
 ]
