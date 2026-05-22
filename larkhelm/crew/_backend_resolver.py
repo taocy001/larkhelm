@@ -34,7 +34,17 @@ if TYPE_CHECKING:
 TASK_PROFILES: dict[str, TaskProfile] = {
     "planner":  TaskProfile(
         complexity="complex",
-        required_capabilities={"reasoning": 1.0, "long_context": 0.6},
+        required_capabilities={"reasoning": 1.0, "long_context": 0.6, "tools": 0.6},
+        # ``require_tools`` added 2026-05-22 after the DSML-leak incident:
+        # planner agents need Read (to inspect existing code / upstream
+        # artefacts) and Write (to persist prd.md / prd_criteria.json /
+        # design.md / tasks.json). API-only backends without a tool layer
+        # (e.g. DeepSeek with tags=["cheap","fast"]) cannot honour these
+        # calls and instead emit the protocol tokens as plain text — that
+        # text then landed in output_file, silently corrupting downstream
+        # stages until the validator (commit 539cc45) caught it. Hard-gate
+        # the routing so the cascade never starts.
+        require_tools=True,
         latency_pref="medium",
     ),
     "engineer": TaskProfile(
@@ -51,7 +61,12 @@ TASK_PROFILES: dict[str, TaskProfile] = {
     ),
     "reviewer": TaskProfile(
         complexity="medium",
-        required_capabilities={"reasoning": 1.0, "long_context": 0.5},
+        required_capabilities={"reasoning": 1.0, "long_context": 0.5, "tools": 0.6},
+        # Same reasoning as ``planner`` — reviewer reads the implementation
+        # diff + writes review.md, both of which fundamentally require tool
+        # support. Without ``require_tools`` an API-only backend would also
+        # leak tool-call tokens into review.md.
+        require_tools=True,
         latency_pref="medium",
     ),
     "chat":     TaskProfile(
