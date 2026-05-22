@@ -39,6 +39,74 @@ def _detect_fail_marker(spec: AgentSpec, result: str) -> bool:
     return spec.fail_marker in last_line
 
 
+# Tool-call protocol tokens that some backends emit as plain text when the
+# larkhelm runner does not translate them into ``tool_use`` events. Observed
+# 2026-05-22 from a DeepSeek-flavoured planner backend writing
+# ``<｜｜DSML｜｜tool_calls>...`` verbatim into ``prd.md`` / ``design.md``,
+# which silently corrupted the entire downstream pipeline (architect, fixer,
+# QA all burned full agents' worth of tokens on an unusable contract).
+# Pinned narrow on purpose — broad regexes risk false-positives on docs
+# that legitimately quote these tokens.
+_OUTPUT_SENTINELS: tuple[str, ...] = (
+    "<｜｜DSML｜｜tool_call",   # DeepSeek DSML (zero-width-ish full-width pipes)
+    "<｜tool▁call",             # DeepSeek alt tokenizer form
+    "<｜tool_call",             # DeepSeek alt tokenizer form
+    "<|tool_call",              # generic OpenAI-style sentinel leak
+    "<tool_call>",
+    "<tool_calls>",
+)
+
+
+def _validate_output_artifact(state: CrewState, agent_id: str, result: str) -> str:
+    """Return a short problem description if the agent's output artifact is
+    structurally corrupt, or "" if it looks OK.
+
+    Two failure modes covered:
+      1. Tool-call protocol tokens leaked into the artifact (see
+         ``_OUTPUT_SENTINELS``). Downstream stages would parse these as
+         markdown content and silently produce garbage.
+      2. ``.json`` ``output_file`` that is not parseable JSON. Downstream
+         stages crash on ``json.load`` mid-wave.
+
+    Scans the on-disk artifact when present (post Write tool) and falls back
+    to the in-memory ``result`` otherwise. Only inspects the first 8 KiB —
+    sentinels always appear at the head of the artifact, and capping the
+    scan keeps the validator O(1) per agent regardless of artifact size.
+    Never raises — defects in this helper must not crash the crew wrapper.
+    """
+    try:
+        spec = state.agents[agent_id].spec
+    except Exception:
+        return ""
+
+    candidates: list[tuple[str, str]] = []  # (label, content)
+    if spec.output_file:
+        try:
+            from larkhelm.chat_state import _get_cwd
+            cwd = _get_cwd(state.chat_id)
+            out_path = Path(cwd) / ".crew_workspace" / spec.output_file
+            if out_path.exists():
+                content = out_path.read_text(encoding="utf-8", errors="replace")
+                if content:
+                    candidates.append((spec.output_file, content))
+        except Exception as e:
+            _debug_log(f"[Crew] {agent_id} validate: read {spec.output_file} failed: {e}")
+    if not candidates and result:
+        candidates.append(("result", result))
+
+    for label, content in candidates:
+        head = content[:8192]
+        for s in _OUTPUT_SENTINELS:
+            if s in head:
+                return f"{label} contains tool-call sentinel {s!r}"
+        if spec.output_file and spec.output_file.endswith(".json"):
+            try:
+                json.loads(content)
+            except Exception as e:
+                return f"{label} is not valid JSON: {type(e).__name__}: {str(e)[:120]}"
+    return ""
+
+
 def _crew_owner_open_id(state: CrewState) -> str:
     """Return the open_id to transfer ownership to: chat sender > config default."""
     import larkhelm.config as _cfg
@@ -709,6 +777,7 @@ def _run_agent_wrapper(state: CrewState, agent_id: str) -> None:
 
     last_exc: Exception = None
     backend_select_failure: bool = False  # set when NoBackendAvailableError surfaces
+    validate_failure: bool = False        # set when _validate_output_artifact fires twice
 
     for proc_attempt in range(2):   # attempt 0 = first try, attempt 1 = retry
         try:
@@ -732,6 +801,31 @@ def _run_agent_wrapper(state: CrewState, agent_id: str) -> None:
             # the in-memory result is substantially longer, persist
             # ``result`` to the expected path before the sync step runs.
             _persist_result_to_output_file_if_missing(state, agent_id, result)
+            # Artifact contract check: if the on-disk file (or in-memory
+            # result) contains a tool-call protocol leak or malformed JSON,
+            # circuit-break before downstream agents read it. Retry once on
+            # the first attempt (transient model glitch); on the second
+            # failure fall through to ``emit_agent_failure(stage="validate")``
+            # so the user gets a targeted card instead of watching the rest
+            # of the pipeline burn tokens on an unusable contract.
+            artifact_issue = _validate_output_artifact(state, agent_id, result)
+            if artifact_issue:
+                if proc_attempt == 0:
+                    warn(
+                        f"[Crew] {agent_id} output validation failed "
+                        f"({artifact_issue}) — retrying with same backend"
+                    )
+                    with state.lock:
+                        state.agents[agent_id].status     = AgentStatus.PENDING
+                        state.agents[agent_id].start_time = None
+                        state.agents[agent_id].result     = ""
+                    time.sleep(1)
+                    continue
+                last_exc = RuntimeError(
+                    f"output artifact contract violation: {artifact_issue}"
+                )
+                validate_failure = True
+                break
             # Sync output_file before updating state to avoid holding the lock during IO
             feishu_url = _sync_output_file(state, agent_id)
             # Auto-commit after code-modification agents succeed (when dev_auto_commit=true)
@@ -811,7 +905,12 @@ def _run_agent_wrapper(state: CrewState, agent_id: str) -> None:
     # failure). Emit the user-facing ⚠️ card via _failure_card so the user
     # actually sees what went wrong; the helper handles state mutation +
     # heartbeat push internally and never raises.
-    stage = "backend_select" if backend_select_failure else "run"
+    if validate_failure:
+        stage = "validate"
+    elif backend_select_failure:
+        stage = "backend_select"
+    else:
+        stage = "run"
     if last_exc is None:
         last_exc = RuntimeError("unknown error")
     emit_agent_failure(state, agent_id, stage, last_exc)
