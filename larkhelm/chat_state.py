@@ -33,8 +33,33 @@ __all__ = [
 _state_lock = threading.RLock()  # RLock allows _set_chat_field to call _save_state while holding the lock
 _chat_state_store: dict = {}
 
+# Debounced write: coalesce rapid sequential field updates into a single disk write.
+_save_timer: threading.Timer | None = None
+_save_timer_lock = threading.Lock()
+_SAVE_DEBOUNCE_SEC = 2.0
+
+
+def _schedule_save() -> None:
+    """Schedule a debounced _save_state() (fires _SAVE_DEBOUNCE_SEC after the last mutation)."""
+    global _save_timer
+    with _save_timer_lock:
+        if _save_timer is not None:
+            _save_timer.cancel()
+        t = threading.Timer(_SAVE_DEBOUNCE_SEC, _save_state)
+        t.daemon = True
+        _save_timer = t
+        t.start()
+
 
 def _load_global_state() -> None:
+    # Cancel any pending debounced write — it would overwrite the state we're about to load.
+    # Safe: this function is only ever called at bridge startup, before concurrent threads
+    # are mutating state, so no new timer can be created between the cancel and the load.
+    global _save_timer
+    with _save_timer_lock:
+        if _save_timer is not None:
+            _save_timer.cancel()
+            _save_timer = None
     # Update in-place rather than rebinding — ensures all modules that imported _chat_state_store see fresh data
     try:
         data = json.loads(_cfg.STATE_FILE.read_text())
@@ -63,7 +88,7 @@ def _get_chat_state(chat_id: str) -> dict:
 def _set_chat_field(chat_id: str, key: str, value: object) -> None:
     with _state_lock:
         _chat_state_store.setdefault(chat_id, {})[key] = value
-        _save_state()
+    _schedule_save()
 
 
 # ═══════════════════════════════════════════════════
@@ -131,7 +156,7 @@ def _increment_turn_count(chat_id: str) -> int:
         state = _chat_state_store.setdefault(chat_id, {})
         new_count = state.get("turn_count", 0) + 1
         state["turn_count"] = new_count
-        _save_state()
+    _schedule_save()
     return new_count
 
 

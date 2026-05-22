@@ -460,18 +460,40 @@ class MemoryContextBuilder:
         if not parts:
             return ""
 
-        total = sum(len(c) + _TAG_OVERHEAD_PER_LAYER for _, c, _, _ in parts)
+        total = 0
+        content_total = 0
+        for _, c, _, _ in parts:
+            total += len(c) + _TAG_OVERHEAD_PER_LAYER
+            content_total += len(c)
         if total > TOTAL_MEMORY_BUDGET:
             available = max(0, TOTAL_MEMORY_BUDGET - _TAG_OVERHEAD_PER_LAYER * len(parts))
-            content_total = sum(len(c) for _, c, _, _ in parts)
             if content_total > 0:
                 _debug_log(
                     f"[Memory] budget trim: total={total} > {TOTAL_MEMORY_BUDGET}, "
                     f"available={available}"
                 )
+                # Session layer gets a minimum floor so recency signal survives heavy
+                # global/project layers. We compute session's budget first, then give
+                # non-session layers the remainder — this keeps total ≤ available.
+                _SESSION_MIN = 800
+                session_len = next(
+                    (len(c) for o, c, _, _ in parts if o == "[SESSION MEMORY]"), 0
+                )
+                if session_len > 0:
+                    session_proportional = int(available * session_len / content_total)
+                    session_budget = max(_SESSION_MIN, session_proportional)
+                else:
+                    session_budget = 0
+                non_session_available = max(0, available - session_budget)
+                non_session_total = content_total - session_len
                 trimmed: list[tuple[str, str, str, int]] = []
                 for open_tag, content, close_tag, max_c in parts:
-                    budget_i = int(available * len(content) / content_total)
+                    if open_tag == "[SESSION MEMORY]":
+                        budget_i = session_budget
+                    elif non_session_total > 0:
+                        budget_i = int(non_session_available * len(content) / non_session_total)
+                    else:
+                        budget_i = 0
                     # S42: prefer a semantic boundary (paragraph > sentence >
                     # line > word) over a raw char-cut that can split a
                     # Chinese sentence mid-character or chop a markdown fence.
