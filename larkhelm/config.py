@@ -322,10 +322,12 @@ def _start_recover_thread() -> None:
     # startup probe hasn't completed yet (avoids first-tick double-probe race).
     _startup_mono = [0.0]  # list-as-mutable-cell so closure can write
     _STARTUP_GRACE_SEC = 120  # how long after start to defer "never probed" specs
+    # Persistent pool — created once at thread start to avoid spawn/teardown every tick.
+    from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _as_completed
+    _probe_pool = _TPE(max_workers=4, thread_name_prefix="health-tick")
 
     def _health_tick():
         import time as _time
-        from concurrent.futures import ThreadPoolExecutor, as_completed
         from larkhelm.model_probe import probe_spec
         from larkhelm.log import _debug_log as _dlog
         # Use monotonic for staleness decisions — wall-clock jumps (NTP, manual
@@ -362,35 +364,36 @@ def _start_recover_thread() -> None:
         # Same MAX_WORKERS=4 so a 5-backend setup with 12s timeouts completes
         # in ~24s worst case instead of the 60s sequential ceiling that would
         # equal the tick interval and cause the loop to fall behind.
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="health-tick") as pool:
-            future_to_target = {pool.submit(probe_spec, s): (s, reason) for s, reason in to_probe}
-            for fut in as_completed(future_to_target):
-                spec, reason = future_to_target[fut]
-                try:
-                    ok, err = fut.result()
-                except Exception as e:
-                    ok, err = False, str(e)[:200]
-                try:
-                    BACKEND_REGISTRY.set_probe_result(spec.id, ok, err)
-                except Exception as e:
-                    _dlog(f"[BackendRegistry] tick set_probe_result failed for {spec.id}: {e}")
-                # Three-state icon: ✓ confirmed reachable, ✗ confirmed failed,
-                # ? indeterminate (ok=None — e.g. subprocess timeout, no
-                # healthy mutation, real-traffic record_call_failure decides).
-                # Round-1 review #1: original ``"✓" if ok else "✗"`` flagged
-                # None as failure visually, misleading operators reading
-                # ``/status`` or the journal.
-                if ok is True:
-                    icon = "✓"
-                elif ok is False:
-                    icon = "✗"
-                else:
-                    icon = "?"
-                # Recompute reason post-hoc: a "retry" that succeeded is a "recover"
-                if reason == "retry" and ok is True:
-                    reason = "recover"
-                suffix = f" ({err})" if err else ""
-                _dlog(f"[BackendRegistry] tick {reason} {icon} {spec.id}{suffix}")
+        # _probe_pool is created once at thread start; reused here to avoid
+        # 4-thread spawn/teardown on every 60 s tick (ARCH-H3).
+        future_to_target = {_probe_pool.submit(probe_spec, s): (s, reason) for s, reason in to_probe}
+        for fut in _as_completed(future_to_target):
+            spec, reason = future_to_target[fut]
+            try:
+                ok, err = fut.result()
+            except Exception as e:
+                ok, err = False, str(e)[:200]
+            try:
+                BACKEND_REGISTRY.set_probe_result(spec.id, ok, err)
+            except Exception as e:
+                _dlog(f"[BackendRegistry] tick set_probe_result failed for {spec.id}: {e}")
+            # Three-state icon: ✓ confirmed reachable, ✗ confirmed failed,
+            # ? indeterminate (ok=None — e.g. subprocess timeout, no
+            # healthy mutation, real-traffic record_call_failure decides).
+            # Round-1 review #1: original ``"✓" if ok else "✗"`` flagged
+            # None as failure visually, misleading operators reading
+            # ``/status`` or the journal.
+            if ok is True:
+                icon = "✓"
+            elif ok is False:
+                icon = "✗"
+            else:
+                icon = "?"
+            # Recompute reason post-hoc: a "retry" that succeeded is a "recover"
+            if reason == "retry" and ok is True:
+                reason = "recover"
+            suffix = f" ({err})" if err else ""
+            _dlog(f"[BackendRegistry] tick {reason} {icon} {spec.id}{suffix}")
 
     def _recover_loop():
         import time as _time

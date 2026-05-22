@@ -159,6 +159,10 @@ def save_plan_state(state: "MultiPlanState") -> None:
         with _get_write_lock(state.plan_id):
             tmp.write_text(json.dumps(payload, ensure_ascii=False),
                            encoding="utf-8")
+            try:
+                os.chmod(tmp, 0o600)
+            except OSError:
+                pass
             os.replace(tmp, path)
     except Exception as e:
         _debug_log(f"[PlanPersist] save_plan_state({state.plan_id[:8]}) failed: {e}")
@@ -599,6 +603,10 @@ def _persist_notify_state(plan_id: str, *, notify_count: int,
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False),
                        encoding="utf-8")
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
         os.replace(tmp, path)
 
 

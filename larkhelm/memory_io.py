@@ -107,7 +107,15 @@ def _redact_config(raw: dict) -> dict:
         elif isinstance(v, dict):
             out[k] = _redact_config(v)
         elif isinstance(v, list):
-            out[k] = [_redact_config(item) if isinstance(item, dict) else item for item in v]
+            _lst = []
+            for _item in v:
+                if isinstance(_item, dict):
+                    _lst.append(_redact_config(_item))
+                elif isinstance(_item, str) and any(s in _item.lower() for s in _SENSITIVE_KEYS):
+                    _lst.append("***")
+                else:
+                    _lst.append(_item)
+            out[k] = _lst
         else:
             out[k] = v
     return out

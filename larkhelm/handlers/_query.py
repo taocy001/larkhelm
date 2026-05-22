@@ -119,8 +119,8 @@ def _inject_doc_context(text: str, chat_id: str) -> str:
             )
         except DocPermissionError:
             injections.append(f"[文档 {url} 无读取权限，已跳过]")
-        except DocError:
-            pass  # Other errors: silently skip, do not disrupt AI query
+        except DocError as _doc_e:
+            _debug_log(f"[DoQuery] doc inject failed for {url}: {_doc_e}")
     if injections:
         return "\n\n".join(injections) + "\n\n---\n\n" + text
     return text
