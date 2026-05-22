@@ -43,6 +43,9 @@ _PATTERNS: list[tuple[str, list[str]]] = [
         r"force[- ]killed",
         r"soft[- ]?timeout",
         r"hard[- ]?timeout",
+        r"killed by os",       # OOM-killed subprocess (rc=-9); host memory pressure, not backend fault
+        r"\brc=-9\b",
+        r"cgroup oom",
     ]),
     (AUTH, [
         r"\b401\b",
