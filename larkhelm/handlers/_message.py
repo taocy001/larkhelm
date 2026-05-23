@@ -587,6 +587,31 @@ def handle_message(data: P2ImMessageReceiveV1):
                 chat_lock.release()
             pending = _pop_pending(chat_id)
             _trigger_cancel(chat_id)
+            # Phase D follow-up: a /cancel that lands inside the configured
+            # window after an AgentDispatcher dispatch is strong evidence
+            # the routing was wrong. We `consume_dispatch` (not `peek`) so
+            # the same /cancel can't be billed against the same dispatch
+            # twice. Skip when the prior intent was already ``chat`` —
+            # chat cancellations are mostly "I changed my mind", not a
+            # routing error.
+            try:
+                from larkhelm.agent_hub.intent_feedback import (
+                    consume_dispatch as _consume_disp,
+                    record_signal as _rec_signal,
+                )
+                from larkhelm.config import INTENT_FEEDBACK_CANCEL_WINDOW_SEC as _CANCEL_W
+                _hit = _consume_disp(chat_id, max_age_sec=_CANCEL_W)
+                if _hit is not None:
+                    _prior_intent, _prior_text, _age = _hit
+                    if _prior_intent.agent_type != "chat":
+                        _rec_signal(
+                            "cancel_after_dispatch", _prior_intent, chat_id,
+                            corrected="chat", text=_prior_text,
+                            metadata={"elapsed_sec": round(_age, 2),
+                                      "was_running": bool(is_running)},
+                        )
+            except Exception as _ce:
+                _debug_log(f"[IntentFeedback] cancel signal failed: {_ce}")
             if is_running:
                 body = "已向当前任务发送中断信号。"
                 if pending:
@@ -721,6 +746,36 @@ def handle_message(data: P2ImMessageReceiveV1):
             target_model = "deepseek"
             prompt = text.split(" ", 1)[1].strip()
             force_backend_id = "deepseek"
+
+        # Phase D follow-up: backend-override slash commands (/c /g /k /d)
+        # bypass AgentDispatcher entirely, so the reswitch hook inside
+        # the dispatcher can never see them. Detect here: if a prior
+        # non-chat agent dispatch sits inside the reswitch window, the
+        # user manually picking a backend means "should've been chat all
+        # along". The plain backend prefix doesn't tell us a NEW agent
+        # type, so we record corrected="chat" (the only legitimate
+        # answer for backend-forcing slash commands).
+        if force_backend_id is not None:
+            try:
+                from larkhelm.agent_hub.intent_feedback import (
+                    consume_dispatch as _consume_disp,
+                    record_signal as _rec_signal,
+                )
+                _hit = _consume_disp(chat_id, max_age_sec=120.0)
+                if _hit is not None:
+                    _prior, _prior_text, _age = _hit
+                    if _prior.agent_type != "chat":
+                        _rec_signal(
+                            "agent_reswitch", _prior, chat_id,
+                            corrected="chat", text=_prior_text,
+                            metadata={
+                                "elapsed_sec": round(_age, 2),
+                                "new_agent": "chat",
+                                "via": f"backend_override:{force_backend_id}",
+                            },
+                        )
+            except Exception as _re:
+                _debug_log(f"[IntentFeedback] reswitch (backend override) failed: {_re}")
 
         # Vision routing: gemini CLI and DeepSeek HTTP don't support image input;
         # force a vision-capable model.

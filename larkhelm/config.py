@@ -221,6 +221,14 @@ INTENT_L1_ENABLED: bool = True
 INTENT_L1_PROMOTION_THRESHOLD: float = 0.70
 INTENT_MICROLEARN_ENABLED: bool = False
 INTENT_MICROLEARN_MIN_CONFIDENCE: float = 0.65
+# Phase D follow-up (May 2026): extended user-behaviour signals piped into
+# intent_feedback.jsonl beyond the force_chat button. Master switch +
+# tunables; setting EXTENDED_SIGNALS=False reverts to the legacy
+# force_chat-only behaviour without restart.
+INTENT_FEEDBACK_EXTENDED_SIGNALS: bool = True
+INTENT_FEEDBACK_CANCEL_WINDOW_SEC: float = 60.0
+INTENT_FEEDBACK_SIGNAL_TEXT_MAX: int = 800
+INTENT_FEEDBACK_L1_GRAY_BAND: float = 0.10
 LLM_ROUTER_CIRCUIT_FAILURES: int = 5
 LLM_ROUTER_CIRCUIT_COOLDOWN_SEC: float = 30.0
 CASCADE_BACKOFF_MAX_ATTEMPTS: int = 3
@@ -818,6 +826,14 @@ def _init_app_config() -> None:
     # and ``scripts/train_intent_classifier.py`` for training.
     config.setdefault("intent_microlearn_enabled", False)
     config.setdefault("intent_microlearn_min_confidence", 0.65)
+    # Phase D follow-up: extended-signal collection for intent_feedback.jsonl
+    # (see ``larkhelm/agent_hub/intent_feedback.py``). Defaults to ON so the
+    # L1 keyword tuner has real-world data to train against; flip
+    # ``intent_feedback_extended_signals=false`` for instant rollback.
+    config.setdefault("intent_feedback_extended_signals", True)
+    config.setdefault("intent_feedback_cancel_window_sec", 60.0)
+    config.setdefault("intent_feedback_signal_text_max", 800)
+    config.setdefault("intent_feedback_l1_gray_band", 0.10)
     config.setdefault("agent_plugins", [])
     config.setdefault("agent_acl", {})
     config.setdefault("intent_feedback_path", "")
@@ -1023,6 +1039,30 @@ def _init_app_config() -> None:
         )
     except (TypeError, ValueError):
         INTENT_MICROLEARN_MIN_CONFIDENCE = 0.65
+
+    global INTENT_FEEDBACK_EXTENDED_SIGNALS, INTENT_FEEDBACK_CANCEL_WINDOW_SEC
+    global INTENT_FEEDBACK_SIGNAL_TEXT_MAX, INTENT_FEEDBACK_L1_GRAY_BAND
+    INTENT_FEEDBACK_EXTENDED_SIGNALS = bool(
+        config.get("intent_feedback_extended_signals", True)
+    )
+    try:
+        INTENT_FEEDBACK_CANCEL_WINDOW_SEC = max(
+            0.0, float(config.get("intent_feedback_cancel_window_sec", 60.0) or 60.0),
+        )
+    except (TypeError, ValueError):
+        INTENT_FEEDBACK_CANCEL_WINDOW_SEC = 60.0
+    try:
+        INTENT_FEEDBACK_SIGNAL_TEXT_MAX = max(
+            0, int(config.get("intent_feedback_signal_text_max", 800) or 800),
+        )
+    except (TypeError, ValueError):
+        INTENT_FEEDBACK_SIGNAL_TEXT_MAX = 800
+    try:
+        INTENT_FEEDBACK_L1_GRAY_BAND = max(
+            0.0, min(0.5, float(config.get("intent_feedback_l1_gray_band", 0.10) or 0.10)),
+        )
+    except (TypeError, ValueError):
+        INTENT_FEEDBACK_L1_GRAY_BAND = 0.10
 
     try:
         LLM_ROUTER_CIRCUIT_FAILURES = max(

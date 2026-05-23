@@ -130,6 +130,7 @@ class LarkhelmMetricsRegistry:
             self.session_auto_reset_total = None
             self.sticky_context_evicted_total = None
             self.workspace_hint_total = None
+            self.intent_feedback_total = None
             return
 
         # Use a private registry so the larkhelm metrics don't collide with
@@ -254,6 +255,18 @@ class LarkhelmMetricsRegistry:
             "larkhelm_workspace_hint_total",
             "Workspace hint segment outcomes per message",
             ["outcome"],
+            registry=self._registry,
+        )
+        # Phase D follow-up (May 2026): intent_feedback.jsonl writes by
+        # signal_type. signal_type ∈ {force_chat, cancel_after_dispatch,
+        # agent_reswitch, dispatch_failed, l1_gray_zone, l2_dispatched}.
+        # Lets operators see whether the extended-signal collector is
+        # producing the rates a downstream L1 trainer expects (>0 across
+        # all live buckets).
+        self.intent_feedback_total = pc.Counter(
+            "larkhelm_intent_feedback_total",
+            "intent_feedback.jsonl rows written by signal_type",
+            ["signal_type"],
             registry=self._registry,
         )
 
@@ -617,6 +630,27 @@ def inc_sticky_context_evicted(reason: str) -> None:
         safe_log(f"[Metrics] inc_sticky_context_evicted failed (reason={reason}): {e}")
 
 
+def inc_intent_feedback(signal_type: str) -> None:
+    """Bump ``larkhelm_intent_feedback_total{signal_type}``.
+
+    Called from :func:`larkhelm.agent_hub.intent_feedback._bump_metric`
+    on every JSONL row write. ``signal_type`` is currently one of
+    ``force_chat`` / ``cancel_after_dispatch`` / ``agent_reswitch`` /
+    ``dispatch_failed`` / ``l1_gray_zone`` / ``l2_dispatched`` but the
+    label isn't whitelisted here so plugins that introduce their own
+    signal types can opt into the same observability without registry
+    changes. Operators should monitor cardinality if a plugin starts
+    emitting per-text labels.
+    """
+    reg = get_registry()
+    if not reg.available or reg.intent_feedback_total is None:
+        return
+    try:
+        reg.intent_feedback_total.labels(signal_type=str(signal_type)).inc()
+    except Exception as e:
+        safe_log(f"[Metrics] inc_intent_feedback failed (signal_type={signal_type}): {e}")
+
+
 def inc_workspace_hint(outcome: str) -> None:
     """Bump ``larkhelm_workspace_hint_total{outcome}``.
 
@@ -685,6 +719,7 @@ __all__ = [
     "inc_session_auto_reset",
     "inc_sticky_context_evicted",
     "inc_workspace_hint",
+    "inc_intent_feedback",
     # Module-level Counter aliases (resolved lazily via __getattr__):
     "WORKSPACE_HINT_TOTAL",
     "SESSION_AUTO_RESET_TOTAL",

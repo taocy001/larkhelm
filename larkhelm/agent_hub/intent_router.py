@@ -439,6 +439,71 @@ def _resolve_microlearn(text: str) -> "IntentResult | None":
     )
 
 
+def _maybe_record_l1_gray_zone(
+    intent: IntentResult,
+    chat_id: str | None,
+    text: str,
+) -> None:
+    """Phase D follow-up: persist an observational sample when L1 fires
+    inside the configurable gray band around its promotion threshold.
+
+    Band default: ``[threshold, threshold + 0.10)``. These are the
+    keyword-tier decisions that are mathematically "barely confident
+    enough" — exactly the sample shape the L1 keyword tuner needs to
+    spot weakly-discriminating rules. ``corrected_intent=""`` keeps the
+    trainer's _load_feedback skipping these (no gold label).
+    """
+    if not chat_id:
+        return
+    if intent.layer != "L1" or intent.confidence <= 0.0:
+        return
+    try:
+        import larkhelm.config as _cfg
+        threshold = float(getattr(_cfg, "INTENT_L1_PROMOTION_THRESHOLD", 0.70) or 0.70)
+        band = float(getattr(_cfg, "INTENT_FEEDBACK_L1_GRAY_BAND", 0.10) or 0.10)
+    except Exception:
+        threshold, band = 0.70, 0.10
+    if not (threshold <= intent.confidence < threshold + band):
+        return
+    try:
+        from larkhelm.agent_hub.intent_feedback import record_signal
+        record_signal(
+            "l1_gray_zone", intent, chat_id, text=text,
+            metadata={"threshold": threshold, "band": band},
+        )
+    except Exception as e:
+        from larkhelm.log import lazy_debug_log
+        lazy_debug_log(f"[IntentRouter] l1_gray_zone signal failed: {e}")
+
+
+def _maybe_record_l2_dispatched(
+    intent: IntentResult,
+    chat_id: str | None,
+    text: str,
+) -> None:
+    """Phase D follow-up: every L2 hit is by construction an L1 miss —
+    capture them as the training corpus the L1 tuner needs to grow new
+    keyword rules. Skip pure ``chat`` fallbacks (those are L2's default
+    answer for ambiguous prompts, not informative for L1) so the
+    fallback class doesn't drown the signal.
+    """
+    if not chat_id:
+        return
+    if intent.layer != "L2":
+        return
+    if intent.agent_type == "chat":
+        return
+    try:
+        from larkhelm.agent_hub.intent_feedback import record_signal
+        record_signal(
+            "l2_dispatched", intent, chat_id, text=text,
+            metadata={"reasoning": (intent.reasoning or "")[:120]},
+        )
+    except Exception as e:
+        from larkhelm.log import lazy_debug_log
+        lazy_debug_log(f"[IntentRouter] l2_dispatched signal failed: {e}")
+
+
 def resolve_intent(
     text: str,
     images: list | None = None,
@@ -482,6 +547,8 @@ def resolve_intent(
     except Exception:
         l1 = None
     if l1 is not None:
+        # Fire-and-forget gray-zone capture — never blocks the L1 return.
+        _maybe_record_l1_gray_zone(l1, chat_id, stripped)
         return l1
 
     try:
@@ -492,9 +559,11 @@ def resolve_intent(
         return ml
 
     try:
-        return _resolve_l2(stripped)
+        l2 = _resolve_l2(stripped)
     except Exception:
-        return _fallback(stripped)
+        l2 = _fallback(stripped)
+    _maybe_record_l2_dispatched(l2, chat_id, stripped)
+    return l2
 
 
 __all__ = ["resolve_intent"]

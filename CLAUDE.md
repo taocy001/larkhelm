@@ -249,6 +249,31 @@ larkhelm/agent_hub/
 | `agent_plugins` | `[]` | 第三方 plugin 入口点字符串，如 `mypkg.module:my_agent` |
 | `agent_acl` | `{}` | `{agent_type: ["chat_id_glob", ...]}` |
 | `intent_feedback_path` / `intent_audit_path` | 空 | 默认 `DATA_DIR/intent_*.jsonl` |
+| `intent_feedback_extended_signals` | `true` | 总开关，关闭时只保留 `signal_type="force_chat"` 一种行为（向后兼容 Phase-D 之前）|
+| `intent_feedback_cancel_window_sec` | `60.0` | `/cancel` 在 dispatch 后多少秒内仍算作 `cancel_after_dispatch` 信号 |
+| `intent_feedback_signal_text_max` | `800` | 观察类信号（`l1_gray_zone` / `l2_dispatched` 等）的 `text` 截断阈值；force_chat 不截断以保持旧记录字节兼容 |
+| `intent_feedback_l1_gray_band` | `0.10` | L1 灰区宽度——置信度落在 `[promotion_threshold, threshold + band)` 时记为 `l1_gray_zone` 难例 |
+
+**扩展信号采集**（`intent_feedback_extended_signals=true` 时启用，默认 ON）：
+
+每条 `intent_feedback.jsonl` 都会带一个新的 `signal_type` 字段（向后兼容：旧
+record 没有该字段视为 `force_chat`）。当前采集的 6 种信号：
+
+| signal_type | 触发位置 | corrected_intent | 用途 |
+|---|---|---|---|
+| `force_chat` | `_card_action.force_chat` 按钮 | `"chat"` | 用户显式纠错（已存在）|
+| `cancel_after_dispatch` | `/cancel` 在 `intent_feedback_cancel_window_sec` 内 | `"chat"` | 用户立即取消，强信号 |
+| `agent_reswitch` | `AgentDispatcher.dispatch` 或 `_message.py` backend override 在 120s 内 | 新 agent_type | 用户切换 agent / backend |
+| `dispatch_failed` | `AgentDispatcher._fallback_to_chat` | `"chat"` | Agent 抛错落回 chat |
+| `l1_gray_zone` | `intent_router._maybe_record_l1_gray_zone` | `""` | L1 置信处于灰区的难例（观察） |
+| `l2_dispatched` | `intent_router._maybe_record_l2_dispatched` | `""` | L1 弃权后由 L2 接管的样本（观察）|
+
+`corrected_intent=""` 的观察类信号被
+`scripts/train_intent_classifier.py:_load_feedback` 自动跳过（其要求非空 label），
+只用于 L1 关键词调优脚本的难例挖掘，不会被当作监督样本污染训练。
+
+每次写入会 `larkhelm_intent_feedback_total{signal_type}` +1，Grafana 可监控各
+信号的实际产生率（>0 即说明扩展信号正常工作）。
 
 > **路径安全**：当显式设置 `intent_feedback_path` / `intent_audit_path` 时，
 > 强烈建议路径**位于 `DATA_DIR` 之内**（例如 `DATA_DIR/audit/intent.jsonl`）。
@@ -518,6 +543,7 @@ if tl.startswith("/new_cmd"):
 | `larkhelm_sticky_context_evicted_total` | Counter | `reason` | P2 缓存出血面收敛：sticky crew context entry 被淘汰一次 +1；`reason` ∈ {`ttl`（超过 `recent_crew_sticky_ttl_sec`）, `max_injections`（达到 `recent_crew_sticky_max_injections` 次注入）}|
 | `larkhelm_workspace_hint_total` | Counter | `outcome` | P3 REQ-03：`handle_message` 每条消息进入工作区注入段时 +1（恰好一次）；`outcome` ∈ {`injected_passive`（注入被动文案）, `injected_active_legacy`（保留位，REQ-01 改文案后已不再发，留给未来回滚）, `skipped_by_gate`（`workspace_hint_keyword_gate=true` 且关键词未命中）, `skipped_empty`（`.crew_workspace/` 不存在或无 `.md`/`.json` 文件）}|
 | `larkhelm_doc_inject_cache_total` | Counter | `outcome` | P1 REQ-03 / P4 REQ-06：`_inject_doc_context` 每次走 doc cache 时 +1；`outcome` ∈ {`hit`（旧 `cached_doc_read` 调用路径）, `hit_with_age_hint`（新 `cached_doc_read_with_meta` 路径，age hint 已注入）, `miss`, `bypass`, `evict`, `invalidate`}；Grafana 总命中率应 query `outcome=~"hit\|hit_with_age_hint"`|
+| `larkhelm_intent_feedback_total` | Counter | `signal_type` | Phase D 跟进：每条 `intent_feedback.jsonl` 写入 +1；`signal_type` ∈ {`force_chat`（按钮）, `cancel_after_dispatch`（`/cancel` 落在 dispatch 后 ≤ `intent_feedback_cancel_window_sec` 秒内）, `agent_reswitch`（同 chat 在 120s 内切换 agent / backend）, `dispatch_failed`（agent 抛错回退 chat）, `l1_gray_zone`（L1 置信落在灰区）, `l2_dispatched`（非-chat L2 命中）}；`intent_feedback_extended_signals=false` 时只剩 `force_chat` 一种|
 
 Prometheus scrape 配置示例：
 

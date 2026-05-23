@@ -15,10 +15,21 @@ import time
 
 from larkhelm.agent_hub.agent_audit import write_audit
 from larkhelm.agent_hub.agent_base import AGENT_REGISTRY, AgentExecutor, AgentRegistry
-from larkhelm.agent_hub.intent_feedback import _new_feedback_id, register_pending
+from larkhelm.agent_hub.intent_feedback import (
+    _new_feedback_id, consume_dispatch, record_signal, register_pending,
+    track_dispatch,
+)
 from larkhelm.agent_hub.intent_types import (
     AgentContext, AgentResult, IntentResult,
 )
+
+
+# Phase D follow-up: reswitch window in seconds. When the same chat
+# dispatches a different agent_type within this window of a previous
+# dispatch, the prior dispatch is logged as misrouted. 120s is wider
+# than the cancel window (60s) because users sometimes wait through a
+# brief "wrong" /dev disclosure card before manually switching.
+_RESWITCH_WINDOW_SEC: float = 120.0
 # Centralized helper; previously this module re-defined a local ``_safe_log``
 # duplicating the same 7-line wrapper as 3 other agent_hub/ modules.
 from larkhelm.log import safe_log as _safe_log
@@ -109,6 +120,44 @@ class AgentDispatcher:
 
         executor = self._registry.match(intent) or self._registry.get("chat")
 
+        # Phase D follow-up: if a prior dispatch is still inside the
+        # reswitch window AND it picked a different agent_type, treat
+        # the prior dispatch as misrouted. consume_ pops so the same
+        # prior dispatch is only billed once. Only fires for non-
+        # override dispatches (force_chat itself is already recorded
+        # via record_feedback in handlers/_card_action.py — wiring it
+        # here too would double-count). We pass ``corrected`` = the new
+        # agent_type since the user just "switched to" that agent.
+        if intent.layer != "override":
+            try:
+                prior = consume_dispatch(ctx.chat_id, max_age_sec=_RESWITCH_WINDOW_SEC)
+                if (prior is not None
+                        and prior[0].agent_type != intent.agent_type):
+                    prior_intent, prior_text, age = prior
+                    record_signal(
+                        "agent_reswitch", prior_intent, ctx.chat_id,
+                        corrected=intent.agent_type, text=prior_text,
+                        metadata={
+                            "elapsed_sec": round(age, 2),
+                            "new_agent": intent.agent_type,
+                            "new_layer": intent.layer,
+                        },
+                    )
+            except Exception as e:
+                _safe_log(f"[AgentDispatcher] reswitch detect failed: {e}")
+
+        # Stamp THIS dispatch in the per-chat history registry BEFORE
+        # running the executor so a fast /cancel from the user (or a
+        # subsequent /c /chat reswitch) attributes correctly. Force-chat
+        # overrides are not tracked — they are themselves the correction
+        # signal, tracking them would create reswitch noise on the next
+        # message.
+        if intent.layer != "override":
+            try:
+                track_dispatch(ctx.chat_id, intent, text=ctx.text)
+            except Exception as e:
+                _safe_log(f"[AgentDispatcher] track_dispatch failed: {e}")
+
         # Intent disclosure card is suppressed in two cases:
         #   1. Explicit slash commands ("/dev …") — the user already chose
         #      the agent, redundant disclosure adds noise.
@@ -140,6 +189,30 @@ class AgentDispatcher:
 
     def _fallback_to_chat(self, intent: IntentResult, ctx: AgentContext, error: str) -> AgentResult:
         chat_agent = self._registry.get("chat")
+        # Phase D follow-up: a dispatched non-chat agent that fell back to
+        # chat is by definition a misroute (the user's prompt actually
+        # got answered by chat). Capture as ``dispatch_failed`` with the
+        # exception class in metadata. ``ACL denied`` already returns
+        # before this method, so dispatch_failed never duplicates ACL
+        # rejects. Chat→chat fallbacks are no-ops (the predicted agent
+        # IS chat), filtered to avoid self-correction noise.
+        if intent.agent_type != "chat":
+            try:
+                record_signal(
+                    "dispatch_failed", intent, ctx.chat_id,
+                    corrected="chat", text=ctx.text,
+                    metadata={"error": (error or "")[:200],
+                              "fallback_agent": "chat"},
+                )
+            except Exception as _re:
+                _safe_log(f"[AgentDispatcher] record_signal dispatch_failed failed: {_re}")
+            # Pop the dispatch-history entry so a subsequent /cancel or
+            # backend-override slash command can't ALSO bill this same
+            # already-failed dispatch as cancel_after_dispatch / reswitch.
+            try:
+                consume_dispatch(ctx.chat_id, max_age_sec=0.0)
+            except Exception as _ce:
+                _safe_log(f"[AgentDispatcher] consume after fallback failed: {_ce}")
         if chat_agent is None:
             return AgentResult(success=False, error=error or "no chat agent")
         try:
