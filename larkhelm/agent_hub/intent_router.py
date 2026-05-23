@@ -77,13 +77,25 @@ _EXPLICIT_PREFIXES: list[tuple[tuple[str, ...], str]] = [
 
 
 # ── L1 rule heuristics ─────────────────────────────────────────────────
+# DEV triggers must be VERB-context phrases. Earlier the single token
+# "实现" matched the noun "代码实现 / 实现细节 / 具体实现" in any review-type
+# prompt and forced dev classification. Require an explicit object marker
+# ("一个/这个/该/新/一套") so noun usage falls through to L2.
 _DEV_TRIGGERS = (
-    "实现", "写一个", "写个", "开发", "写代码", "新建项目", "搭一个",
+    "实现一个", "实现这个", "实现该", "实现新", "实现一套", "实现一下",
+    "写一个", "写个", "开发", "写代码", "新建项目", "搭一个",
     "implement", "build me", "scaffold", "create a project", "write a function",
 )
+# CREW = multi-perspective / multi-role tasks. Code review counts: it
+# benefits from PM/architect/QA/reviewer viewpoints rather than a single
+# dev pipeline. Add Chinese + English review keywords so prompts like
+# "组织一次代码检视 / code review" route to crew, not dev.
 _CREW_TRIGGERS = (
     "调研", "研究", "策划", "分析整理", "多角色协作", "讨论方案",
+    "检视", "代码检视", "代码审查", "代码评审", "代码 review", "评审一下",
+    "组织一次", "组织 一次",
     "brainstorm", "research and summarize",
+    "code review", "code-review",
 )
 _PLAN_TRIGGERS = (
     "分阶段", "step by step", "拆分计划", "多步执行", "依次完成",
