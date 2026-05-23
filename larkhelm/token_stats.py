@@ -193,6 +193,18 @@ def record_token_usage(chat_id: str, model: str, usage: dict) -> None:
     except Exception as e:
         _debug_log(f"[TokenStats] inc_tokens failed (model={model}): {e}")
 
+    # P0: Claude session auto-reset hook. Lazy import avoids a config →
+    # token_stats → claude_session_guard → memory → … cycle during boot;
+    # guard module itself swallows exceptions, but we wrap defensively so
+    # any import-time error here can't break record_token_usage.
+    try:
+        from larkhelm.claude_session_guard import maybe_auto_reset_session
+        maybe_auto_reset_session(chat_id, model, usage)
+    except Exception as e:
+        _debug_log(
+            f"[TokenStats] maybe_auto_reset_session failed (model={model}): {e}"
+        )
+
 
 def get_token_stats(chat_id: str | None = None) -> dict:
     """Return token statistics for a specific chat, or aggregated across all chats.

@@ -713,9 +713,14 @@ def handle_message(data: P2ImMessageReceiveV1):
             )
             parent_id = None  # already handled; no need to fetch parent in _do_query
         elif not parent_id:
-            # No parent at all → try sticky crew context (local, no I/O)
-            from larkhelm.crew import get_recent_crew_context
-            crew_ctx = get_recent_crew_context(chat_id)
+            # No parent at all → try sticky crew context (local, no I/O).
+            # P2 (design.md §3.2): use the consuming accessor here so each
+            # injection bumps the per-entry counter and triggers eviction
+            # after `recent_crew_sticky_max_injections`. Read-only call
+            # sites (/status, /memory diagnose, _query.* fallbacks) keep
+            # get_recent_crew_context to avoid double-counting one user turn.
+            from larkhelm.crew import consume_recent_crew_context
+            crew_ctx = consume_recent_crew_context(chat_id)
             if crew_ctx:
                 _debug_log(f"[MSG] injecting sticky crew context '{crew_ctx['title'][:20]}' → {chat_id[:12]}")
                 prompt = (

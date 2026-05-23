@@ -127,6 +127,8 @@ class LarkhelmMetricsRegistry:
             self.file_downloads_total = None
             self.file_extract_errors_total = None
             self.tokens_total = None
+            self.session_auto_reset_total = None
+            self.sticky_context_evicted_total = None
             return
 
         # Use a private registry so the larkhelm metrics don't collide with
@@ -230,6 +232,19 @@ class LarkhelmMetricsRegistry:
             "larkhelm_tokens_total",
             "Token usage per backend per kind",
             ["backend", "kind"],
+            registry=self._registry,
+        )
+        # P0/P2 cache-bleed counters (design.md §3.4).
+        self.session_auto_reset_total = pc.Counter(
+            "larkhelm_session_auto_reset_total",
+            "Claude session auto-resets by trigger reason",
+            ["reason"],
+            registry=self._registry,
+        )
+        self.sticky_context_evicted_total = pc.Counter(
+            "larkhelm_sticky_context_evicted_total",
+            "Sticky crew context evictions by reason",
+            ["reason"],
             registry=self._registry,
         )
 
@@ -557,6 +572,35 @@ def inc_tokens(backend: str, usage: dict) -> None:
             )
 
 
+def inc_session_auto_reset(reason: str) -> None:
+    """Bump ``larkhelm_session_auto_reset_total{reason}``.
+
+    ``reason`` ∈ {'cache_tokens', 'turns'}. Never raises. Safe to call
+    when prometheus-client is missing (registry no-op).
+    """
+    reg = get_registry()
+    if not reg.available or reg.session_auto_reset_total is None:
+        return
+    try:
+        reg.session_auto_reset_total.labels(reason=str(reason)).inc()
+    except Exception as e:
+        safe_log(f"[Metrics] inc_session_auto_reset failed (reason={reason}): {e}")
+
+
+def inc_sticky_context_evicted(reason: str) -> None:
+    """Bump ``larkhelm_sticky_context_evicted_total{reason}``.
+
+    ``reason`` ∈ {'max_injections', 'ttl'}. Never raises.
+    """
+    reg = get_registry()
+    if not reg.available or reg.sticky_context_evicted_total is None:
+        return
+    try:
+        reg.sticky_context_evicted_total.labels(reason=str(reason)).inc()
+    except Exception as e:
+        safe_log(f"[Metrics] inc_sticky_context_evicted failed (reason={reason}): {e}")
+
+
 __all__ = [
     "PrometheusNotInstalled",
     "LarkhelmMetricsRegistry",
@@ -574,4 +618,6 @@ __all__ = [
     "inc_file_download",
     "inc_file_extract_error",
     "inc_tokens",
+    "inc_session_auto_reset",
+    "inc_sticky_context_evicted",
 ]

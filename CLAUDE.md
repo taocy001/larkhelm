@@ -94,6 +94,12 @@ CLI --data-dir > LARKHELM_DATA_DIR env > /var/lib/larkhelm > ~/.local/share/lark
 | `doc_inject_cache_ttl_sec` | P1 REQ-03：TTL 秒数，floor `1`（`0` 视为关闭，回退到默认值）。默认 `300`；与 Anthropic 5min ephemeral cache TTL 同档对齐 |
 | `cli_skip_recent_turns_when_sid` | P1 REQ-04：CLI（claude/kimi/gemini）`sid` 非空时跳过 recent_turns 注入；`deepseek_api` 在 `load_history` 非空时同步跳过。默认 `true`；flip `false` 恢复每次注入（多花 ~500 input tokens / call）|
 | `anthropic_extended_cache_enabled` | bool 默认 `true`。Anthropic API 适配器请求时携带 `anthropic-beta: extended-cache-ttl-2025-04-11` header 并将 `cache_control.ttl` 升级为 `1h`；若该 beta 在该账号未开通而被拒，进程内自动回退到 5min ephemeral 并写一次 `[anthropic_api]` 调试日志，整进程不再重试。设为 `false` 强制保留 5min |
+| `claude_session_auto_reset_enabled` | P0 缓存出血面收敛：当 `claude --resume` 累积 prefix 越过下面两个阈值任一时，自动调 `_clear_sid("claude", chat_id)` + 清零累计器 + 写 milestone + 触发 `larkhelm_session_auto_reset_total{reason}`。默认 `true`；翻 `false` 关掉自动 reset（仍统计累计，仅不触发） |
+| `claude_session_reset_cache_tokens` | P0：单 session 累计 `usage.cache_read` 触发自动 reset 的阈值（tokens），默认 `5000000`（5M）。`reason="cache_tokens"` |
+| `claude_session_reset_turns` | P0：单 session 累计 `record_token_usage(model="claude")` 调用次数触发自动 reset 的阈值，默认 `50`。`reason="turns"` |
+| `chat_agent_cheap_routing_enabled` | P1 缓存出血面收敛：`ChatAgent.execute` 调 `resolve_backend_for_task(profile=chat, cost_ceiling=0.10)` 把 chat 流量导向 DeepSeek/Kimi 等 cheap backend；rank 无健康候选时回落 `_get_chat_model` 并写 `[ChatAgent] fell back to chat model`。默认 `true`；翻 `false` 直接走用户偏好 model |
+| `recent_crew_sticky_ttl_sec` | P2：sticky crew context（`get_recent_crew_context` / `consume_recent_crew_context`）生存秒数，floor 60s。默认 `1800`（30 min；之前硬编码 7200/2h）。过期时 `_recent_crew_by_chat` 懒删除并 bump `larkhelm_sticky_context_evicted_total{reason="ttl"}` |
+| `recent_crew_sticky_max_injections` | P2：同一 sticky entry 经 `consume_recent_crew_context` 注入到主路径 prompt 多少次后强制淘汰，默认 `5`。`0` = 禁用 per-count 淘汰（仅 TTL）。淘汰时 bump `larkhelm_sticky_context_evicted_total{reason="max_injections"}` |
 
 > **超时层级说明**：
 > - `response_timeout`（软超时）：AI 响应无更新超过此时长，释放主锁但后台继续运行，默认 300s
@@ -506,6 +512,8 @@ if tl.startswith("/new_cmd"):
 | `larkhelm_extract_buffer_flushes_total` | Counter | `trigger` | trigger∈{timer,capacity,manual,shutdown} |
 | `larkhelm_llm_router_circuit_state` | Gauge | `backend` | P3 REQ-04：memory_llm_router 断路器状态，0=closed / 1=half_open / 2=open |
 | `larkhelm_tokens_total` | Counter | `backend`,`kind` | 每次 `record_token_usage` 触发一次 4-bucket inc；kind ∈ {input, output, cache_read, cache_create}；backend 取调用方传入的 `model` 标识（CLI 是 `claude`/`gemini`/`kimi`/`deepseek`，API 流式是 `spec.model or spec.id`）|
+| `larkhelm_session_auto_reset_total` | Counter | `reason` | P0 缓存出血面收敛：`claude_session_guard.maybe_auto_reset_session` 触发一次自动 reset 时 +1；`reason` ∈ {`cache_tokens`, `turns`}（先 check cache_read 阈值，再 check turn 阈值）|
+| `larkhelm_sticky_context_evicted_total` | Counter | `reason` | P2 缓存出血面收敛：sticky crew context entry 被淘汰一次 +1；`reason` ∈ {`ttl`（超过 `recent_crew_sticky_ttl_sec`）, `max_injections`（达到 `recent_crew_sticky_max_injections` 次注入）}|
 
 Prometheus scrape 配置示例：
 

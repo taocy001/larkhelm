@@ -25,6 +25,9 @@ __all__ = [
     "_register_btw_msg", "_is_btw_reply",
     "set_pending_doc_write", "pop_pending_doc_write",
     "_set_pending_intent", "_pop_pending_intent",
+    "_get_claude_session_counters",
+    "_increment_claude_session_counters",
+    "_clear_claude_session_counters",
 ]
 
 # ═══════════════════════════════════════════════════
@@ -158,6 +161,55 @@ def _increment_turn_count(chat_id: str) -> int:
         state["turn_count"] = new_count
     _schedule_save()
     return new_count
+
+
+# ═══════════════════════════════════════════════════
+#  Claude session counters (P0: cache-bleed auto-reset)
+# ═══════════════════════════════════════════════════
+# Two counters live alongside the normal per-chat state under
+# ``_chat_state_store[chat_id]``:
+#   * ``claude_session_cache_read`` — accumulated ``usage.cache_read`` tokens
+#     since the last reset
+#   * ``claude_session_turns``      — count of ``record_token_usage(model="claude")``
+#     calls since the last reset
+# Missing keys read as 0 so existing .feishu_state.json files are byte-compat
+# (NFR-2). See ``larkhelm.claude_session_guard.maybe_auto_reset_session`` for
+# the threshold-check + reset side-effect logic.
+def _get_claude_session_counters(chat_id: str) -> tuple[int, int]:
+    """Return ``(cache_read_total, turn_total)``; defaults to ``(0, 0)``."""
+    with _state_lock:
+        state = _chat_state_store.get(chat_id) or {}
+        cache_read = int(state.get("claude_session_cache_read", 0) or 0)
+        turns = int(state.get("claude_session_turns", 0) or 0)
+    return cache_read, turns
+
+
+def _increment_claude_session_counters(
+    chat_id: str,
+    cache_read_delta: int,
+) -> tuple[int, int]:
+    """Atomic ``+cache_read_delta`` and ``+1 turn``. Returns new totals."""
+    try:
+        delta = max(0, int(cache_read_delta or 0))
+    except (TypeError, ValueError):
+        delta = 0
+    with _state_lock:
+        state = _chat_state_store.setdefault(chat_id, {})
+        new_cache = int(state.get("claude_session_cache_read", 0) or 0) + delta
+        new_turns = int(state.get("claude_session_turns", 0) or 0) + 1
+        state["claude_session_cache_read"] = new_cache
+        state["claude_session_turns"] = new_turns
+    _schedule_save()
+    return new_cache, new_turns
+
+
+def _clear_claude_session_counters(chat_id: str) -> None:
+    """Zero both Claude session counters; idempotent on fresh chats."""
+    with _state_lock:
+        state = _chat_state_store.setdefault(chat_id, {})
+        state["claude_session_cache_read"] = 0
+        state["claude_session_turns"] = 0
+    _schedule_save()
 
 
 # ═══════════════════════════════════════════════════

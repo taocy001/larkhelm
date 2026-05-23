@@ -27,6 +27,9 @@ from larkhelm.token_stats import (
     get_token_stats, get_token_stats_persistent,
     summarize_crew_agent_tokens_for_chat,
 )
+from larkhelm.claude_session_guard import (
+    get_session_counters, clear_session_counters,
+)
 from larkhelm.perm import revoke_yolo, is_yolo
 from larkhelm.doc_handlers import _cmd_doc_write_do  # backs the doc_write_confirm card button (DocAgent path)
 from larkhelm.lark_client import (
@@ -110,6 +113,9 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
         except Exception as e:
             _debug_log(f"[reset] clear_history failed: {e}")
             _api_clear_failed = True
+        # P0 (design.md §6.5 AC-05): a full reset also zeroes the Claude
+        # session counters so the very next record_token_usage starts fresh.
+        clear_session_counters(chat_id)
         log_entry(chat_id, "reset", "reset:all", model="system")
         if _api_clear_failed:
             send_card_reply(chat_id, msg_id, "⚠️ 部分重置",
@@ -127,6 +133,9 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
         except Exception as e:
             _debug_log(f"[reset] clear_history failed: {e}")
             _api_clear_failed = True
+        # P0 (design.md §6.5 AC-05): clear the session cache/turn counters
+        # so the auto-reset threshold isn't already partially primed.
+        clear_session_counters(chat_id)
         log_entry(chat_id, "reset", "reset:claude", model="system")
         if _api_clear_failed:
             send_card_reply(chat_id, msg_id, "⚠️ 部分重置",
@@ -757,6 +766,27 @@ def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
         "---",
         _fmt_token_block("📦 累计（全部）", stats_all),
     ]
+
+    # P0 (design.md §6.5 AC-03): show Claude session counters and how far
+    # they are from triggering an auto-reset, so operators can spot a
+    # prefix-bloat session before the threshold actually fires.
+    try:
+        sc = get_session_counters(chat_id)
+        if sc.get("enabled"):
+            sc_cache  = int(sc.get("cache_read", 0) or 0)
+            sc_turns  = int(sc.get("turns", 0) or 0)
+            t_cache   = max(1, int(sc.get("threshold_cache_read", 1) or 1))
+            t_turns   = max(1, int(sc.get("threshold_turns", 1) or 1))
+            pct_cache = min(100, int(sc_cache * 100 / t_cache))
+            pct_turns = min(100, int(sc_turns * 100 / t_turns))
+            pct = max(pct_cache, pct_turns)
+            parts.append("---")
+            parts.append(
+                f"**当前 session：{sc_turns} 轮 / {sc_cache:,} tokens "
+                f"cache_read（距离阈值 {pct}%）**"
+            )
+    except Exception as e:
+        _debug_log(f"[stats] session counters render failed: {e}")
 
     # If persistent data is empty (fresh deploy or upgrade from old version), show in-memory stats as fallback
     if not stats_all and stats_mem:

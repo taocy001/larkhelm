@@ -233,6 +233,17 @@ DOC_INJECT_CACHE_ENABLED: bool = True
 DOC_INJECT_CACHE_TTL_SEC: int = 300
 CLI_SKIP_RECENT_TURNS_WHEN_SID: bool = True
 
+# ── P0/P1/P2 cache-bleed knobs (.crew_workspace/design.md §3.3) ───────────
+# P0: Claude session auto-reset
+CLAUDE_SESSION_AUTO_RESET_ENABLED: bool = True
+CLAUDE_SESSION_RESET_CACHE_TOKENS: int = 5_000_000
+CLAUDE_SESSION_RESET_TURNS: int = 50
+# P1: ChatAgent cheap routing
+CHAT_AGENT_CHEAP_ROUTING_ENABLED: bool = True
+# P2: Sticky crew context tuning
+RECENT_CREW_STICKY_TTL_SEC: int = 1800
+RECENT_CREW_STICKY_MAX_INJECTIONS: int = 5
+
 # ── File handling configuration ───────────────────────────────────────────
 FILE_ENABLED: bool = True
 MAX_FILE_SIZE_BYTES: int = 10 * 1024 * 1024   # 10 MB
@@ -1027,6 +1038,55 @@ def _init_app_config() -> None:
     CLI_SKIP_RECENT_TURNS_WHEN_SID = bool(
         config.get("cli_skip_recent_turns_when_sid", True)
     )
+
+    # ── P0/P1/P2 cache-bleed knobs (design.md §3.3) ───────────────────────
+    # All three groups default to "feature on" — the new behaviours are the
+    # explicit P0/P1/P2 design intent. Operators flip individual flags in
+    # config.json to bisect a regression without redeploying.
+    config.setdefault("claude_session_auto_reset_enabled", True)
+    config.setdefault("claude_session_reset_cache_tokens", 5_000_000)
+    config.setdefault("claude_session_reset_turns", 50)
+    config.setdefault("chat_agent_cheap_routing_enabled", True)
+    config.setdefault("recent_crew_sticky_ttl_sec", 1800)
+    config.setdefault("recent_crew_sticky_max_injections", 5)
+
+    global CLAUDE_SESSION_AUTO_RESET_ENABLED, CLAUDE_SESSION_RESET_CACHE_TOKENS
+    global CLAUDE_SESSION_RESET_TURNS, CHAT_AGENT_CHEAP_ROUTING_ENABLED
+    global RECENT_CREW_STICKY_TTL_SEC, RECENT_CREW_STICKY_MAX_INJECTIONS
+
+    CLAUDE_SESSION_AUTO_RESET_ENABLED = bool(
+        config.get("claude_session_auto_reset_enabled", True)
+    )
+    try:
+        CLAUDE_SESSION_RESET_CACHE_TOKENS = max(
+            1, int(config.get("claude_session_reset_cache_tokens", 5_000_000)
+                   or 5_000_000),
+        )
+    except (TypeError, ValueError):
+        CLAUDE_SESSION_RESET_CACHE_TOKENS = 5_000_000
+    try:
+        CLAUDE_SESSION_RESET_TURNS = max(
+            1, int(config.get("claude_session_reset_turns", 50) or 50),
+        )
+    except (TypeError, ValueError):
+        CLAUDE_SESSION_RESET_TURNS = 50
+    CHAT_AGENT_CHEAP_ROUTING_ENABLED = bool(
+        config.get("chat_agent_cheap_routing_enabled", True)
+    )
+    try:
+        # Floor 60s: anything shorter would drop a freshly-completed crew
+        # context before the user could send a reply.
+        RECENT_CREW_STICKY_TTL_SEC = max(
+            60, int(config.get("recent_crew_sticky_ttl_sec", 1800) or 1800),
+        )
+    except (TypeError, ValueError):
+        RECENT_CREW_STICKY_TTL_SEC = 1800
+    try:
+        RECENT_CREW_STICKY_MAX_INJECTIONS = max(
+            0, int(config.get("recent_crew_sticky_max_injections", 5) or 5),
+        )
+    except (TypeError, ValueError):
+        RECENT_CREW_STICKY_MAX_INJECTIONS = 5
 
     # ── File handling configuration ────────────────────────────────────────
     config.setdefault("file_enabled", True)

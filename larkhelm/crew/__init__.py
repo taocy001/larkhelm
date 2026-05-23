@@ -16,6 +16,7 @@ from larkhelm.crew._state import (
     signal_breakpoint,
     get_crew_card_context,
     get_recent_crew_context,
+    consume_recent_crew_context,
     clear_recent_crew_context,
     _register_crew_card,
 )
@@ -112,6 +113,7 @@ __all__ = [
     "signal_breakpoint",
     "get_crew_card_context",
     "get_recent_crew_context",
+    "consume_recent_crew_context",
     "clear_recent_crew_context",
     "_register_crew_card",
     # Commands

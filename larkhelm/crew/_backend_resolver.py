@@ -73,6 +73,11 @@ TASK_PROFILES: dict[str, TaskProfile] = {
         complexity="simple",
         required_capabilities={"chat": 1.0},
         latency_pref="fast",
+        # P1 (design.md §3.3): cap the per-call estimate at $0.10 so
+        # ``rank_for_task`` filters out expensive backends (Claude Opus,
+        # Kimi-thinking, etc.) for plain chat — DeepSeek / smaller models
+        # become the natural top pick.
+        cost_ceiling=0.10,
     ),
 }
 
