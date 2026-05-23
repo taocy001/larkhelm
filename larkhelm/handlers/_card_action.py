@@ -12,7 +12,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 
 import larkhelm.config as _cfg
 from larkhelm.log import _debug_log
-from larkhelm.concurrency import _trigger_cancel, _pop_pending
+from larkhelm.concurrency import _trigger_cancel, _replace_cancel_event, _pop_pending
 from larkhelm.perm import (grant_yolo, _perm_lock, _perm_pending, _perm_decision,
                             _perm_tool_name, _perm_tool_input, _fmt_tool_body)
 from larkhelm.card_builder import _make_card_dict
@@ -196,6 +196,15 @@ def handle_card_action(event: P2CardActionTrigger) -> P2CardActionTriggerRespons
             except Exception as e:
                 _debug_log(f"[CardAction] record_feedback failed: {e}")
             _trigger_cancel(chat_id)
+            # Cancel the in-flight intent dispatch (above), then SWAP the
+            # per-chat cancel event for a fresh one so the new chat-agent
+            # dispatch below doesn't observe the just-set flag and exit
+            # immediately. The old task keeps its reference to the now-
+            # orphaned set event and shuts down normally; the new task
+            # picks up the fresh event via ``_get_cancel_event`` and runs
+            # to completion. Without this swap the converted "normal task"
+            # short-circuits within ~10s instead of executing.
+            _replace_cancel_event(chat_id)
             override_intent = IntentResult(
                 agent_type="chat", layer="override",
                 is_explicit_command=True, raw_text=pending.text,
