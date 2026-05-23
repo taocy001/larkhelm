@@ -78,6 +78,19 @@ class DocKey:
 
 
 @dataclass(frozen=True)
+class DocReadResult:
+    """Return type for :func:`cached_doc_read_with_meta` (P4 REQ-05).
+
+    Carries the loaded payload plus cache provenance so callers
+    (``_inject_doc_context``) can prepend an age hint to the injected
+    text without re-reading the cache key set themselves.
+    """
+    payload: Any
+    from_cache: bool
+    age_sec: Optional[int]
+
+
+@dataclass(frozen=True)
 class DocCachedEntry:
     """Value side of the doc TTL cache.
 
@@ -228,6 +241,27 @@ class TTLCache(Generic[K, V]):
                 return None
             self._hits += 1
             return payload
+
+    def get_with_age(self, key: K) -> Optional[tuple[V, int]]:
+        """Return ``(value, age_sec)`` on hit, ``None`` on miss / expiry.
+
+        ``age_sec`` is ``int(monotonic_now - fetched_at)``, clamped at 0.
+        Shares the same lock + expiry semantics as :meth:`get` so
+        callers don't see a different staleness window.
+        """
+        now = time.monotonic()
+        with self._lock:
+            entry = self._data.get(key)
+            if entry is None:
+                self._misses += 1
+                return None
+            fetched_at, payload = entry
+            if now - fetched_at > self._ttl:
+                self._data.pop(key, None)
+                self._misses += 1
+                return None
+            self._hits += 1
+            return payload, max(0, int(now - fetched_at))
 
     def put(self, key: K, value: V) -> None:
         with self._lock:
@@ -522,6 +556,67 @@ def cached_doc_read(
     return payload
 
 
+def cached_doc_read_with_meta(
+    chat_id: str,
+    ref: Any,
+    max_chars: int,
+    *,
+    loader: Callable[[], Any],
+) -> DocReadResult:
+    """TTL-cached wrapper for ``FeishuDocClient.read``, returning provenance.
+
+    Same caching semantics as :func:`cached_doc_read` (key = chat_id +
+    doc_type + token + max_chars; TTL hot-read from
+    ``_cfg.DOC_INJECT_CACHE_TTL_SEC``; ``DOC_INJECT_CACHE_ENABLED=False``
+    bypasses with a ``bypass`` metric — aligned with
+    :func:`cached_memory_layer`'s disabled branch).
+
+    On hit emits ``inc_doc_inject_cache("hit_with_age_hint")`` instead of
+    plain ``hit`` so dashboards can distinguish the two call paths (REQ-06).
+    Errors raised by ``loader()`` propagate unchanged — callers'
+    ``DocPermissionError`` / ``DocError`` handlers must keep firing.
+    """
+    if not _config_flag("DOC_INJECT_CACHE_ENABLED", True):
+        # Align metric label with log label and with cached_memory_layer's
+        # disabled-flag branch (which uses 'bypass'). CLAUDE.md monitoring
+        # table lists `bypass` as a first-class outcome alongside hit/miss.
+        _inc_outcome("doc_inject", "bypass")
+        _log_event("doc_inject", "bypass", f"chat={chat_id[:8]}")
+        return DocReadResult(payload=loader(), from_cache=False, age_sec=None)
+
+    new_ttl = _doc_ttl_sec()
+    if new_ttl != _doc_cache.ttl_sec:
+        _doc_cache.set_ttl(new_ttl)
+
+    doc_type = getattr(ref, "doc_type", "")
+    if doc_type and not isinstance(doc_type, str):
+        doc_type = getattr(doc_type, "name", "") or str(doc_type)
+    token = getattr(ref, "token", "") or ""
+    key = DocKey(
+        chat_id=chat_id,
+        doc_type=str(doc_type),
+        token=str(token),
+        max_chars=int(max_chars),
+    )
+
+    aged = _doc_cache.get_with_age(key)
+    if aged is not None:
+        entry, age_sec = aged
+        _inc_outcome("doc_inject", "hit_with_age_hint")
+        _log_event(
+            "doc_inject",
+            "hit_with_age_hint",
+            f"chat={chat_id[:8]} doc={token[:8]} age={age_sec}s",
+        )
+        return DocReadResult(payload=entry.payload, from_cache=True, age_sec=age_sec)
+
+    payload = loader()
+    _doc_cache.put(key, DocCachedEntry(payload=payload))
+    _inc_outcome("doc_inject", "miss")
+    _log_event("doc_inject", "miss", f"chat={chat_id[:8]} doc={token[:8]}")
+    return DocReadResult(payload=payload, from_cache=False, age_sec=None)
+
+
 def reset_for_tests() -> None:
     """Test-only: clear every cache + counter. Production must not call.
 
@@ -541,6 +636,8 @@ def reset_for_tests() -> None:
 __all__ = [
     "LRUCache", "TTLCache",
     "RecentTurnsKey", "MemoryLayerKey", "DocKey", "DocCachedEntry",
+    "DocReadResult",
     "cached_recent_turns", "cached_memory_layer", "cached_doc_read",
+    "cached_doc_read_with_meta",
     "reset_for_tests",
 ]

@@ -7,6 +7,7 @@ Contains:
 """
 import json
 import os
+import re as _re
 import threading
 import time
 import traceback
@@ -85,6 +86,58 @@ def _intent_router_active(chat_id: str) -> bool:
     return hash_traffic_active(
         chat_id, "intent_router_enabled", "intent_router_traffic",
     )
+
+
+# P3 REQ-02 / design.md §3.3: case-insensitive keyword set that gates the
+# workspace-hint segment when WORKSPACE_HINT_KEYWORD_GATE=True. Compiled at
+# import time (regex is fixed; satisfies NFR §4.1 "< 0.5 ms / message").
+_WORKSPACE_KEYWORD_RE = _re.compile(
+    r"(workspace|计划|任务|设计|prd|design|tasks|review|qa|crew)",
+    _re.IGNORECASE,
+)
+
+
+def _build_workspace_hint(chat_id: str, user_text: str) -> tuple[str, str]:
+    """Return ``(injection_prefix, outcome)`` for the workspace-hint segment.
+
+    The prefix is the literal text to prepend (incl. trailing ``\\n\\n``)
+    or ``""`` when the caller must NOT touch the prompt. ``outcome`` is
+    the metric label (always non-empty for telemetry parity).
+
+    Outcomes (cf. design.md §3.4):
+      * ``injected_passive``  — files exist; gate off OR keyword matched
+      * ``skipped_by_gate``   — files exist; gate on AND keyword missed
+      * ``skipped_empty``     — no ``.crew_workspace/`` dir or no files
+
+    Wraps every filesystem touch in a broad ``except OSError`` so a
+    permission flake on the ``.crew_workspace/`` directory degrades to
+    "no hint" rather than tossing the user message back with a 500.
+    """
+    try:
+        from pathlib import Path as _Path
+        ws = _Path(_get_cwd(chat_id)) / ".crew_workspace"
+        if not ws.is_dir():
+            return "", "skipped_empty"
+        files = sorted(
+            f.name for f in ws.iterdir()
+            if f.is_file() and f.suffix in (".md", ".json")
+            and f.name != "crew_checkpoint.json"
+        )
+    except OSError:
+        return "", "skipped_empty"
+
+    if not files:
+        return "", "skipped_empty"
+
+    gate_on = bool(getattr(_cfg, "WORKSPACE_HINT_KEYWORD_GATE", False))
+    if gate_on and _WORKSPACE_KEYWORD_RE.search(user_text or "") is None:
+        return "", "skipped_by_gate"
+
+    prefix = (
+        f"[工作区] .crew_workspace/ 下存在以下文件：{', '.join(files)}。"
+        f"如果与本次问题相关，再读取；否则忽略。\n\n"
+    )
+    return prefix, "injected_passive"
 
 
 def handle_reaction_created(data: P2ImMessageReactionCreatedV1):
@@ -569,7 +622,6 @@ def handle_message(data: P2ImMessageReceiveV1):
 
         # ── /rename — chat_state mutator; not registry-able ──
         if tl.startswith("/rename "):
-            import re as _re
             name = text[8:].strip()
             name = _re.sub(r'[`*_~]', '', name)[:30]
             if name:
@@ -714,10 +766,11 @@ def handle_message(data: P2ImMessageReceiveV1):
             parent_id = None  # already handled; no need to fetch parent in _do_query
         elif not parent_id:
             # No parent at all → try sticky crew context (local, no I/O).
-            # P2 (design.md §3.2): use the consuming accessor here so each
-            # injection bumps the per-entry counter and triggers eviction
-            # after `recent_crew_sticky_max_injections`. Read-only call
-            # sites (/status, /memory diagnose, _query.* fallbacks) keep
+            # P2 (design.md §6.3 / D9): use the *mutating* consume_* entry
+            # point so the per-entry injection counter increments and the
+            # entry gets evicted after RECENT_CREW_STICKY_MAX_INJECTIONS
+            # consumes. Read-only callers (status, diagnose, parent-fetch
+            # fallback in _query.py / _query_session.py) keep using
             # get_recent_crew_context to avoid double-counting one user turn.
             from larkhelm.crew import consume_recent_crew_context
             crew_ctx = consume_recent_crew_context(chat_id)
@@ -732,23 +785,21 @@ def handle_message(data: P2ImMessageReceiveV1):
                 )
         # else: parent_id set and no crew card found → _do_query will fetch parent text in background
 
-        # Workspace context: if .crew_workspace/ has relevant files, tell the AI so it
-        # can read them naturally (enables "fix failed /dev" or "revise /plan" via chat).
+        # Workspace context: P3 REQ-01 passive phrasing + REQ-02 optional
+        # keyword gate. _build_workspace_hint encodes the scanning + gate
+        # logic so it stays unit-testable; one outcome metric per call
+        # (cf. design.md §6.1 invariant).
         try:
-            from pathlib import Path as _Path
-            _ws = _Path(_get_cwd(chat_id)) / ".crew_workspace"
-            _ws_files = sorted(
-                f.name for f in _ws.iterdir()
-                if f.is_file() and f.suffix in (".md", ".json") and f.name != "crew_checkpoint.json"
-            ) if _ws.is_dir() else []
-            if _ws_files:
-                prompt = (
-                    f"[工作区] .crew_workspace/ 下有以下文件可供参考：{', '.join(_ws_files)}。"
-                    f"如需了解当前任务背景，请读取这些文件。\n\n"
-                    f"{prompt}"
-                )
+            _ws_prefix, _ws_outcome = _build_workspace_hint(chat_id, text)
+            if _ws_prefix:
+                prompt = _ws_prefix + prompt
+            try:
+                from larkhelm.metrics import inc_workspace_hint as _inc_ws
+                _inc_ws(_ws_outcome)
+            except Exception as _metric_err:
+                _debug_log(f"[Message] inc_workspace_hint failed: {_metric_err}")
         except Exception as e:
-            _debug_log(f"[message] workspace listing failed: {e}")
+            _debug_log(f"[Message] workspace hint build failed: {e}")
 
         # Generate ``trace_id`` HERE — before the user log entry — so the
         # user side carries the same id ``_do_query`` will later use on

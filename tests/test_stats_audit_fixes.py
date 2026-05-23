@@ -1641,5 +1641,185 @@ class TestFmtTokenBlockHitRateHeader(unittest.TestCase):
         self.assertNotIn("缓存命中率", body)
 
 
+# ════════════════════════════════════════════════════════════════════════
+#  P5 — agent_type bucket aggregation + /stats rendering (AC-07..09)
+# ════════════════════════════════════════════════════════════════════════
+
+
+class TestSummarizeByType(unittest.TestCase):
+    """AC-08 — summarize_crew_agent_tokens_by_type returns one dict per
+    bucketed agent_type with the 6 documented inner fields."""
+
+    def setUp(self):
+        self._snap = dict(token_stats._crew_agent_tokens)
+        token_stats._crew_agent_tokens.clear()
+
+    def tearDown(self):
+        token_stats._crew_agent_tokens.clear()
+        token_stats._crew_agent_tokens.update(self._snap)
+
+    def test_returns_empty_dict_when_no_entries(self):
+        self.assertEqual(
+            token_stats.summarize_crew_agent_tokens_by_type("nobody"), {}
+        )
+
+    def test_buckets_by_agent_id_via_static_map(self):
+        """implementer + fixer must collapse to 'engineer'; qa / reviewer
+        keep their own buckets."""
+        token_stats.record_crew_agent_tokens(
+            "chatA__crew_run1_implementer", "claude",
+            {"input_tokens": 100, "output_tokens": 50,
+             "cache_read": 0, "cache_create": 0, "cost_usd": 0.01},
+        )
+        token_stats.record_crew_agent_tokens(
+            "chatA__crew_run1_fixer", "claude",
+            {"input_tokens": 30, "output_tokens": 20,
+             "cache_read": 0, "cache_create": 0, "cost_usd": 0.005},
+        )
+        token_stats.record_crew_agent_tokens(
+            "chatA__crew_run1_qa", "kimi",
+            {"input_tokens": 10, "output_tokens": 5,
+             "cache_read": 0, "cache_create": 0, "cost_usd": 0.001},
+        )
+        token_stats.record_crew_agent_tokens(
+            "chatA__crew_run1_reviewer", "kimi",
+            {"input_tokens": 20, "output_tokens": 10,
+             "cache_read": 0, "cache_create": 0, "cost_usd": 0.002},
+        )
+
+        buckets = token_stats.summarize_crew_agent_tokens_by_type("chatA")
+        self.assertIn("engineer", buckets)
+        self.assertIn("qa", buckets)
+        self.assertIn("reviewer", buckets)
+        self.assertEqual(buckets["engineer"]["agents"], 2)
+        self.assertEqual(buckets["engineer"]["input_tokens"], 130)
+        self.assertEqual(buckets["engineer"]["output_tokens"], 70)
+        self.assertAlmostEqual(buckets["engineer"]["cost_usd"], 0.015, places=4)
+        self.assertEqual(buckets["qa"]["agents"], 1)
+        self.assertEqual(buckets["reviewer"]["agents"], 1)
+
+    def test_unknown_agent_id_falls_back_to_其它(self):
+        token_stats.record_crew_agent_tokens(
+            "chatA__crew_run1_my_custom_agent", "claude",
+            {"input_tokens": 5, "output_tokens": 5,
+             "cache_read": 0, "cache_create": 0, "cost_usd": 0.001},
+        )
+        buckets = token_stats.summarize_crew_agent_tokens_by_type("chatA")
+        self.assertIn("其它", buckets)
+        self.assertEqual(buckets["其它"]["agents"], 1)
+
+    def test_prefix_anchor_isolates_chats(self):
+        """chatA must not absorb chatAB's entries (same anchor invariant
+        as the legacy helper)."""
+        token_stats.record_crew_agent_tokens(
+            "chatA__crew_x_implementer", "claude", {"input_tokens": 10},
+        )
+        token_stats.record_crew_agent_tokens(
+            "chatAB__crew_x_implementer", "claude", {"input_tokens": 99},
+        )
+        buckets = token_stats.summarize_crew_agent_tokens_by_type("chatA")
+        self.assertEqual(buckets["engineer"]["input_tokens"], 10)
+
+
+class TestStatsByTypeRendering(unittest.TestCase):
+    """AC-07 — _render_crew_agent_breakdown orders buckets by total
+    tokens descending and uses the PRD line format."""
+
+    def setUp(self):
+        self._snap = dict(token_stats._crew_agent_tokens)
+        token_stats._crew_agent_tokens.clear()
+        self._flag_snap = bool(
+            getattr(_cfg, "STATS_AGENT_TYPE_BREAKDOWN_ENABLED", True)
+        )
+
+    def tearDown(self):
+        token_stats._crew_agent_tokens.clear()
+        token_stats._crew_agent_tokens.update(self._snap)
+        _cfg.STATS_AGENT_TYPE_BREAKDOWN_ENABLED = self._flag_snap
+
+    def _seed_three_buckets(self) -> None:
+        # engineer biggest (1500), reviewer middle (250), qa smallest (150)
+        token_stats.record_crew_agent_tokens(
+            "ccc__crew_run1_implementer", "claude",
+            {"input_tokens": 1000, "output_tokens": 500,
+             "cache_read": 0, "cache_create": 0, "cost_usd": 0.01},
+        )
+        token_stats.record_crew_agent_tokens(
+            "ccc__crew_run1_reviewer", "kimi",
+            {"input_tokens": 200, "output_tokens": 50,
+             "cache_read": 0, "cache_create": 0, "cost_usd": 0.002},
+        )
+        token_stats.record_crew_agent_tokens(
+            "ccc__crew_run1_qa", "kimi",
+            {"input_tokens": 100, "output_tokens": 50,
+             "cache_read": 0, "cache_create": 0, "cost_usd": 0.001},
+        )
+
+    def test_descending_by_total_tokens(self):
+        from larkhelm.commands import _render_crew_agent_breakdown
+
+        _cfg.STATS_AGENT_TYPE_BREAKDOWN_ENABLED = True
+        self._seed_three_buckets()
+        lines = _render_crew_agent_breakdown("ccc")
+        # First entry is the separator + header; bucket lines follow.
+        bucket_lines = [
+            ln for ln in lines if ln.startswith("›")
+        ]
+        self.assertEqual(len(bucket_lines), 3)
+        # Order: engineer (1500) > reviewer (250) > qa (150)
+        self.assertIn("engineer", bucket_lines[0])
+        self.assertIn("reviewer", bucket_lines[1])
+        self.assertIn("qa",       bucket_lines[2])
+
+    def test_line_format_matches_prd_spec(self):
+        from larkhelm.commands import _render_crew_agent_breakdown
+
+        _cfg.STATS_AGENT_TYPE_BREAKDOWN_ENABLED = True
+        self._seed_three_buckets()
+        lines = _render_crew_agent_breakdown("ccc")
+        header = lines[1]
+        self.assertIn("按类型", header)
+        engineer_line = next(ln for ln in lines if "engineer" in ln)
+        self.assertIn("**engineer**", engineer_line)
+        self.assertIn("1 agents", engineer_line)
+        self.assertIn("合计 **1,500** tokens", engineer_line)
+        self.assertIn("费用 **$0.0100**", engineer_line)
+
+
+class TestBreakdownDisabled(unittest.TestCase):
+    """AC-09 — STATS_AGENT_TYPE_BREAKDOWN_ENABLED=False restores the
+    P2 single-line summary."""
+
+    def setUp(self):
+        self._snap = dict(token_stats._crew_agent_tokens)
+        token_stats._crew_agent_tokens.clear()
+        self._flag_snap = bool(
+            getattr(_cfg, "STATS_AGENT_TYPE_BREAKDOWN_ENABLED", True)
+        )
+
+    def tearDown(self):
+        token_stats._crew_agent_tokens.clear()
+        token_stats._crew_agent_tokens.update(self._snap)
+        _cfg.STATS_AGENT_TYPE_BREAKDOWN_ENABLED = self._flag_snap
+
+    def test_breakdown_disabled_falls_back_to_p2_single_line(self):
+        from larkhelm.commands import _render_crew_agent_breakdown
+
+        token_stats.record_crew_agent_tokens(
+            "ddd__crew_run1_implementer", "claude",
+            {"input_tokens": 1000, "output_tokens": 500,
+             "cache_read": 0, "cache_create": 0, "cost_usd": 0.01},
+        )
+        _cfg.STATS_AGENT_TYPE_BREAKDOWN_ENABLED = False
+        lines = _render_crew_agent_breakdown("ddd")
+        body = "\n".join(lines)
+        self.assertIn("**🤖 Crew Agents（本进程）**", body)
+        self.assertNotIn("按类型", body,
+            "flag=false must keep the P2 single-line summary",
+        )
+        # Single bucket aggregated as one line.
+        self.assertIn("1 agents", body)
+
+
 if __name__ == "__main__":
     unittest.main()

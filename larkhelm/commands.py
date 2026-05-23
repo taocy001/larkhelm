@@ -26,6 +26,7 @@ from larkhelm.concurrency import (
 from larkhelm.token_stats import (
     get_token_stats, get_token_stats_persistent,
     summarize_crew_agent_tokens_for_chat,
+    summarize_crew_agent_tokens_by_type,
 )
 from larkhelm.claude_session_guard import (
     get_session_counters, clear_session_counters,
@@ -595,6 +596,64 @@ def _fmt_token_block(label: str, data: dict) -> str:
     return "\n".join(lines)
 
 
+def _render_crew_agent_breakdown(chat_id: str) -> list[str]:
+    """Build the markdown lines for the /stats "Crew Agents" block.
+
+    Returns ``[]`` when there are no crew-agent tokens (caller suppresses
+    the section). Honours :pydata:`config.STATS_AGENT_TYPE_BREAKDOWN_ENABLED`:
+
+      * ``True``  → header line + one line per bucket, sorted by total
+        tokens descending (P5 REQ-07).
+      * ``False`` → single-line P2-byte-compat fallback
+        (REQ-09; for the rare card-overflow escape hatch).
+    """
+    breakdown_on = bool(
+        getattr(_cfg, "STATS_AGENT_TYPE_BREAKDOWN_ENABLED", True)
+    )
+
+    if not breakdown_on:
+        summary = summarize_crew_agent_tokens_for_chat(chat_id)
+        if not summary:
+            return []
+        crew_total = (
+            summary["input_tokens"] + summary["output_tokens"]
+            + summary["cache_read"] + summary["cache_create"]
+        )
+        cost_val = summary.get("cost_usd", 0.0)
+        cost_str = "—" if cost_val is None else f"${cost_val:.4f}"
+        return [
+            "---",
+            (
+                f"**🤖 Crew Agents（本进程）**\n"
+                f"› {summary['agents']} agents  合计 **{crew_total:,}** tokens  "
+                f"费用 **{cost_str}**"
+            ),
+        ]
+
+    buckets = summarize_crew_agent_tokens_by_type(chat_id)
+    if not buckets:
+        return []
+
+    def _bucket_total(item: tuple[str, dict]) -> int:
+        _name, agg = item
+        return (
+            agg.get("input_tokens", 0) + agg.get("output_tokens", 0)
+            + agg.get("cache_read", 0) + agg.get("cache_create", 0)
+        )
+
+    ordered = sorted(buckets.items(), key=_bucket_total, reverse=True)
+    lines = ["---", "**🤖 Crew Agents（本进程·按类型）**"]
+    for type_name, agg in ordered:
+        total = _bucket_total((type_name, agg))
+        cost_val = agg.get("cost_usd", 0.0)
+        cost_str = "—" if cost_val is None else f"${cost_val:.4f}"
+        lines.append(
+            f"› **{type_name}** {agg['agents']} agents  "
+            f"合计 **{total:,}** tokens  费用 **{cost_str}**"
+        )
+    return lines
+
+
 def _cmd_stats_intent(chat_id: str, msg_id: str = None, date: str | None = None):
     """Render today's intent dispatcher aggregate (hit rate / latency / cost)."""
     try:
@@ -793,26 +852,13 @@ def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
         parts.append("---")
         parts.append(_fmt_token_block("⚡ 本次启动（内存）", stats_mem))
 
-    # Round-4 audit P1 (R4-1e): expose the in-memory per-crew-agent
-    # counter (CLAUDE.md promised this drill-down but had no UI hook).
-    # Counters reset on bridge restart so we label "本进程" to set the
-    # right expectation; the totals are also rolled up into the parent
-    # chat's persistent stats above, so this block is purely a per-agent
-    # split, not a separate accounting source.
-    crew_summary = summarize_crew_agent_tokens_for_chat(chat_id)
-    if crew_summary:
-        crew_total = (
-            crew_summary["input_tokens"] + crew_summary["output_tokens"]
-            + crew_summary["cache_read"] + crew_summary["cache_create"]
-        )
-        cost_val = crew_summary.get("cost_usd", 0.0)
-        cost_str = "—" if cost_val is None else f"${cost_val:.4f}"
-        parts.append("---")
-        parts.append(
-            f"**🤖 Crew Agents（本进程）**\n"
-            f"› {crew_summary['agents']} agents  合计 **{crew_total:,}** tokens  "
-            f"费用 **{cost_str}**"
-        )
+    # Round-4 audit P1 (R4-1e) + P5 REQ-07/09: expose the in-memory
+    # per-crew-agent counter. Counters reset on bridge restart so the
+    # block labels "本进程" — totals are also rolled up into the parent
+    # chat's persistent stats above, so this is a per-agent split, not a
+    # separate accounting source. STATS_AGENT_TYPE_BREAKDOWN_ENABLED=false
+    # restores the P2 single-line summary.
+    parts.extend(_render_crew_agent_breakdown(chat_id))
 
     send_card_reply(chat_id, msg_id, "📊 Token 统计", "\n\n".join(parts), color="turquoise")
 

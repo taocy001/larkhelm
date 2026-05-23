@@ -74,6 +74,20 @@ def _extract_feishu_urls(text: str) -> list:
     return re.findall(r'https://[a-zA-Z0-9-]+\.feishu\.cn/[^\s\]>）]+', text)
 
 
+def _format_age_hint(age_sec: int) -> str:
+    """Render the parenthetical age hint for a cache-served doc payload.
+
+    < 60s  → 「（缓存版本，不到 1 分钟前读取，如内容已变请提示刷新）」
+    >= 60s → f「（缓存版本，{age_sec // 60} 分钟前读取，如内容已变请提示刷新）」
+
+    Round-down minutes (`240 // 60 = 4` rather than ceil-or-round) keeps
+    the hint conservative — the doc is at least N minutes old, never less.
+    """
+    if age_sec < 60:
+        return "（缓存版本，不到 1 分钟前读取，如内容已变请提示刷新）"
+    return f"（缓存版本，{age_sec // 60} 分钟前读取，如内容已变请提示刷新）"
+
+
 def _inject_doc_context(text: str, chat_id: str) -> str:
     """
     Detect Feishu document URLs in text, read their content, and prepend it to
@@ -82,9 +96,11 @@ def _inject_doc_context(text: str, chat_id: str) -> str:
     normal conversation is unaffected.
 
     Successful reads are cached for ``DOC_INJECT_CACHE_TTL_SEC`` seconds per
-    (chat_id, doc_token) — see ``_context_cache.cached_doc_read``. Permission
-    / API errors propagate from the loader and are caught here (so the user
-    still sees the "no permission" hint on each retry).
+    (chat_id, doc_token) — see ``_context_cache.cached_doc_read_with_meta``.
+    On cache hit (P4 REQ-05) the injection text carries a parenthetical
+    age hint so the model can warn the user the body may be stale.
+    Permission / API errors propagate from the loader and are caught here
+    (so the user still sees the "no permission" hint on each retry).
     """
     from larkhelm.lark_client import (
         FeishuDocClient, parse_doc_url,
@@ -103,19 +119,26 @@ def _inject_doc_context(text: str, chat_id: str) -> str:
         if ref is None:
             continue
         try:
+            age_hint = ""
             if cache_enabled:
-                from larkhelm._context_cache import cached_doc_read
-                result = cached_doc_read(
+                from larkhelm._context_cache import cached_doc_read_with_meta
+                result_meta = cached_doc_read_with_meta(
                     chat_id, ref, _cfg.DOC_INJECT_MAX_CHARS,
                     loader=lambda r=ref: doc_client.read(
                         r, max_chars=_cfg.DOC_INJECT_MAX_CHARS
                     ),
                 )
+                result = result_meta.payload
+                if result_meta.from_cache and result_meta.age_sec is not None:
+                    age_hint = _format_age_hint(result_meta.age_sec)
             else:
                 result = doc_client.read(ref, max_chars=_cfg.DOC_INJECT_MAX_CHARS)
             label  = result.title or url
+            header = f"[文档内容：《{label}》]"
+            if age_hint:
+                header = f"{header}\n{age_hint}"
             injections.append(
-                f"[文档内容：《{label}》]\n{result.content}\n[/文档内容]"
+                f"{header}\n{result.content}\n[/文档内容]"
             )
         except DocPermissionError:
             injections.append(f"[文档 {url} 无读取权限，已跳过]")

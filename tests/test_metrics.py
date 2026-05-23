@@ -173,6 +173,7 @@ def test_tokens_total_safe_when_prom_missing(_force_legacy_off, monkeypatch):
     """inc_tokens must be a silent no-op when prometheus-client is absent."""
     monkeypatch.setattr(_met, "_resolve_prom_client", lambda: None)
     _met._reset_for_tests()
+    # Call must not raise and not produce side effects.
     _met.inc_tokens(
         "claude",
         {
@@ -182,6 +183,7 @@ def test_tokens_total_safe_when_prom_missing(_force_legacy_off, monkeypatch):
             "cache_create":  4,
         },
     )
+    # render_exposition will raise (prom missing) — verify no_op path covered.
     with pytest.raises(_met.PrometheusNotInstalled):
         _met.render_exposition()
 
@@ -198,6 +200,8 @@ def test_tokens_total_coerces_negative_and_garbage(_force_legacy_off):
         },
     )
     body = _met.render_exposition()
+    # Only the well-formed cache_create=7 should appear; the three bad
+    # buckets emit zero increments and therefore no series line at all.
     assert 'larkhelm_tokens_total{backend="kimi",kind="cache_create"} 7.0' in body
     assert 'backend="kimi",kind="input"' not in body
     assert 'backend="kimi",kind="output"' not in body

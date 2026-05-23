@@ -129,6 +129,7 @@ class LarkhelmMetricsRegistry:
             self.tokens_total = None
             self.session_auto_reset_total = None
             self.sticky_context_evicted_total = None
+            self.workspace_hint_total = None
             return
 
         # Use a private registry so the larkhelm metrics don't collide with
@@ -245,6 +246,14 @@ class LarkhelmMetricsRegistry:
             "larkhelm_sticky_context_evicted_total",
             "Sticky crew context evictions by reason",
             ["reason"],
+            registry=self._registry,
+        )
+        # P3 REQ-03: workspace-hint segment telemetry. One outcome emitted
+        # per handle_message that reaches the workspace injection block.
+        self.workspace_hint_total = pc.Counter(
+            "larkhelm_workspace_hint_total",
+            "Workspace hint segment outcomes per message",
+            ["outcome"],
             registry=self._registry,
         )
 
@@ -490,7 +499,14 @@ def inc_memory_layer_cache(layer: str, outcome: str) -> None:
 def inc_doc_inject_cache(outcome: str) -> None:
     """Bump ``larkhelm_doc_inject_cache_total{outcome}``.
 
-    ``outcome`` ∈ {hit, miss, evict, invalidate, bypass}. Never raises.
+    ``outcome`` ∈ {hit, miss, evict, invalidate, bypass, hit_with_age_hint}.
+    ``hit_with_age_hint`` (P4 REQ-06) is emitted by
+    :func:`larkhelm._context_cache.cached_doc_read_with_meta` instead of
+    plain ``hit`` to mark hits that are surfaced to the user with an age
+    annotation. Grafana queries should match `outcome=~"hit|hit_with_age_hint"`
+    for total hit rate. Accepts arbitrary strings (no whitelist) — callers
+    must keep the documented set to preserve cardinality discipline.
+    Never raises.
     """
     reg = get_registry()
     if not reg.available or reg.doc_inject_cache_total is None:
@@ -601,6 +617,54 @@ def inc_sticky_context_evicted(reason: str) -> None:
         safe_log(f"[Metrics] inc_sticky_context_evicted failed (reason={reason}): {e}")
 
 
+def inc_workspace_hint(outcome: str) -> None:
+    """Bump ``larkhelm_workspace_hint_total{outcome}``.
+
+    ``outcome`` ∈ {injected_passive, injected_active_legacy, skipped_by_gate,
+    skipped_empty}. Never raises. Safe to call when prometheus-client is
+    missing (registry no-op).
+
+    Invariant: each call to handle_message that reaches the workspace
+    injection block (after command routing + crew sticky + early returns)
+    emits exactly ONE outcome — never zero, never multiple.
+    """
+    reg = get_registry()
+    if not reg.available or reg.workspace_hint_total is None:
+        return
+    try:
+        reg.workspace_hint_total.labels(outcome=str(outcome)).inc()
+    except Exception as e:
+        safe_log(f"[Metrics] inc_workspace_hint failed (outcome={outcome}): {e}")
+
+
+# ── Module-level Counter aliases (PRD verify-command sugar) ───────────────
+# PRD verify commands (cf. ``.crew_workspace/prd_criteria.json``) sometimes
+# spell counter references as module-level constants (``WORKSPACE_HINT_TOTAL``
+# etc.) rather than chasing through ``get_registry()``. Expose them via PEP-562
+# ``__getattr__`` so the lookup stays lazy: when ``prometheus-client`` is
+# missing the registry's attribute is ``None`` and the constant resolves to
+# ``None`` (verify command exits 0 with ``print(None)`` — same byte-compat
+# semantics as the existing ``inc_*`` helpers' no-op contract).
+_REGISTRY_ALIASES = {
+    "WORKSPACE_HINT_TOTAL":          "workspace_hint_total",
+    "SESSION_AUTO_RESET_TOTAL":      "session_auto_reset_total",
+    "STICKY_CONTEXT_EVICTED_TOTAL":  "sticky_context_evicted_total",
+    "TOKENS_TOTAL":                  "tokens_total",
+    "DOC_INJECT_CACHE_TOTAL":        "doc_inject_cache_total",
+}
+
+
+def __getattr__(name: str):
+    """Lazy module attribute lookup for ``_REGISTRY_ALIASES``.
+
+    Raises ``AttributeError`` for any other name so import-time typos still
+    surface immediately rather than silently resolving to ``None``.
+    """
+    if name in _REGISTRY_ALIASES:
+        return getattr(get_registry(), _REGISTRY_ALIASES[name], None)
+    raise AttributeError(f"module 'larkhelm.metrics' has no attribute {name!r}")
+
+
 __all__ = [
     "PrometheusNotInstalled",
     "LarkhelmMetricsRegistry",
@@ -620,4 +684,11 @@ __all__ = [
     "inc_tokens",
     "inc_session_auto_reset",
     "inc_sticky_context_evicted",
+    "inc_workspace_hint",
+    # Module-level Counter aliases (resolved lazily via __getattr__):
+    "WORKSPACE_HINT_TOTAL",
+    "SESSION_AUTO_RESET_TOTAL",
+    "STICKY_CONTEXT_EVICTED_TOTAL",
+    "TOKENS_TOTAL",
+    "DOC_INJECT_CACHE_TOTAL",
 ]

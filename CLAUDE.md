@@ -91,7 +91,9 @@ CLI --data-dir > LARKHELM_DATA_DIR env > /var/lib/larkhelm > ~/.local/share/lark
 | `recent_turns_cache_enabled` | P1 REQ-01：`_get_recent_turns` 走 LRU 缓存（key = chat_id + max_turns + max_chars + dedup_prefix_hash + all.jsonl mtime_ns + size），默认 `true`；flip `false` 直走原 tail-read 路径用于 bisect |
 | `memory_legacy_cache_enabled` | P1 REQ-02：memory `_layer_global / _layer_project / _layer_session` 走 LRU 缓存（key = layer + path + mtime_ns），默认 `true`；包含 `global_slots` / `project_sections` 两个独立 layer，单层 LRU 容量 128 |
 | `doc_inject_cache_enabled` | P1 REQ-03：`_inject_doc_context` 走 TTL 缓存（key = chat_id + doc_type + token + max_chars），默认 `true`；`DocPermissionError` 与 `DocError` 不入缓存（用户可现场授权重试）|
-| `doc_inject_cache_ttl_sec` | P1 REQ-03：TTL 秒数，floor `1`（`0` 视为关闭，回退到默认值）。默认 `300`；与 Anthropic 5min ephemeral cache TTL 同档对齐 |
+| `doc_inject_cache_ttl_sec` | P1 REQ-03 / P4 REQ-04：TTL 秒数，floor `1`（`0` 视为关闭，回退到默认值）。默认 `600`（P3 之前为 `300`）；命中时 `_inject_doc_context` 在文档头部加「（缓存版本，N 分钟前读取，如内容已变请提示刷新）」age hint（P4 REQ-05），且 metric outcome 是 `hit_with_age_hint` 而非 `hit`（P4 REQ-06）|
+| `workspace_hint_keyword_gate` | P3 REQ-02：bool，默认 `false`。`true` 时 `.crew_workspace/` 文件清单仅当用户消息正则匹配 `(workspace\|计划\|任务\|设计\|prd\|design\|tasks\|review\|qa\|crew)`（大小写不敏感）才注入；未命中则整段跳过并 bump `larkhelm_workspace_hint_total{outcome="skipped_by_gate"}`。即使 `true` + 命中关键词，文案仍是 P3 REQ-01 的被动条件式（「如果与本次问题相关，再读取；否则忽略」）|
+| `stats_agent_type_breakdown_enabled` | P5 REQ-09：bool，默认 `true`。`/stats` 的 Crew Agents 块按 agent_type 桶（planner/engineer/qa/reviewer/chat/dev/crew/plan/doc/其它）降序输出每桶 `agents/合计 tokens/费用`。`false` 时退回 P2 单行汇总（`**🤖 Crew Agents（本进程）**` 不带「按类型」），用于桶数过多导致卡片溢出 `max_card_len` 的极端情况 |
 | `cli_skip_recent_turns_when_sid` | P1 REQ-04：CLI（claude/kimi/gemini）`sid` 非空时跳过 recent_turns 注入；`deepseek_api` 在 `load_history` 非空时同步跳过。默认 `true`；flip `false` 恢复每次注入（多花 ~500 input tokens / call）|
 | `anthropic_extended_cache_enabled` | bool 默认 `true`。Anthropic API 适配器请求时携带 `anthropic-beta: extended-cache-ttl-2025-04-11` header 并将 `cache_control.ttl` 升级为 `1h`；若该 beta 在该账号未开通而被拒，进程内自动回退到 5min ephemeral 并写一次 `[anthropic_api]` 调试日志，整进程不再重试。设为 `false` 强制保留 5min |
 | `claude_session_auto_reset_enabled` | P0 缓存出血面收敛：当 `claude --resume` 累积 prefix 越过下面两个阈值任一时，自动调 `_clear_sid("claude", chat_id)` + 清零累计器 + 写 milestone + 触发 `larkhelm_session_auto_reset_total{reason}`。默认 `true`；翻 `false` 关掉自动 reset（仍统计累计，仅不触发） |
@@ -514,6 +516,8 @@ if tl.startswith("/new_cmd"):
 | `larkhelm_tokens_total` | Counter | `backend`,`kind` | 每次 `record_token_usage` 触发一次 4-bucket inc；kind ∈ {input, output, cache_read, cache_create}；backend 取调用方传入的 `model` 标识（CLI 是 `claude`/`gemini`/`kimi`/`deepseek`，API 流式是 `spec.model or spec.id`）|
 | `larkhelm_session_auto_reset_total` | Counter | `reason` | P0 缓存出血面收敛：`claude_session_guard.maybe_auto_reset_session` 触发一次自动 reset 时 +1；`reason` ∈ {`cache_tokens`, `turns`}（先 check cache_read 阈值，再 check turn 阈值）|
 | `larkhelm_sticky_context_evicted_total` | Counter | `reason` | P2 缓存出血面收敛：sticky crew context entry 被淘汰一次 +1；`reason` ∈ {`ttl`（超过 `recent_crew_sticky_ttl_sec`）, `max_injections`（达到 `recent_crew_sticky_max_injections` 次注入）}|
+| `larkhelm_workspace_hint_total` | Counter | `outcome` | P3 REQ-03：`handle_message` 每条消息进入工作区注入段时 +1（恰好一次）；`outcome` ∈ {`injected_passive`（注入被动文案）, `injected_active_legacy`（保留位，REQ-01 改文案后已不再发，留给未来回滚）, `skipped_by_gate`（`workspace_hint_keyword_gate=true` 且关键词未命中）, `skipped_empty`（`.crew_workspace/` 不存在或无 `.md`/`.json` 文件）}|
+| `larkhelm_doc_inject_cache_total` | Counter | `outcome` | P1 REQ-03 / P4 REQ-06：`_inject_doc_context` 每次走 doc cache 时 +1；`outcome` ∈ {`hit`（旧 `cached_doc_read` 调用路径）, `hit_with_age_hint`（新 `cached_doc_read_with_meta` 路径，age hint 已注入）, `miss`, `bypass`, `evict`, `invalidate`}；Grafana 总命中率应 query `outcome=~"hit\|hit_with_age_hint"`|
 
 Prometheus scrape 配置示例：
 
@@ -728,3 +732,17 @@ P3 引入 10 项 prod-ready 收尾改进，全部默认关闭 / 状态不变。�
 - **REQ-08 MemoryGC daemon**：`memory_gc.MemoryGC` 加 `interval_hours` + `start/stop`；tick 内 audit rotate + stale 重算
 - **REQ-09 Checkpoint TTL GC**：`crew/_checkpoint_gc.CheckpointGC` 由 MemoryGC tick 调度，7d 孤儿 checkpoint 清理
 - **REQ-10 Dev stage timeouts**：`dev_stage_timeouts: {stage_id: seconds}` 覆盖 `_make_dev_pipeline` 的公式
+
+## P3 / P4 / P5 变更摘要（2026-05-23）
+
+第二批 prefix 出血面收尾 — 减少自动 Read 触发与提高 doc cache 命中率。详见 `.crew_workspace/prd.md` + `.crew_workspace/changes.md`：
+
+- **REQ-01 工作区提示改被动**：`handlers/_message.py::_build_workspace_hint` 把 *「请读取这些文件」* 改成 *「如果与本次问题相关，再读取；否则忽略」*，不再主动诱导模型 Read
+- **REQ-02 关键词门控**：`workspace_hint_keyword_gate=true` 时 `.crew_workspace/` 文件清单仅当用户消息正则匹配 `(workspace|计划|任务|设计|prd|design|tasks|review|qa|crew)` 才注入；门关闭（默认）时维持被动文案直接注入
+- **REQ-03 工作区注入仪表**：`larkhelm_workspace_hint_total{outcome}` Counter 注册，outcome ∈ {`injected_passive`, `injected_active_legacy`（保留位）, `skipped_by_gate`, `skipped_empty`}
+- **REQ-04 doc cache TTL 默认值升级**：`doc_inject_cache_ttl_sec` 从 300 提到 600（10 min），与 Anthropic 1h extended cache 形成 6× 衰减档；5 处定义点同步（`config.py` 默认值 + dataclass 默认值 + setdefault 校验 + 2 处 fallback）
+- **REQ-05 doc cache age hint**：`_context_cache.cached_doc_read_with_meta` 返回 `DocReadResult(payload, from_cache, age_sec)`；`_inject_doc_context` 命中缓存时在文档头部追加「（缓存版本，N 分钟前读取，如内容已变请提示刷新）」，`< 60s` 渲染「不到 1 分钟前」。首次注入不加 hint
+- **REQ-06 doc cache 命中类型可观测**：`larkhelm_doc_inject_cache_total{outcome}` 新增 `hit_with_age_hint` outcome 与原 `hit` 并列；Grafana 总命中率应 `outcome=~"hit|hit_with_age_hint"`
+- **REQ-07/08 /stats 按 agent_type 分桶**：`token_stats.summarize_crew_agent_tokens_by_type` 把 crew agent token 按 `_AGENT_TYPE_MAP` 归到 planner/engineer/qa/reviewer/chat/dev/crew/plan/doc 桶，`commands._render_crew_agent_breakdown` 渲染降序行
+- **REQ-09 退路开关**：`stats_agent_type_breakdown_enabled=false` 让 `_cmd_stats` 退回 P2 单行汇总（用于桶数过多导致卡片溢出的极端情况）
+- **REQ-10 开关独立性**：本批 4 个新 flag（`workspace_hint_keyword_gate` / `stats_agent_type_breakdown_enabled` / 复用既有 `doc_inject_cache_ttl_sec` / `doc_inject_cache_enabled`）默认值在 `config.py` 与本表保持一致、彼此独立可翻，无隐式依赖

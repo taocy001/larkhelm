@@ -92,8 +92,11 @@ class _RuntimeConfig:
     RECENT_TURNS_CACHE_ENABLED:        bool = True
     MEMORY_LEGACY_CACHE_ENABLED:       bool = True
     DOC_INJECT_CACHE_ENABLED:          bool = True
-    DOC_INJECT_CACHE_TTL_SEC:          int = 300
+    DOC_INJECT_CACHE_TTL_SEC:          int = 600
     CLI_SKIP_RECENT_TURNS_WHEN_SID:    bool = True
+    # Workspace-hint / stats-breakdown toggles (P3/P5)
+    WORKSPACE_HINT_KEYWORD_GATE:        bool = False
+    STATS_AGENT_TYPE_BREAKDOWN_ENABLED: bool = True
     # File processing (M4.1)
     FILE_ENABLED:          bool = True
     MAX_FILE_SIZE_BYTES:   int = 10 * 1024 * 1024
@@ -230,8 +233,18 @@ DEV_STAGE_TIMEOUTS: "dict[str, int]" = {}
 RECENT_TURNS_CACHE_ENABLED: bool = True
 MEMORY_LEGACY_CACHE_ENABLED: bool = True
 DOC_INJECT_CACHE_ENABLED: bool = True
-DOC_INJECT_CACHE_TTL_SEC: int = 300
+DOC_INJECT_CACHE_TTL_SEC: int = 600
 CLI_SKIP_RECENT_TURNS_WHEN_SID: bool = True
+
+# ── P3 workspace-hint / P5 stats-breakdown knobs ──────────────────────────
+# WORKSPACE_HINT_KEYWORD_GATE (default False): when True, the workspace
+# hint segment is suppressed unless the user message matches the keyword
+# regex (see _message._WORKSPACE_KEYWORD_RE). REQ-02.
+# STATS_AGENT_TYPE_BREAKDOWN_ENABLED (default True): when True, /stats
+# renders crew agents bucketed by agent_type; when False, falls back to
+# the P2 single-line summary for cards approaching MAX_CARD_LEN. REQ-09.
+WORKSPACE_HINT_KEYWORD_GATE: bool = False
+STATS_AGENT_TYPE_BREAKDOWN_ENABLED: bool = True
 
 # ── P0/P1/P2 cache-bleed knobs (.crew_workspace/design.md §3.3) ───────────
 # P0: Claude session auto-reset
@@ -1017,8 +1030,13 @@ def _init_app_config() -> None:
     config.setdefault("recent_turns_cache_enabled", True)
     config.setdefault("memory_legacy_cache_enabled", True)
     config.setdefault("doc_inject_cache_enabled", True)
-    config.setdefault("doc_inject_cache_ttl_sec", 300)
+    config.setdefault("doc_inject_cache_ttl_sec", 600)
     config.setdefault("cli_skip_recent_turns_when_sid", True)
+    # P3 REQ-02 / P5 REQ-09. Defaults preserve P2 byte-compat for the gate
+    # (false = inject as before) and the new "by type" rendering is opt-out
+    # (true) so operators only flip false when card overflow triggers.
+    config.setdefault("workspace_hint_keyword_gate", False)
+    config.setdefault("stats_agent_type_breakdown_enabled", True)
 
     RECENT_TURNS_CACHE_ENABLED = bool(
         config.get("recent_turns_cache_enabled", True)
@@ -1031,12 +1049,20 @@ def _init_app_config() -> None:
     )
     try:
         DOC_INJECT_CACHE_TTL_SEC = max(
-            1, int(config.get("doc_inject_cache_ttl_sec", 300) or 300),
+            1, int(config.get("doc_inject_cache_ttl_sec", 600) or 600),
         )
     except (TypeError, ValueError):
-        DOC_INJECT_CACHE_TTL_SEC = 300
+        DOC_INJECT_CACHE_TTL_SEC = 600
     CLI_SKIP_RECENT_TURNS_WHEN_SID = bool(
         config.get("cli_skip_recent_turns_when_sid", True)
+    )
+
+    global WORKSPACE_HINT_KEYWORD_GATE, STATS_AGENT_TYPE_BREAKDOWN_ENABLED
+    WORKSPACE_HINT_KEYWORD_GATE = bool(
+        config.get("workspace_hint_keyword_gate", False)
+    )
+    STATS_AGENT_TYPE_BREAKDOWN_ENABLED = bool(
+        config.get("stats_agent_type_breakdown_enabled", True)
     )
 
     # ── P0/P1/P2 cache-bleed knobs (design.md §3.3) ───────────────────────
@@ -1228,6 +1254,8 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         DOC_INJECT_CACHE_ENABLED=DOC_INJECT_CACHE_ENABLED,
         DOC_INJECT_CACHE_TTL_SEC=DOC_INJECT_CACHE_TTL_SEC,
         CLI_SKIP_RECENT_TURNS_WHEN_SID=CLI_SKIP_RECENT_TURNS_WHEN_SID,
+        WORKSPACE_HINT_KEYWORD_GATE=WORKSPACE_HINT_KEYWORD_GATE,
+        STATS_AGENT_TYPE_BREAKDOWN_ENABLED=STATS_AGENT_TYPE_BREAKDOWN_ENABLED,
         FILE_ENABLED=FILE_ENABLED,
         MAX_FILE_SIZE_BYTES=MAX_FILE_SIZE_BYTES,
         FILE_TEXT_EXTENSIONS=FILE_TEXT_EXTENSIONS,

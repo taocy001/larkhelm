@@ -95,16 +95,17 @@ def test_unknown_keys_allowed():
 # ── Default-value regression: P0+P1 caching audit (2026-05-22) ───────────
 
 
-def test_doc_inject_cache_ttl_default_300(tmp_path):
-    """An empty operator config must resolve to TTL=300s — aligned with
-    Anthropic 5min ephemeral cache. Previously was 60s.
+def test_doc_inject_cache_ttl_default_600(tmp_path):
+    """An empty operator config must resolve to TTL=600s. P4 REQ-04 raised
+    the default from 300 → 600 because the age hint (REQ-05) makes longer
+    TTLs safe — users get told how stale the cached payload is.
     """
     import larkhelm.config as _cfg
 
     cfg_file = tmp_path / "config.json"
     cfg_file.write_text(json.dumps({"APP_ID": "x", "APP_SECRET": "x"}))
     _cfg._init_runtime(config_path=str(cfg_file), data_dir=str(tmp_path))
-    assert _cfg.DOC_INJECT_CACHE_TTL_SEC == 300
+    assert _cfg.DOC_INJECT_CACHE_TTL_SEC == 600
 
 
 def test_anthropic_extended_cache_default_true(tmp_path):

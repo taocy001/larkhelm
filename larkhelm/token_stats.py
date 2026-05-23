@@ -15,7 +15,30 @@ __all__ = [
     "record_token_usage", "get_token_stats", "get_token_stats_persistent",
     "record_crew_agent_tokens", "get_crew_agent_tokens", "evict_crew_agent_tokens",
     "summarize_crew_agent_tokens_for_chat",
+    "summarize_crew_agent_tokens_by_type",
 ]
+
+# P5 REQ-08 / design.md §3.2: static agent_id → bucket name table.
+# Covers the 6 `/dev` pipeline IDs plus the 5 Phase 5 agent_hub types.
+# Unknown agent_ids fall back to `_AGENT_TYPE_FALLBACK` (Chinese label
+# matches existing /stats UI). Keep this table aligned with
+# crew/_pipeline.py + agent_hub/builtin/.
+_AGENT_TYPE_MAP: "dict[str, str]" = {
+    # /dev pipeline agent IDs → task_profile name
+    "pm":          "planner",
+    "architect":   "planner",
+    "implementer": "engineer",
+    "fixer":       "engineer",
+    "qa":          "qa",
+    "reviewer":    "reviewer",
+    # Phase 5 agent_hub agent_type → itself (identity)
+    "chat":  "chat",
+    "dev":   "dev",
+    "crew":  "crew",
+    "plan":  "plan",
+    "doc":   "doc",
+}
+_AGENT_TYPE_FALLBACK = "其它"
 
 # In-memory statistics (reset on restart)
 # Structure: {chat_id: {model: {input_tokens, output_tokens, cache_read, cache_create, cost_usd, calls}}}
@@ -116,6 +139,70 @@ def summarize_crew_agent_tokens_for_chat(chat_id: str) -> dict:
         out["cache_read"]    += entry.get("cache_read", 0)
         out["cache_create"]  += entry.get("cache_create", 0)
         out["cost_usd"]      += entry.get("cost_usd", 0.0)
+    return out
+
+
+def _classify_agent_type(crew_ns: str, chat_id: str) -> str:
+    """Return the bucket name for ``crew_ns`` under ``chat_id``.
+
+    Parses agent_id from ``crew_ns = "{chat_id}__crew_{crew_id}_{agent_id}"``
+    (design.md §4.1 contract #6) and looks it up in ``_AGENT_TYPE_MAP``.
+    Unknown agent_ids and any unparseable prefix collapse to
+    ``_AGENT_TYPE_FALLBACK``.
+    """
+    prefix = f"{chat_id}__crew_"
+    if not crew_ns.startswith(prefix):
+        return _AGENT_TYPE_FALLBACK
+    # Strip the chat_id prefix, leaving "<crew_id>_<agent_id>". crew_id
+    # is an 8-hex slug (no underscore), so partition on the first "_"
+    # gives us agent_id on the right.
+    remainder = crew_ns[len(prefix):]
+    _crew_id, sep, agent_id = remainder.partition("_")
+    if not sep or not agent_id:
+        return _AGENT_TYPE_FALLBACK
+    return _AGENT_TYPE_MAP.get(agent_id, _AGENT_TYPE_FALLBACK)
+
+
+def summarize_crew_agent_tokens_by_type(chat_id: str) -> dict[str, dict]:
+    """Aggregate ``_crew_agent_tokens`` for ``chat_id`` bucketed by agent_type.
+
+    Iterates the in-memory ``_crew_agent_tokens`` LRU, keeps entries whose
+    key starts with ``f"{chat_id}__crew_"`` (strict double-underscore
+    anchor — prevents "chatA" swallowing "chatAB__crew_*" entries), then
+    classifies each via :func:`_classify_agent_type` and sums the 5 raw
+    counters per bucket.
+
+    Returns ``{}`` when no entry matches. Otherwise
+    ``{agent_type: {"agents", "input_tokens", "output_tokens",
+                    "cache_read", "cache_create", "cost_usd"}}``.
+
+    Process-local (no JSONL persistence; resets on bridge restart).
+    """
+    prefix = f"{chat_id}__crew_"
+    with _crew_agent_lock:
+        matched = [
+            (k, dict(v)) for k, v in _crew_agent_tokens.items()
+            if k.startswith(prefix)
+        ]
+    if not matched:
+        return {}
+    out: dict[str, dict] = {}
+    for crew_ns, entry in matched:
+        bucket = _classify_agent_type(crew_ns, chat_id)
+        agg = out.setdefault(bucket, {
+            "agents":        0,
+            "input_tokens":  0,
+            "output_tokens": 0,
+            "cache_read":    0,
+            "cache_create":  0,
+            "cost_usd":      0.0,
+        })
+        agg["agents"]        += 1
+        agg["input_tokens"]  += entry.get("input_tokens", 0)
+        agg["output_tokens"] += entry.get("output_tokens", 0)
+        agg["cache_read"]    += entry.get("cache_read", 0)
+        agg["cache_create"]  += entry.get("cache_create", 0)
+        agg["cost_usd"]      += entry.get("cost_usd", 0.0)
     return out
 
 

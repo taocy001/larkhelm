@@ -408,6 +408,95 @@ class CachedDocReadTests(unittest.TestCase):
 
 
 # ════════════════════════════════════════════════════════════════════════
+#  P4 — cached_doc_read_with_meta + age hint (AC-05)
+# ════════════════════════════════════════════════════════════════════════
+
+
+class TestAgeHint(unittest.TestCase):
+    """AC-05 — cached_doc_read_with_meta surfaces (from_cache, age_sec)
+    on every call so _inject_doc_context can render a parenthetical
+    age hint to the user."""
+
+    class _FakeRef:
+        def __init__(self, token: str = "tok456", doc_type: str = "docx"):
+            self.token = token
+            self.doc_type = doc_type
+
+    def setUp(self):
+        cc.reset_for_tests()
+        _cfg.DOC_INJECT_CACHE_ENABLED = True
+        _cfg.DOC_INJECT_CACHE_TTL_SEC = 600
+
+    def test_first_inject_no_hint(self):
+        """First call → from_cache=False, age_sec=None (no hint to render)."""
+        def loader():
+            return "doc payload"
+
+        ref = self._FakeRef()
+        result = cc.cached_doc_read_with_meta(
+            "chatX", ref, 1000, loader=loader,
+        )
+        self.assertEqual(result.payload, "doc payload")
+        self.assertFalse(result.from_cache)
+        self.assertIsNone(result.age_sec)
+
+    def test_second_inject_has_minutes_hint(self):
+        """Second call after 240s → from_cache=True, age_sec≈240."""
+        calls = [0]
+
+        def loader():
+            calls[0] += 1
+            return f"payload{calls[0]}"
+
+        ref = self._FakeRef()
+        # Seed
+        cc.cached_doc_read_with_meta("chatX", ref, 1000, loader=loader)
+        now = time.monotonic()
+        with patch.object(cc.time, "monotonic", return_value=now + 240.0):
+            result = cc.cached_doc_read_with_meta(
+                "chatX", ref, 1000, loader=loader,
+            )
+        self.assertTrue(result.from_cache)
+        self.assertEqual(result.payload, "payload1",
+            "second call must return the cached payload, not a re-load",
+        )
+        self.assertIsNotNone(result.age_sec)
+        # Allow ±1s slack against monotonic float→int truncation.
+        self.assertGreaterEqual(result.age_sec, 239)
+        self.assertLessEqual(result.age_sec, 241)
+        self.assertEqual(calls[0], 1, "loader must not run on a hit")
+
+        # The query-side helper must render "4 分钟前" for 240s age.
+        from larkhelm.handlers._query import _format_age_hint
+        self.assertIn("4 分钟前", _format_age_hint(result.age_sec))
+
+    def test_under_60s_renders_special(self):
+        """`_format_age_hint(30)` → "不到 1 分钟前" (avoid misleading "0 分钟前")."""
+        from larkhelm.handlers._query import _format_age_hint
+        text = _format_age_hint(30)
+        self.assertIn("不到 1 分钟前", text)
+        self.assertNotIn("0 分钟前", text)
+
+    def test_disabled_flag_bypasses_with_no_cache_flag(self):
+        """DOC_INJECT_CACHE_ENABLED=False → from_cache=False even on 2nd call."""
+        calls = [0]
+
+        def loader():
+            calls[0] += 1
+            return f"v{calls[0]}"
+
+        ref = self._FakeRef()
+        with patch.object(_cfg, "DOC_INJECT_CACHE_ENABLED", False):
+            r1 = cc.cached_doc_read_with_meta("chatX", ref, 1000, loader=loader)
+            r2 = cc.cached_doc_read_with_meta("chatX", ref, 1000, loader=loader)
+        self.assertFalse(r1.from_cache)
+        self.assertFalse(r2.from_cache)
+        self.assertIsNone(r1.age_sec)
+        self.assertIsNone(r2.age_sec)
+        self.assertEqual(calls[0], 2, "bypass must call loader every time")
+
+
+# ════════════════════════════════════════════════════════════════════════
 #  Metrics bridge
 # ════════════════════════════════════════════════════════════════════════
 
