@@ -467,7 +467,8 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
               parent_id: str | None = None,
               force_backend_id: str | None = None,
               trace_id: str | None = None,
-              sender_open_id: str | None = None):
+              sender_open_id: str | None = None,
+              queue_card_mid: str | None = None):
     # P1-1 PR2: opt-in dispatch to the QuerySession rewrite. Default OFF so
     # existing behaviour is byte-identical until the flag flips.
     #
@@ -488,6 +489,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 user_msg_id=user_msg_id, images=images, files=files,
                 parent_id=parent_id, force_backend_id=force_backend_id,
                 sender_open_id=sender_open_id,
+                queue_card_mid=queue_card_mid,
             )
         except Exception as _v2_setup_err:
             # Pre-side-effect failure (import / __init__) → legacy fallback is safe.
@@ -557,11 +559,15 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 _ev.wait(timeout=4 * 3600)
                 pending = _pop_pending(_cid)
                 if pending:
-                    p_msg, p_model, p_user_msg_id, *_ = pending
+                    p_msg, p_model, p_user_msg_id, p_queue_mid = (
+                        pending[0], pending[1], pending[2],
+                        pending[3] if len(pending) >= 4 else None,
+                    )
                     _reset_cancel(_cid)
                     threading.Thread(
                         target=_do_query,
                         args=(_cid, p_msg, p_model, p_user_msg_id),
+                        kwargs={"queue_card_mid": p_queue_mid},
                         daemon=True, name=f"query-{_cid[:8]}",
                     ).start()
 
@@ -640,10 +646,21 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
         init_card = _make_card(f"⏳ {m_name} 连接中",
                                f"> 正在启动...\n\n目录: `{cwd}`", color="grey",
                                buttons=[("🛑 取消", f"cancel:{chat_id}")])
-        if user_msg_id:
-            mid = _reply_card_raw(user_msg_id, init_card, in_thread=False)
-        else:
-            mid = _send_card_raw(chat_id, init_card)
+        # When dispatched from the pending queue, reuse the existing
+        # ``⏳ 排队中 / ❌ 取消排队`` card so the user sees one continuous
+        # status thread (transition queued → running in place) rather than
+        # an orphan "queued" card lingering next to a fresh progress card.
+        # Falls back to send / reply if the patch fails (e.g. card mid
+        # invalidated by Feishu retention sweep).
+        mid: str | None = None
+        if queue_card_mid:
+            if _patch_card_raw(queue_card_mid, init_card):
+                mid = queue_card_mid
+        if not mid:
+            if user_msg_id:
+                mid = _reply_card_raw(user_msg_id, init_card, in_thread=False)
+            else:
+                mid = _send_card_raw(chat_id, init_card)
         if mid:
             _pin_task_card(chat_id, mid)
 
@@ -702,12 +719,16 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             _replace_cancel_event(chat_id)
             pending = _pop_pending(chat_id)
             if pending:
-                p_msg, p_model, p_user_msg_id, *_ = pending
+                p_msg, p_model, p_user_msg_id, p_queue_mid = (
+                    pending[0], pending[1], pending[2],
+                    pending[3] if len(pending) >= 4 else None,
+                )
                 _debug_log(f"[Queue/SoftTimeout] processing queued message: {p_msg[:60]}")
                 try:
                     threading.Thread(
                         target=_do_query,
                         args=(chat_id, p_msg, p_model, p_user_msg_id),
+                        kwargs={"queue_card_mid": p_queue_mid},
                         daemon=True, name=f"query-{chat_id[:8]}",
                     ).start()
                 except Exception as _te:
@@ -1169,12 +1190,16 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
         if not lock_released:
             pending = _pop_pending(chat_id)
             if pending:
-                p_msg, p_model, p_user_msg_id, *_ = pending
+                p_msg, p_model, p_user_msg_id, p_queue_mid = (
+                    pending[0], pending[1], pending[2],
+                    pending[3] if len(pending) >= 4 else None,
+                )
                 _debug_log(f"[Queue] processing queued message: {p_msg[:60]}")
                 _reset_cancel(chat_id)
                 threading.Thread(
                     target=_do_query,
                     args=(chat_id, p_msg, p_model, p_user_msg_id),
+                    kwargs={"queue_card_mid": p_queue_mid},
                     daemon=True, name=f"query-{chat_id[:8]}"
                 ).start()
         # Clean up image temp files created for this query.

@@ -62,6 +62,13 @@ class QuerySession:
     force_backend_id: "str | None" = None
     trace_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     sender_open_id: "str | None" = None  # MEM-C1: forwarded to global memory lookup
+    # When set, the init card patches this existing message instead of
+    # creating a new one — drives the queue-card → progress-card in-place
+    # transition (replaces 「⏳ 排队中 / ❌ 取消排队」with 「⏳ 连接中 / 🛑 取消」)
+    # so a dequeued message doesn't leave its original queue card orphaned
+    # with a stale cancel button. Populated from ``_pop_pending`` (4th
+    # tuple element).
+    queue_card_mid: "str | None" = None
 
     # Mutable state populated during run()
     mid: "str | None" = None
@@ -192,10 +199,19 @@ class QuerySession:
 
     def emit_init_card(self, cwd: str) -> "str | None":
         card_json = _query_pure.build_init_card(self.m_name, cwd, self.chat_id)
-        if self.user_msg_id:
-            mid = _reply_card_raw(self.user_msg_id, card_json, in_thread=False)
-        else:
-            mid = _send_card_raw(self.chat_id, card_json)
+        mid: "str | None" = None
+        # Dequeued message → in-place patch the existing 「排队中」card so
+        # the user sees a single status thread, no orphan card lingering
+        # with its stale 「取消排队」button. Falls back to send / reply when
+        # the patch fails (e.g. Feishu retention swept the original).
+        if self.queue_card_mid:
+            if _patch_card_raw(self.queue_card_mid, card_json):
+                mid = self.queue_card_mid
+        if not mid:
+            if self.user_msg_id:
+                mid = _reply_card_raw(self.user_msg_id, card_json, in_thread=False)
+            else:
+                mid = _send_card_raw(self.chat_id, card_json)
         if mid:
             _pin_task_card(self.chat_id, mid)
         return mid
@@ -572,13 +588,17 @@ class QuerySession:
         _replace_cancel_event(self.chat_id)
         pending = _pop_pending(self.chat_id)
         if pending:
-            p_msg, p_model, p_user_msg_id, *_ = pending
+            p_msg, p_model, p_user_msg_id, p_queue_mid = (
+                pending[0], pending[1], pending[2],
+                pending[3] if len(pending) >= 4 else None,
+            )
             _debug_log(
                 f"[Queue/QuerySession-SoftTimeout] processing queued message: {p_msg[:60]}"
             )
             threading.Thread(
                 target=_re_dispatch_query,
                 args=(self.chat_id, p_msg, p_model, p_user_msg_id),
+                kwargs={"queue_card_mid": p_queue_mid},
                 daemon=True, name=f"query-{self.chat_id[:8]}",
             ).start()
 
@@ -636,11 +656,15 @@ class QuerySession:
             _ev.wait(timeout=4 * 3600)
             pending = _pop_pending(cid)
             if pending:
-                p_msg, p_model, p_user_msg_id, *_ = pending
+                p_msg, p_model, p_user_msg_id, p_queue_mid = (
+                    pending[0], pending[1], pending[2],
+                    pending[3] if len(pending) >= 4 else None,
+                )
                 _reset_cancel(cid)
                 threading.Thread(
                     target=_re_dispatch_query,
                     args=(cid, p_msg, p_model, p_user_msg_id),
+                    kwargs={"queue_card_mid": p_queue_mid},
                     daemon=True, name=f"query-{cid[:8]}",
                 ).start()
 
@@ -713,20 +737,30 @@ class QuerySession:
         pending = _pop_pending(self.chat_id)
         if not pending:
             return
-        p_msg, p_model, p_user_msg_id, *_ = pending
+        p_msg, p_model, p_user_msg_id, p_queue_mid = (
+            pending[0], pending[1], pending[2],
+            pending[3] if len(pending) >= 4 else None,
+        )
         _debug_log(f"[Queue/QuerySession] processing queued message: {p_msg[:60]}")
         _reset_cancel(self.chat_id)
         threading.Thread(
             target=_re_dispatch_query,
             args=(self.chat_id, p_msg, p_model, p_user_msg_id),
+            kwargs={"queue_card_mid": p_queue_mid},
             daemon=True, name=f"query-{self.chat_id[:8]}",
         ).start()
 
 
-def _re_dispatch_query(chat_id, message, model, user_msg_id):
-    """Re-enter the main _do_query so the v2 flag is honoured again."""
+def _re_dispatch_query(chat_id, message, model, user_msg_id,
+                       queue_card_mid: "str | None" = None):
+    """Re-enter the main _do_query so the v2 flag is honoured again.
+
+    ``queue_card_mid`` is forwarded so the dequeued task patches the
+    original 「排队中」card in place rather than emitting a new init card.
+    """
     from larkhelm.handlers._query import _do_query
-    _do_query(chat_id, message, model, user_msg_id)
+    _do_query(chat_id, message, model, user_msg_id,
+              queue_card_mid=queue_card_mid)
 
 
 __all__ = ["QuerySession"]
