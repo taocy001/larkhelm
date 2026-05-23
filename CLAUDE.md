@@ -24,15 +24,22 @@ python3 -m larkhelm start --config /path/to/config.json --data-dir /path/to/data
 
 ## Testing
 
-No formal test framework. Manual testing via:
+仓库自带 pytest 套件（`tests/` 下 ~170 个测试文件），统一入口在 `Makefile` / `scripts/check.sh`：
 
 ```bash
-# 检查包能否正常导入
-python3 -c "import larkhelm.bridge; print('OK')"
+make test                       # pytest 全套（含 pytest-timeout 守护）
+make lint                       # ruff bug-detector 子集
+make type                       # mypy 严格白名单
+make all                        # 上面三个
 
-# 直接以模块方式启动（--help 查看参数）
-python3 -m larkhelm --help
+make test ARGS="-k pure -x"     # 转发额外参数
+./scripts/check.sh test         # 没装 make 时直接调脚本
+
+python3 -c "import larkhelm.bridge; print('OK')"   # 仅检查包能否 import
+python3 -m larkhelm --help                          # 命令行入口
 ```
+
+> 跑测试 / lint / type check 需要 `pip install -e ".[dev]"`（带 pytest-timeout / mypy / ruff）。
 
 ## Configuration
 
@@ -106,56 +113,111 @@ CLI --data-dir > LARKHELM_DATA_DIR env > /var/lib/larkhelm > ~/.local/share/lark
 > **超时层级说明**：
 > - `response_timeout`（软超时）：AI 响应无更新超过此时长，释放主锁但后台继续运行，默认 300s
 > - `hard_timeout`（硬超时）：强制终止子进程，默认 21600s
-> - Shell 命令（`/run`）：固定 30s 硬超时，不受上述配置影响
+> - Shell 命令（`/run`）：默认 30s 硬超时，可通过 `shell_timeout_sec` 调整（floor 1s），不走 `response_timeout` / `hard_timeout`
 
 ## Architecture
 
-Project is structured as the `larkhelm/` package:
+> **文件清单不再写行号**——行号一过几次重构就全错。下面只列符号入口（函数 / 类 / 模块用途）。需要看具体行号请 `grep -n <symbol>` 或读源码。
 
-```
-larkhelm/
-├── bridge.py           (147 行)  - 主程序入口、WebSocket 事件监听与注册
-├── config.py           (242 行)  - 运行时配置加载、路径初始化
-├── handlers/                    - 飞书事件处理器子包
-│   ├── __init__.py     (24 行)   - re-export
-│   ├── _message.py     (393 行)  - 消息接收、路由、表情处理
-│   ├── _query.py       (461 行)  - AI 查询流程（流式卡片更新、超时、取消）
-│   └── _card_action.py (186 行)  - 卡片按钮回调分发
-├── commands.py         (893 行)  - 命令实现（/run, /cd, /ls 等核心命令）
-├── doc_handlers.py     (441 行)  - 飞书文档/Wiki 读写 dispatcher（natural-language 入口，被 DocAgent 调用；用户面 /doc 已下线）
-├── chat_state.py       (165 行)  - Per-chat 状态持久化（cwd/model/crons）
-├── concurrency.py      (135 行)  - 并发原语（per-chat 锁、取消事件、信号量）
-├── dedup.py            (34 行)   - 消息去重（OrderedDict 缓存）
-├── _message_pure.py    (200 行)  - P2 REQ-03：5 个纯函数（dedup/ACL/doc-url/分类/路由），无飞书 SDK 依赖，可单测
-├── metrics.py          (350 行)  - P2 REQ-01：Prometheus 注册中心（4 核心 Gauge + 5 Counter + 1 Histogram），可选 prometheus-client
-├── memory_global_slots.py     (~200 行) - P2 REQ-05.1：global memory 4 槽位读写（style/format/domain/expertise）
-├── memory_project_sections.py (~170 行) - P2 REQ-05.2：project memory 4 段读写（TechStack/Conventions/Architecture/Constraints）
-├── memory_session_compress.py (~250 行) - P2 REQ-07：句子级 score + top-K 压缩，确定性、无 LLM
-├── memory_extract_buffer.py   (~230 行) - P2 REQ-06：进程内 session-cascade buffer，timer/capacity/shutdown 三触发
-├── backend_api_streaming.py   (~290 行) - P2 REQ-09：StreamingAPIAdapter Protocol + 3 实现 + 通用模板
-├── log.py              (89 行)   - 对话日志读写（.md + all.jsonl）
-├── token_stats.py      (146 行)  - Token 使用量统计与持久化
-├── lark_client.py      (1021 行) - 飞书 API 调用封装、卡片操作、权限引导卡片
-├── card_builder.py     (166 行)  - 卡片 JSON 构建、Markdown 分割
-├── ai_runner.py        (112 行)  - thin shim，re-export runner_base/runner_claude 等公共接口
-├── runner_base.py      (358 行)  - BaseProcessRunner 抽象基类（信号量、watch、retry 模板方法）
-├── runner_claude.py    (225 行)  - ClaudeRunner 子类（MCP config、设置文件临时文件管理）
-├── runner_kimi.py      (155 行)  - KimiRunner 子类
-├── runner_gemini.py    (120 行)  - GeminiRunner 子类
-├── crew/                        - 多 Agent 协作子包
-│   ├── __init__.py     (118 行)  - re-export
-│   ├── _commands.py    (686 行)  - /crew 和 /dev 入口命令
-│   ├── _runner.py      (911 行)  - Agent 执行与 DAG 调度
-│   ├── _state.py       (121 行)  - 全局 crew 状态变量
-│   ├── _checkpoint.py  (260 行)  - Checkpoint 持久化与恢复
-│   ├── _pipeline.py    (194 行)  - /dev 固定流水线定义
-│   └── _scheduler.py   (137 行)  - Cron 调度器
-├── crew_types.py       (120+ 行) - Crew 数据类型（AgentSpec/AgentState/CrewState/CrewPhase 等）
-├── crew_card.py        (267 行)  - Crew 飞书卡片构建与心跳推送
-├── perm.py             (298 行)  - 权限审批系统
-├── perm_hook.py        (74 行)   - 权限审批 hook
-└── __main__.py         (42 行)   - 命令行入口
-```
+Project is structured as the `larkhelm/` package. 核心模块按角色分组：
+
+### 入口与配置
+- `__main__.py` — CLI 入口（`larkhelm start` / `larkhelm voice probe` / `larkhelm memory ...` / `larkhelm doc ...`）
+- `bridge.py` — `main()` 主程序、`_start_memory_boot_warmup()` 启动 daemon、`.register_p2_*` 注册飞书事件
+- `config.py` — 运行时配置加载、~91 个 `setdefault`、自动发现 backend（`_auto_discover_cli` / `_auto_discover_http`）
+- `command_registry.py` — `CommandSpec` + `COMMAND_REGISTRY` 集中式 slash 命令注册表（替代旧的 600 行 if/elif 链）
+
+### 飞书事件层 (`handlers/`)
+- `_message.py` — `handle_message()` 主消息路由（ACL / dedup / 工作区注入 / intent router / `/cancel` `/rename` `/btw` 直接处理）；其余命令交给 `COMMAND_REGISTRY.dispatch`
+- `_query.py` — `_do_query()` AI 查询主流程；`_inject_doc_context()` doc URL 注入、流式卡片更新、超时、取消
+- `_query_session.py` — `QuerySession` 类化重构（v2 灰度由 `query_session_v2_traffic` 控制）
+- `_query_card_state.py` / `_query_pure.py` — query 子组件（卡片状态机 / 纯函数）
+- `_card_action.py` — 卡片按钮回调分发，调用 `commands._dispatch_button_cmd`
+
+### 命令实现
+- `commands.py` — 所有 `_cmd_*` 函数（`/run` `/cd` `/ls` `/help` `/reset` `/status` `/history` `/stats` `/memory` `/voice` `/cron` 等）+ `_dispatch_button_cmd()`
+- `cmd_plan.py` — `/plan` 多阶段串行流水线入口
+- `doc_handlers.py` — 飞书文档/Wiki 读写 dispatcher；**无用户面 slash 命令**，由 `larkhelm doc` CLI 与 DocAgent（natural-language 入口）共同调用
+- `file_handler.py` — 飞书文件消息（M4.1）处理
+- `orchestration.py` — `_do_query_with_delegation` 的 DELEGATE / FORWARD 协议
+- `router.py` — backend 路由分发
+
+### 状态与并发
+- `chat_state.py` — Per-chat 状态字典（cwd / model / crons / sender_open_id），磁盘 `.feishu_state.json`
+- `concurrency.py` — `_get_chat_lock`（per-chat 串行锁）+ `is_shutting_down` 取消事件 + Gemini 进程池信号量
+- `dedup.py` — 消息事件去重（OrderedDict 缓存）
+- `log.py` — `_debug_log` / `safe_log` / `lazy_debug_log` / `info/warn/error` + 对话日志（`.md` + `all.jsonl`）+ rotate
+- `token_stats.py` — Token 用量累计、`summarize_crew_agent_tokens_by_type` 按 agent_type 分桶
+
+### AI Runner
+- `ai_runner.py` — thin shim，re-export `runner_base` / `runner_claude` 等公共接口
+- `runner_base.py` — `BaseProcessRunner` 抽象基类（信号量、watch、retry、`_compute_max_procs` 公式）
+- `runner_claude.py` — ClaudeRunner（`--print --output-format stream-json --verbose`，`--resume <sid>`，MCP config 临时文件）
+- `runner_gemini.py` — GeminiRunner（`-y --output-format stream-json`，`--resume <sid>`）
+- `runner_kimi.py` — KimiRunner（`--print --output-format stream-json --input-format stream-json`，`--session <sid>`）
+- `runner_deepseek.py` — DeepSeek HTTP backend（无官方 CLI，纯 API 透传）
+- `backend_api_streaming.py` — `StreamingAPIAdapter` Protocol + 3 实现 + 通用模板（P2 REQ-09）
+- `backend_registry.py` — 11 个 backend 注册 + `rank_for_task` 选型 + 健康探测
+
+### 飞书 SDK 封装
+- `lark_client.py` — 飞书 API 调用封装、卡片增删改、权限引导卡片、`BOT_OPEN_ID`
+- `card_builder.py` — 卡片 JSON 构建（JSON 2.0 unconditionally）、`_split_md` Markdown 分割
+
+### 记忆系统
+- `memory.py` — 三层记忆（global / project / session）+ `maybe_auto_update` LLM 摘要 + `record_milestone`
+- `memory_global_slots.py` — global memory 4 槽位（style / format / domain / expertise）— P2 REQ-05.1
+- `memory_project_sections.py` — project memory 4 段（TechStack / Conventions / Architecture / Constraints）— P2 REQ-05.2
+- `memory_session_compress.py` — 句子级 score + top-K 压缩（确定性，无 LLM）— P2 REQ-07
+- `memory_extract_buffer.py` — session-cascade buffer（timer / capacity / shutdown 三触发）— P2 REQ-06
+- `memory_embedding.py` — `EmbeddingBackend` 三实现（Local ONNX / HTTP / Stub）+ `EmbeddingCache` + circuit breaker — Phase D
+- `memory_lifecycle.py` — `mark_stale_slices` / `inject_stale_marks` / `unstale_slice_id` — Phase D
+- `memory_circuit.py` — `CircuitBreaker`（cheap-backend 断路保护）
+- `memory_gc.py` — `MemoryGC` daemon（audit rotate + stale 重算）
+- `_context_cache.py` — doc cache（`cached_doc_read_with_meta` 返回 `DocReadResult`）
+
+### Crew 多 Agent (`crew/`)
+- `_commands.py` — `cmd_crew()` / `cmd_dev()` 入口
+- `_runner.py` — Agent 执行 + DAG 调度 + checkpoint 恢复
+- `_state.py` — 全局 crew 状态变量
+- `_checkpoint.py` — Checkpoint 持久化与恢复
+- `_checkpoint_gc.py` — 孤儿 checkpoint 清理（TTL = `crew_checkpoint_ttl_days`，默认 7d）
+- `_pipeline.py` — `/dev` 固定流水线定义（PM → 架构 → 工程 → QA → Review）
+- `_backend_resolver.py` — `task_profile` → backend 选型
+- `_scheduler.py` — Cron 调度器
+- `_failure_card.py` — `emit_agent_failure` / `emit_terminal_failure` / `emit_breakpoint_timeout`（永不抛契约）
+- `_hermes_orchestrator.py` — Hermes / 多 Agent orchestrator 后端
+
+### Crew 共享
+- `crew_types.py` — `AgentSpec` / `AgentState` / `CrewState` / `CrewPhase` 等数据类型
+- `crew_card.py` — Crew 飞书卡片构建与心跳推送
+
+### 智能编排 (`agent_hub/`) · Phase 5
+> 详细设计见 [`.crew_workspace/design.md`](.crew_workspace/design.md) §Phase 5
+- `intent_types.py` / `agent_base.py` — `AgentExecutor` ABC + `AGENT_REGISTRY` 单例
+- `intent_router.py` — `resolve_intent`: 显式命令 → L1 关键词 → L2 cheap LLM
+- `intent_keywords.py` — L1 关键词分类器
+- `intent_embedding.py` — embedding L2 分类器（P3 REQ-03）
+- `intent_microlearn.py` — 微学习分类器（Phase D-D）
+- `intent_feedback.py` — 6 种 signal_type 反馈（force_chat / cancel_after_dispatch / agent_reswitch / dispatch_failed / l1_gray_zone / l2_dispatched）
+- `agent_audit.py` — write_audit / aggregate_daily（JSONL 0600）
+- `agent_dispatcher.py` — `AgentDispatcher.dispatch` + ACL + 透明化卡片
+- `model_selector.py` — `resolve_backend_for_task` 调 `BackendRegistry.rank_for_task`
+- `plugin_loader.py` / `plugin_report.py` — entry-point 插件加载 + 失败汇总卡片
+- `builtin/` — ChatAgent / DevAgent / CrewAgent / PlanAgent / DocAgent（薄壳调用现有命令）
+
+### 语音 (`voice/`)
+- `voice/transcribe.py` — faster-whisper / DashScope 引擎封装 + duration gate（P3 REQ-01）
+- `voice/merge.py` — 多条语音合并窗口
+
+### 监控与运维
+- `metrics.py` — Prometheus 注册中心（核心 Gauge + Counter + Histogram），可选 prometheus-client — P2 REQ-01
+- `health_server.py` — `/health` `/ready` `/metrics` HTTP 端点
+- `perm.py` — 权限审批系统（飞书卡片 + socket 协议）
+- `perm_hook.py` — Claude Code PreToolUse hook 入口（**注意**：editable 安装下，hook command 必须用 `python3 -m larkhelm.perm_hook` 而非绝对文件路径，因为 site-packages 里没有物理文件，靠 `.pth` 解析）
+- `mcp_server.py` — MCP 工具服务器（larkhelm-as-MCP-server）
+- `workspace_finalize.py` — `.crew_workspace/` 文件清单注入与 finalize
+- `oauth_user.py` — 飞书 user-token OAuth 流程
+- `_message_pure.py` — 5 个纯函数(dedup/ACL/doc-url/分类/路由)，无飞书 SDK 依赖 — P2 REQ-03
 
 ### 1. Event Handler (`handlers/`)
 
@@ -165,13 +227,22 @@ Two dispatch points, both using if/elif chains:
 - **Main message routing**: `handlers/_message.py` (inside `handle_message`)
 - **Card button callbacks**: `handlers/_card_action.py` + `commands.py` (`_dispatch_button_cmd`)
 
-### 2. AI Query Engine (`ai_runner.py`)
+### 2. AI Query Engine (`ai_runner.py` + `runner_*.py` + `backend_registry.py`)
 
-- **Claude**: Spawns `claude --print --output-format stream-json --verbose` as a subprocess per query. Session IDs are passed via `--resume` for conversation continuity. On crash, clears session and retries once.
-- **Gemini**: Spawns `gemini -y --output-format stream-json` per query, session via `--resume`.
-- **Kimi**: Spawns `kimi --print --output-format stream-json --input-format stream-json` per query, session via `--session`.
+四个 backend，前三个是 CLI 子进程，最后一个是 HTTP API 透传：
 
-All three support cancellation via threading events and stream structured JSON events (`tool_use`, `text`, `result`) back to callbacks. A global semaphore (`MAX_AI_PROCS=3`) limits concurrent subprocess count.
+- **Claude**: spawns `claude --print --output-format stream-json --verbose`, session via `--resume <sid>`. On crash, clears session and retries once.
+- **Gemini**: spawns `gemini -y --output-format stream-json`, session via `--resume <sid>`.
+- **Kimi**: spawns `kimi --print --output-format stream-json --input-format stream-json`, session via `--session <sid>`.
+- **DeepSeek**: no CLI — `runner_deepseek.py` 走 HTTP API（`DEEPSEEK_BASE_URL/chat/completions`），session 历史保存在 `.feishu_sessions/deepseek_*.sid`。
+
+All four backends:
+- Stream structured JSON events (`tool_use` / `text` / `result`) back to callbacks
+- Support cancellation via threading events
+- 受 `BackendRegistry` 健康探测、`rank_for_task` 选型管理
+- CLI backend 共享 `MAX_AI_PROCS` 信号量（`max_ai_procs="auto"` 时由 `_compute_max_procs` 公式决定）
+
+复杂任务可由 `orchestration.py:_do_query_with_delegation` 走 DELEGATE / FORWARD 协议委托给 Crew / 子 agent。
 
 ### 3. State & Session Persistence (`chat_state.py` / `concurrency.py`)
 
@@ -212,7 +283,7 @@ Responses are sent as Feishu interactive cards (Markdown). Cards are updated in-
 Card schema: **JSON 2.0 unconditionally** (post-commit `4b7c68e`). Buttons land
 as native `{"tag":"button", ...}` elements in `body.elements[]`; multi-button
 rows wrap in `column_set` with `width:"auto"` columns. Callback payload sits
-in `behaviors:[{"type":"callback","value":{"cmd":...}}]` — `_card_action.py:27`
+in `behaviors:[{"type":"callback","value":{"cmd":...}}]` — `_card_action.py`
 parses ``CallBackAction.value`` schema-agnostically. The legacy `_make_card_json10_dict`
 path (which used `{"tag":"div","text":{"tag":"lark_md",...}}` for body and
 `{"tag":"action","actions":[...]}` for buttons) was deleted because Feishu's
@@ -222,92 +293,13 @@ fenced code blocks, and block quotes.
 
 ### 6. Phase 5 智能编排层 (`larkhelm/agent_hub/`)
 
-Phase 5 引入意图识别 + Agent 分发层，与现有显式命令并存（不替换）。
+Phase 5 引入意图识别 + Agent 分发层，与现有显式命令**并存**（不替换）。**默认全关**（`intent_router_enabled=false` + `intent_router_traffic=0.0`），关闭时 `_message.py` 完全不 import `agent_hub`。
 
-**包结构**：
-
-```
-larkhelm/agent_hub/
-├── intent_types.py    - IntentResult / TaskProfile / AgentDispatch / AgentContext / AgentResult
-├── agent_base.py      - AgentExecutor (ABC) + AgentRegistry 单例 AGENT_REGISTRY
-├── intent_router.py   - resolve_intent(): 显式命令 → L1 关键词 → L2 cheap LLM JSON
-├── model_selector.py  - resolve_backend_for_task() 调用 BackendRegistry.rank_for_task
-├── agent_dispatcher.py - AgentDispatcher.dispatch() 透明化卡片 + ACL + 审计
-├── intent_feedback.py - record_feedback / register_pending / resolve_pending（JSONL 0600）
-├── agent_audit.py     - write_audit / aggregate_daily（JSONL 0600）
-├── plugin_loader.py   - importlib.metadata.entry_points('larkhelm.agents') + config['agent_plugins']
-└── builtin/           - ChatAgent / DevAgent / CrewAgent / PlanAgent / DocAgent（薄壳调用现有命令）
-```
-
-**灰度开关**（`config.json`）：
-
-| 字段 | 默认值 | 含义 |
-|---|---|---|
-| `intent_router_enabled` | `false` | 总开关，关闭时 `_message.py` 完全不导入 `agent_hub` |
-| `intent_router_traffic` | `0.0` | 0.0–1.0 灰度比例，按 `chat_id` 哈希一致性分流 |
-| `intent_layer2_strategy` | `"llm"` | `llm` 或 `embedding`（P2 预留） |
-| `agent_plugins` | `[]` | 第三方 plugin 入口点字符串，如 `mypkg.module:my_agent` |
-| `agent_acl` | `{}` | `{agent_type: ["chat_id_glob", ...]}` |
-| `intent_feedback_path` / `intent_audit_path` | 空 | 默认 `DATA_DIR/intent_*.jsonl` |
-| `intent_feedback_extended_signals` | `true` | 总开关，关闭时只保留 `signal_type="force_chat"` 一种行为（向后兼容 Phase-D 之前）|
-| `intent_feedback_cancel_window_sec` | `60.0` | `/cancel` 在 dispatch 后多少秒内仍算作 `cancel_after_dispatch` 信号 |
-| `intent_feedback_signal_text_max` | `800` | 观察类信号（`l1_gray_zone` / `l2_dispatched` 等）的 `text` 截断阈值；force_chat 不截断以保持旧记录字节兼容 |
-| `intent_feedback_l1_gray_band` | `0.10` | L1 灰区宽度——置信度落在 `[promotion_threshold, threshold + band)` 时记为 `l1_gray_zone` 难例 |
-
-**扩展信号采集**（`intent_feedback_extended_signals=true` 时启用，默认 ON）：
-
-每条 `intent_feedback.jsonl` 都会带一个新的 `signal_type` 字段（向后兼容：旧
-record 没有该字段视为 `force_chat`）。当前采集的 6 种信号：
-
-| signal_type | 触发位置 | corrected_intent | 用途 |
-|---|---|---|---|
-| `force_chat` | `_card_action.force_chat` 按钮 | `"chat"` | 用户显式纠错（已存在）|
-| `cancel_after_dispatch` | `/cancel` 在 `intent_feedback_cancel_window_sec` 内 | `"chat"` | 用户立即取消，强信号 |
-| `agent_reswitch` | `AgentDispatcher.dispatch` 或 `_message.py` backend override 在 120s 内 | 新 agent_type | 用户切换 agent / backend |
-| `dispatch_failed` | `AgentDispatcher._fallback_to_chat` | `"chat"` | Agent 抛错落回 chat |
-| `l1_gray_zone` | `intent_router._maybe_record_l1_gray_zone` | `""` | L1 置信处于灰区的难例（观察） |
-| `l2_dispatched` | `intent_router._maybe_record_l2_dispatched` | `""` | L1 弃权后由 L2 接管的样本（观察）|
-
-`corrected_intent=""` 的观察类信号被
-`scripts/train_intent_classifier.py:_load_feedback` 自动跳过（其要求非空 label），
-只用于 L1 关键词调优脚本的难例挖掘，不会被当作监督样本污染训练。
-
-每次写入会 `larkhelm_intent_feedback_total{signal_type}` +1，Grafana 可监控各
-信号的实际产生率（>0 即说明扩展信号正常工作）。
-
-> **路径安全**：当显式设置 `intent_feedback_path` / `intent_audit_path` 时，
-> 强烈建议路径**位于 `DATA_DIR` 之内**（例如 `DATA_DIR/audit/intent.jsonl`）。
-> 这两份 JSONL 以 0600 权限写入，落到 `DATA_DIR` 之外可能：
-> 1. 不参与 `DATA_DIR` 的备份策略，丢失审计；
-> 2. 与运维的备份/分享脚本冲突，泄露用户原始 query。
-> 若 `DATA_DIR` 未设置（早期 bootstrap / 单文件调试），模块会回退到
-> `tempfile.gettempdir() / intent_*.jsonl`，避免文件意外落入当前工作目录。
-
-**第三方 Agent 接入**：
-
-```python
-# 子类化 AgentExecutor，实现 execute(intent, ctx) -> AgentResult
-from larkhelm.agent_hub import AgentExecutor, AgentResult, AgentContext, IntentResult
-
-class MyAgent(AgentExecutor):
-    agent_type = "translate"
-    description = "中英互译 Agent"
-
-    def execute(self, intent: IntentResult, ctx: AgentContext) -> AgentResult:
-        ...
-```
-
-通过 entry-point group `larkhelm.agents` 暴露：
-
-```toml
-# pyproject.toml
-[project.entry-points."larkhelm.agents"]
-translate = "mypkg.translate:MyAgent"
-```
-
-或在 `config.json` 中追加 `"agent_plugins": ["mypkg.translate:MyAgent"]`。
-
-**详细设计文档**：`.crew_workspace/design.md`（v1.0，2026-05-09）。
+- 包结构、灰度开关、扩展信号采集、第三方 Agent 接入：详见 [`.crew_workspace/design.md`](.crew_workspace/design.md) §Phase 5
+- 关键审计 / 反馈 JSONL：`DATA_DIR/intent_*.jsonl`（0600 权限）
+- 6 种 signal_type：`force_chat` / `cancel_after_dispatch` / `agent_reswitch` / `dispatch_failed` / `l1_gray_zone` / `l2_dispatched`
+- 指标：`larkhelm_intent_feedback_total{signal_type}`
+- 第三方 plugin 通过 entry-point group `larkhelm.agents` 或 `config["agent_plugins"]` 接入
 
 ## 写入飞书文档（Claude Code CLI 集成）
 
@@ -330,34 +322,38 @@ cat updated.md | larkhelm doc write "https://feishu.cn/docx/xxxx"
 
 ## User-Facing Commands
 
-所有命令均以 `/` 开头。
+所有命令均以 `/` 开头。详细命令清单与示例见 README.md「聊天命令」段；下表按入口函数 / 模块整理，便于代码导航。
 
-| Command | Function | File | Action |
+| Command | Function | Module | Action |
 |---|---|---|---|
-| `/c`, `/claude <prompt>` | `_cmd_cli_native()` | commands.py:517 | Force Claude |
-| `/g`, `/gemini <prompt>` | `_cmd_cli_native()` | commands.py:517 | Force Gemini |
-| `/model claude\|gemini` | `_cmd_model()` | commands.py:490 | Switch default model for this chat |
-| `/reset [claude\|gemini\|perm]` | `_cmd_reset()` | commands.py:61 | Clear session(s) / permissions |
-| `/status` | `_cmd_status()` | commands.py:78 | Show versions, session IDs, runtime info |
-| `/help` | `_cmd_help()` | commands.py:173 | Show help |
-| `/cancel` | inline | handlers.py | Interrupt current query |
-| `/run <cmd>` | `_cmd_run()` | commands.py:471 | Execute shell command (30s timeout) |
-| `/cd <path>` | `_cmd_cd()` | commands.py:432 | Change working directory |
-| `/pwd` | `_cmd_pwd()` | commands.py:447 | Show current working directory |
-| `/ls [path]` | `_cmd_ls()` | commands.py:451 | List files (max 60 entries) |
-| `/pickup` | `_cmd_pickup()` | commands.py:221 | Print commands to resume sessions in terminal |
-| `/history [all]` | `_cmd_history()` | commands.py:238 | Last 10 conversation summaries |
-| `/stats` | `_cmd_stats()` | commands.py:298 | Token usage statistics |
-| `/upgrade` | `_cmd_upgrade()` | commands.py | 更新 larkhelm 到最新版本 |
-| `/cron` | `_cmd_cron()` | commands.py:350 | Manage scheduled tasks |
-| `/btw <prompt>` | `_cmd_btw()` | commands.py:608 | Quick side question (bypasses main lock) |
-| `/crew <task>` | `cmd_crew()` | crew.py | Multi-agent collaborative planning |
-| `/dev <task>` | `cmd_dev()` | crew.py | Software engineering pipeline |
-| `/rename <名称>` | inline | handlers.py | 给当前会话命名 |
-| `/voice [status\|lang <zh\|en\|auto>]` | `_cmd_voice()` | commands.py | 查看 / 切换语音转写设置（卡片显示当前 engine + 状态）|
-| `/memory export` | `_cmd_memory()` | commands.py | 导出当前 chat 的所有持久化数据为 zip 文件，机器人回复文件消息 |
-| `/memory import [file_key]` | `_cmd_memory()` | commands.py | 从 zip 导入记忆数据；无参时等待用户回复 zip 文件 |
-| `/memory status` | `_cmd_memory()` | commands.py | 查看持久化层摘要（chat 数、日志大小、记忆文件数等）|
+| `/c`, `/claude <prompt>` | `_cmd_cli_native()` | `commands.py` | Force Claude |
+| `/g`, `/gemini <prompt>` | `_cmd_cli_native()` | `commands.py` | Force Gemini |
+| `/k`, `/kimi <prompt>` | `_cmd_cli_native()` | `commands.py` | Force Kimi |
+| `/d`, `/deepseek <prompt>` | `_cmd_cli_native()` | `commands.py` | Force DeepSeek (HTTP API) |
+| `/model claude\|gemini\|kimi\|deepseek` | `_cmd_model()` | `commands.py` | Switch default model（`/lock` 是别名）|
+| `/lock [id\|off]` | `_cmd_lock()` | `commands.py` | List / lock / unlock backend |
+| `/reset [claude\|gemini\|kimi\|deepseek\|perm\|memory]` | `_cmd_reset()` | `commands.py` | Clear session(s) / permissions / session memory |
+| `/status` | `_cmd_status()` | `commands.py` | Show versions, session IDs, backend health |
+| `/help` | `_cmd_help()` | `commands.py` | Show help |
+| `/cancel` | inline | `handlers/_message.py` | Interrupt current query |
+| `/rename <名称>` | inline | `handlers/_message.py` | 给当前会话命名 |
+| `/btw <prompt>` | `_cmd_btw()` | `commands.py` | Quick side question (bypasses main lock) |
+| `/run <cmd>` | `_cmd_run()` | `commands.py` | Execute shell command (30s timeout) |
+| `/cd <path>` | `_cmd_cd()` | `commands.py` | Change working directory |
+| `/pwd` | `_cmd_pwd()` | `commands.py` | Show current working directory |
+| `/ls [path]` | `_cmd_ls()` | `commands.py` | List files (max 60 entries) |
+| `/pickup` | `_cmd_pickup()` | `commands.py` | Print commands to resume sessions in terminal |
+| `/history [all]` | `_cmd_history()` | `commands.py` | Conversation summaries |
+| `/stats [intent]` | `_cmd_stats()` | `commands.py` | Token usage statistics（含 `intent` 子命令）|
+| `/upgrade` | `_cmd_upgrade()` | `commands.py` | 更新 larkhelm 到最新版本 |
+| `/cron add\|list\|del` | `_cmd_cron()` | `commands.py` | Manage scheduled tasks |
+| `/voice [status\|lang <zh\|en\|auto>]` | `_cmd_voice()` | `commands.py` | 查看 / 切换语音转写设置 |
+| `/memory [status\|update\|clear\|gc\|export\|import\|diagnose\|observe\|set\|list]` | `_cmd_memory()` | `commands.py` | 记忆系统操作（详见 `commands.py` 内子命令分发）|
+| `/crew <task>` | `cmd_crew()` | `crew/_commands.py` | Multi-agent collaborative planning |
+| `/dev <task> [--no-confirm]` | `cmd_dev()` | `crew/_commands.py` | Software engineering pipeline |
+| `/plan <task>` | `cmd_plan()` | `cmd_plan.py` | 多阶段串行：`[dev]` `[review]` `[fix]` `[test]` |
+
+> **文档操作**：没有 `/doc` 用户命令。读：消息含飞书 URL 时由 `_inject_doc_context` 自动注入内容；写：`larkhelm doc` CLI 或意图识别后的 DocAgent（两者共用 `doc_handlers.py` 的 dispatcher）。命令面入口由 `command_registry.py` 集中注册，硬编码命令保留在 `handlers/_message.py` 顶部（仅 `/cancel` / `/rename` / `/btw` / model shortcut 等需要触发 per-chat 锁 / cancel_event 的特例）。
 
 外部 CLI（不是飞书命令）：
 
@@ -371,12 +367,14 @@ cat updated.md | larkhelm doc write "https://feishu.cn/docx/xxxx"
 
 ### 飞书文档自动注入（Auto Doc Context Injection）
 
-当用户消息中包含飞书文档/Wiki URL 时，`handlers.py` 中的 `_inject_doc_context()` 会**自动读取文档内容**并追加到发送给 AI 的上下文中。用户无需任何额外操作——这是 LarkHelm 与原生飞书 AI 集成的核心差异化能力。
+当用户消息中包含飞书文档/Wiki URL 时，`handlers/_query.py` 的 `_inject_doc_context()` 会**自动读取文档内容**并追加到发送给 AI 的上下文中。用户无需任何额外操作——这是 LarkHelm 与原生飞书 AI 集成的核心差异化能力。
 
 支持的 URL 类型：
 - `https://xxx.feishu.cn/docx/...` — 新版文档
 - `https://xxx.feishu.cn/wiki/...` — Wiki 页面
 - `https://xxx.feishu.cn/sheets/...` — 电子表格
+
+> 缓存命中走 `_context_cache.cached_doc_read_with_meta`，注入时会标注「N 分钟前读取」age hint（P4 REQ-05），默认 TTL `doc_inject_cache_ttl_sec=600`（10 min）。
 
 ### Crew 断点机制（Human-in-the-Loop）
 
@@ -481,41 +479,56 @@ KeywordRetriever 并写 `audit.fail_open=True`。`_build_with_retriever` 自己�
 
 ## Adding a New Command
 
-**Step 1** — define in `commands.py`:
+90% 的新命令应该走 `command_registry.py` 注册表，不要再往 `handlers/_message.py` 里加 if/elif 分支（那条老路径已被收敛，目前仅保留 `/cancel` / `/rename` / `/btw` / model shortcut 等需要 per-chat 锁 / cancel_event 的特例）。
+
+**Step 1** — 在 `commands.py` 实现处理函数（同步入参 `DispatchContext`）：
+
 ```python
-def _cmd_new_cmd(chat_id: str, args: str = ""):
-    send_card(chat_id, "Title", "Body", color="blue")
+from larkhelm.command_registry import DispatchContext
+
+def _cmd_new_cmd(ctx: DispatchContext) -> None:
+    args = ctx.raw_args.strip()
+    if not args:
+        send_card(ctx.chat_id, "用法", "/new_cmd <arg>", color="orange")
+        return
+    send_card(ctx.chat_id, "标题", f"已处理：{args}", color="blue")
 ```
 
-**Step 2** — add import in `handlers.py:38-42`:
+**Step 2** — 在 `command_registry.py` 的 `_default_registrations()` 里 `register()`：
+
 ```python
-from larkhelm.commands import _cmd_new_cmd
+register(CommandSpec(
+    name="/new_cmd",
+    handler=_lazy_import("larkhelm.commands", "_cmd_new_cmd"),  # 懒 import，避免启动期连锁
+    match_kind="prefix",          # "exact" 当命令不带参数；"prefix" 当带参数（自动剥离前缀拿 raw_args）
+    aliases=("/nc",),             # 可选别名
+    usage_card="/new_cmd <arg>",  # raw_args 为空时自动回的橙色用法卡
+    run_async=False,              # IO 阻塞 > 1s 的处理器设为 True，会自动包 daemon thread + 错误卡
+    thread_label="new_cmd",       # run_async=True 时显示在错误卡里的标签
+    hidden=False,                 # /help 是否列出（M1 增 description/examples 字段后由 help 渲染器消费）
+))
 ```
 
-**Step 3** — add route in `handlers.py:671-740`:
-```python
-if tl.startswith("/new_cmd"):
-    _cmd_new_cmd(chat_id, text[9:].strip())
-    return
-```
+**Step 3**（可选）— 卡片按钮回调：在 `commands.py::_dispatch_button_cmd` 内加分支（button payload 的 `cmd` 字段触发）。
 
-**Step 4** (optional) — add button route in `commands.py:681-716`
+**Step 4**（可选）— 在 `_cmd_help` 的硬编码 help 字符串里加一行（**M1 已规划自动生成**，届时这步将消失）。
 
-**Step 5** (optional) — update `_cmd_help()` help text
+**Step 5**（可选）— 写测试：`tests/test_command_registry.py` 与 `tests/test_pure_*.py` 是 pin 现有契约的位置；新加 spec 至少 cover「`/new_cmd` 触发」与「`/new_cmd ` 空参回 usage_card」两条用例。
 
-> **状态读写提示**：若需读写 Per-chat 状态（cwd、model 等），
-> 请使用 `from larkhelm.chat_state import _get_chat_state, _set_chat_field`。
-> 并发锁请使用 `from larkhelm.concurrency import _get_chat_lock`。
+> **状态读写**：`from larkhelm.chat_state import _get_chat_state, _set_chat_field`。并发锁：`from larkhelm.concurrency import _get_chat_lock`。日志：`from larkhelm.log import _debug_log, info, warn, error`（前缀按 PascalCase，如 `[NewCmd] …`）。
 
 ## Other Extension Points
 
 | Extension point | File | Notes |
 |---|---|---|
-| Register new Feishu events | bridge.py:86-91 | `.register_p2_xxx_yyy(handler)` |
-| New Feishu API calls | lark_client.py | Follow existing patterns |
-| Card layout | card_builder.py | Modify `_make_card()` |
-| State fields | chat_state.py | Add to `_chat_state_store` data structure |
-| Permission rules | perm.py | Add new permission check logic |
+| Register new Feishu events | `bridge.py` | 在 `main()` builder 链上加 `.register_p2_xxx_yyy(handler)` |
+| New Feishu API calls | `lark_client.py` | Follow existing patterns；`BOT_OPEN_ID` 缓存在模块 attribute |
+| Card layout | `card_builder.py` | Modify `_make_card()` / `_split_md()`（JSON 2.0 unconditionally）|
+| State fields | `chat_state.py` | Add to `_chat_state_store` data structure |
+| Permission rules | `perm.py` | Add new permission check logic |
+| New backend | `backend_registry.py` | `BACKEND_REGISTRY.register(BackendSpec(...))`，并在 `runner_*.py` 实现 streaming adapter |
+| New crew agent type | `agent_hub/builtin/` 子类化 `AgentExecutor`，或通过 `pyproject.toml` `[project.entry-points."larkhelm.agents"]` 暴露 plugin | 详见 [`.crew_workspace/design.md`](.crew_workspace/design.md) §Phase 5 |
+| New memory layer | `memory.py` + sidecar（如 `memory_*_slots.py`）+ retriever 接入 | 走 LRU + mtime_ns 缓存协议 |
 
 ## 监控集成（Prometheus，P2 REQ-01）
 
@@ -544,6 +557,9 @@ if tl.startswith("/new_cmd"):
 | `larkhelm_workspace_hint_total` | Counter | `outcome` | P3 REQ-03：`handle_message` 每条消息进入工作区注入段时 +1（恰好一次）；`outcome` ∈ {`injected_passive`（注入被动文案）, `injected_active_legacy`（保留位，REQ-01 改文案后已不再发，留给未来回滚）, `skipped_by_gate`（`workspace_hint_keyword_gate=true` 且关键词未命中）, `skipped_empty`（`.crew_workspace/` 不存在或无 `.md`/`.json` 文件）}|
 | `larkhelm_doc_inject_cache_total` | Counter | `outcome` | P1 REQ-03 / P4 REQ-06：`_inject_doc_context` 每次走 doc cache 时 +1；`outcome` ∈ {`hit`（旧 `cached_doc_read` 调用路径）, `hit_with_age_hint`（新 `cached_doc_read_with_meta` 路径，age hint 已注入）, `miss`, `bypass`, `evict`, `invalidate`}；Grafana 总命中率应 query `outcome=~"hit\|hit_with_age_hint"`|
 | `larkhelm_intent_feedback_total` | Counter | `signal_type` | Phase D 跟进：每条 `intent_feedback.jsonl` 写入 +1；`signal_type` ∈ {`force_chat`（按钮）, `cancel_after_dispatch`（`/cancel` 落在 dispatch 后 ≤ `intent_feedback_cancel_window_sec` 秒内）, `agent_reswitch`（同 chat 在 120s 内切换 agent / backend）, `dispatch_failed`（agent 抛错回退 chat）, `l1_gray_zone`（L1 置信落在灰区）, `l2_dispatched`（非-chat L2 命中）}；`intent_feedback_extended_signals=false` 时只剩 `force_chat` 一种|
+| `larkhelm_intent_layer_total` | Counter | `layer`,`outcome` | P1-5a (review_summary §3 / W8/W9)：`resolve_intent` 每条消息按命中层 +1；`layer` ∈ {`explicit`, `l1`, `microlearn`, `l2`, `fallback`}, `outcome` ∈ {`hit`, `abstain`, `error`}。同一消息可能 bump 多次（L1 abstain → L2 hit），Grafana 查命中率用 `outcome="hit"` |
+| `larkhelm_intent_l2_fallback_total` | Counter | — | P1-5a (W22)：L2（embedding 或 LLM）无法解析，回落 `chat` 时 +1。和 `larkhelm_intent_layer_total{layer="fallback",outcome="hit"}` 同步 bump，用于一眼看到 L2→chat 失败率 |
+| `larkhelm_cascade_backoff_exhausted_total` | Counter | — | P1-5a (W14)：memory cascade ExponentialBackoff 用完最大重试次数仍失败时 +1。`memory._run_one_shot_with_backoff` 和 `memory_extract_buffer._invoke_cascade_with_backoff` 两个调用点都会 bump |
 
 Prometheus scrape 配置示例：
 
@@ -558,7 +574,7 @@ scrape_configs:
 **⚠️ 安全提示**：`health_bind_addr` 默认 `127.0.0.1`；不要直接 bind `0.0.0.0`，
 经身份验证的反向代理（nginx/Caddy）才暴露给 scraper。
 
-### 6. 状态模块导入指南
+## 状态模块导入指南
 
 各专属模块分工明确，直接按需导入：
 
@@ -571,14 +587,14 @@ scrape_configs:
 | 消息去重 | `larkhelm.dedup` |
 | Crew 数据类型 | `larkhelm.crew_types` |
 
-### 7. 记忆系统的两条触发路径
+## 记忆系统的两条触发路径
 
 `memory.maybe_auto_update(chat_id)` 是后台 LLM 摘要器，把最近对话浓缩成
 session memory，再级联抽取 project / global memory。它有**两条触发路径**：
 
 | 触发 | 何时 | 谁触发 | 频率 |
 |---|---|---|---|
-| 普通节奏 | 普通 `/chat` 查询完成后 | `handlers/_query.py:742` | 每 `AUTO_UPDATE_EVERY=10` 轮一次 |
+| 普通节奏 | 普通 `/chat` 查询完成后 | `handlers/_query.py` 内 `maybe_auto_update(chat_id)` 调用点 | 每 `AUTO_UPDATE_EVERY=10` 轮一次 |
 | 里程碑节奏 | `/dev` / `/crew` / `/plan` 完成时 | `record_milestone(chat_id, kind, summary)`（`memory.py`）| 每次完成 + 60s 防抖 |
 
 里程碑节奏修复了之前"用 `/dev` 干完一整天但 memory 一字未变"的问题：
@@ -650,6 +666,7 @@ resp = client.sheets.v3.spreadsheet_sheet.query(
     .spreadsheet_token("sheet_token_xxx")
     .build()
 )
+```
 
 ## 异常处理规范
 
@@ -738,37 +755,16 @@ python3 -m larkhelm start
 | `runner_base.py` `_drain_stderr` 线程 | display-only，失败无副作用 |
 | `runner_base.py` `_cleanup_tmp` unlink | 临时文件已不存在为预期 |
 | `log.py` `_debug_log` 内部两处 pass | 调试基础设施，递归报错无意义 |
-| `log.py:105` JSONL 行解析跳过 | 设计意图：容错读取损坏行 |
+| `log.py` JSONL 行解析跳过 | 设计意图：容错读取损坏行 |
 | `memory.py` `_global_memory_file` chat_state 访问 | 已有明确 fallback（返回 None） |
 | `crew/_runner.py` git diff | 非 git 仓库为预期行为 |
 | `mcp_server.py` config inner parse | MCP config 行级容错，解析失败继续下一行 |
 | `crew/_failure_card.py` `emit_agent_failure` / `emit_terminal_failure` / `emit_breakpoint_timeout` 顶层 try | 错误上报路径「永不抛」契约——这三个 emit 入口本身就是其它路径的失败兜底，再抛只会复合污染。docstring 显式说明；三者均由 `test_crew_failure_card.py::test_*_never_raises_on_lark_error` pinned |
 
-## P3 变更摘要（2026-05-18）
+## 变更记录索引
 
-P3 引入 10 项 prod-ready 收尾改进，全部默认关闭 / 状态不变。详见 `.crew_workspace/prd.md` + `.crew_workspace/design.md`：
+每批 REQ 的简短摘要 + flag 与回滚开关：见 [`.crew_workspace/changes.md`](.crew_workspace/changes.md)
+关键子系统的详细设计（Phase 5 / Phase D / Crew task_profile / 断点机制）：见 [`.crew_workspace/design.md`](.crew_workspace/design.md)
+PRD / 任务清单占位：[`prd.md`](.crew_workspace/prd.md) / [`tasks.md`](.crew_workspace/tasks.md)
 
-- **REQ-01 Voice duration gate**：`voice/transcribe.py` 强制 `VOICE_MAX_DURATION_MS`；超长音频返回 `error="duration_exceeded"` 而不走推理（ffprobe / wave 探测元数据，无解码成本）
-- **REQ-02 Query session v2 traffic**：`query_session_v2_traffic` 灰度比，复用 `_gating.hash_bucket_allows`；`query_session_v2_enabled=true` 仍是强制全开
-- **REQ-03 Intent embedding L2**：`intent_layer2_strategy="embedding"` 时走 cosine top-1 + `intent_embedding_top_k_threshold`，失败静默退 LLM
-- **REQ-04 LLM router circuit breaker**：`memory_circuit.CircuitBreaker` wrap cheap-backend，metric `larkhelm_llm_router_circuit_state`
-- **REQ-05 Cascade exponential backoff**：`memory.cascade_extract` + `memory_extract_buffer.flush` 加 `ExponentialBackoff(max_attempts=cascade_backoff_max_attempts)`，默认 `3` 即 sleep 序列 `[1.0s, 2.0s]`；要 `[1.0s, 2.0s, 4.0s]`（共 4 次尝试）需显式 `cascade_backoff_max_attempts=4`，单次 sleep cap 30s
-- **REQ-06 Plan retry engine**：`plan_retry.PlanRetryEngine`，三策略 `now`/`manual`/`off`，默认 `off` 保持现状
-- **REQ-07 Plugin failure card**：`plugin_loader.load_plugins` 返回 `PluginLoadReport`；`plugin_report_card_enabled=true` 时 bridge 启动后推送橙色卡片给 `admin_chat_id`
-- **REQ-08 MemoryGC daemon**：`memory_gc.MemoryGC` 加 `interval_hours` + `start/stop`；tick 内 audit rotate + stale 重算
-- **REQ-09 Checkpoint TTL GC**：`crew/_checkpoint_gc.CheckpointGC` 由 MemoryGC tick 调度，7d 孤儿 checkpoint 清理
-- **REQ-10 Dev stage timeouts**：`dev_stage_timeouts: {stage_id: seconds}` 覆盖 `_make_dev_pipeline` 的公式
-
-## P3 / P4 / P5 变更摘要（2026-05-23）
-
-第二批 prefix 出血面收尾 — 减少自动 Read 触发与提高 doc cache 命中率。详见 `.crew_workspace/prd.md` + `.crew_workspace/changes.md`：
-
-- **REQ-01 工作区提示改被动**：`handlers/_message.py::_build_workspace_hint` 把 *「请读取这些文件」* 改成 *「如果与本次问题相关，再读取；否则忽略」*，不再主动诱导模型 Read
-- **REQ-02 关键词门控**：`workspace_hint_keyword_gate=true` 时 `.crew_workspace/` 文件清单仅当用户消息正则匹配 `(workspace|计划|任务|设计|prd|design|tasks|review|qa|crew)` 才注入；门关闭（默认）时维持被动文案直接注入
-- **REQ-03 工作区注入仪表**：`larkhelm_workspace_hint_total{outcome}` Counter 注册，outcome ∈ {`injected_passive`, `injected_active_legacy`（保留位）, `skipped_by_gate`, `skipped_empty`}
-- **REQ-04 doc cache TTL 默认值升级**：`doc_inject_cache_ttl_sec` 从 300 提到 600（10 min），与 Anthropic 1h extended cache 形成 6× 衰减档；5 处定义点同步（`config.py` 默认值 + dataclass 默认值 + setdefault 校验 + 2 处 fallback）
-- **REQ-05 doc cache age hint**：`_context_cache.cached_doc_read_with_meta` 返回 `DocReadResult(payload, from_cache, age_sec)`；`_inject_doc_context` 命中缓存时在文档头部追加「（缓存版本，N 分钟前读取，如内容已变请提示刷新）」，`< 60s` 渲染「不到 1 分钟前」。首次注入不加 hint
-- **REQ-06 doc cache 命中类型可观测**：`larkhelm_doc_inject_cache_total{outcome}` 新增 `hit_with_age_hint` outcome 与原 `hit` 并列；Grafana 总命中率应 `outcome=~"hit|hit_with_age_hint"`
-- **REQ-07/08 /stats 按 agent_type 分桶**：`token_stats.summarize_crew_agent_tokens_by_type` 把 crew agent token 按 `_AGENT_TYPE_MAP` 归到 planner/engineer/qa/reviewer/chat/dev/crew/plan/doc 桶，`commands._render_crew_agent_breakdown` 渲染降序行
-- **REQ-09 退路开关**：`stats_agent_type_breakdown_enabled=false` 让 `_cmd_stats` 退回 P2 单行汇总（用于桶数过多导致卡片溢出的极端情况）
-- **REQ-10 开关独立性**：本批 4 个新 flag（`workspace_hint_keyword_gate` / `stats_agent_type_breakdown_enabled` / 复用既有 `doc_inject_cache_ttl_sec` / `doc_inject_cache_enabled`）默认值在 `config.py` 与本表保持一致、彼此独立可翻，无隐式依赖
+> 新增 REQ 或灰度 flag 时，请同步：`larkhelm_config.example.json` + `config.py` setdefault + `.crew_workspace/changes.md` + （对用户可见时）README.md。本文件 CLAUDE.md 只保留扩展点契约与架构符号入口，不再粘贴变更日志。
