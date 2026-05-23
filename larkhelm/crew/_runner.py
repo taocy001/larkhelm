@@ -378,7 +378,10 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
     from larkhelm.ai_runner import query_gemini, query_kimi
     from larkhelm.crew._scheduler import _resolve_prompt
     from larkhelm.crew._state import _git_head
-    from larkhelm.crew._hermes_orchestrator import _run_hermes_orchestrator
+    # ``_run_hermes_orchestrator`` is lazy-imported inside the ``hermes_*``
+    # dispatch branch below so a failure to load it cannot poison agents
+    # that never call it (regression observed 2026-05-23: a single transient
+    # ModuleNotFoundError at this site failed all 4 agents of a /crew run).
 
     spec      = state.agents[agent_id].spec
     cancel_ev = state.cancel_ev
@@ -675,6 +678,7 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
             # ``resolved.provider == "hermes"`` (line 356), and every
             # hermes BackendSpec id begins with ``hermes_``, so the
             # second clause was unreachable. Review §4 cleanup.
+            from larkhelm.crew._hermes_orchestrator import _run_hermes_orchestrator
             _on_start()
             output = _run_hermes_orchestrator(
                 state=state,
