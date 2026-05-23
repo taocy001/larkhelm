@@ -213,6 +213,14 @@ MEMORY_PROJECT_SECTION_ENABLED: bool = False
 # Operators flip them in config.json; setdefault preserves their override.
 QUERY_SESSION_V2_TRAFFIC: float = 0.0
 INTENT_EMBEDDING_THRESHOLD: float = 0.30
+# Phase D intent-router quality knobs (May 2026). L1 keyword score must
+# exceed the threshold to short-circuit; below it the router defers to
+# L2 (embedding or LLM JSON). Setting intent_l1_enabled=false bisects
+# the entire keyword tier without restart.
+INTENT_L1_ENABLED: bool = True
+INTENT_L1_PROMOTION_THRESHOLD: float = 0.70
+INTENT_MICROLEARN_ENABLED: bool = False
+INTENT_MICROLEARN_MIN_CONFIDENCE: float = 0.65
 LLM_ROUTER_CIRCUIT_FAILURES: int = 5
 LLM_ROUTER_CIRCUIT_COOLDOWN_SEC: float = 30.0
 CASCADE_BACKOFF_MAX_ATTEMPTS: int = 3
@@ -791,7 +799,25 @@ def _init_app_config() -> None:
     # phase4 behavior is unchanged when these keys are missing).
     config.setdefault("intent_router_enabled", False)
     config.setdefault("intent_router_traffic", 0.0)
-    config.setdefault("intent_layer2_strategy", "llm")
+    # Default flipped from "llm" → "embedding" (Phase D-C, May 2026).
+    # Embedding L2 is faster, deterministic, and cheaper than the cheap
+    # LLM JSON path. When the ONNX runtime / model isn't available the
+    # embedding backend returns None and the router auto-falls-back to
+    # the LLM path — no operator action needed for the legacy code path.
+    config.setdefault("intent_layer2_strategy", "embedding")
+    # L1 keyword-tier overrides (Phase D-A, May 2026). intent_l1_enabled
+    # =false skips the keyword classifier entirely; threshold controls
+    # how high a keyword score must be to short-circuit to L1
+    # (otherwise abstain → fall through to L2).
+    config.setdefault("intent_l1_enabled", True)
+    config.setdefault("intent_l1_promotion_threshold", 0.70)
+    # Phase D-D: opt-in micro-learn classifier trained from
+    # intent_feedback.jsonl. Off by default; flip on once a checkpoint
+    # exists at ``data_dir/intent_microlearn.pkl``. See
+    # ``larkhelm/agent_hub/intent_microlearn.py`` for the inference API
+    # and ``scripts/train_intent_classifier.py`` for training.
+    config.setdefault("intent_microlearn_enabled", False)
+    config.setdefault("intent_microlearn_min_confidence", 0.65)
     config.setdefault("agent_plugins", [])
     config.setdefault("agent_acl", {})
     config.setdefault("intent_feedback_path", "")
@@ -980,6 +1006,23 @@ def _init_app_config() -> None:
         )
     except (TypeError, ValueError):
         INTENT_EMBEDDING_THRESHOLD = 0.30
+
+    global INTENT_L1_ENABLED, INTENT_L1_PROMOTION_THRESHOLD
+    global INTENT_MICROLEARN_ENABLED, INTENT_MICROLEARN_MIN_CONFIDENCE
+    INTENT_L1_ENABLED = bool(config.get("intent_l1_enabled", True))
+    try:
+        INTENT_L1_PROMOTION_THRESHOLD = max(
+            0.05, min(1.0, float(config.get("intent_l1_promotion_threshold", 0.70) or 0.70)),
+        )
+    except (TypeError, ValueError):
+        INTENT_L1_PROMOTION_THRESHOLD = 0.70
+    INTENT_MICROLEARN_ENABLED = bool(config.get("intent_microlearn_enabled", False))
+    try:
+        INTENT_MICROLEARN_MIN_CONFIDENCE = max(
+            0.0, min(1.0, float(config.get("intent_microlearn_min_confidence", 0.65) or 0.65)),
+        )
+    except (TypeError, ValueError):
+        INTENT_MICROLEARN_MIN_CONFIDENCE = 0.65
 
     try:
         LLM_ROUTER_CIRCUIT_FAILURES = max(

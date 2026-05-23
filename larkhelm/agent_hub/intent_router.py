@@ -77,50 +77,24 @@ _EXPLICIT_PREFIXES: list[tuple[tuple[str, ...], str]] = [
 
 
 # ── L1 rule heuristics ─────────────────────────────────────────────────
-# DEV triggers must be VERB-context phrases. Earlier the single token
-# "实现" matched the noun "代码实现 / 实现细节 / 具体实现" in any review-type
-# prompt and forced dev classification. Require an explicit object marker
-# ("一个/这个/该/新/一套") so noun usage falls through to L2.
-_DEV_TRIGGERS = (
-    "实现一个", "实现这个", "实现该", "实现新", "实现一套", "实现一下",
-    "写一个", "写个", "开发", "写代码", "新建项目", "搭一个",
-    "implement", "build me", "scaffold", "create a project", "write a function",
-)
-# CREW = multi-perspective / multi-role tasks. Code review counts: it
-# benefits from PM/architect/QA/reviewer viewpoints rather than a single
-# dev pipeline. Add Chinese + English review keywords so prompts like
-# "组织一次代码检视 / code review" route to crew, not dev.
-_CREW_TRIGGERS = (
-    "调研", "研究", "策划", "分析整理", "多角色协作", "讨论方案",
-    "检视", "代码检视", "代码审查", "代码评审", "代码 review", "评审一下",
-    "组织一次", "组织 一次",
-    "brainstorm", "research and summarize",
-    "code review", "code-review",
-)
-_PLAN_TRIGGERS = (
-    "分阶段", "step by step", "拆分计划", "多步执行", "依次完成",
-    "phased", "multi-stage plan",
-)
-_DOC_TRIGGERS = (
-    "写到飞书文档", "保存到 wiki", "保存到wiki", "更新这份文档", "整理成文档",
-    "write to feishu doc", "append to wiki",
-)
-
-# Guard for the ``has_doc_urls + write-verb`` L1 rule below: when the user's
-# text shows they want to read the URL'd doc and write a *brand-new* document
-# (e.g. "看 wiki 找出错误观点重新写一份正确的文档"), the verb's object is the
-# new document, not the URL'd one. Defer such cases to L2 LLM instead of
-# slamming them into DocAgent. Matches Chinese "一份/一篇/一个 (新|正确|完整|另) (的)? 文档/笔记/总结/稿/文章/wiki"
-# and English "a new doc/document/note/article/page/wiki".
-_NEW_DOC_OBJECT_RE = re.compile(
-    r"一?\s*[份篇个]\s*(?:新的?|正确的?|完整的?|另一?|另起的?)?\s*"
-    r"(?:文档|文稿|笔记|总结|稿|文章|wiki|doc|document|note|article|page)"
-    r"|a\s+new\s+(?:doc|document|note|article|page|wiki)",
-    re.IGNORECASE,
+# Keyword rules + negative patterns + few-shot examples live in
+# ``intent_keywords`` for testability. The router scores each agent by
+# the max strength of any matched rule (minus any rule blocked by a
+# negative pattern), then promotes to L1 only when the winner exceeds
+# ``L1_PROMOTION_THRESHOLD``. Below threshold → abstain → defer to L2.
+from larkhelm.agent_hub.intent_keywords import (  # noqa: E402
+    AGENT_FEW_SHOTS,
+    L1_PROMOTION_THRESHOLD as _DEFAULT_L1_PROMOTION_THRESHOLD,
+    all_negative_rules,
+    all_rules,
 )
 
 
 def _match_prefix(text_l: str) -> str | None:
+    """Return the agent name when ``text_l`` opens with an explicit
+    slash-command prefix. The router treats this as the highest-priority
+    decision (confidence 1.0, ``is_explicit_command=True``).
+    """
     for prefixes, agent in _EXPLICIT_PREFIXES:
         for p in prefixes:
             if text_l == p or text_l.startswith(p + " ") or text_l.startswith(p + "\n"):
@@ -128,55 +102,142 @@ def _match_prefix(text_l: str) -> str | None:
     return None
 
 
+def _l1_threshold() -> float:
+    """Hot-read the promotion threshold from config.
+
+    Tests / operators can override via ``intent_l1_promotion_threshold``
+    in ``config.json``. Floor at 0.05 so a bad value can't silently
+    disable L1 entirely (set the flag below to ``false`` for that).
+    """
+    try:
+        import larkhelm.config as _cfg
+        raw = getattr(_cfg, "INTENT_L1_PROMOTION_THRESHOLD", None)
+        if raw is None:
+            return _DEFAULT_L1_PROMOTION_THRESHOLD
+        return max(0.05, float(raw))
+    except Exception:
+        return _DEFAULT_L1_PROMOTION_THRESHOLD
+
+
+def _l1_disabled() -> bool:
+    """``intent_l1_enabled=false`` → skip the keyword tier entirely and
+    let every prompt fall through to L2. Useful when an operator wants
+    to bisect a misclassification without restarting.
+    """
+    try:
+        import larkhelm.config as _cfg
+        return not bool(getattr(_cfg, "INTENT_L1_ENABLED", True))
+    except Exception:
+        return False
+
+
 def _resolve_l1(text: str, images: list | None, has_doc_urls: bool) -> IntentResult | None:
-    t = text.lower()
+    if _l1_disabled():
+        return None
+    text_l = text.lower()
 
-    if has_doc_urls and any(k in text for k in ("写", "更新", "保存", "覆盖", "追加", "append", "write", "update")):
-        # Defer "read URL'd doc, write a NEW doc" intents to L2 LLM. The
-        # write verb's grammatical object is the new doc, not the URL'd one,
-        # so DocAgent (which writes back to the URL) is the wrong target.
-        if not _NEW_DOC_OBJECT_RE.search(text):
-            return IntentResult(
-                agent_type="doc", layer="L1", confidence=0.85,
-                reasoning="contains feishu doc URL + write verb", raw_text=text,
-            )
+    # Step 1: negative-pattern blocklist.
+    blocked: set[str] = set()
+    for nr in all_negative_rules():
+        try:
+            if nr.match(text, text_l):
+                blocked.update(nr.blocks)
+        except Exception:
+            continue
 
-    for kw in _DOC_TRIGGERS:
-        if kw in text or kw in t:
-            return IntentResult(agent_type="doc", layer="L1", confidence=0.9,
-                                reasoning=f"trigger: {kw}", raw_text=text)
-    for kw in _PLAN_TRIGGERS:
-        if kw in text or kw in t:
-            return IntentResult(agent_type="plan", layer="L1", confidence=0.9,
-                                reasoning=f"trigger: {kw}", raw_text=text)
-    for kw in _CREW_TRIGGERS:
-        if kw in text or kw in t:
-            return IntentResult(agent_type="crew", layer="L1", confidence=0.85,
-                                reasoning=f"trigger: {kw}", raw_text=text)
-    for kw in _DEV_TRIGGERS:
-        if kw in text or kw in t:
-            return IntentResult(agent_type="dev", layer="L1", confidence=0.9,
-                                reasoning=f"trigger: {kw}",
-                                complexity="complex" if len(text) > 60 else "medium",
-                                raw_text=text)
-    return None
+    # Step 2: score each agent by max-strength matched rule.
+    scores: dict[str, float] = {}
+    evidence: dict[str, list[str]] = {}
+    for rule in all_rules():
+        if rule.agent in blocked:
+            continue
+        try:
+            if rule.match(text, text_l):
+                if rule.strength > scores.get(rule.agent, 0.0):
+                    scores[rule.agent] = rule.strength
+                    evidence.setdefault(rule.agent, []).append(
+                        str(rule.pattern)[:30]
+                    )
+        except Exception:
+            continue
+
+    # Step 3: doc-URL + write-verb still gets its own promotion (matches
+    # the prior _NEW_DOC_OBJECT_RE guarded behaviour) since the URL is a
+    # stronger signal than any keyword. Negative rule above already
+    # blocks doc when the user's writing object is a NEW doc.
+    if has_doc_urls and "doc" not in blocked:
+        if any(k in text for k in ("写", "更新", "保存", "覆盖", "追加",
+                                    "append", "write", "update")):
+            if scores.get("doc", 0.0) < 0.82:
+                scores["doc"] = 0.82
+                evidence.setdefault("doc", []).append("doc URL + write verb")
+
+    if not scores:
+        return None
+
+    # Step 4: pick the highest-scoring agent. On ties, prefer the more
+    # specialised agent (doc > plan > crew > dev > chat) — these are the
+    # agents that incur the most cost when mis-routed *for* them (e.g.
+    # dispatching dev when the user wanted crew burns a pipeline).
+    PREF_ORDER = ("doc", "plan", "crew", "dev")
+    best_agent = max(
+        scores,
+        key=lambda a: (scores[a], -PREF_ORDER.index(a) if a in PREF_ORDER else -99),
+    )
+    best_score = scores[best_agent]
+
+    if best_score < _l1_threshold():
+        # Abstain: let L2 disambiguate. Same fall-through as a true miss.
+        return None
+
+    complexity = "complex" if len(text) > 60 else "medium"
+    return IntentResult(
+        agent_type=best_agent,
+        layer="L1",
+        confidence=best_score,
+        complexity=complexity,
+        reasoning=f"keywords: {', '.join(evidence[best_agent][:3])}",
+        raw_text=text,
+    )
 
 
 def _build_l2_prompt(agent_descriptions: list[tuple[str, str]]) -> str:
-    desc_lines = "\n".join(
-        f"- {atype}: {desc[:120]}" for atype, desc in agent_descriptions if desc
-    ) or "- chat: 普通对话与简单问答\n- dev: 完整软件开发流水线\n- crew: 多角色调研协作\n- plan: 多阶段开发计划\n- doc: 飞书文档读写"
+    """Few-shot L2 prompt — description + 2 positive + 1 negative example
+    per agent. Cheap LLMs (DeepSeek / Kimi) classify on examples
+    materially more accurately than on abstract descriptions alone.
+    """
+    if not agent_descriptions:
+        agent_descriptions = [
+            ("chat", "普通对话与简单问答"),
+            ("dev",  "完整软件开发流水线"),
+            ("crew", "多角色调研协作"),
+            ("plan", "多阶段开发计划"),
+            ("doc",  "飞书文档读写"),
+        ]
+    blocks: list[str] = []
+    for atype, desc in agent_descriptions:
+        if not desc:
+            continue
+        block = [f"- {atype}: {desc[:120]}"]
+        shots = AGENT_FEW_SHOTS.get(atype) or ()
+        for sign, ex in shots:
+            mark = "✓" if sign == "+" else "✗"
+            block.append(f"    {mark} {ex[:120]}")
+        blocks.append("\n".join(block))
+    desc_lines = "\n".join(blocks)
     return (
         "You are an intent classifier. Read the user's message and respond with ONLY a JSON object. "
         "Use this exact schema:\n"
         '{"intent":"chat|dev|crew|plan|doc","complexity":"simple|medium|complex","reasoning":"…"}\n\n'
-        f"Available agent_types and descriptions:\n{desc_lines}\n\n"
+        f"Available agent_types with examples (✓ matches, ✗ does NOT match):\n{desc_lines}\n\n"
         "Rules:\n"
-        "- 'chat' is the default for casual conversation, factual questions, code reading.\n"
-        "- 'dev' for non-trivial code writing tasks.\n"
-        "- 'crew' for research / multi-agent / brainstorming tasks.\n"
-        "- 'plan' when the user explicitly asks for a multi-stage/phased plan.\n"
-        "- 'doc' when the user wants to read/write Feishu doc or wiki content.\n"
+        "- 'chat' is the default for casual conversation, factual questions, code reading, debugging Q&A.\n"
+        "- 'dev' for non-trivial code-writing tasks the user wants the bot to actually do.\n"
+        "- 'crew' for research / multi-perspective / brainstorming / code review tasks.\n"
+        "- 'plan' when the user explicitly asks for a multi-stage / phased plan with sequential steps.\n"
+        "- 'doc' when the user wants to read/write Feishu doc or wiki content (writes back to an URL).\n"
+        "- Nouns like '代码实现' / '实现细节' do NOT make a prompt dev — only verb-with-object phrasings do.\n"
+        "- A doc URL alone is NOT enough for 'doc' — the user must also want to write back to that URL.\n"
         "Output JSON only, no markdown fences."
     )
 
@@ -331,6 +392,53 @@ def _fallback(text: str) -> IntentResult:
     return IntentResult(agent_type="chat", layer="fallback", confidence=0.0, raw_text=text)
 
 
+def _resolve_microlearn(text: str) -> "IntentResult | None":
+    """Phase D-D: feedback-driven LR classifier vote.
+
+    Runs only when ``intent_microlearn_enabled=true`` AND a checkpoint
+    exists AND the predicted confidence ≥
+    ``intent_microlearn_min_confidence``. Otherwise returns None and the
+    caller falls through to L2.
+
+    Wrapped in try/except so any internal failure (no numpy, stale
+    sklearn, ONNX glitch) silently collapses to L2 — never breaks
+    classification.
+    """
+    try:
+        from larkhelm.agent_hub.intent_microlearn import predict as _ml_predict
+        import larkhelm.config as _cfg
+    except Exception:
+        return None
+
+    if not bool(getattr(_cfg, "INTENT_MICROLEARN_ENABLED", False)):
+        return None
+
+    try:
+        result = _ml_predict(text)
+    except Exception:
+        return None
+    if result is None:
+        return None
+
+    agent, confidence = result
+    min_conf = float(getattr(_cfg, "INTENT_MICROLEARN_MIN_CONFIDENCE", 0.65) or 0.65)
+    if confidence < min_conf:
+        return None
+
+    if agent not in {"chat", "dev", "crew", "plan", "doc", "search"}:
+        return None
+
+    complexity = "complex" if len(text) > 60 else "medium"
+    return IntentResult(
+        agent_type=agent,
+        layer="microlearn",
+        confidence=float(confidence),
+        complexity=complexity,
+        reasoning=f"microlearn LR (p={confidence:.2f}, ≥{min_conf:.2f})",
+        raw_text=text,
+    )
+
+
 def resolve_intent(
     text: str,
     images: list | None = None,
@@ -341,9 +449,14 @@ def resolve_intent(
 
     Order:
       1. Explicit slash command prefix → ``is_explicit_command=True``.
-      2. L1 keyword/heuristic rules.
-      3. L2 cheap-backend JSON classifier.
-      4. Fallback ``chat``.
+      2. L1 keyword tier with confidence scoring; abstains below
+         ``INTENT_L1_PROMOTION_THRESHOLD`` and falls through.
+      3. Micro-learn LR classifier (Phase D-D, opt-in via
+         ``intent_microlearn_enabled``). Returns only on high confidence;
+         otherwise abstains.
+      4. L2 cheap-backend classifier (embedding by default, LLM JSON
+         fallback). Configured via ``intent_layer2_strategy``.
+      5. Fallback ``chat``.
     Any exception inside L2 collapses to fallback (NFR-SEC-02).
     """
     if not isinstance(text, str):
@@ -370,6 +483,13 @@ def resolve_intent(
         l1 = None
     if l1 is not None:
         return l1
+
+    try:
+        ml = _resolve_microlearn(stripped)
+    except Exception:
+        ml = None
+    if ml is not None:
+        return ml
 
     try:
         return _resolve_l2(stripped)
