@@ -22,10 +22,58 @@ name. The template + adapter classes are internal but importable for tests.
 from __future__ import annotations
 
 import os
+import threading
 from typing import Any, Callable, Iterator, Protocol
 
 from larkhelm.backend_registry import BackendSpec, BACKEND_REGISTRY
 from larkhelm.log import _debug_log, safe_log
+
+# Process-wide memory of whether the Anthropic ``extended-cache-ttl`` beta
+# header has been rejected by the API. Once set, subsequent calls in this
+# process skip the 1h TTL request shape entirely so we don't pay a wasted
+# handshake on every query. Restart clears the flag, allowing recovery once
+# Anthropic enables the beta on the account.
+_extended_cache_disabled: bool = False
+_extended_cache_lock = threading.Lock()
+
+
+def _is_extended_cache_rejection(exc: Exception) -> bool:
+    """Match Anthropic SDK errors that indicate the beta header was rejected.
+
+    Recognises ``anthropic.BadRequestError`` / ``anthropic.PermissionDeniedError``
+    whose payload mentions ``extended-cache`` / ``extended_cache`` / ``ttl`` /
+    ``beta``. Falls back to ``str(exc)`` substring match when the SDK class
+    hierarchy is unavailable (test stub modules expose plain ``Exception``
+    subclasses with the right names). Returns False on any other exception
+    type so unrelated errors propagate.
+    """
+    # Substring-match the message first — this is the most reliable signal
+    # across SDK / stub variants and avoids depending on the precise class
+    # hierarchy being importable.
+    try:
+        msg = str(exc).lower()
+    except Exception:
+        return False
+    if not any(token in msg for token in ("extended-cache", "extended_cache", "ttl", "beta")):
+        return False
+
+    # Constrain to the SDK error classes when possible so unrelated
+    # ``ValueError("ttl ...")`` don't trigger fallback. When the import
+    # fails (stub module / partial install), accept any exception whose
+    # message already matched the keyword list — keyword + reachable code
+    # path is signal enough.
+    try:
+        import anthropic  # type: ignore[import-not-found]
+    except Exception:
+        return True
+
+    cls_names = ("BadRequestError", "PermissionDeniedError", "APIStatusError")
+    for name in cls_names:
+        cls = getattr(anthropic, name, None)
+        if cls is not None and isinstance(exc, cls):
+            return True
+    # Fallback for tests/stubs: accept by class-name match.
+    return type(exc).__name__ in cls_names
 
 
 # ── Outcome recording (moved verbatim from backend_api.py) ────────────────
@@ -142,24 +190,103 @@ class AnthropicAdapter:
             # Prompt caching: ``cache_control: ephemeral`` enables ~10%
             # input pricing on the next call within the 5-min TTL. The
             # 4500-char three-tier memory_ctx is the typical prefix
-            # (stable across turns); break-even is 2 reads.
+            # (stable across turns); break-even is 2 reads. When the
+            # operator opts into ``anthropic_extended_cache_enabled`` AND
+            # the beta header has not yet been rejected this process,
+            # upgrade the TTL to 1h via the
+            # ``anthropic-beta: extended-cache-ttl-2025-04-11`` header.
             system_text = "\n\n".join(system_parts)
+            cache_control: dict = {"type": "ephemeral"}
+            use_extended = False
+            try:
+                from larkhelm import config as _cfg
+                use_extended = bool(
+                    getattr(_cfg, "ANTHROPIC_EXTENDED_CACHE_ENABLED", True)
+                ) and not _extended_cache_disabled
+            except Exception:
+                use_extended = False
+            if use_extended:
+                cache_control = {"type": "ephemeral", "ttl": "1h"}
+                kwargs["extra_headers"] = {
+                    "anthropic-beta": "extended-cache-ttl-2025-04-11",
+                }
             kwargs["system"] = [{
                 "type":          "text",
                 "text":          system_text,
-                "cache_control": {"type": "ephemeral"},
+                "cache_control": cache_control,
             }]
         return kwargs
 
+    def _is_extended_cache_request(self, request: dict) -> bool:
+        """True iff ``request`` carries the 1h TTL + anthropic-beta header."""
+        headers = request.get("extra_headers") or {}
+        if headers.get("anthropic-beta") != "extended-cache-ttl-2025-04-11":
+            return False
+        for sys_part in request.get("system") or ():
+            cc = sys_part.get("cache_control") if isinstance(sys_part, dict) else None
+            if isinstance(cc, dict) and cc.get("ttl") == "1h":
+                return True
+        return False
+
+    def _strip_extended_cache(self, request: dict) -> dict:
+        """Return a shallow-copied request with the 1h TTL + beta header removed.
+
+        Never mutates the input; safe to retry. The retry shape matches the
+        pre-extended-cache prompt-cache payload byte-for-byte.
+        """
+        new_req: dict = dict(request)
+        new_req.pop("extra_headers", None)
+        old_system = request.get("system") or []
+        new_system = []
+        for sys_part in old_system:
+            if isinstance(sys_part, dict):
+                copy = dict(sys_part)
+                cc = copy.get("cache_control")
+                if isinstance(cc, dict) and "ttl" in cc:
+                    new_cc = {k: v for k, v in cc.items() if k != "ttl"}
+                    copy["cache_control"] = new_cc
+                new_system.append(copy)
+            else:
+                new_system.append(sys_part)
+        if new_system:
+            new_req["system"] = new_system
+        return new_req
+
     def iter_text_chunks(self, client: Any, request: dict) -> Iterator[str]:
+        global _extended_cache_disabled
         self._usage_raw = None
-        with client.messages.stream(**request) as stream:
+        # Anthropic SDK's ``client.messages.stream(**request)`` only constructs
+        # a ``MessageStreamManager``; the HTTP request fires in
+        # ``MessageStreamManager.__enter__()``. So beta-header rejections
+        # (BadRequestError / PermissionDeniedError) surface from ``__enter__``,
+        # not from ``stream()``. The try block therefore wraps both calls.
+        try:
+            stream_cm = client.messages.stream(**request)
+            stream = stream_cm.__enter__()
+        except Exception as e:
+            if self._is_extended_cache_request(request) and _is_extended_cache_rejection(e):
+                _debug_log(
+                    f"[{self.provider_label}] extended-cache rejected, "
+                    f"falling back to 5min ephemeral: {e}"
+                )
+                with _extended_cache_lock:
+                    _extended_cache_disabled = True
+                request = self._strip_extended_cache(request)
+                stream_cm = client.messages.stream(**request)
+                stream = stream_cm.__enter__()
+            else:
+                raise
+        try:
             for chunk in stream.text_stream:
                 yield chunk
-            # Capture the raw usage object after all chunks are yielded.
             try:
                 final = stream.get_final_message()
                 self._usage_raw = final.usage
+            except Exception:
+                pass
+        finally:
+            try:
+                stream_cm.__exit__(None, None, None)
             except Exception:
                 pass
 
@@ -453,4 +580,5 @@ __all__ = [
     "OpenAICompatAdapter",
     "_record_outcome",
     "_run_streaming_api",
+    "_is_extended_cache_rejection",
 ]

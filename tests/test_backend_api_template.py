@@ -457,3 +457,206 @@ def test_anthropic_adapter_with_injected_module():
         ad, _spec(), "chat_x", "hi", history=[],
     )
     assert out == "hello anthropic"
+
+
+# ── Extended-cache TTL=1h header injection + fallback ────────────────────
+
+
+@pytest.fixture
+def _reset_extended_cache_state():
+    """Reset the module-level _extended_cache_disabled before/after."""
+    prev = _stream._extended_cache_disabled
+    _stream._extended_cache_disabled = False
+    yield
+    _stream._extended_cache_disabled = prev
+
+
+def test_extended_cache_inject_header_and_ttl(monkeypatch, _reset_extended_cache_state):
+    """When ANTHROPIC_EXTENDED_CACHE_ENABLED is True and the process-wide
+    fallback flag is False, prepare_request injects the 1h TTL + beta header.
+    """
+    import larkhelm.config as _cfg
+    monkeypatch.setattr(_cfg, "ANTHROPIC_EXTENDED_CACHE_ENABLED", True, raising=False)
+
+    mod = types.SimpleNamespace(Anthropic=lambda **kw: None)
+    ad = _stream.AnthropicAdapter(anthropic_module=mod)
+    request = ad.prepare_request(_spec(), [], "hi", extra_system="some context")
+
+    # extra_headers should carry the beta opt-in.
+    assert request.get("extra_headers", {}).get("anthropic-beta") == \
+        "extended-cache-ttl-2025-04-11"
+    # system[0].cache_control should be the 1h ephemeral variant.
+    system = request.get("system", [])
+    assert system, "system block must be present when extra_system provided"
+    cc = system[0]["cache_control"]
+    assert cc == {"type": "ephemeral", "ttl": "1h"}
+
+
+def test_extended_cache_disabled_via_config(monkeypatch, _reset_extended_cache_state):
+    """Operator toggle off → no beta header, no 1h ttl."""
+    import larkhelm.config as _cfg
+    monkeypatch.setattr(_cfg, "ANTHROPIC_EXTENDED_CACHE_ENABLED", False, raising=False)
+
+    mod = types.SimpleNamespace(Anthropic=lambda **kw: None)
+    ad = _stream.AnthropicAdapter(anthropic_module=mod)
+    request = ad.prepare_request(_spec(), [], "hi", extra_system="some context")
+
+    assert "extra_headers" not in request
+    cc = request["system"][0]["cache_control"]
+    assert cc == {"type": "ephemeral"}
+    assert "ttl" not in cc
+
+
+def test_extended_cache_fallback_on_400(monkeypatch, _reset_extended_cache_state):
+    """When the API rejects the beta header on the first call, the adapter
+    must transparently re-issue the request without the 1h ttl / extra_headers
+    and flip the module-level fallback flag so future calls skip the dance.
+    """
+    import larkhelm.config as _cfg
+    monkeypatch.setattr(_cfg, "ANTHROPIC_EXTENDED_CACHE_ENABLED", True, raising=False)
+
+    class _BadRequestError(Exception):
+        """Stand-in for anthropic.BadRequestError."""
+
+    # Inject our stub class so _is_extended_cache_rejection matches by name.
+    fake_anthropic = types.SimpleNamespace(
+        BadRequestError=_BadRequestError,
+        PermissionDeniedError=type("PermissionDeniedError", (Exception,), {}),
+        APIStatusError=type("APIStatusError", (Exception,), {}),
+    )
+    monkeypatch.setitem(__import__("sys").modules, "anthropic", fake_anthropic)
+
+    call_log: list[dict] = []
+    chunks = ["fallback ", "ok"]
+
+    # Anthropic SDK behaviour: ``stream()`` always returns a
+    # ``MessageStreamManager`` synchronously; the HTTP request — and any
+    # ``BadRequestError`` for an unknown beta header — fires inside
+    # ``MessageStreamManager.__enter__()``. The stub mirrors that.
+    class _StreamCM:
+        def __init__(self, raise_in_enter: bool):
+            self._raise = raise_in_enter
+
+        def __enter__(self):
+            if self._raise:
+                raise _BadRequestError(
+                    "unknown beta: extended-cache-ttl-2025-04-11"
+                )
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        @property
+        def text_stream(self):
+            return iter(chunks)
+
+    class _Messages:
+        def stream(self, **kw):
+            call_log.append(kw)
+            # First call asks for the 1h beta → reject in __enter__.
+            # Second call is the stripped retry → succeed.
+            return _StreamCM(raise_in_enter=(len(call_log) == 1))
+
+    class _Anthropic:
+        def __init__(self, **kw):
+            self.messages = _Messages()
+
+    mod = types.SimpleNamespace(Anthropic=_Anthropic)
+    ad = _stream.AnthropicAdapter(anthropic_module=mod)
+    client = ad.build_client(_spec())
+    request = ad.prepare_request(_spec(), [], "hi", extra_system="some context")
+    # First request must carry the 1h beta header before iter_text_chunks runs.
+    assert request["system"][0]["cache_control"]["ttl"] == "1h"
+    assert request["extra_headers"]["anthropic-beta"] == "extended-cache-ttl-2025-04-11"
+
+    out = "".join(ad.iter_text_chunks(client, request))
+    assert out == "fallback ok"
+
+    # Two SDK calls: first 1h (rejected), second stripped.
+    assert len(call_log) == 2
+    first_kwargs = call_log[0]
+    second_kwargs = call_log[1]
+
+    # First call carried the beta header + ttl.
+    assert first_kwargs["extra_headers"]["anthropic-beta"] == \
+        "extended-cache-ttl-2025-04-11"
+    assert first_kwargs["system"][0]["cache_control"]["ttl"] == "1h"
+
+    # Retry must NOT carry the beta header and must NOT carry the 1h ttl.
+    assert "extra_headers" not in second_kwargs
+    assert "ttl" not in second_kwargs["system"][0]["cache_control"]
+
+    # Module-level flag has flipped — future requests will downgrade up-front.
+    assert _stream._extended_cache_disabled is True
+
+    # Sanity: a fresh prepare_request with the flag set must produce 5min ttl.
+    follow = ad.prepare_request(_spec(), [], "again", extra_system="ctx")
+    assert "extra_headers" not in follow
+    assert follow["system"][0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_is_extended_cache_rejection_substring_match(monkeypatch):
+    """The classifier accepts SDK errors whose message + class name hint
+    at the beta header rejection.
+    """
+    # Pin the SDK to a known stub so the test is reproducible across hosts
+    # (some have anthropic installed, some don't).
+    class _BadRequestError(Exception):
+        pass
+
+    class _PermissionDeniedError(Exception):
+        pass
+
+    fake_anthropic = types.SimpleNamespace(
+        BadRequestError=_BadRequestError,
+        PermissionDeniedError=_PermissionDeniedError,
+        APIStatusError=type("APIStatusError", (Exception,), {}),
+    )
+    monkeypatch.setitem(__import__("sys").modules, "anthropic", fake_anthropic)
+
+    # Matching class hierarchy + matching keyword → True
+    assert _stream._is_extended_cache_rejection(
+        _BadRequestError("unknown beta header extended-cache-ttl-2025-04-11")
+    ) is True
+    assert _stream._is_extended_cache_rejection(
+        _PermissionDeniedError("beta extended_cache not enabled")
+    ) is True
+
+    # Right class but unrelated message → False
+    assert _stream._is_extended_cache_rejection(
+        _BadRequestError("rate limit exceeded")
+    ) is False
+
+    # Right keyword but unrelated class → False (keeps unrelated errors
+    # from being silently swallowed under fallback)
+    assert _stream._is_extended_cache_rejection(
+        ValueError("unknown beta header extended-cache-ttl-2025-04-11")
+    ) is False
+
+
+def test_strip_extended_cache_does_not_mutate_input():
+    mod = types.SimpleNamespace(Anthropic=lambda **kw: None)
+    ad = _stream.AnthropicAdapter(anthropic_module=mod)
+
+    request = {
+        "model":   "claude-sonnet-4-6",
+        "system":  [{
+            "type":          "text",
+            "text":          "ctx",
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+        }],
+        "extra_headers": {"anthropic-beta": "extended-cache-ttl-2025-04-11"},
+        "max_tokens": 8192,
+    }
+    stripped = ad._strip_extended_cache(request)
+
+    # Input untouched.
+    assert request["extra_headers"]["anthropic-beta"] == \
+        "extended-cache-ttl-2025-04-11"
+    assert request["system"][0]["cache_control"]["ttl"] == "1h"
+
+    # Output has the right shape.
+    assert "extra_headers" not in stripped
+    assert stripped["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert stripped["model"] == "claude-sonnet-4-6"

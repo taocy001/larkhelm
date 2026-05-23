@@ -126,6 +126,7 @@ class LarkhelmMetricsRegistry:
             self.doc_inject_cache_total = None
             self.file_downloads_total = None
             self.file_extract_errors_total = None
+            self.tokens_total = None
             return
 
         # Use a private registry so the larkhelm metrics don't collide with
@@ -223,6 +224,12 @@ class LarkhelmMetricsRegistry:
             "larkhelm_file_extract_errors_total",
             "File content extraction errors",
             ["ext", "error_type"],
+            registry=self._registry,
+        )
+        self.tokens_total = pc.Counter(
+            "larkhelm_tokens_total",
+            "Token usage per backend per kind",
+            ["backend", "kind"],
             registry=self._registry,
         )
 
@@ -507,6 +514,49 @@ def inc_file_extract_error(ext: str, error_type: str) -> None:
         safe_log(f"[Metrics] inc_file_extract_error failed (ext={ext}, error_type={error_type}): {e}")
 
 
+_TOKEN_KIND_TO_USAGE_KEY = (
+    ("input",        "input_tokens"),
+    ("output",       "output_tokens"),
+    ("cache_read",   "cache_read"),
+    ("cache_create", "cache_create"),
+)
+
+
+def inc_tokens(backend: str, usage: dict) -> None:
+    """Bump ``larkhelm_tokens_total{backend, kind}`` for one query.
+
+    ``usage`` must carry the keys produced by adapters / runners:
+      - ``input_tokens``  (int)
+      - ``output_tokens`` (int)
+      - ``cache_read``    (int)
+      - ``cache_create``  (int)
+
+    Missing / negative / non-int values coerce to 0 silently — the call
+    never raises and never increments by a negative number. Safe to call
+    when prometheus-client is missing (registry no-op).
+    """
+    reg = get_registry()
+    if not reg.available or reg.tokens_total is None:
+        return
+    if not isinstance(usage, dict):
+        return
+    for kind, key in _TOKEN_KIND_TO_USAGE_KEY:
+        raw = usage.get(key, 0)
+        try:
+            value = max(0, int(raw or 0))
+        except (TypeError, ValueError):
+            value = 0
+        if value == 0:
+            continue
+        try:
+            reg.tokens_total.labels(backend=str(backend), kind=kind).inc(value)
+        except Exception as e:
+            safe_log(
+                f"[Metrics] inc_tokens failed "
+                f"(backend={backend}, kind={kind}, value={value}): {e}"
+            )
+
+
 __all__ = [
     "PrometheusNotInstalled",
     "LarkhelmMetricsRegistry",
@@ -523,4 +573,5 @@ __all__ = [
     "inc_doc_inject_cache",
     "inc_file_download",
     "inc_file_extract_error",
+    "inc_tokens",
 ]

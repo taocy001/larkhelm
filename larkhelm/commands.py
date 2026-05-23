@@ -572,8 +572,14 @@ def _fmt_token_block(label: str, data: dict) -> str:
         # hit or free-tier) renders as "$0.0000" so the user can tell
         # apart "we don't know" from "we know it was free".
         cost_str = "—" if cost is None else f"${cost:.4f}"
+        # Single block per model: drop the redundant ``› **{model}**``
+        # prefix that previously sat on the hit-rate header (the prefix is
+        # already on the next line). The parenthesised ``（X%）`` in the
+        # detail row is intentionally retained — three audit regressions
+        # (cache-arithmetic / overlap cases) pin that exact substring.
         lines.append(
             f"› **{model}**  {calls} 次  合计 **{total:,}** tokens  费用 **{cost_str}**\n"
+            f"  缓存命中率 **{hit_pct}%**  写入比 **{create_pct}%**\n"
             f"  新输入 {inp:,}  输出 {out:,}\n"
             f"  缓存命中 {cr:,}（{hit_pct}%）  缓存写入 {cc:,}（{create_pct}%）"
         )

@@ -83,6 +83,7 @@ class _RuntimeConfig:
     CREW_BREAKPOINT_TIMEOUT_SEC: int
     # P2 toggles
     METRICS_TEXT_LEGACY:                bool = False
+    ANTHROPIC_EXTENDED_CACHE_ENABLED:   bool = True
     MEMORY_EXTRACT_BUFFER_WINDOW_SEC:   int = 0
     MEMORY_SESSION_SMART_COMPRESS:      bool = False
     MEMORY_GLOBAL_PROFILE_SLOT_ENABLED: bool = False
@@ -91,7 +92,7 @@ class _RuntimeConfig:
     RECENT_TURNS_CACHE_ENABLED:        bool = True
     MEMORY_LEGACY_CACHE_ENABLED:       bool = True
     DOC_INJECT_CACHE_ENABLED:          bool = True
-    DOC_INJECT_CACHE_TTL_SEC:          int = 60
+    DOC_INJECT_CACHE_TTL_SEC:          int = 300
     CLI_SKIP_RECENT_TURNS_WHEN_SID:    bool = True
     # File processing (M4.1)
     FILE_ENABLED:          bool = True
@@ -198,6 +199,7 @@ MEMORY_SESSION_LAYER_SMART: bool = True
 # so an unmigrated process (worker spawned before _init_runtime) sees the safe
 # fallback rather than an AttributeError.
 METRICS_TEXT_LEGACY: bool = False
+ANTHROPIC_EXTENDED_CACHE_ENABLED: bool = True
 MEMORY_EXTRACT_BUFFER_WINDOW_SEC: int = 0
 MEMORY_SESSION_SMART_COMPRESS: bool = False
 MEMORY_GLOBAL_PROFILE_SLOT_ENABLED: bool = False
@@ -228,7 +230,7 @@ DEV_STAGE_TIMEOUTS: "dict[str, int]" = {}
 RECENT_TURNS_CACHE_ENABLED: bool = True
 MEMORY_LEGACY_CACHE_ENABLED: bool = True
 DOC_INJECT_CACHE_ENABLED: bool = True
-DOC_INJECT_CACHE_TTL_SEC: int = 60
+DOC_INJECT_CACHE_TTL_SEC: int = 300
 CLI_SKIP_RECENT_TURNS_WHEN_SID: bool = True
 
 # ── File handling configuration ───────────────────────────────────────────
@@ -521,7 +523,8 @@ def _init_app_config() -> None:
     global HEALTH_ENDPOINT_PORT, HEALTH_BIND_ADDR
     global SESSION_LAYER_BUDGETS, MEMORY_CASCADE_MIDFLIGHT_CANCEL
     global QUERY_SESSION_V2_ENABLED, MEMORY_SESSION_LAYER_SMART
-    global METRICS_TEXT_LEGACY, MEMORY_EXTRACT_BUFFER_WINDOW_SEC
+    global METRICS_TEXT_LEGACY, ANTHROPIC_EXTENDED_CACHE_ENABLED
+    global MEMORY_EXTRACT_BUFFER_WINDOW_SEC
     global MEMORY_SESSION_SMART_COMPRESS
     global MEMORY_GLOBAL_PROFILE_SLOT_ENABLED, MEMORY_PROJECT_SECTION_ENABLED
     global QUERY_SESSION_V2_TRAFFIC, INTENT_EMBEDDING_THRESHOLD
@@ -889,12 +892,16 @@ def _init_app_config() -> None:
     # with P1 unless an operator explicitly opens the gate. ``setdefault``
     # preserves any operator override already in config.json.
     config.setdefault("metrics_text_legacy", False)
+    config.setdefault("anthropic_extended_cache_enabled", True)
     config.setdefault("memory_extract_buffer_window_sec", 0)
     config.setdefault("memory_session_smart_compress", False)
     config.setdefault("memory_global_profile_slot_enabled", False)
     config.setdefault("memory_project_section_enabled", False)
 
     METRICS_TEXT_LEGACY = bool(config.get("metrics_text_legacy", False))
+    ANTHROPIC_EXTENDED_CACHE_ENABLED = bool(
+        config.get("anthropic_extended_cache_enabled", True)
+    )
     try:
         MEMORY_EXTRACT_BUFFER_WINDOW_SEC = max(
             0, int(config.get("memory_extract_buffer_window_sec", 0) or 0),
@@ -999,7 +1006,7 @@ def _init_app_config() -> None:
     config.setdefault("recent_turns_cache_enabled", True)
     config.setdefault("memory_legacy_cache_enabled", True)
     config.setdefault("doc_inject_cache_enabled", True)
-    config.setdefault("doc_inject_cache_ttl_sec", 60)
+    config.setdefault("doc_inject_cache_ttl_sec", 300)
     config.setdefault("cli_skip_recent_turns_when_sid", True)
 
     RECENT_TURNS_CACHE_ENABLED = bool(
@@ -1013,10 +1020,10 @@ def _init_app_config() -> None:
     )
     try:
         DOC_INJECT_CACHE_TTL_SEC = max(
-            1, int(config.get("doc_inject_cache_ttl_sec", 60) or 60),
+            1, int(config.get("doc_inject_cache_ttl_sec", 300) or 300),
         )
     except (TypeError, ValueError):
-        DOC_INJECT_CACHE_TTL_SEC = 60
+        DOC_INJECT_CACHE_TTL_SEC = 300
     CLI_SKIP_RECENT_TURNS_WHEN_SID = bool(
         config.get("cli_skip_recent_turns_when_sid", True)
     )
@@ -1151,6 +1158,7 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         MEMORY_LIMIT_MB=MEMORY_LIMIT_MB,
         CREW_BREAKPOINT_TIMEOUT_SEC=CREW_BREAKPOINT_TIMEOUT_SEC,
         METRICS_TEXT_LEGACY=METRICS_TEXT_LEGACY,
+        ANTHROPIC_EXTENDED_CACHE_ENABLED=ANTHROPIC_EXTENDED_CACHE_ENABLED,
         MEMORY_EXTRACT_BUFFER_WINDOW_SEC=MEMORY_EXTRACT_BUFFER_WINDOW_SEC,
         MEMORY_SESSION_SMART_COMPRESS=MEMORY_SESSION_SMART_COMPRESS,
         MEMORY_GLOBAL_PROFILE_SLOT_ENABLED=MEMORY_GLOBAL_PROFILE_SLOT_ENABLED,

@@ -91,8 +91,9 @@ CLI --data-dir > LARKHELM_DATA_DIR env > /var/lib/larkhelm > ~/.local/share/lark
 | `recent_turns_cache_enabled` | P1 REQ-01：`_get_recent_turns` 走 LRU 缓存（key = chat_id + max_turns + max_chars + dedup_prefix_hash + all.jsonl mtime_ns + size），默认 `true`；flip `false` 直走原 tail-read 路径用于 bisect |
 | `memory_legacy_cache_enabled` | P1 REQ-02：memory `_layer_global / _layer_project / _layer_session` 走 LRU 缓存（key = layer + path + mtime_ns），默认 `true`；包含 `global_slots` / `project_sections` 两个独立 layer，单层 LRU 容量 128 |
 | `doc_inject_cache_enabled` | P1 REQ-03：`_inject_doc_context` 走 TTL 缓存（key = chat_id + doc_type + token + max_chars），默认 `true`；`DocPermissionError` 与 `DocError` 不入缓存（用户可现场授权重试）|
-| `doc_inject_cache_ttl_sec` | P1 REQ-03：TTL 秒数，floor `1`（`0` 视为关闭，回退到默认 60s），默认 `60` |
+| `doc_inject_cache_ttl_sec` | P1 REQ-03：TTL 秒数，floor `1`（`0` 视为关闭，回退到默认值）。默认 `300`；与 Anthropic 5min ephemeral cache TTL 同档对齐 |
 | `cli_skip_recent_turns_when_sid` | P1 REQ-04：CLI（claude/kimi/gemini）`sid` 非空时跳过 recent_turns 注入；`deepseek_api` 在 `load_history` 非空时同步跳过。默认 `true`；flip `false` 恢复每次注入（多花 ~500 input tokens / call）|
+| `anthropic_extended_cache_enabled` | bool 默认 `true`。Anthropic API 适配器请求时携带 `anthropic-beta: extended-cache-ttl-2025-04-11` header 并将 `cache_control.ttl` 升级为 `1h`；若该 beta 在该账号未开通而被拒，进程内自动回退到 5min ephemeral 并写一次 `[anthropic_api]` 调试日志，整进程不再重试。设为 `false` 强制保留 5min |
 
 > **超时层级说明**：
 > - `response_timeout`（软超时）：AI 响应无更新超过此时长，释放主锁但后台继续运行，默认 300s
@@ -504,6 +505,7 @@ if tl.startswith("/new_cmd"):
 | `larkhelm_query_duration_seconds` | Histogram | — | query 端到端延时（buckets: 0.5/1/2/5/10/30/60/120/300/600） |
 | `larkhelm_extract_buffer_flushes_total` | Counter | `trigger` | trigger∈{timer,capacity,manual,shutdown} |
 | `larkhelm_llm_router_circuit_state` | Gauge | `backend` | P3 REQ-04：memory_llm_router 断路器状态，0=closed / 1=half_open / 2=open |
+| `larkhelm_tokens_total` | Counter | `backend`,`kind` | 每次 `record_token_usage` 触发一次 4-bucket inc；kind ∈ {input, output, cache_read, cache_create}；backend 取调用方传入的 `model` 标识（CLI 是 `claude`/`gemini`/`kimi`/`deepseek`，API 流式是 `spec.model or spec.id`）|
 
 Prometheus scrape 配置示例：
 

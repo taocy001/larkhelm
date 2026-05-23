@@ -203,5 +203,44 @@ class TestInjectDocContext(unittest.TestCase):
         self.assertIn("---", result)
 
 
+class TestRunBackendSingleSidSkipsSystem(unittest.TestCase):
+    """REQ-05 regression: claude_cli with non-empty sid must NOT re-inject
+    system_prompt — the resumed session already carries that context, and
+    re-passing it on every turn multiplies prompt size linearly.
+    """
+
+    def test_cli_resumed_skips_system_prompt(self):
+        from larkhelm.handlers import _query as _q
+        from larkhelm.backend_registry import BackendSpec
+
+        spec = BackendSpec(
+            id="claude", provider="claude_cli", display_name="Claude",
+            role="orchestrator", tags=[], command="claude",
+            healthy=True, enabled=True,
+        )
+
+        captured_kwargs = {}
+
+        def _fake_run_claude(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return "stub-output"
+
+        with patch.object(_q, "_load_sid", return_value="sess-123"), \
+             patch("larkhelm.backend_cli.run_claude", side_effect=_fake_run_claude) as m:
+            out = _q._run_backend_single(
+                spec, "chat_x", "hello", cwd="/tmp",
+                cancel_ev=None, on_text=None, on_tool=None,
+                on_tool_result=None, on_soft_timeout=None,
+                recent_turns="some recent turns text",
+                extra_system="some system text",
+            )
+
+        self.assertEqual(out, "stub-output")
+        # system_prompt must be None on resumed CLI sessions, regardless of
+        # how juicy recent_turns / extra_system looked.
+        self.assertIs(captured_kwargs.get("system_prompt"), None)
+        self.assertEqual(m.call_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

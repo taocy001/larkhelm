@@ -146,3 +146,59 @@ def test_health_server_metrics_route_uses_registry(_force_legacy_off):
     assert captured["status"] == 200
     # The Prometheus exposition body always opens with a "# HELP" line.
     assert "# HELP larkhelm_backend_healthy" in captured["body"]
+
+
+# ── larkhelm_tokens_total Counter (P0+P1 caching audit) ───────────────────
+
+
+def test_tokens_total_counter_emits_4_buckets(_force_legacy_off):
+    pytest.importorskip("prometheus_client")
+    _met.inc_tokens(
+        "claude",
+        {
+            "input_tokens":  10,
+            "output_tokens": 20,
+            "cache_read":    100,
+            "cache_create":  5,
+        },
+    )
+    body = _met.render_exposition()
+    assert 'larkhelm_tokens_total{backend="claude",kind="input"} 10.0' in body
+    assert 'larkhelm_tokens_total{backend="claude",kind="output"} 20.0' in body
+    assert 'larkhelm_tokens_total{backend="claude",kind="cache_read"} 100.0' in body
+    assert 'larkhelm_tokens_total{backend="claude",kind="cache_create"} 5.0' in body
+
+
+def test_tokens_total_safe_when_prom_missing(_force_legacy_off, monkeypatch):
+    """inc_tokens must be a silent no-op when prometheus-client is absent."""
+    monkeypatch.setattr(_met, "_resolve_prom_client", lambda: None)
+    _met._reset_for_tests()
+    _met.inc_tokens(
+        "claude",
+        {
+            "input_tokens":  1,
+            "output_tokens": 2,
+            "cache_read":    3,
+            "cache_create":  4,
+        },
+    )
+    with pytest.raises(_met.PrometheusNotInstalled):
+        _met.render_exposition()
+
+
+def test_tokens_total_coerces_negative_and_garbage(_force_legacy_off):
+    pytest.importorskip("prometheus_client")
+    _met.inc_tokens(
+        "kimi",
+        {
+            "input_tokens":  -5,         # → 0
+            "output_tokens": "junk",     # → 0
+            "cache_read":    None,       # → 0
+            "cache_create":  7,
+        },
+    )
+    body = _met.render_exposition()
+    assert 'larkhelm_tokens_total{backend="kimi",kind="cache_create"} 7.0' in body
+    assert 'backend="kimi",kind="input"' not in body
+    assert 'backend="kimi",kind="output"' not in body
+    assert 'backend="kimi",kind="cache_read"' not in body

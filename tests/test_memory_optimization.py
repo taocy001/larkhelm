@@ -205,7 +205,14 @@ class AnthropicCacheControlTests(unittest.TestCase):
         self.assertEqual(len(sys_field), 1)
         blk = sys_field[0]
         self.assertEqual(blk["type"], "text")
-        self.assertEqual(blk["cache_control"], {"type": "ephemeral"})
+        # P0+P1 caching audit (2026-05-22): cache_control now defaults to
+        # the 1h ttl shape when ANTHROPIC_EXTENDED_CACHE_ENABLED (default
+        # True) and the process-wide fallback flag is False. Accept either
+        # shape so the assertion survives the operator toggling extended
+        # cache off via config.json.
+        cc = blk["cache_control"]
+        self.assertEqual(cc["type"], "ephemeral")
+        self.assertIn(cc.get("ttl"), (None, "1h"))
         self.assertIn("some-memory-blob", blk["text"])
 
     def test_no_system_no_field(self):

@@ -90,3 +90,43 @@ def test_unknown_keys_allowed():
     schema = _load_schema()
     # additionalProperties: true → unknown keys validate.
     jsonschema.validate({"my_custom_key": "anything"}, schema)
+
+
+# ── Default-value regression: P0+P1 caching audit (2026-05-22) ───────────
+
+
+def test_doc_inject_cache_ttl_default_300(tmp_path):
+    """An empty operator config must resolve to TTL=300s — aligned with
+    Anthropic 5min ephemeral cache. Previously was 60s.
+    """
+    import larkhelm.config as _cfg
+
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({"APP_ID": "x", "APP_SECRET": "x"}))
+    _cfg._init_runtime(config_path=str(cfg_file), data_dir=str(tmp_path))
+    assert _cfg.DOC_INJECT_CACHE_TTL_SEC == 300
+
+
+def test_anthropic_extended_cache_default_true(tmp_path):
+    """The 1h Anthropic extended-cache opt-in defaults to ON for any
+    operator who hasn't pinned it. A first-call rejection auto-disables
+    process-wide, so leaving the toggle on is safe."""
+    import larkhelm.config as _cfg
+
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({"APP_ID": "x", "APP_SECRET": "x"}))
+    _cfg._init_runtime(config_path=str(cfg_file), data_dir=str(tmp_path))
+    assert _cfg.ANTHROPIC_EXTENDED_CACHE_ENABLED is True
+
+
+def test_anthropic_extended_cache_opt_out_honoured(tmp_path):
+    """A pinned ``false`` survives _init_app_config."""
+    import larkhelm.config as _cfg
+
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({
+        "APP_ID": "x", "APP_SECRET": "x",
+        "anthropic_extended_cache_enabled": False,
+    }))
+    _cfg._init_runtime(config_path=str(cfg_file), data_dir=str(tmp_path))
+    assert _cfg.ANTHROPIC_EXTENDED_CACHE_ENABLED is False

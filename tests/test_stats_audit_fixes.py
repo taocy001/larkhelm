@@ -1601,5 +1601,45 @@ class TestCmdStatsCrewAgentsLine(unittest.TestCase):
         )
 
 
+class TestFmtTokenBlockHitRateHeader(unittest.TestCase):
+    """P0+P1 caching audit (2026-05-22):  /stats output must surface a
+    "缓存命中率 X% 写入比 Y%" line per model so operators can grep and so
+    cache regressions are visible without parsing the multi-line block.
+    """
+
+    def test_fmt_token_block_renders_hit_rate_header(self):
+        from larkhelm.commands import _fmt_token_block
+
+        stats = {
+            "claude": {
+                "input_tokens":  1000,
+                "output_tokens": 500,
+                "cache_read":    9000,
+                "cache_create":  100,
+                "calls":         3,
+                "cost_usd":      0.05,
+            }
+        }
+        body = _fmt_token_block("测试", stats)
+
+        # The header line must surface both labels.
+        self.assertIn("缓存命中率", body)
+        self.assertIn("写入比", body)
+        # cr / (cr + inp) = 9000 / 10000 = 90%
+        self.assertIn("缓存命中率 **90%**", body)
+        # cc / (cr + inp) = 100 / 10000 = 1%
+        self.assertIn("写入比 **1%**", body)
+        # Original detail line must still be present (regression guard).
+        self.assertIn("合计 **10,600**", body)
+
+    def test_fmt_token_block_empty_data_unchanged(self):
+        """Empty data path must remain byte-identical (no hit-rate spam)."""
+        from larkhelm.commands import _fmt_token_block
+
+        body = _fmt_token_block("空", {})
+        self.assertEqual(body, "**空** — 暂无数据")
+        self.assertNotIn("缓存命中率", body)
+
+
 if __name__ == "__main__":
     unittest.main()
