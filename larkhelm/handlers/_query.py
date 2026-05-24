@@ -634,6 +634,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
         # Resolve backend early (pure registry lookup, no network) so the initial card
         # shows the correct model name instead of the legacy default_model value.
         m_name = {"claude": "Claude", "gemini": "Gemini", "kimi": "Kimi", "deepseek": "DeepSeek"}.get(model, model.capitalize())
+        _early_spec = None  # pre-initialise; used by the recent_turns skip gate below
         try:
             from larkhelm.router import resolve_backend as _early_resolve
             from larkhelm.backend_registry import BACKEND_REGISTRY as _early_reg
@@ -824,30 +825,51 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             recent_turns_list: list[str] = []
             try:
                 from larkhelm.log import _get_recent_turns
-                # Compute a dedup_prefix from the session memory's Work
-                # Context slot so summarised content doesn't double-inject
-                # into the orchestrator. Any failure (memory not loaded,
-                # parse miss) cleanly degrades to ``dedup_prefix=None`` →
-                # byte-compatible with the PR-prior behaviour.
-                _dedup_prefix: str | None = None
-                try:
-                    from larkhelm.memory import load_memory
-                    from larkhelm.memory_context import extract_work_context
-                    _session_raw = load_memory(chat_id)
-                    _wc = extract_work_context(_session_raw)
-                    _dedup_prefix = _wc or None
-                except Exception as _wc_err:
-                    _debug_log(f"[{trace_id}][DoQuery] work_context extract error: {_wc_err}")
-                    _dedup_prefix = None
-                try:
-                    _raw_recent = _get_recent_turns(chat_id, dedup_prefix=_dedup_prefix) or ""
-                except Exception as _rt_err:
-                    _debug_log(f"[{trace_id}][DoQuery] dedup recent_turns error: {_rt_err}, retrying without prefix")
-                    _raw_recent = _get_recent_turns(chat_id) or ""
-                if _raw_recent:
-                    recent_turns_list = [
-                        ln for ln in _raw_recent.splitlines() if ln.strip()
-                    ]
+                # P1 REQ-04 fast-path: skip the 100 KB tail-read entirely when the
+                # target backend is a resumed CLI session.  ``_maybe_drop_recent_turns_for_cli``
+                # would drop the result anyway (system_prompt is None for --resume),
+                # so we save the disk I/O up-front.  _early_spec was resolved above
+                # (None when routing failed → fall through to the normal read path).
+                _skip_recent_turns = False
+                if bool(getattr(_cfg, "CLI_SKIP_RECENT_TURNS_WHEN_SID", True)):
+                    try:
+                        _cli_providers = {"claude_cli", "gemini_cli", "kimi_cli"}
+                        if (_early_spec is not None
+                                and _early_spec.provider in _cli_providers
+                                and _load_sid(chat_id, _early_spec.id)):
+                            _skip_recent_turns = True
+                            _debug_log(
+                                f"[Cache] {_early_spec.provider} skip recent_turns "
+                                f"pre-read chat={chat_id[:8]} sid present"
+                            )
+                    except Exception:
+                        pass
+
+                if not _skip_recent_turns:
+                    # Compute a dedup_prefix from the session memory's Work
+                    # Context slot so summarised content doesn't double-inject
+                    # into the orchestrator. Any failure (memory not loaded,
+                    # parse miss) cleanly degrades to ``dedup_prefix=None`` →
+                    # byte-compatible with the PR-prior behaviour.
+                    _dedup_prefix: str | None = None
+                    try:
+                        from larkhelm.memory import load_memory
+                        from larkhelm.memory_context import extract_work_context
+                        _session_raw = load_memory(chat_id)
+                        _wc = extract_work_context(_session_raw)
+                        _dedup_prefix = _wc or None
+                    except Exception as _wc_err:
+                        _debug_log(f"[{trace_id}][DoQuery] work_context extract error: {_wc_err}")
+                        _dedup_prefix = None
+                    try:
+                        _raw_recent = _get_recent_turns(chat_id, dedup_prefix=_dedup_prefix) or ""
+                    except Exception as _rt_err:
+                        _debug_log(f"[{trace_id}][DoQuery] dedup recent_turns error: {_rt_err}, retrying without prefix")
+                        _raw_recent = _get_recent_turns(chat_id) or ""
+                    if _raw_recent:
+                        recent_turns_list = [
+                            ln for ln in _raw_recent.splitlines() if ln.strip()
+                        ]
             except Exception as _hist_err:
                 _debug_log(f"[{trace_id}][DoQuery] rolling history error: {_hist_err}")
 

@@ -190,16 +190,21 @@ class CachedRecentTurnsTests(unittest.TestCase):
         self.assertEqual(calls[0], 2)
         self.assertNotEqual(a, b)
 
-    def test_dedup_prefix_changes_key(self):
+    def test_dedup_prefix_excluded_from_key(self):
+        # dedup_prefix is intentionally NOT part of the cache key (see
+        # RecentTurnsKey docstring).  Two calls with different dedup_prefix
+        # values but the same (chat_id, max_turns, max_chars, mtime, size)
+        # should share the same cache entry — the second call is a hit.
         calls = [0]
 
         def loader():
             calls[0] += 1
             return f"v{calls[0]}"
 
-        cc.cached_recent_turns("chatA", 6, 2000, "prefix-A", loader=loader)
-        cc.cached_recent_turns("chatA", 6, 2000, "prefix-B", loader=loader)
-        self.assertEqual(calls[0], 2, "different dedup_prefix → different key")
+        a = cc.cached_recent_turns("chatA", 6, 2000, "prefix-A", loader=loader)
+        b = cc.cached_recent_turns("chatA", 6, 2000, "prefix-B", loader=loader)
+        self.assertEqual(calls[0], 1, "same mtime → second call is a cache hit")
+        self.assertEqual(a, b, "same cached payload returned for both calls")
 
     def test_lru_eviction_when_capacity_exceeded(self):
         # Reach into the singleton to test capacity behaviour deterministically.

@@ -57,9 +57,13 @@ class RecentTurnsKey:
     chat_id: str
     max_turns: int
     max_chars: int
-    dedup_prefix_hash: str
     jsonl_mtime_ns: int
     jsonl_size: int
+    # NOTE: dedup_prefix_hash intentionally excluded from the key.
+    # The dedup filter is cheap (in-memory substring scan) and is applied
+    # INSIDE the loader; removing it from the key lets the exception-retry
+    # path in _query.py (line 843 → 846, dedup_prefix=P → None) share the
+    # same cache entry as the primary call — avoiding a second 100 KB read.
 
 
 @dataclass(frozen=True)
@@ -413,11 +417,16 @@ def cached_recent_turns(
 
       * ``chat_id`` — turns are per-chat by construction.
       * ``max_turns`` / ``max_chars`` — caller-controlled limits.
-      * ``dedup_prefix_hash`` — 8-byte blake2b so a 400-char Work Context
-        slot doesn't bloat the key.
       * ``jsonl_mtime_ns`` + ``jsonl_size`` — the only signal larkhelm
         sees when a new turn arrives. ext4/xfs preserve both on each
         ``log_entry`` append, so any new write invalidates the entry.
+
+    ``dedup_prefix`` is intentionally NOT part of the key: it is applied
+    inside the loader and its effect is cheap (substring scan on in-memory
+    strings).  Excluding it from the key means the exception-retry path in
+    ``_query.py`` (``dedup_prefix=P`` → exception → ``dedup_prefix=None``)
+    can share the same cache slot as the primary call instead of doing a
+    second 100 KB tail-read.
 
     Cache disabled (config flag off) → directly returns ``loader()``;
     no metric, no debug log.
@@ -436,7 +445,6 @@ def cached_recent_turns(
         chat_id=chat_id,
         max_turns=int(max_turns),
         max_chars=int(max_chars),
-        dedup_prefix_hash=_dedup_hash(dedup_prefix),
         jsonl_mtime_ns=mtime_ns,
         jsonl_size=size,
     )
