@@ -212,8 +212,85 @@ class DefaultRegistrationsTests(unittest.TestCase):
         # /doc was retired in commit 7c9845c (方案B) — no longer in the registry.
         for expected in ("/status", "/help", "/reset", "/run", "/cd", "/ls",
                          "/dev", "/crew", "/plan", "/memory", "/cron",
-                         "/model", "/voice"):
+                         "/model", "/lock", "/voice"):
             self.assertIn(expected, names, f"{expected} missing from default registry")
+
+
+class CommandSpecMetadataTests(unittest.TestCase):
+    """P1-2a: CommandSpec.description / examples (pure metadata, no dispatch impact)."""
+
+    def test_metadata_defaults_empty(self):
+        spec = CommandSpec(name="/x", handler=lambda c: None)
+        self.assertEqual(spec.description, "")
+        self.assertEqual(spec.examples, ())
+
+    def test_default_registrations_all_have_description(self):
+        from larkhelm.command_registry import COMMAND_REGISTRY
+        missing = [s.name for s in COMMAND_REGISTRY._ordered if not s.description]
+        self.assertEqual(missing, [],
+                         f"specs missing description: {missing}")
+
+    def test_default_registrations_examples_threshold(self):
+        from larkhelm.command_registry import COMMAND_REGISTRY
+        n_with_examples = sum(1 for s in COMMAND_REGISTRY._ordered if s.examples)
+        self.assertGreaterEqual(
+            n_with_examples, 13,
+            f"PRD REQ-06 requires >=13 specs with examples; got {n_with_examples}",
+        )
+
+    def test_three_commands_have_examples_metadata(self):
+        from larkhelm.command_registry import COMMAND_REGISTRY
+        for name in ("/dev", "/cron", "/memory"):
+            spec = COMMAND_REGISTRY.lookup(name)
+            self.assertIsNotNone(spec, f"{name} must be registered")
+            self.assertGreaterEqual(
+                len(spec.examples), 1,
+                f"{name} must carry at least 1 example",
+            )
+
+    def test_dispatch_ignores_new_metadata(self):
+        """Two specs identical except for description/examples must behave
+        byte-identically in matches() / extract_args() / dispatch()."""
+        calls_a: list[str] = []
+        calls_b: list[str] = []
+
+        def _h_a(ctx: DispatchContext) -> None:
+            calls_a.append(ctx.raw_args)
+
+        def _h_b(ctx: DispatchContext) -> None:
+            calls_b.append(ctx.raw_args)
+
+        spec_bare = CommandSpec(
+            name="/probe", handler=_h_a, match_kind="prefix",
+        )
+        spec_meta = CommandSpec(
+            name="/probe", handler=_h_b, match_kind="prefix",
+            description="probe handler — should not affect dispatch",
+            examples=("/probe foo", "/probe bar baz"),
+        )
+
+        # matches() parity
+        for tl in ("/probe", "/probe foo", "/probe foo bar", "/probex", ""):
+            self.assertEqual(spec_bare.matches(tl), spec_meta.matches(tl),
+                             f"matches({tl!r}) diverged")
+
+        # extract_args() parity
+        for text in ("/probe", "/probe foo", "/probe  foo bar", "/PROBE Foo"):
+            self.assertEqual(spec_bare.extract_args(text),
+                             spec_meta.extract_args(text),
+                             f"extract_args({text!r}) diverged")
+
+        # dispatch() parity: two registries, one spec each.
+        reg_a = CommandRegistry()
+        reg_a.register(spec_bare)
+        reg_b = CommandRegistry()
+        reg_b.register(spec_meta)
+        for text in ("/probe foo", "/probe alpha beta"):
+            r_a = reg_a.dispatch(_ctx(text))
+            r_b = reg_b.dispatch(_ctx(text))
+            self.assertEqual(r_a, r_b, f"dispatch({text!r}) result diverged")
+        self.assertEqual(calls_a, calls_b,
+                         "handler invocations diverged between bare and meta specs")
 
 
 if __name__ == "__main__":

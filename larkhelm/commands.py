@@ -44,6 +44,128 @@ from larkhelm.card_builder import _make_card, _fmt_elapsed
 
 
 # ═══════════════════════════════════════════════════
+#  /help renderer (P1-2b/P1-2c — data-driven)
+# ═══════════════════════════════════════════════════
+
+# Static narrative blocks. Indexed by key from ``_HELP_LAYOUT``.
+# Splitting these out (rather than hardcoding inside _cmd_help) lets
+# tests monkey-patch a single section, and lets future plugins inject
+# / swap a section without touching the render function.
+_HELP_STATIC_SECTIONS: dict[str, str] = {
+    "intro": "发消息直接提问，命令均以 `/` 开头",
+    "decision_tree": (
+        "**🧭 任务怎么选**\n"
+        "💬 直接发消息 — 单轮问答 / 闲聊 / 代码片段解释\n"
+        "🛠 **/dev** <需求> — 软件工程流水线（PM→架构→工程→QA→审查），产物通常一次 commit\n"
+        "🤖 **/crew** <需求> — 动态规划，Manager 自动分解任务多 Agent 并行\n"
+        "📋 **/plan** — 多阶段串行：`[dev]` `[review]` `[fix]` `[test]`，每步确认；支持飞书文档 URL\n"
+        "💡 不确定时 → 直接发消息让 AI 判断"
+    ),
+    "separator": "---",
+    "model_shortcuts": (
+        "**🎯 与指定模型对话**\n"
+        "**/c <消息>** — Claude\n"
+        "**/g <消息>** — Gemini\n"
+        "**/k <消息>** — Kimi\n"
+        "**/d <消息>** — DeepSeek"
+    ),
+    "reset_detail": (
+        "**♻️ 重置细分**\n"
+        "**/reset** claude | gemini | kimi | deepseek — 单独重置某 backend 会话\n"
+        "**/reset perm** — 权限审批\n"
+        "**/reset memory** — 清除会话记忆（全局/项目保留）"
+    ),
+    "memory_detail": (
+        "**🧠 记忆系统**（每 10 轮自动从对话中提取，无需手工维护）\n"
+        "**/memory** — 查看三层（全局/项目/会话）\n"
+        "**/memory observe** — 容量与健康度\n"
+        "**/memory set** global | project <内容> — 手动覆盖偏好/项目记忆\n"
+        "**/memory update** — 立即触发摘要 + 抽取\n"
+        "**/memory clear** session | project | global | all — 清除指定记忆层\n"
+        "**/memory list** — 列出记忆文件\n"
+        "**/memory gc [天数] [apply]** — 清理过期记忆\n"
+        "**/memory export** — 导出记忆 zip\n"
+        "**/memory import [file_key]** — 导入记忆 zip"
+    ),
+    "doc_section": (
+        "**📄 飞书文档**\n"
+        "**读** — 在消息里粘贴 `docx` / `wiki` / `sheets` URL，bridge 自动读取并注入上下文\n"
+        "**写** — 终端跑 `larkhelm doc create|append|write`；或开启智能编排后由 DocAgent 自动接管"
+    ),
+}
+
+# Ordered layout descriptor. Each entry is either:
+#   ("static", key)                              → emit _HELP_STATIC_SECTIONS[key]
+#   ("group", title, rows)                       → render a titled group
+# where each row is either a registry name (str) — looked up at render
+# time so the renderer always reflects ``COMMAND_REGISTRY`` — or a
+# (name, fallback_desc) tuple for commands handled in handlers/_message.py
+# (per design.md D1 — those don't belong in the registry).
+_HELP_LAYOUT: tuple = (
+    ("static", "intro"),
+    ("static", "decision_tree"),
+    ("static", "separator"),
+    ("group", "🚀 常用", (
+        "/reset",
+        ("/cancel", "取消当前查询"),
+        "/cd", "/pwd", "/ls", "/run", "/pickup", "/status",
+        ("/rename", "命名当前会话"),
+        "/history", "/stats",
+        "/help",
+    )),
+    ("static", "model_shortcuts"),
+    ("group", "🔒 Backend 锁定", ("/model", "/lock")),
+    ("static", "reset_detail"),
+    ("static", "memory_detail"),
+    ("static", "doc_section"),
+    ("group", "📦 其他命令", (
+        "/voice", "/cron",
+        ("/btw", "快问，不占主锁"),
+        "/upgrade",
+    )),
+)
+
+
+def _render_help_body() -> str:
+    """Compose the /help card body from ``_HELP_LAYOUT`` + ``COMMAND_REGISTRY``.
+
+    Pure function — no I/O, no chat_id. Hidden / unregistered rows are
+    silently skipped; a group whose rows all vanish drops its title too.
+    Truncates with a trailing hint if length reaches MAX_CARD_LEN.
+    """
+    from larkhelm.command_registry import COMMAND_REGISTRY
+
+    parts: list[str] = []
+    for sec in _HELP_LAYOUT:
+        kind = sec[0]
+        if kind == "static":
+            parts.append(_HELP_STATIC_SECTIONS[sec[1]])
+            continue
+        # group
+        _, title, rows = sec
+        rendered_rows: list[str] = []
+        for row in rows:
+            if isinstance(row, str):
+                spec = COMMAND_REGISTRY.lookup(row)
+                if spec is None or spec.hidden:
+                    continue
+                desc = spec.description or "（无描述）"
+                rendered_rows.append(f"**{spec.name}** — {desc}")
+            else:
+                name, fallback_desc = row
+                rendered_rows.append(f"**{name}** — {fallback_desc}")
+        if not rendered_rows:
+            continue
+        parts.append(f"**{title}**\n" + "\n".join(rendered_rows))
+
+    body = "\n\n".join(parts)
+    max_len = getattr(_cfg, "MAX_CARD_LEN", 3000)
+    if len(body) >= max_len:
+        body = body[: max_len - 100] + "\n\n...（命令清单已截断，请查看 README）"
+    return body
+
+
+# ═══════════════════════════════════════════════════
 #  Shell command execution
 # ═══════════════════════════════════════════════════
 
@@ -67,14 +189,16 @@ def _run_shell(chat_id: str, cmd: str) -> tuple[str, str, int]:
         return "", f"命令格式错误: {e}", 1
     safe_env = {k: v for k, v in _os.environ.items()
                 if not any(s in k.upper() for s in _SENSITIVE_ENV_PREFIXES)}
+    # P3-a (W17): timeout is configurable via `shell_timeout_sec`; defaults to 30s.
+    timeout_s = int(getattr(_cfg, "SHELL_TIMEOUT", 30) or 30)
     try:
         r = subprocess.run(
             args, shell=False, capture_output=True, text=True,
-            timeout=30, cwd=cwd, env=safe_env
+            timeout=timeout_s, cwd=cwd, env=safe_env
         )
         return r.stdout, r.stderr, r.returncode
     except subprocess.TimeoutExpired:
-        return "", "命令超时（>30s）", -1
+        return "", f"命令超时（>{timeout_s}s）", -1
     except Exception as e:
         return "", str(e), -1
 
@@ -353,64 +477,7 @@ def _cmd_status(chat_id: str, msg_id: str = None):
 
 
 def _cmd_help(chat_id: str, msg_id: str = None):
-    body = (
-        "发消息直接提问，命令均以 `/` 开头\n"
-        "\n"
-        "**🧭 任务怎么选**\n"
-        "💬 直接发消息 — 单轮问答 / 闲聊 / 代码片段解释\n"
-        "🛠 **/dev** <需求> — 软件工程流水线（PM→架构→工程→QA→审查），产物通常一次 commit\n"
-        "🤖 **/crew** <需求> — 动态规划，Manager 自动分解任务多 Agent 并行\n"
-        "📋 **/plan** — 多阶段串行：`[dev]` `[review]` `[fix]` `[test]`，每步确认；支持飞书文档 URL\n"
-        "💡 不确定时 → 直接发消息让 AI 判断\n"
-        "\n"
-        "---\n"
-        "\n"
-        "**🚀 常用**\n"
-        "**/reset** — 重置会话\n"
-        "**/cancel** — 取消当前查询\n"
-        "**/cd 路径** — 切换目录\n"
-        "**/pwd** — 当前目录\n"
-        "**/ls [路径]** — 列目录\n"
-        "**/run 命令** — 执行 Shell（30s）\n"
-        "**/pickup** — 终端接力\n"
-        "**/status** — 运行状态\n"
-        "**/rename <名称>** — 命名会话\n"
-        "**/history [all]** — 最近 10 条记录\n"
-        "**/stats** — 今日统计\n"
-        "\n"
-        "**🎯 与指定模型对话**\n"
-        "**/c <消息>** — Claude\n"
-        "**/g <消息>** — Gemini\n"
-        "**/k <消息>** — Kimi\n"
-        "**/d <消息>** — DeepSeek\n"
-        "\n"
-        "**🔒 Backend 锁定**\n"
-        "**/lock** — 列出所有 backend 及健康状态\n"
-        "**/lock <id>** — 持久锁定某个 backend\n"
-        "**/lock off** — 解锁\n"
-        "\n"
-        "**♻️ 重置细分**\n"
-        "**/reset** claude | gemini | kimi | deepseek — 单独重置某 backend 会话\n"
-        "**/reset perm** — 权限审批\n"
-        "**/reset memory** — 清除会话记忆（全局/项目保留）\n"
-        "\n"
-        "**🧠 记忆系统**（每 10 轮自动从对话中提取，无需手工维护）\n"
-        "**/memory** — 查看三层（全局/项目/会话）\n"
-        "**/memory observe** — 容量与健康度\n"
-        "**/memory set** global | project <内容> — 手动覆盖偏好/项目记忆\n"
-        "**/memory update** — 立即触发摘要 + 抽取\n"
-        "**/memory clear** session | project | global | all — 清除指定记忆层\n"
-        "**/memory list** — 列出记忆文件\n"
-        "**/memory gc [天数] [apply]** — 清理过期记忆\n"
-        "**/memory export** — 导出记忆 zip\n"
-        "**/memory import [file_key]** — 导入记忆 zip\n"
-        "\n"
-        "**📦 其他命令**\n"
-        "**/voice** [status|lang …] — 语音转写设置\n"
-        "**/cron** add | list | del — 定时任务\n"
-        "**/btw** <问题> — 快问，不占主锁\n"
-        "**/upgrade** — 更新 larkhelm"
-    )
+    body = _render_help_body()
     send_card_reply(chat_id, msg_id, "📖 帮助", body, color="blue", normalize=False)
 
 
@@ -878,7 +945,20 @@ def _cmd_cron(chat_id: str, args: str, msg_id: str = None):
             return
         lines = []
         for c in crons:
-            lines.append(f"**`{c['id']}`** `{c['expr']}` [{c['model']}]\n{c['query'][:60]}")
+            block = f"**`{c['id']}`** `{c['expr']}` [{c['model']}]\n{c['query'][:60]}"
+            last_at = c.get("last_run_at", "")
+            last_status = c.get("last_run_status", "")
+            if not last_at or not last_status:
+                status_line = "上次：从未执行"
+            else:
+                icon = "✅" if last_status == "ok" else "❌"
+                status_line = f"上次：{icon} {last_at}"
+                if last_status == "error":
+                    last_error = c.get("last_error", "")
+                    if last_error:
+                        status_line += f"（{last_error[:60]}）"
+            block += f"\n{status_line}"
+            lines.append(block)
         send_card_reply(chat_id, msg_id, f"⏰ 定时任务（{len(crons)} 条）",
                         "\n\n---\n\n".join(lines), color="blue")
         return
@@ -1779,6 +1859,104 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open
                     lines.append(f"**上次 GC：** {last_gc}")
             except Exception as inner:
                 _debug_log(f"[memory status] stale summary failed: {inner}")
+
+            # P1-1c: observability triad — cascade breaker / L2 fallback /
+            # cron health. Three independent try/except blocks so a single
+            # inner failure degrades only that row to "n/a" without
+            # affecting the other two (PRD §3 REQ-05 partial-failure
+            # isolation). All imports are lazy so the existing /memory
+            # status path stays cheap when these subsystems are absent.
+
+            # 1) Cascade 断路器
+            try:
+                from larkhelm.metrics import (
+                    get_registry as _obs_get_registry,
+                    is_prometheus_available as _obs_prom_ok,
+                )
+                from larkhelm.memory_llm_router import (
+                    circuit_state as _obs_circuit_state,
+                )
+                if not _obs_prom_ok():
+                    lines.append("**Cascade 断路器：** n/a")
+                else:
+                    state = _obs_circuit_state()
+                    emoji = {"closed": "✅", "half_open": "⚠️ ",
+                             "open": "🔥"}.get(state, "❓")
+                    exhausted = int(_obs_get_registry()
+                                    .cascade_backoff_exhausted_total
+                                    ._value.get())
+                    lines.append(
+                        f"**Cascade 断路器：** {emoji}{state}"
+                        f"（backoff exhausted: {exhausted} 次）"
+                    )
+            except Exception as inner:
+                _debug_log(f"[memory status] cascade breaker line failed: {inner}")
+                lines.append("**Cascade 断路器：** n/a")
+
+            # 2) L2 fallback
+            try:
+                from larkhelm.metrics import (
+                    get_registry as _obs_get_registry,
+                    is_prometheus_available as _obs_prom_ok,
+                )
+                if not _obs_prom_ok():
+                    lines.append("**L2 fallback：** n/a")
+                else:
+                    reg = _obs_get_registry()
+                    fall = int(reg.intent_l2_fallback_total._value.get())
+                    total = 0
+                    for _m in reg.intent_layer_total.collect():
+                        for _s in _m.samples:
+                            # ignore the sibling ``_created`` sample
+                            if (_s.name.endswith("_total")
+                                    and _s.labels.get("outcome") == "hit"):
+                                total += int(_s.value)
+                    if total > 0:
+                        pct = round(100 * fall / total)
+                        lines.append(
+                            f"**L2 fallback：** {fall} / {total} ({pct}%)"
+                        )
+                    else:
+                        lines.append(f"**L2 fallback：** {fall} / 0 (n/a)")
+            except Exception as inner:
+                _debug_log(f"[memory status] l2 fallback line failed: {inner}")
+                lines.append("**L2 fallback：** n/a")
+
+            # 3) Cron 健康度 — independent of prometheus; reads chat_state.
+            # Lock window only covers the shallow copy; aggregation runs
+            # lock-free (PRD §4 non-functional).
+            try:
+                from larkhelm.chat_state import (
+                    _state_lock as _obs_state_lock,
+                    _chat_state_store as _obs_store,
+                )
+                with _obs_state_lock:
+                    snapshot = [
+                        dict(entry)
+                        for st_dict in _obs_store.values()
+                        for entry in st_dict.get("crons", [])
+                    ]
+                ok = err = never = 0
+                for entry in snapshot:
+                    status_ = entry.get("last_run_status", "")
+                    if status_ == "ok":
+                        ok += 1
+                    elif status_ == "error":
+                        err += 1
+                    else:
+                        never += 1
+                total_cron = ok + err + never
+                if total_cron == 0:
+                    lines.append("**Cron 健康度：** 无 cron 任务")
+                else:
+                    lines.append(
+                        f"**Cron 健康度：** ✅{ok} · ❌{err} · ❓{never}"
+                        f"（共 {total_cron} 条）"
+                    )
+            except Exception as inner:
+                _debug_log(f"[memory status] cron health line failed: {inner}")
+                lines.append("**Cron 健康度：** n/a")
+
             if st['chats']:
                 lines.append("\n**各 Chat 摘要：**")
                 for c in st['chats'][:10]:

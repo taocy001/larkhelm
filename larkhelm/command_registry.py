@@ -14,6 +14,10 @@ don't generalise. Everything else lives here.
 Imports are deliberately lazy (inside handlers / inside ``_default_registrations``)
 so importing this module never drags in commands.py / doc_handlers.py / crew —
 keeping ``handlers/_message.py`` import time minimal.
+
+``CommandSpec.description`` / ``examples`` field semantics and the
+recommended workflow for adding a new command are documented in
+CLAUDE.md §"Adding a New Command".
 """
 from __future__ import annotations
 
@@ -67,6 +71,15 @@ class CommandSpec:
     ``run_async=True`` wraps the handler in a daemon thread, surrounded by
     ``_thread_error_card(chat_id, thread_label, exc)``. Use for any
     handler that may block on I/O for more than ~1s.
+
+    ``description`` is a ≤80-character one-line summary of the command
+    (single source of truth for future help renderers — must read like
+    the README "聊天命令" section). ``examples`` is 0–3 paste-ready
+    usage samples (each ≤120 chars, no placeholders like ``<path>``,
+    no embedded newlines / ``\\r``). Both fields are pure metadata —
+    ``dispatch`` / ``matches`` / ``extract_args`` never read them. They
+    exist for the upcoming ``/help`` auto-renderer and third-party
+    plugins.
     """
     name: str
     handler: Callable[[DispatchContext], None]
@@ -77,6 +90,8 @@ class CommandSpec:
     run_async: bool = False
     thread_label: str = ""
     hidden: bool = False
+    description: str = ""
+    examples: tuple[str, ...] = ()
 
     # ── matching ───────────────────────────────────────────────────
 
@@ -238,6 +253,8 @@ def register_simple(
     run_async: bool = False,
     thread_label: str = "",
     hidden: bool = False,
+    description: str = "",
+    examples: tuple[str, ...] = (),
 ) -> None:
     COMMAND_REGISTRY.register(CommandSpec(
         name=name,
@@ -249,6 +266,8 @@ def register_simple(
         run_async=run_async,
         thread_label=thread_label,
         hidden=hidden,
+        description=description,
+        examples=examples,
     ))
 
 
@@ -300,28 +319,34 @@ def _default_registrations() -> None:
             "/reset claude", "/reset gemini", "/reset kimi", "/reset deepseek",
             "/reset permissions", "/reset perm", "/reset memory",
         ),
+        description="重置会话（按子命令清除指定 backend / 权限 / 记忆）",
+        examples=("/reset", "/reset claude", "/reset memory"),
     ))
 
     # ── /status / /help / /pickup / /upgrade ───────────────────────
     def _h_status(ctx: DispatchContext) -> None:
         from larkhelm.commands import _cmd_status
         _cmd_status(ctx.chat_id, ctx.msg_id)
-    register_simple("/status", _h_status)
+    register_simple("/status", _h_status,
+                    description="查看服务运行状态：版本 / session ID / backend 健康")
 
     def _h_help(ctx: DispatchContext) -> None:
         from larkhelm.commands import _cmd_help
         _cmd_help(ctx.chat_id, ctx.msg_id)
-    register_simple("/help", _h_help)
+    register_simple("/help", _h_help,
+                    description="显示命令帮助卡片")
 
     def _h_pickup(ctx: DispatchContext) -> None:
         from larkhelm.commands import _cmd_pickup
         _cmd_pickup(ctx.chat_id, ctx.msg_id)
-    register_simple("/pickup", _h_pickup)
+    register_simple("/pickup", _h_pickup,
+                    description="获取在终端接力当前 Claude / Gemini / Kimi 会话的命令")
 
     def _h_upgrade(ctx: DispatchContext) -> None:
         from larkhelm.commands import _cmd_upgrade
         _cmd_upgrade(ctx.chat_id, ctx.msg_id)
-    register_simple("/upgrade", _h_upgrade)
+    register_simple("/upgrade", _h_upgrade,
+                    description="更新 larkhelm 到最新版本")
 
     # ── /history ───────────────────────────────────────────────────
     def _h_history(ctx: DispatchContext) -> None:
@@ -335,48 +360,90 @@ def _default_registrations() -> None:
         handler=_h_history,
         match_kind="exact",
         sub_matches=("/history all",),
+        description="查看当前会话历史（默认最近 10 条，加 all 查看全部）",
+        examples=("/history", "/history all"),
     ))
 
     # ── /stats / /memory / /cron ──────────────────────────────────
     def _h_stats(ctx: DispatchContext) -> None:
         from larkhelm.commands import _cmd_stats
         _cmd_stats(ctx.chat_id, ctx.msg_id, args=ctx.raw_args)
-    register(CommandSpec(name="/stats", handler=_h_stats, match_kind="prefix"))
+    register(CommandSpec(
+        name="/stats",
+        handler=_h_stats,
+        match_kind="prefix",
+        description="查看 Token 用量统计（加 intent 子命令查看意图路由分布）",
+        examples=("/stats", "/stats intent"),
+    ))
 
     def _h_memory(ctx: DispatchContext) -> None:
         from larkhelm.commands import _cmd_memory
         _cmd_memory(ctx.chat_id, ctx.raw_args, ctx.msg_id, sender_open_id=ctx.sender_open_id)
-    register(CommandSpec(name="/memory", handler=_h_memory, match_kind="prefix"))
+    register(CommandSpec(
+        name="/memory",
+        handler=_h_memory,
+        match_kind="prefix",
+        description="查看 / 管理三层记忆（全局 / 项目 / 会话）",
+        examples=("/memory status", "/memory set global 偏好简短回答", "/memory clear session"),
+    ))
 
     def _h_cron(ctx: DispatchContext) -> None:
         from larkhelm.commands import _cmd_cron
         _cmd_cron(ctx.chat_id, ctx.raw_args, ctx.msg_id)
-    register(CommandSpec(name="/cron", handler=_h_cron, match_kind="prefix"))
+    register(CommandSpec(
+        name="/cron",
+        handler=_h_cron,
+        match_kind="prefix",
+        description="管理定时查询任务（add / list / del）",
+        examples=('/cron add "0 9 * * *" 早会提醒', "/cron list", "/cron del abc123"),
+    ))
 
     # ── /crew / /dev / /plan (async, error-carded) ─────────────────
     def _h_crew(ctx: DispatchContext) -> None:
         from larkhelm.crew import cmd_crew
         cmd_crew(ctx.chat_id, ctx.raw_args, ctx.msg_id, sender_open_id=ctx.sender_open_id)
-    register(CommandSpec(name="/crew", handler=_h_crew, match_kind="prefix",
-                         run_async=True, thread_label="Crew"))
+    register(CommandSpec(
+        name="/crew",
+        handler=_h_crew,
+        match_kind="prefix",
+        run_async=True,
+        thread_label="Crew",
+        description="动态规划：Manager 自动分解任务，多 Agent 并行执行",
+        examples=("/crew 调研竞品 X 与 Y 的差异",),
+    ))
 
     def _h_dev(ctx: DispatchContext) -> None:
         from larkhelm.crew import cmd_dev
         cmd_dev(ctx.chat_id, ctx.raw_args, ctx.msg_id, sender_open_id=ctx.sender_open_id)
-    register(CommandSpec(name="/dev", handler=_h_dev, match_kind="prefix",
-                         run_async=True, thread_label="Dev"))
+    register(CommandSpec(
+        name="/dev",
+        handler=_h_dev,
+        match_kind="prefix",
+        run_async=True,
+        thread_label="Dev",
+        description="软件工程流水线：PM → 架构 → 工程 → QA → 审查",
+        examples=("/dev 给登录页加 SSO 支持", "/dev 修复登录超时 bug --no-confirm"),
+    ))
 
     def _h_plan(ctx: DispatchContext) -> None:
         from larkhelm.cmd_plan import cmd_plan
         cmd_plan(ctx.chat_id, ctx.raw_args, ctx.msg_id, sender_open_id=ctx.sender_open_id)
-    register(CommandSpec(name="/plan", handler=_h_plan, match_kind="prefix",
-                         run_async=True, thread_label="Plan"))
+    register(CommandSpec(
+        name="/plan",
+        handler=_h_plan,
+        match_kind="prefix",
+        run_async=True,
+        thread_label="Plan",
+        description="多阶段串行流水线：dev → review → fix → test，每步可确认",
+        examples=("/plan 给设置页加深色模式",),
+    ))
 
     # ── /cd / /pwd / /ls / /run ────────────────────────────────────
     def _h_pwd(ctx: DispatchContext) -> None:
         from larkhelm.commands import _cmd_pwd
         _cmd_pwd(ctx.chat_id, ctx.msg_id)
-    register_simple("/pwd", _h_pwd)
+    register_simple("/pwd", _h_pwd,
+                    description="显示当前工作目录")
 
     def _h_cd(ctx: DispatchContext) -> None:
         from larkhelm.commands import _cmd_cd
@@ -386,12 +453,20 @@ def _default_registrations() -> None:
         handler=_h_cd,
         match_kind="prefix",
         usage_card="`/cd <path>` — 切换工作目录",
+        description="切换当前会话的工作目录",
+        examples=("/cd /home/user/code/larkhelm",),
     ))
 
     def _h_ls(ctx: DispatchContext) -> None:
         from larkhelm.commands import _cmd_ls
         _cmd_ls(ctx.chat_id, ctx.raw_args, ctx.msg_id)
-    register(CommandSpec(name="/ls", handler=_h_ls, match_kind="prefix"))
+    register(CommandSpec(
+        name="/ls",
+        handler=_h_ls,
+        match_kind="prefix",
+        description="列出目录文件（默认当前目录，最多 60 条）",
+        examples=("/ls", "/ls /tmp"),
+    ))
 
     def _h_run(ctx: DispatchContext) -> None:
         from larkhelm.commands import _cmd_run
@@ -403,9 +478,14 @@ def _default_registrations() -> None:
         usage_card="`/run <command>` — 执行 shell 命令（30s 超时）",
         run_async=True,
         thread_label="Run",
+        description="执行 Shell 命令（默认 30s 超时，可配 shell_timeout_sec）",
+        examples=("/run uname -a", "/run df -h"),
     ))
 
-    # ── /model + /lock (alias) + /voice ────────────────────────────
+    # ── /model + /lock (twin specs, shared handler) + /voice ───────
+    # P1-2c: /lock used to be an alias of /model. Pulling it out as an
+    # independent CommandSpec lets the help renderer (which iterates
+    # COMMAND_REGISTRY by name) surface both entries — see design.md D3.
     def _h_model(ctx: DispatchContext) -> None:
         from larkhelm.commands import _cmd_lock
         _cmd_lock(ctx.chat_id, ctx.raw_args, ctx.msg_id)
@@ -413,13 +493,27 @@ def _default_registrations() -> None:
         name="/model",
         handler=_h_model,
         match_kind="prefix",
-        aliases=("/lock",),
+        description="切换当前会话默认 backend（list / off / <id>）",
+        examples=("/model claude", "/model kimi"),
+    ))
+    register(CommandSpec(
+        name="/lock",
+        handler=_h_model,
+        match_kind="prefix",
+        description="持久锁定 backend（list / off / <id>，/model 的同义入口）",
+        examples=("/lock", "/lock kimi", "/lock off"),
     ))
 
     def _h_voice(ctx: DispatchContext) -> None:
         from larkhelm.commands import _cmd_voice
         _cmd_voice(ctx.chat_id, ctx.raw_args, ctx.msg_id)
-    register(CommandSpec(name="/voice", handler=_h_voice, match_kind="prefix"))
+    register(CommandSpec(
+        name="/voice",
+        handler=_h_voice,
+        match_kind="prefix",
+        description="查看 / 切换语音转写设置（status / lang zh|en|auto）",
+        examples=("/voice status", "/voice lang en"),
+    ))
 
 
 # Register defaults at import time. Python caches the module after the first

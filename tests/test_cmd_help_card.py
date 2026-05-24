@@ -154,6 +154,90 @@ class TestHelpCardLayout(unittest.TestCase):
             "card-builder normaliser would otherwise rewrap"
         )
 
+    # ── P1-2b/P1-2c: data-driven renderer ────────────────────────────────
+
+    def test_render_body_uses_registry_iteration(self):
+        """AC-01: ``_cmd_help`` collapses to a thin shim; the actual
+        composition lives in ``_render_help_body`` which must read
+        ``COMMAND_REGISTRY`` rather than hardcode lines."""
+        import inspect
+        from larkhelm.commands import _cmd_help, _render_help_body
+        cmd_src = inspect.getsource(_cmd_help)
+        # Sanity: the previous hardcoded body was ~60 lines; the shim
+        # should be tiny (signature + 2 statements + blank lines).
+        self.assertLess(
+            len(cmd_src.splitlines()), 80,
+            f"_cmd_help should delegate to _render_help_body now "
+            f"(got {len(cmd_src.splitlines())} lines)"
+        )
+        renderer_src = inspect.getsource(_render_help_body)
+        # Must consult the registry at render time, not at module import.
+        self.assertIn(
+            "COMMAND_REGISTRY", renderer_src,
+            "_render_help_body must read COMMAND_REGISTRY at render time"
+        )
+
+    def test_hidden_spec_not_rendered(self):
+        """AC-02: a ``hidden=True`` spec is excluded from the rendered body.
+
+        ``CommandSpec`` is a frozen dataclass, so we swap the ``/voice``
+        entry in ``COMMAND_REGISTRY._by_name`` + ``_ordered`` with a
+        ``hidden=True`` clone and assert ``/voice`` disappears from the
+        rendered body."""
+        from dataclasses import replace
+        from larkhelm.command_registry import COMMAND_REGISTRY
+        from larkhelm.commands import _render_help_body
+
+        original = COMMAND_REGISTRY.lookup("/voice")
+        self.assertIsNotNone(original, "/voice must be registered for this test")
+        hidden_clone = replace(original, hidden=True)
+
+        # First confirm it appears when visible.
+        body_before = _render_help_body()
+        self.assertIn("/voice", body_before, "/voice should appear when visible")
+
+        # Patch in the hidden clone.
+        idx = COMMAND_REGISTRY._ordered.index(original)
+        COMMAND_REGISTRY._by_name["/voice"] = hidden_clone
+        COMMAND_REGISTRY._ordered[idx] = hidden_clone
+        try:
+            body_after = _render_help_body()
+            # ``/voice`` may still appear as a literal token (e.g. inside
+            # other static blocks), but its bolded help row must be gone.
+            self.assertNotIn(
+                "**/voice**", body_after,
+                "hidden spec must not produce a bolded help row"
+            )
+        finally:
+            COMMAND_REGISTRY._by_name["/voice"] = original
+            COMMAND_REGISTRY._ordered[idx] = original
+
+    def test_message_special_commands_listed(self):
+        """AC-06: ``/c /g /k /d`` (model shortcuts) and
+        ``/cancel /rename /btw`` (handled directly in _message.py) are
+        not in the registry but must remain discoverable in the card."""
+        cap = self._capture_help_call()
+        body = cap["body"]
+        for token in ("/c ", "/g ", "/k ", "/d ", "/cancel", "/rename", "/btw"):
+            self.assertIn(
+                token, body,
+                f"{token!r} (special command, not in registry) missing from /help body"
+            )
+
+    def test_all_visible_specs_rendered(self):
+        """AC-08: every visible spec in ``COMMAND_REGISTRY.iter_visible()``
+        must appear in the rendered body. Skip nothing — the layout is
+        the contract."""
+        from larkhelm.command_registry import COMMAND_REGISTRY
+        cap = self._capture_help_call()
+        body = cap["body"]
+        for spec in COMMAND_REGISTRY.iter_visible():
+            self.assertIn(
+                spec.name, body,
+                f"visible spec {spec.name} not rendered in /help body — "
+                f"either add it to _HELP_LAYOUT or mark it hidden=True"
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
