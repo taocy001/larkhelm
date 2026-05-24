@@ -701,10 +701,23 @@ def _cmd_crew_status(chat_id: str):
     from larkhelm.card_builder import _fmt_elapsed
     from larkhelm.lark_client import send_card
     from larkhelm.crew_card import _STATUS_ICON
-    from larkhelm.crew._state import _active_crew_lock, _active_crew_states
+    from larkhelm.crew._state import (
+        _active_crew, _active_crew_lock, _active_crew_states,
+        describe_active_owner,
+    )
 
+    # C4 #11: ``_active_crew`` holds the owner token for whatever owns the
+    # per-chat slot — crew/dev write a raw hex crew_id, ``cmd_plan`` writes
+    # ``plan:<id>``. ``_active_crew_states`` only carries CrewState for
+    # crew/dev. Pre-C4 ``/crew status`` consulted only the second dict, so
+    # when a ``/plan`` task held the slot the user got "no task running"
+    # while the chat was actually serialised behind the plan — operator
+    # debug nightmare (sister of C3 #9). We now snapshot both under a
+    # single lock acquisition and route the plan / unknown-owner case
+    # through ``describe_active_owner`` for a meaningful card.
     with _active_crew_lock:
         state = _active_crew_states.get(chat_id)
+        owner_token = _active_crew.get(chat_id, "") if state is None else ""
     if state:
         elapsed = _fmt_elapsed(time.time() - state.start_time)
         n_done  = sum(1 for a in state.agents.values() if a.status == AgentStatus.DONE)
@@ -725,6 +738,22 @@ def _cmd_crew_status(chat_id: str):
             _backend_paren = f"（{_backend}）" if _backend else ""
             lines.append(f"{icon} {spec.role}{_backend_paren}")
         send_card(chat_id, "⚙️ Crew 任务进行中", "\n".join(lines), color="blue")
+    elif owner_token:
+        # C4 #11: slot is held by a non-crew owner (today: ``/plan``;
+        # any future ``_active_crew`` writer that doesn't populate
+        # ``_active_crew_states`` falls through here too — see the
+        # owner-token contract in ``crew/_state.py``). Tell the user
+        # what's actually running so they know whether to /cancel or
+        # wait — instead of the pre-C4 lie "no crew task running"
+        # while the chat is in fact serialised.
+        owner_desc = describe_active_owner(owner_token)
+        send_card(
+            chat_id, "⚙️ 任务进行中",
+            f"当前 chat 正在运行 {owner_desc}。\n\n"
+            "（这不是一个 `/crew` 或 `/dev` 任务——用 `/cancel` 中止，"
+            "或等待完成后再发 `/crew` / `/dev`。）",
+            color="blue",
+        )
     else:
         # Look for the most recent crew record in the logs
         records = _read_logs(chat_id)
@@ -902,12 +931,19 @@ def _run_generic_crew_inner_impl(chat_id: str, requirement: str,
         plan = _crew_plan(chat_id, requirement, cwd, max_agents, cancel_ev)
         if plan is None:
             if not cancel_ev.is_set():
-                # Fallback: single agent
+                # Fallback: single agent. C4 #10 — drop the hardcoded
+                # ``model="claude"`` and route through ``task_profile`` so
+                # the highest-ranked healthy backend wins at runtime
+                # (mirrors the C3 #8 migration of /plan's single-agent
+                # specs). The fallback is a generic helper with no tool /
+                # vision contract, so ``chat`` profile suffices — heavier
+                # work would have gone through the Manager-planned path.
                 _debug_log("[Crew] Manager planning failed, falling back to single agent")
                 plan = CrewPlan(
                     title=requirement[:30],
                     agents=[AgentSpec(
-                        id="agent_1", role="通用助手", model="claude",
+                        id="agent_1", role="通用助手",
+                        model="", task_profile="chat",
                         system="", prompt=requirement,
                         depends_on=[], timeout=_cfg.RESPONSE_TIMEOUT,
                     )],

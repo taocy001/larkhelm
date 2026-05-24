@@ -337,6 +337,7 @@ def _cmd_status(chat_id: str, msg_id: str = None):
     crew_info = ""
     try:
         from larkhelm.crew import _active_crew, _active_crew_states, _active_crew_lock
+        from larkhelm.crew._state import describe_active_owner
         with _active_crew_lock:
             crew_id    = _active_crew.get(chat_id)
             crew_state = _active_crew_states.get(chat_id)
@@ -350,7 +351,16 @@ def _cmd_status(chat_id: str, msg_id: str = None):
             n_total = len(crew_state.agents)
             crew_info = f"**Crew 进行中** {crew_id[:8]}…　{_phase_label}　{n_done}/{n_total} 完成"
         elif crew_id:
-            crew_info = f"**Crew 进行中** {crew_id[:8]}…"
+            # C4 #12 (sister of C4 #11 / C3 #9): when ``/plan`` owns the
+            # slot, ``_active_crew_states`` is empty (plan never writes
+            # it) but ``_active_crew`` carries the ``plan:<id>`` token.
+            # Pre-C4 this branch labelled the row "Crew 进行中 plan:abc…"
+            # — both the wrong command type AND a truncated token that
+            # bleeds the ``plan:`` prefix into the displayed hex. Route
+            # through ``describe_active_owner`` so the user sees the
+            # real owner (``/plan 任务 (id=...)`` vs ``/crew 或 /dev
+            # 任务 (id=...)``), matching the /crew-status fix in C4 #11.
+            crew_info = f"**任务进行中** {describe_active_owner(crew_id)}"
     except Exception as e:
         _debug_log(f"[status] crew info failed: {e}")
 

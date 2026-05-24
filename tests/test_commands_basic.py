@@ -156,3 +156,47 @@ def test_cmd_status_emits_card(_silence_cards, monkeypatch):
     except Exception as e:
         pytest.fail(f"_cmd_status raised: {e}")
     assert any(r.get("kind") in ("reply", "patch_reply", "send") for r in _silence_cards)
+
+
+# ── /status — C4 #12: plan-owner is decoded, not displayed as Crew ────
+
+
+def test_cmd_status_reports_plan_owner_not_crew(_silence_cards, monkeypatch):
+    """C4 #12 (HIGH-sev sister of C4 #11): when ``/plan`` holds the chat
+    slot, ``_active_crew[chat_id]="plan:<id>"`` but
+    ``_active_crew_states[chat_id]`` is empty. Pre-C4 ``/status`` fell
+    into ``elif crew_id:`` and labelled the row "Crew 进行中 plan:abc…"
+    — both the wrong command type AND a truncated owner token that
+    bleeds the ``plan:`` prefix into the displayed hex. Fix routes
+    through ``describe_active_owner`` so the row reads "任务进行中
+    /plan 任务 (id=...)" instead.
+    """
+    from larkhelm.crew._state import (
+        _active_crew, _active_crew_lock, _active_crew_states,
+    )
+    from larkhelm import commands as _cm
+    monkeypatch.setattr(_cm, "_get_cwd", lambda chat_id: "/tmp/work")
+    monkeypatch.setattr(_cm, "log_entry", lambda *a, **kw: None)
+
+    chat = "c_status_plan_owner"
+    plan_id = "abcdef123456"
+    with _active_crew_lock:
+        _active_crew[chat] = f"plan:{plan_id}"
+        assert chat not in _active_crew_states
+    try:
+        _cm._cmd_status(chat, msg_id="m1")
+    finally:
+        with _active_crew_lock:
+            _active_crew.pop(chat, None)
+
+    status_cards = [r for r in _silence_cards
+                    if r.get("kind") in ("reply", "patch_reply", "send")]
+    assert status_cards, "expected /status to emit a card"
+    body_joined = "\n".join(r.get("body", "") for r in status_cards)
+    # Pre-C4: would say "Crew 进行中 plan:abc…" — both assertions catch this.
+    assert "Crew 进行中" not in body_joined, (
+        f"/status still labels plan-owner as Crew; body={body_joined!r}"
+    )
+    assert "/plan" in body_joined and plan_id[:8] in body_joined, (
+        f"/status didn't decode plan owner; body={body_joined!r}"
+    )
