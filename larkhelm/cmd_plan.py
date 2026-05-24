@@ -666,7 +666,7 @@ def _run_single_agent_step(state: MultiPlanState, step: PlanStep) -> bool:
 
     if step.type == "review":
         spec = AgentSpec(
-            id="reviewer", role="代码审查员", model="claude",
+            id="reviewer", role="代码审查员", model="", task_profile="reviewer",
             system=(
                 "你是一个严格的代码审查员。\n\n"
                 "**必须逐条检查以下 8 项，每项给出 ✅ 或 ❌ 及说明：**\n"
@@ -687,7 +687,7 @@ def _run_single_agent_step(state: MultiPlanState, step: PlanStep) -> bool:
         )
     elif step.type == "fix":
         spec = AgentSpec(
-            id="fixer", role="工程师（修复）", model="claude",
+            id="fixer", role="工程师（修复）", model="", task_profile="engineer",
             system=(
                 "你是一个资深工程师，专注于修复问题。\n"
                 "读取 .crew_workspace/qa_report.md 和 .crew_workspace/review.md（若存在），"
@@ -700,7 +700,7 @@ def _run_single_agent_step(state: MultiPlanState, step: PlanStep) -> bool:
         )
     elif step.type == "test":
         spec = AgentSpec(
-            id="qa", role="测试工程师", model="gemini",
+            id="qa", role="测试工程师", model="", task_profile="qa",
             system=(
                 "你是一个测试工程师。先确保测试环境就绪（安装依赖、配置环境），再运行所有测试。\n"
                 "发现代码 bug 时记录到 .crew_workspace/qa_report.md，不要自行修复代码。\n\n"
@@ -1176,8 +1176,11 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None, *,
 
     with _active_crew_lock:
         if chat_id in _active_crew:
+            from larkhelm.crew._state import describe_active_owner
+            owner_desc = describe_active_owner(_active_crew[chat_id])
             send_card(chat_id, "⚠️ 任务冲突",
-                      "当前有任务正在运行，请等待完成或发送 `/cancel` 后再试。",
+                      f"当前 chat 正在运行 {owner_desc}，请等待完成或发送 "
+                      "`/cancel` 后再试。",
                       color="orange")
             return
 

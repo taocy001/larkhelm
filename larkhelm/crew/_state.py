@@ -16,9 +16,32 @@ from larkhelm.crew_types import CrewState
 # ═══════════════════════════════════════════════════════════════
 
 # Per-chat active crew (only one crew per chat at a time)
-_active_crew: dict[str, str]        = {}   # chat_id → crew_id
+#
+# Owner-token contract (read by ``describe_active_owner`` below):
+#   * ``f"plan:{plan_id}"`` — written by ``cmd_plan._run_plan._hold_slot``
+#   * ``"<12-char-hex crew_id>"`` — written by ``crew._commands`` (/crew, /dev)
+#     and by ``crew._checkpoint.resume_interrupted_crews``
+# Any new writer MUST either reuse one of these formats or extend the helper.
+_active_crew: dict[str, str]        = {}   # chat_id → owner_token (see above)
 _active_crew_states: dict[str, "CrewState"] = {}  # chat_id → CrewState
 _active_crew_lock = threading.Lock()
+
+
+def describe_active_owner(owner: str) -> str:
+    """Render a short human-readable label for an ``_active_crew`` owner token.
+
+    Used by both ``/plan`` and ``/crew`` / ``/dev`` conflict cards so the user
+    sees *what* is holding the slot, not just "task in progress". Pre-C3 the
+    conflict cards just said "已有任务" with no hint about which command to
+    cancel — operator debug nightmare. Pure-string parser, no imports of
+    ``cmd_plan`` so this helper is safe to call from any module.
+    """
+    if not owner:
+        return "未知任务"
+    if owner.startswith("plan:"):
+        plan_id = owner[5:13] or "?"
+        return f"`/plan` 任务 (id={plan_id})"
+    return f"`/crew` 或 `/dev` 任务 (id={owner[:8]})"
 
 # Subscribers waiting for crew to finish (protected by _active_crew_lock)
 _crew_done_subscribers: dict[str, list[threading.Event]] = {}  # chat_id → [Event]

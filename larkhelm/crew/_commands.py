@@ -862,8 +862,10 @@ def _run_generic_crew_inner_impl(chat_id: str, requirement: str,
 
     with _active_crew_lock:
         if chat_id in _active_crew:
+            from larkhelm.crew._state import describe_active_owner
+            owner_desc = describe_active_owner(_active_crew[chat_id])
             send_card(chat_id, "⚠️ Crew 已在运行",
-                      "当前已有 crew 任务在运行，发送 `/cancel` 停止后再试。",
+                      f"当前 chat 正在运行 {owner_desc}，发送 `/cancel` 停止后再试。",
                       color="orange")
             return
         _active_crew[chat_id] = crew_id
@@ -1018,8 +1020,10 @@ def _run_dev_crew_inner_impl(chat_id: str, requirement: str, user_msg_id: str,
 
     with _active_crew_lock:
         if chat_id in _active_crew:
+            from larkhelm.crew._state import describe_active_owner
+            owner_desc = describe_active_owner(_active_crew[chat_id])
             send_card(chat_id, "⚠️ Crew 已在运行",
-                      "当前已有 crew 任务在运行，发送 `/cancel` 停止后再试。",
+                      f"当前 chat 正在运行 {owner_desc}，发送 `/cancel` 停止后再试。",
                       color="orange")
             return
         _active_crew[chat_id] = crew_id
