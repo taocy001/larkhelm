@@ -749,7 +749,7 @@ def _run_single_agent_step(state: MultiPlanState, step: PlanStep) -> bool:
 
 # ── Confirmation wait ────────────────────────────────────────────
 
-def _wait_for_confirm_or_cancel(state: MultiPlanState, timeout: float = 86400.0) -> bool:
+def _wait_for_confirm_or_cancel(state: MultiPlanState, timeout: float = 1800.0) -> bool:
     """Block until either a card button signals state._confirm_ev or a cancel
     is observed. threading.Event lacks native multi-event wait, so we poll the
     confirm event with a short timeout and re-check the cancel sources.
@@ -787,6 +787,44 @@ def _wait_for_confirm_or_cancel(state: MultiPlanState, timeout: float = 86400.0)
             return True
 
 
+def _resolve_breakpoint_timeout_sec() -> int:
+    """Read ``CREW_BREAKPOINT_TIMEOUT_SEC`` lazily (mirrors /crew semantics).
+
+    Lazy lookup because ``cmd_plan`` is imported before ``_init_runtime``
+    in some test fixtures; reading the module global at import time would
+    freeze the value at the dataclass default (the pre-C2 86400s was
+    effectively "wait forever" and predated this config item entirely).
+    Floors at 60s so a misconfigured 0/negative never busy-loops the
+    poll branch into instant timeout.
+    """
+    try:
+        import larkhelm.config as _cfg
+        return max(60, int(getattr(_cfg, "CREW_BREAKPOINT_TIMEOUT_SEC", 1800) or 1800))
+    except Exception:
+        return 1800
+
+
+def _send_breakpoint_timeout_card(state: MultiPlanState, *, phase_hint: str) -> None:
+    """Emit the orange "等待确认超时" card after a plan wait expired.
+
+    ``phase_hint`` is a short Chinese label so the user knows which wait
+    timed out (e.g. ``"步骤间确认"`` vs ``"计划生成后确认"``). Fail-soft —
+    a card-send failure must not prevent the surrounding cancel flow.
+    """
+    try:
+        from larkhelm.lark_client import send_card
+        bp = _resolve_breakpoint_timeout_sec()
+        send_card(
+            state.chat_id,
+            f"⏱️ Plan · {phase_hint}超时 ({bp // 60} 分钟)",
+            f"**{state.title}**\n\n超过 {bp} 秒未收到确认，计划已自动取消。"
+            f"如需继续，请重新发送 `/plan`。",
+            color="orange",
+        )
+    except Exception as e:
+        _debug_log(f"[Plan] breakpoint-timeout card send failed: {e}")
+
+
 def _wait_confirm(state: MultiPlanState) -> str:
     """Enter waiting phase, show confirm card, block until user acts.
     Returns 'continue' | 'skip' | 'cancel' | 'retry'.
@@ -794,13 +832,22 @@ def _wait_confirm(state: MultiPlanState) -> str:
     Wakes up on either:
       - User clicks a card button (signal_plan → _confirm_ev)
       - User sends /cancel command (chat-level cancel event)
+      - Breakpoint timeout (``CREW_BREAKPOINT_TIMEOUT_SEC``) — returns
+        "cancel" and sets ``state.cancel_ev`` so the main loop exits.
     """
     with state.lock:
         state.phase = PlanPhase.WAITING
         state._confirm_ev.clear()
         state._confirm_result = "cancel"   # default on timeout / cancel
     _update_plan_card(state)
-    _wait_for_confirm_or_cancel(state)
+    bp_timeout = _resolve_breakpoint_timeout_sec()
+    awoken = _wait_for_confirm_or_cancel(state, timeout=float(bp_timeout))
+    if not awoken:
+        # Timeout: ``_confirm_result`` is still "cancel" (set above).
+        # Propagate to ``cancel_ev`` so the ``_run_plan`` main loop's
+        # ``state.cancel_ev.is_set()`` check below us trips on next iter.
+        state.cancel_ev.set()
+        _send_breakpoint_timeout_card(state, phase_hint="步骤间确认")
     with state.lock:
         return state._confirm_result
 
@@ -1199,8 +1246,16 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None, *,
 
         # Wait for user to click "开始执行" or "取消".
         # Watches chat-level /cancel as well, so a typed /cancel can abort the plan
-        # before any step runs (without this, the wait would block forever).
-        _wait_for_confirm_or_cancel(state)
+        # before any step runs. Bounded by ``CREW_BREAKPOINT_TIMEOUT_SEC`` so a
+        # user who walks away doesn't leave the plan in ``_active_plans``
+        # forever — pre-C2 default was 24h.
+        bp_timeout = _resolve_breakpoint_timeout_sec()
+        awoken = _wait_for_confirm_or_cancel(state, timeout=float(bp_timeout))
+        if not awoken:
+            with state.lock:
+                state.cancel_ev.set()
+                state._confirm_result = "cancel"
+            _send_breakpoint_timeout_card(state, phase_hint="计划生成后确认")
         with state.lock:
             action = state._confirm_result
 
