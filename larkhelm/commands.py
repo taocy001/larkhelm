@@ -2317,15 +2317,28 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
     import os as _os
     import sys as _sys
     from larkhelm.concurrency import set_shutting_down, wait_for_idle
+    from larkhelm.config import _resolve_source_dir
+    from larkhelm import config as _cfg_mod
 
-    # Guard: ``SOURCE_DIR`` must point at an actual git repo. For editable
-    # installs ``_init_runtime`` sets this to the repo root directly; for
-    # non-editable installs it's recovered from the dist-info
-    # ``direct_url.json`` (see ``config.py``). When neither succeeds (e.g.
-    # wheel install from PyPI, or local source directory was deleted after
-    # install) we surface a clear diagnostic instead of letting ``git pull``
-    # bail with a confusing "fatal: not a git repository" message.
-    source_dir = Path(_cfg.SOURCE_DIR)
+    # Re-resolve SOURCE_DIR / editable mode on every entry rather than reading
+    # the boot-time frozen globals. pipx can flip install layout (wheel ↔
+    # editable) while the bridge is running, which leaves ``_cfg.SOURCE_DIR``
+    # pointing at a deleted ``<site-packages>/larkhelm`` directory and makes
+    # /upgrade impossible without a full restart. Doing the resolve here means
+    # the *next* /upgrade after a layout change just works.
+    source_dir, editable = _resolve_source_dir(Path(_cfg_mod.__file__))
+
+    # Two distinct failure modes — collapsing them under one "不是 git 仓库"
+    # message misleads operators when the real problem is that the directory
+    # was deleted by a reinstall.
+    if not source_dir.exists():
+        send_card_reply(chat_id, msg_id, "❌ 升级失败",
+                        f"`SOURCE_DIR` 已不存在：`{source_dir}`\n\n"
+                        f"通常意味着 pipx / pip 重装时换了 install 模式，"
+                        f"旧路径被删除。建议重启 bridge（让 `_init_runtime` "
+                        f"重新解析）或 `pipx reinstall larkhelm` 后再 `/upgrade`。",
+                        color="red")
+        return
     if not (source_dir / ".git").exists():
         send_card_reply(chat_id, msg_id, "❌ 升级失败",
                         f"`SOURCE_DIR` 不是 git 仓库：`{source_dir}`\n\n"
@@ -2369,7 +2382,9 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
     pip_install_cmd = [
         _sys.executable, "-m", "pip", "install", "--no-deps", "-q",
     ]
-    if getattr(_cfg, "EDITABLE_INSTALL", False):
+    # Use the locally-resolved `editable` flag rather than ``_cfg.EDITABLE_INSTALL``;
+    # the resolver above already accounts for any post-boot install-mode flip.
+    if editable:
         pip_install_cmd += ["-e", str(source_dir)]
     else:
         pip_install_cmd += ["--force-reinstall", str(source_dir)]
@@ -2395,18 +2410,24 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
     from larkhelm.crew import cancel_all_crews, wait_crews_done
     cancel_all_crews(reason="服务升级中，Crew 任务重启后将自动恢复")
     wait_crews_done(timeout=30.0)
-    idle = wait_for_idle(timeout=60.0)
+    wait_for_idle(timeout=60.0)
 
-    # If we timed out, notify affected chats so their streaming cards don't hang silently
-    if not idle:
-        from larkhelm.concurrency import get_busy_chat_ids
-        for busy_cid in get_busy_chat_ids():
-            try:
-                send_card(busy_cid, "⚠️ 查询已中断",
-                          "服务正在升级重启，当前查询被中断，请稍后重新发送。",
-                          color="orange")
-            except Exception as e:
-                _debug_log(f"[upgrade] restart card failed: {e}")
+    # Always notify any chat that still has an in-flight query — the execv
+    # below severs the lark-oapi WebSocket and freezes their streaming cards
+    # until reconnect, regardless of whether wait_for_idle returned cleanly
+    # (a chat that became busy between idle-check and execv would otherwise
+    # be silently stranded). Skip the upgrade originator: they already have
+    # the "🔄 服务正在重启" card sent below.
+    from larkhelm.concurrency import get_busy_chat_ids
+    for busy_cid in get_busy_chat_ids():
+        if busy_cid == chat_id:
+            continue
+        try:
+            send_card(busy_cid, "⚠️ 查询已中断",
+                      "服务正在升级重启，当前查询被中断，请稍后重新发送。",
+                      color="orange")
+        except Exception as e:
+            _debug_log(f"[Upgrade] in-flight notify failed: {e}")
 
     # Write a marker file so the new process can confirm back to the upgrade requester
     import json as _json

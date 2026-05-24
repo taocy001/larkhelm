@@ -228,7 +228,11 @@ def _resolve_source_dir(config_file: Path) -> tuple[Path, bool]:
                 continue
             local = Path(url[len("file://"):])
             if (local / ".git").exists():
-                return local, False
+                # Dereference symlinks: ``pip install -e <symlink>`` writes the
+                # symlink path verbatim into ``direct_url.json``; if the symlink
+                # is later removed the resolver would point at a dead path.
+                # ``strict=False`` so missing intermediate components don't raise.
+                return local.resolve(strict=False), False
     except Exception as e:
         print(f"[config] direct_url.json scan failed (ignored): {e}",
               file=sys.stderr)

@@ -119,6 +119,37 @@ def test_direct_url_with_non_file_scheme_falls_back(tmp_path: Path):
     assert editable is False
 
 
+def test_non_editable_direct_url_through_symlink_is_dereferenced(tmp_path: Path):
+    """``pip install -e <symlink>`` writes the symlink path verbatim into
+    ``direct_url.json``. The resolver must dereference it so the returned
+    path stays valid even after the symlink is removed, and so downstream
+    consumers don't accidentally write back the symlink path on the next
+    ``pip install -e``."""
+    real_source = tmp_path / "real" / "larkhelm-source"
+    real_source.mkdir(parents=True)
+    _git_init(real_source)
+
+    sym = tmp_path / "via-symlink"
+    sym.symlink_to(real_source)
+
+    site_packages = tmp_path / "venv" / "site-packages"
+    pkg = site_packages / "larkhelm"
+    pkg.mkdir(parents=True)
+    config_file = pkg / "config.py"
+    config_file.write_text("")
+
+    dist_info = site_packages / "larkhelm-1.2.3.dist-info"
+    dist_info.mkdir()
+    (dist_info / "direct_url.json").write_text(json.dumps({
+        "dir_info": {},
+        "url": f"file://{sym}",
+    }))
+
+    src, editable = _resolve_source_dir(config_file)
+    assert src == real_source.resolve(), "symlink must be dereferenced"
+    assert editable is False
+
+
 def test_corrupt_direct_url_json_is_swallowed(tmp_path: Path, capsys):
     """Invalid JSON must not crash — fall back to package dir and log to stderr."""
     site_packages = tmp_path / "venv" / "site-packages"
