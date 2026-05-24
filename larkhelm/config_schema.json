@@ -133,6 +133,7 @@
     "cascade_backoff_max_attempts":      { "type": "integer", "minimum": 1 },
     "plan_retry_strategy":               { "enum": ["now", "manual", "off"] },
     "plugin_report_card_enabled":        { "type": "boolean" },
+    "failure_report_card_enabled":       { "type": "boolean" },
     "admin_chat_id":                     { "type": "string" },
     "memory_gc_interval_hours":          { "type": "number",  "minimum": 0.0 },
     "crew_checkpoint_ttl_days":          { "type": "number",  "minimum": 0.0 },

@@ -34,9 +34,13 @@ import lark_oapi.ws as ws
 
 import larkhelm.lark_client as _lc
 from larkhelm.config import _init_runtime
-from larkhelm.log import _debug_log, rotate_jsonl_if_needed
-from larkhelm.chat_state import _load_global_state, _state_lock, _chat_state_store
+from larkhelm.log import _debug_log, redact_error, rotate_jsonl_if_needed
+from larkhelm.chat_state import (
+    _load_global_state, _state_lock, _chat_state_store,
+    _get_chat_state, _set_chat_field,
+)
 from larkhelm.concurrency import _cron_lock, set_shutting_down, is_shutting_down, wait_for_idle
+from larkhelm.failure_report import emit as _emit_failure_report
 from larkhelm.perm import _start_perm_server
 from larkhelm.handlers import handle_message, handle_card_action, handle_reaction_created
 
@@ -268,43 +272,157 @@ def _start_gc_thread() -> None:
     threading.Thread(target=_loop, daemon=True, name="gc-collector").start()
 
 
+def _persist_cron_result(
+    chat_id: str,
+    cron_id: str,
+    status: str,
+    error_text: str,
+) -> None:
+    """Write ``last_run_at`` / ``last_run_status`` / ``last_error`` back to the
+    target cron entry inside ``state.json``.
+
+    Holds ``_cron_lock`` for the re-fetch + modify + ``_set_chat_field`` so
+    concurrent ``/cron add|del`` writes cannot drop the new fields. Wrapped
+    in a top-level try/except — per REQ-07 the scheduler must NEVER raise
+    out of a tick; any persistence failure is logged via ``_debug_log``.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        import larkhelm.config as _cfg
+        ts = datetime.now(ZoneInfo(_cfg.CRON_TIMEZONE)).isoformat(timespec="seconds")
+        with _cron_lock:
+            crons = list(_get_chat_state(chat_id).get("crons", []))
+            updated = False
+            for entry in crons:
+                if entry.get("id") == cron_id:
+                    entry["last_run_at"] = ts
+                    entry["last_run_status"] = status
+                    entry["last_error"] = error_text if status == "error" else ""
+                    updated = True
+                    break
+            if updated:
+                _set_chat_field(chat_id, "crons", crons)
+            else:
+                _debug_log(
+                    f"[Cron] _persist_cron_result: cron_id={cron_id} not found "
+                    f"in chat={chat_id[:12]}"
+                )
+    except Exception as e:
+        _debug_log(f"[Cron] _persist_cron_result failed id={cron_id}: {e}")
+
+
+def _bump_failure_and_maybe_emit(
+    chat_id: str,
+    c: dict,
+    exc: BaseException,
+    consecutive_failures: dict[str, int],
+) -> None:
+    """Increment the per-cron consecutive-failure counter; if it reaches 3,
+    push an admin failure card via ``failure_report.emit`` and reset the
+    counter back to 0 so the next 3-strike window can build up again.
+
+    REQ-03: emit exactly once per 3-failure window. After emit the counter
+    is cleared regardless of whether the card actually went out (flag-off
+    or empty admin_chat_id still counts as "handled" — re-firing every
+    minute would only spam the operator).
+    """
+    try:
+        cron_id = c.get("id", "")
+        consecutive_failures[cron_id] = consecutive_failures.get(cron_id, 0) + 1
+        count = consecutive_failures[cron_id]
+        if count < 3:
+            return
+        try:
+            exc_type = type(exc).__name__
+            expr = c.get("expr", "")
+            summary = (
+                f"cron_id={cron_id} expr={expr} 连续失败 {count} 次 · {exc_type}"
+            )
+            query_preview = str(c.get("query", ""))[:80]
+            detail = (
+                f"chat={chat_id[:12]}\n"
+                f"query={query_preview}\n"
+                f"error={redact_error(repr(exc))[:400]}"
+            )
+            _emit_failure_report("cron", summary, detail)
+        finally:
+            consecutive_failures[cron_id] = 0
+    except Exception as e:
+        _debug_log(f"[Cron] _bump_failure_and_maybe_emit failed: {e}")
+
+
+def _process_cron_tick(
+    chat_id: str,
+    c: dict,
+    now_aware: datetime,
+    last_fired: dict[str, float],
+    consecutive_failures: dict[str, int],
+) -> None:
+    """Process a single cron entry for one scheduler tick.
+
+    Mirrors the original per-cron ``try`` block from ``_loop``: parse the
+    expression, check whether it just fired (diff < 65s) and was not
+    already triggered this minute (>50s since last_fired), and on a hit
+    spawn the ``_do_query`` daemon thread. Now also writes the
+    ``last_run_*`` observability fields and accumulates failures for
+    the admin-card threshold.
+
+    Never raises — every internal failure is funneled to ``_debug_log``
+    plus the failure-counter path so the scheduler loop above can keep
+    iterating other chats / cron entries undisturbed.
+    """
+    from croniter import croniter
+    from larkhelm.handlers import _do_query
+
+    cron_id = c.get("id", "")
+    try:
+        cr = croniter(c["expr"], now_aware)
+        prev = cr.get_prev(datetime)
+        diff = (now_aware - prev).total_seconds()
+        now_ts = now_aware.timestamp()
+        if diff < 65 and (now_ts - last_fired.get(cron_id, 0)) > 50:
+            last_fired[cron_id] = now_ts
+            _debug_log(f"[Cron] 触发 id={cron_id} chat={chat_id[:12]}")
+            threading.Thread(
+                target=_do_query,
+                args=(chat_id, c["query"], c["model"], None),
+                daemon=True, name=f"cron-{cron_id}",
+            ).start()
+            consecutive_failures[cron_id] = 0
+            _persist_cron_result(chat_id, cron_id, "ok", "")
+    except Exception as e:
+        _debug_log(f"[Cron] 任务检查异常 id={cron_id}: {e}")
+        _bump_failure_and_maybe_emit(chat_id, c, e, consecutive_failures)
+        _persist_cron_result(
+            chat_id, cron_id, "error", redact_error(repr(e))[:200],
+        )
+
+
 def _start_cron_scheduler() -> None:
     """Start the cron scheduler daemon thread; checks for due tasks once per minute."""
-    from croniter import croniter
     from zoneinfo import ZoneInfo
     import larkhelm.config as _cfg
-    from larkhelm.handlers import _do_query
     from larkhelm.chat_state import _get_chat_state as _gcs
 
     # Track last-fired ts per cron id to prevent double-firing within the
     # same minute due to scheduler sleep drift.
     _last_fired: dict[str, float] = {}
+    # Track per-cron consecutive failure count for the admin-card threshold.
+    _consecutive_failures: dict[str, int] = {}
 
     def _loop():
         while True:
             try:
                 now_aware = datetime.now(ZoneInfo(_cfg.CRON_TIMEZONE))
-                now_ts = now_aware.timestamp()
                 with _state_lock:
                     all_chats = list(_chat_state_store.keys())
                 for chat_id in all_chats:
                     crons = _gcs(chat_id).get("crons", [])
                     for c in crons:
-                        try:
-                            cr = croniter(c["expr"], now_aware)
-                            prev = cr.get_prev(datetime)
-                            diff = (now_aware - prev).total_seconds()
-                            cron_id = c["id"]
-                            if diff < 65 and (now_ts - _last_fired.get(cron_id, 0)) > 50:
-                                _last_fired[cron_id] = now_ts
-                                _debug_log(f"[Cron] 触发 id={cron_id} chat={chat_id[:12]}")
-                                threading.Thread(
-                                    target=_do_query,
-                                    args=(chat_id, c["query"], c["model"], None),
-                                    daemon=True, name=f"cron-{cron_id}",
-                                ).start()
-                        except Exception as e:
-                            _debug_log(f"[Cron] 任务检查异常 id={c.get('id')}: {e}")
+                        _process_cron_tick(
+                            chat_id, c, now_aware,
+                            _last_fired, _consecutive_failures,
+                        )
             except Exception as e:
                 _debug_log(f"[Cron] 调度器异常: {e}")
             time.sleep(60)
