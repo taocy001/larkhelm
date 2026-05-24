@@ -436,7 +436,7 @@ class MemoryContextBuilder:
         """Full context: global (if relevant) + project (if relevant) + session."""
         from larkhelm.memory import (
             GLOBAL_MAX_CHARS, PROJECT_MAX_CHARS, SESSION_MAX_CHARS,
-            TOTAL_MEMORY_BUDGET, _TAG_OVERHEAD_PER_LAYER, _layer_meter_line,
+            TOTAL_MEMORY_BUDGET, _TAG_OVERHEAD_PER_LAYER,
         )
 
         parts: list[tuple[str, str, str, int]] = []  # (open, content, close, max_chars)
@@ -501,9 +501,14 @@ class MemoryContextBuilder:
                     trimmed.append((open_tag, content, close_tag, max_c))
                 parts = trimmed
 
+        # P5-OPT1: meter line removed from injection path — it sat on the
+        # second line of every layer and rotated whenever session_n changed by
+        # a single char, busting the Anthropic prompt-cache prefix for the
+        # entire system prompt. The meter is still exposed by
+        # ``_layer_meter_line`` for the ``/memory observe`` card path.
         return "\n\n".join(
-            f"{o}\n{_layer_meter_line(len(c), max_c)}\n{c}\n{cl}"
-            for o, c, cl, max_c in parts
+            f"{o}\n{c}\n{cl}"
+            for o, c, cl, _ in parts
         )
 
     def _build_request(self) -> "RetrievalRequest":

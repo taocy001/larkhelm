@@ -75,11 +75,12 @@ MEMORY_SCHEMA_VERSION = "1"
 # substring "schema_version" (e.g. last_schema_version_check, my_schema_version_note).
 _SCHEMA_KEY_RE = re.compile(r'(?m)^schema_version\s*:')
 
-# Bumped from 50 → 90 to reserve room for the per-layer meter line injected by
-# ``get_memory_context()`` (e.g. ``[1850/2000 chars, 92%] ⚠️ near limit`` is
-# ~36 chars; 90 leaves slack for unicode + newlines). TOTAL_MEMORY_BUDGET is
-# unchanged so user content is preserved as before — only the bookkeeping
-# allowance grows.
+# Tag overhead (open + close + separator) reserved per layer when computing
+# the trim budget. Was bumped to 90 to also cover the per-layer meter line
+# that used to be injected on the second line of every layer; P5-OPT1 stripped
+# the meter from the injection path (cache-prefix stability) but the 90-char
+# slack stays — shrinking it now would chase ~30 char savings per layer at
+# real risk of mis-budgeting unicode tag bytes.
 _TAG_OVERHEAD_PER_LAYER = 90
 
 # ── /memory observe tuning ───────────────────────────────────────────────────

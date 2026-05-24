@@ -56,11 +56,32 @@ class _ObserveTestBase(unittest.TestCase):
         # _load_md_body uses an mtime-keyed in-process cache; clear it so the
         # fixture rewrites between tests are observed.
         larkhelm_memory._mem_body_cache.clear()
+        # _query_sender_open_id is a process-wide ContextVar that
+        # ``handlers/_message.handle_message`` ``.set()``s without saving a
+        # reset Token. In production each asyncio task gets its own context
+        # copy so this is harmless; in pytest every test shares the main
+        # context and an earlier ``test_file_message`` run leaks
+        # ``"user_open_id"`` here, making ``_global_memory_file`` resolve
+        # ``chat_M``'s global memory to ``global_user_open_id.md`` (which
+        # this fixture doesn't write) and silently dropping the global
+        # layer. Reset it on setUp + restore on tearDown so the slot/legacy
+        # path (P5-OPT6 flipped slot ON by default) sees the expected file.
+        from larkhelm.memory import _query_sender_open_id
+        self._sender_open_id_var = _query_sender_open_id
+        self._sender_open_id_token = _query_sender_open_id.set("")
 
     def tearDown(self):
         for p in self.cfg_patches:
             p.stop()
         larkhelm_memory._mem_body_cache.clear()
+        try:
+            self._sender_open_id_var.reset(self._sender_open_id_token)
+        except Exception:
+            # ContextVar reset can fail if the Token belongs to a different
+            # context (rare; happens when a test mutates the contextvars
+            # state mid-run). Swallow — clearing the leak partially is still
+            # better than leaving it untouched.
+            pass
         shutil.rmtree(self.tmp, ignore_errors=True)
 
 
@@ -132,12 +153,34 @@ class TestAggregateObservation(_ObserveTestBase):
 
 
 class TestMeterInjection(_ObserveTestBase):
-    """AC-03 + AC-04: ``get_memory_context`` injects meter line at each layer.
+    """P5-OPT1: meter line is **never** injected into ``get_memory_context``.
 
-    50% → ``[X/Y chars, 50%]`` only.
-    92% → also ``⚠️ near limit``.
-    100%+ → still ``⚠️ near limit`` (already trimmed-at-budget marker).
+    The meter sat on the second line of every layer; when session_n grew by
+    a single char the meter rotated and busted Anthropic prompt-cache prefix
+    for the entire system prompt. The ``/memory observe`` card still calls
+    ``_layer_meter_line`` directly via ``_aggregate_memory_observation``, so
+    the per-layer capacity readout for humans is unaffected.
+
+    Slots/sections (P5-OPT6) are disabled inside this class so the free-form
+    fixture body lands verbatim in ctx — keeping the focus on meter-line
+    behaviour, not on slot truncation (which is exercised separately).
     """
+
+    def setUp(self):
+        super().setUp()
+        self._meter_patches = [
+            patch.object(larkhelm_memory._cfg, "MEMORY_GLOBAL_PROFILE_SLOT_ENABLED",
+                         False, create=True),
+            patch.object(larkhelm_memory._cfg, "MEMORY_PROJECT_SECTION_ENABLED",
+                         False, create=True),
+        ]
+        for p in self._meter_patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self._meter_patches:
+            p.stop()
+        super().tearDown()
 
     def _setup_layers(self, *, global_n: int, project_n: int, session_n: int):
         cwd = str(self.tmp / "proj")
@@ -162,25 +205,48 @@ class TestMeterInjection(_ObserveTestBase):
                       extra_fm="chat_id: chat_M\nturns: 3\nversion: 1\n")
         return cwd
 
-    def test_50pct_no_warning(self):
+    def test_50pct_no_meter_line(self):
         cwd = self._setup_layers(global_n=400, project_n=750, session_n=1000)
         ctx = larkhelm_memory.get_memory_context("chat_M", cwd=cwd)
-        self.assertIn("[400/800 chars, 50%]", ctx)
-        self.assertIn("[750/1500 chars, 50%]", ctx)
-        self.assertIn("[1000/2000 chars, 50%]", ctx)
+        # Layer envelopes remain — only the meter line was stripped.
+        self.assertIn("[GLOBAL MEMORY]", ctx)
+        self.assertIn("[PROJECT MEMORY", ctx)
+        self.assertIn("[SESSION MEMORY]", ctx)
+        # No meter, no warning — body content still rendered.
+        self.assertNotIn("[400/800 chars", ctx)
+        self.assertNotIn("[750/1500 chars", ctx)
+        self.assertNotIn("[1000/2000 chars", ctx)
+        self.assertNotIn("chars, 50%]", ctx)
         self.assertNotIn("⚠️", ctx)
+        # Body characters made it through (gggg... ssss... etc.)
+        self.assertIn("g" * 400, ctx)
+        self.assertIn("s" * 1000, ctx)
 
-    def test_92pct_emits_warning_on_session_only(self):
+    def test_92pct_no_warning_in_injected_ctx(self):
         cwd = self._setup_layers(global_n=0, project_n=0, session_n=1850)
         ctx = larkhelm_memory.get_memory_context("chat_M", cwd=cwd)
-        self.assertIn("[1850/2000 chars, 92%]", ctx)
-        self.assertIn("⚠️ near limit", ctx)
+        self.assertNotIn("[1850/2000 chars", ctx)
+        self.assertNotIn("⚠️ near limit", ctx)
+        self.assertIn("s" * 1850, ctx)
 
-    def test_100pct_still_warns(self):
+    def test_100pct_no_warning_in_injected_ctx(self):
         cwd = self._setup_layers(global_n=800, project_n=0, session_n=0)
         ctx = larkhelm_memory.get_memory_context("chat_M", cwd=cwd)
-        self.assertIn("[800/800 chars, 100%]", ctx)
-        self.assertIn("⚠️ near limit", ctx)
+        self.assertNotIn("[800/800 chars", ctx)
+        self.assertNotIn("⚠️ near limit", ctx)
+        self.assertIn("g" * 800, ctx)
+
+    def test_layer_meter_line_function_still_works(self):
+        """``_layer_meter_line`` is still consumed by the observe card path."""
+        self.assertEqual(
+            larkhelm_memory._layer_meter_line(400, 800),
+            "[400/800 chars, 50%]",
+        )
+        # near-limit warning preserved for the observe card formatter
+        self.assertIn(
+            "⚠️ near limit",
+            larkhelm_memory._layer_meter_line(1850, 2000),
+        )
 
 
 class TestBudgetUnchanged(_ObserveTestBase):

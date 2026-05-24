@@ -1099,19 +1099,6 @@ def get_retriever(
 
 # ── Composition ────────────────────────────────────────────────────────────
 
-def _layer_meter_line_local(chars: int, max_chars: int) -> str:
-    """Local copy of memory._layer_meter_line so we don't trigger circular
-    imports during memory_context bootstrap."""
-    if max_chars <= 0:
-        pct = 0
-    else:
-        pct = chars * 100 // max_chars
-    base = f"[{chars}/{max_chars} chars, {pct}%]"
-    if pct >= 90:
-        base += " ⚠️ near limit"
-    return base
-
-
 def compose_slices_to_context(
     scored: list[ScoredSlice],
     policy: InjectionPolicy,
@@ -1120,9 +1107,10 @@ def compose_slices_to_context(
 ) -> str:
     """Group slices by layer → smart_truncate per layer → wrap with tags.
 
-    Output shape is byte-compatible with v2's ``MemoryContextBuilder.build()``:
+    Output shape is byte-compatible with v2's ``MemoryContextBuilder.build()``
+    (post-P5-OPT1: meter line removed from both code paths):
     each present layer becomes
-    ``[<LAYER> MEMORY[ — cwd]]\\n<meter>\\n<body>\\n[/<LAYER> MEMORY]``
+    ``[<LAYER> MEMORY[ — cwd]]\\n<body>\\n[/<LAYER> MEMORY]``
     joined by ``\\n\\n``."""
     if not scored:
         return ""
@@ -1180,9 +1168,12 @@ def compose_slices_to_context(
     if not parts:
         return ""
 
+    # P5-OPT1: meter line stripped from injection path on both the legacy v2
+    # builder and this retriever path; the ``cap`` field is retained in
+    # ``parts`` only as a stable contract for any future per-layer telemetry.
     return "\n\n".join(
-        f"{o}\n{_layer_meter_line_local(len(c), cap)}\n{c}\n{cl}"
-        for o, c, cl, cap in parts
+        f"{o}\n{c}\n{cl}"
+        for o, c, cl, _ in parts
     )
 
 

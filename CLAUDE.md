@@ -98,8 +98,8 @@ CLI --data-dir > LARKHELM_DATA_DIR env > /var/lib/larkhelm > ~/.local/share/lark
 | `cli_skip_recent_turns_when_sid` | 默认 `true`。`sid` 非空时跳过 recent_turns 注入（多省 ~500 input tokens / call）；flip `false` 强制每次注入 |
 | `memory_extract_buffer_window_sec` | 默认 `0` = 禁 buffer，每次 update 立即 cascade（P1 byte-compat）；>0 合并 |
 | `memory_session_smart_compress` | 默认 `false` = 尾截断；翻 `true` 走句子级评分 + top-K（确定性，无 LLM） |
-| `memory_global_profile_slot_enabled` | 默认 `false` = 整段文本；翻 `true` 走 4 槽位（style/format/domain/expertise，≤200 chars 每槽） |
-| `memory_project_section_enabled` | 默认 `false` = 整段文本；翻 `true` 走 4 段（TechStack/Conventions/Architecture/Constraints） |
+| `memory_global_profile_slot_enabled` | **默认 `true`（P5-OPT6）** = 4 槽位（style/format/domain/expertise，≤200 chars 每槽）；局部编辑不会让整段 body 漂移、Anthropic prompt-cache prefix 命中率更稳。翻 `false` 退回整段文本 |
+| `memory_project_section_enabled` | **默认 `true`（P5-OPT6）** = 4 段（TechStack/Conventions/Architecture/Constraints）；翻 `false` 退回整段文本 |
 | `recent_turns_cache_enabled` | 默认 `true`，`_get_recent_turns` 走 LRU；flip `false` 直走 tail-read（bisect 用） |
 | `memory_legacy_cache_enabled` | 默认 `true`，三层 memory 走 LRU（key = layer + path + mtime_ns），单层容量 128 |
 | `doc_inject_cache_enabled` / `doc_inject_cache_ttl_sec` | 默认 `true` / `600`s。命中时 `_inject_doc_context` 加 age hint，metric outcome = `hit_with_age_hint`；`DocPermissionError` 与 `DocError` 不入缓存 |

@@ -87,8 +87,14 @@ class _RuntimeConfig:
     ANTHROPIC_EXTENDED_CACHE_ENABLED:   bool = True
     MEMORY_EXTRACT_BUFFER_WINDOW_SEC:   int = 0
     MEMORY_SESSION_SMART_COMPRESS:      bool = False
-    MEMORY_GLOBAL_PROFILE_SLOT_ENABLED: bool = False
-    MEMORY_PROJECT_SECTION_ENABLED:     bool = False
+    # P5-OPT6: defaults flipped to True at every layer (dataclass /
+    # module-level / setdefault) so ``is_enabled()`` returns the production
+    # default even before ``_init_runtime`` runs — tests that touch the
+    # module without booting the runtime now see the same behaviour as
+    # production. Pinned by
+    # ``tests/test_memory_*_slots.py::test_is_enabled_default_true``.
+    MEMORY_GLOBAL_PROFILE_SLOT_ENABLED: bool = True
+    MEMORY_PROJECT_SECTION_ENABLED:     bool = True
     # Context-injection cache toggles (REQ-01..04)
     RECENT_TURNS_CACHE_ENABLED:        bool = True
     MEMORY_LEGACY_CACHE_ENABLED:       bool = True
@@ -213,8 +219,8 @@ METRICS_TEXT_LEGACY: bool = False
 ANTHROPIC_EXTENDED_CACHE_ENABLED: bool = True
 MEMORY_EXTRACT_BUFFER_WINDOW_SEC: int = 0
 MEMORY_SESSION_SMART_COMPRESS: bool = False
-MEMORY_GLOBAL_PROFILE_SLOT_ENABLED: bool = False
-MEMORY_PROJECT_SECTION_ENABLED: bool = False
+MEMORY_GLOBAL_PROFILE_SLOT_ENABLED: bool = True
+MEMORY_PROJECT_SECTION_ENABLED: bool = True
 
 # ── P3 globals (REQ-02 / 03 / 04 / 05 / 06 / 07 / 08 / 09 / 10) ────────────
 # All eleven default to "feature off / status quo" so byte-compat with P2 holds.
@@ -990,8 +996,20 @@ def _init_app_config() -> None:
     config.setdefault("anthropic_extended_cache_enabled", True)
     config.setdefault("memory_extract_buffer_window_sec", 0)
     config.setdefault("memory_session_smart_compress", False)
-    config.setdefault("memory_global_profile_slot_enabled", False)
-    config.setdefault("memory_project_section_enabled", False)
+    # P5-OPT6: 4 slots / 4 sections default on — local edits stay scoped to
+    # the modified slot/section, so global/project memory body doesn't
+    # rotate on every cascade and Anthropic prompt-cache prefix survives.
+    # Legacy free-form bodies parse into the first slot/section (backward
+    # compatible); next cheap-LLM cascade migrates them in place.
+    #
+    # Module-level globals and the ``_RuntimeConfig`` dataclass defaults
+    # were flipped to True alongside this setdefault so a test that imports
+    # the slot module without booting ``_init_runtime`` still sees the
+    # production default. Pinned by
+    # ``test_memory_*_slots.py::test_is_enabled_default_true`` (with a
+    # paired ``can_be_disabled`` for the ``false`` override path).
+    config.setdefault("memory_global_profile_slot_enabled", True)
+    config.setdefault("memory_project_section_enabled", True)
 
     METRICS_TEXT_LEGACY = bool(config.get("metrics_text_legacy", False))
     ANTHROPIC_EXTENDED_CACHE_ENABLED = bool(

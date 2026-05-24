@@ -77,15 +77,28 @@ def _extract_feishu_urls(text: str) -> list:
 def _format_age_hint(age_sec: int) -> str:
     """Render the parenthetical age hint for a cache-served doc payload.
 
-    < 60s  → 「（缓存版本，不到 1 分钟前读取，如内容已变请提示刷新）」
-    >= 60s → f「（缓存版本，{age_sec // 60} 分钟前读取，如内容已变请提示刷新）」
+    P5-OPT2: bucketed into 4 discrete bands so the injected user-message
+    string stays byte-stable across small clock drifts. The Anthropic
+    5-min ephemeral user-turn cache is keyed on exact byte content; the
+    earlier per-minute rendering rotated the hint on every minute boundary
+    and stopped repeated questions about the same doc from cache-hitting.
 
-    Round-down minutes (`240 // 60 = 4` rather than ceil-or-round) keeps
-    the hint conservative — the doc is at least N minutes old, never less.
+    Buckets (pinned by ``tests/test_context_cache.py``):
+
+    - ``[0,   300)`` →  ``刚刚``           (< 5 min)
+    - ``[300, 1800)`` → ``几分钟前``       (5..30 min)
+    - ``[1800, 3600)`` → ``约半小时前``     (30..60 min)
+    - ``>= 3600`` →    ``{age_sec // 3600} 小时前`` (floor hours)
     """
-    if age_sec < 60:
-        return "（缓存版本，不到 1 分钟前读取，如内容已变请提示刷新）"
-    return f"（缓存版本，{age_sec // 60} 分钟前读取，如内容已变请提示刷新）"
+    if age_sec < 300:
+        phrase = "刚刚"
+    elif age_sec < 1800:
+        phrase = "几分钟前"
+    elif age_sec < 3600:
+        phrase = "约半小时前"
+    else:
+        phrase = f"{age_sec // 3600} 小时前"
+    return f"（缓存版本，{phrase}读取，如内容已变请提示刷新）"
 
 
 def _inject_doc_context(text: str, chat_id: str) -> str:

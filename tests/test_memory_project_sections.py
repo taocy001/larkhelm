@@ -52,6 +52,21 @@ def test_parse_body_legacy_no_headings_to_first_section():
         assert out[s] == ""
 
 
+def test_parse_body_legacy_not_truncated_to_section_budget():
+    """P5-OPT6 BLOCKER (reviewer): flipping
+    ``memory_project_section_enabled`` to true must NOT silently truncate
+    existing free-form project memory from up to 1500 chars down to
+    SECTION_BUDGET (400). Legacy path now caps to SECTION_LEGACY_CAP."""
+    body = "y" * 1500
+    out = _mps.parse_body(body)
+    assert len(out["TechStack"]) == 1500, (
+        f"legacy free-form body must keep all 1500 chars (was {len(out['TechStack'])});"
+        f" if you re-introduce per-section SECTION_BUDGET on this path,"
+        f" existing project memory drops by 73% on first read after the"
+        f" flag flips."
+    )
+
+
 def test_parse_body_empty_returns_all_empty():
     out = _mps.parse_body("")
     assert out == {s: "" for s in _mps.SECTION_NAMES}
@@ -99,7 +114,14 @@ def test_load_with_unknown_cwd_returns_empty_dict(isolated_memory_home):
 # ── is_enabled() ─────────────────────────────────────────────────────────
 
 
-def test_is_enabled_default_false():
+def test_is_enabled_default_true():
+    """P5-OPT6: runtime default true (``config.setdefault`` truth)."""
+    assert _mps.is_enabled() is True
+
+
+def test_is_enabled_can_be_disabled(monkeypatch):
+    import larkhelm.config as _cfg
+    monkeypatch.setattr(_cfg, "MEMORY_PROJECT_SECTION_ENABLED", False, raising=False)
     assert _mps.is_enabled() is False
 
 

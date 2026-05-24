@@ -53,6 +53,24 @@ def test_parse_body_legacy_no_headings_into_style():
     assert slots["format"] == slots["domain"] == slots["expertise"] == ""
 
 
+def test_parse_body_legacy_not_truncated_to_slot_budget():
+    """P5-OPT6 BLOCKER (reviewer): flipping
+    ``memory_global_profile_slot_enabled`` to true must NOT silently
+    truncate existing free-form global memory from up to 800 chars down
+    to SLOT_BUDGET (200). Legacy path now caps to SLOT_TOTAL so the
+    cheap-LLM cascade has a fair chance to migrate the text into 4
+    proper slots before any cap is enforced.
+    """
+    body = "x" * 800
+    slots = _mgs.parse_body(body)
+    assert len(slots["style"]) == 800, (
+        f"legacy free-form body must keep all 800 chars (was {len(slots['style'])});"
+        f" if you re-introduce per-slot SLOT_BUDGET on this path, existing"
+        f" global memory drops by 75% on first read after the flag flips."
+    )
+    # Per-slot cap still kicks in on the heading path (covered by a separate test).
+
+
 def test_parse_body_empty_returns_all_empty():
     slots = _mgs.parse_body("")
     assert all(v == "" for v in slots.values())
@@ -126,7 +144,16 @@ def test_render_for_context_emits_only_nonempty_slots():
 # ── is_enabled() honours flag ────────────────────────────────────────────
 
 
-def test_is_enabled_default_false():
+def test_is_enabled_default_true():
+    """P5-OPT6: ``memory_global_profile_slot_enabled`` defaults true at
+    runtime (``config.setdefault`` is the source of truth per CLAUDE.md).
+    Per-process attribute reflects whatever ``_init_runtime`` resolved."""
+    assert _mgs.is_enabled() is True
+
+
+def test_is_enabled_can_be_disabled(monkeypatch):
+    import larkhelm.config as _cfg
+    monkeypatch.setattr(_cfg, "MEMORY_GLOBAL_PROFILE_SLOT_ENABLED", False, raising=False)
     assert _mgs.is_enabled() is False
 
 

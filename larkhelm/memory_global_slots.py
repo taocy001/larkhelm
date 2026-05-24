@@ -79,9 +79,16 @@ def parse_body(body: str) -> dict[str, str]:
 
     matches = list(_HEADING_RE.finditer(body))
     if not matches:
+        # Legacy free-form body: cap to SLOT_TOTAL (the combined layer
+        # budget, == GLOBAL_MAX_CHARS) rather than SLOT_BUDGET (per-slot
+        # cap). Per-slot cap belongs to the heading path; applying it here
+        # would silently truncate existing free-form global memory from up
+        # to 800 chars down to 200 the first time the file is read after
+        # ``memory_global_profile_slot_enabled`` flips to true (P5-OPT6
+        # blocker — reviewed).
         text = body.strip()
         if text:
-            out["style"] = text[:SLOT_BUDGET]
+            out["style"] = text[:SLOT_TOTAL]
         return out
 
     # Pre-heading prose: stick it on the first slot's bucket so a manual
@@ -105,6 +112,10 @@ def parse_body(body: str) -> dict[str, str]:
         else:
             out[slot] = chunk
 
+    # Per-slot cap only applies to the structured (heading) path. The next
+    # ``save_global_slots`` re-applies the cap on write, so the LLM has a
+    # fair chance to migrate legacy text into 4 short slots before any
+    # truncation occurs.
     for s in SLOT_NAMES:
         out[s] = out[s][:SLOT_BUDGET]
     return out

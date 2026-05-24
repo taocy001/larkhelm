@@ -44,6 +44,10 @@ SECTION_NAMES: tuple[str, ...] = (
 
 # Per-section soft cap; the four together respect PROJECT_MAX_CHARS=1500.
 SECTION_BUDGET: int = 400
+# Combined cap used only for the legacy free-form fallback in ``parse_body``
+# (matches PROJECT_MAX_CHARS so we don't truncate existing project memory
+# below the layer's real budget on first read after P5-OPT6 flag flip).
+SECTION_LEGACY_CAP: int = 1500
 
 _SCHEMA_VERSION = "2"
 
@@ -75,10 +79,15 @@ def parse_body(body: str) -> dict[str, str]:
 
     matches = list(_HEADING_RE.finditer(body))
     if not matches:
-        # Legacy free-form body: stuff it under the first section so the
-        # text still reaches the prompt; subsequent saves will re-emit
-        # under the proper heading.
-        out[SECTION_NAMES[0]] = body.strip()[:SECTION_BUDGET]
+        # Legacy free-form body: cap to SECTION_LEGACY_CAP (== layer
+        # budget) rather than SECTION_BUDGET (per-section cap). Applying
+        # the per-section cap here would silently truncate existing
+        # free-form project memory from up to 1500 chars down to 400 the
+        # first time the file is read after ``memory_project_section_enabled``
+        # flips to true (P5-OPT6 blocker — reviewed). Subsequent saves
+        # re-emit under proper headings, at which point the per-section
+        # cap kicks in.
+        out[SECTION_NAMES[0]] = body.strip()[:SECTION_LEGACY_CAP]
         return out
 
     pre_text = body[: matches[0].start()].strip()

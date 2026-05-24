@@ -482,16 +482,48 @@ class TestAgeHint(unittest.TestCase):
         self.assertLessEqual(result.age_sec, 241)
         self.assertEqual(calls[0], 1, "loader must not run on a hit")
 
-        # The query-side helper must render "4 分钟前" for 240s age.
+        # The query-side helper renders 240s into the "<5min" bucket.
+        # P5-OPT2: per-minute rendering was replaced with 4 discrete buckets
+        # so the injected user-message string stays byte-stable across small
+        # clock drifts — letting Anthropic's 5-min ephemeral user-turn cache
+        # actually hit on repeated questions about the same doc.
         from larkhelm.handlers._query import _format_age_hint
-        self.assertIn("4 分钟前", _format_age_hint(result.age_sec))
+        self.assertIn("刚刚", _format_age_hint(result.age_sec))
 
-    def test_under_60s_renders_special(self):
-        """`_format_age_hint(30)` → "不到 1 分钟前" (avoid misleading "0 分钟前")."""
+    def test_under_60s_renders_in_first_bucket(self):
+        """`_format_age_hint(30)` → "刚刚" (sub-5min bucket)."""
         from larkhelm.handlers._query import _format_age_hint
         text = _format_age_hint(30)
-        self.assertIn("不到 1 分钟前", text)
-        self.assertNotIn("0 分钟前", text)
+        self.assertIn("刚刚", text)
+        self.assertNotIn("分钟前", text)
+
+    def test_age_hint_buckets(self):
+        """P5-OPT2 contract — 4 discrete buckets, stable inside each band."""
+        from larkhelm.handlers._query import _format_age_hint
+        # <5min bucket
+        self.assertEqual(_format_age_hint(0), _format_age_hint(299))
+        self.assertIn("刚刚", _format_age_hint(299))
+        # 5..30min bucket
+        self.assertEqual(_format_age_hint(300), _format_age_hint(1799))
+        self.assertIn("几分钟前", _format_age_hint(1500))
+        # 30..60min bucket
+        self.assertEqual(_format_age_hint(1800), _format_age_hint(3599))
+        self.assertIn("约半小时前", _format_age_hint(3000))
+        # >=1h bucket — counted in floor hours
+        self.assertIn("1 小时前", _format_age_hint(3600))
+        self.assertIn("3 小时前", _format_age_hint(3 * 3600 + 1700))
+
+    def test_age_hint_bucket_boundaries(self):
+        """P5-OPT2 — boundary checks pin the cutoffs so a ``<`` ↔ ``<=`` flip
+        in ``_format_age_hint`` is caught by CI rather than shipping silently
+        (reviewer flag)."""
+        from larkhelm.handlers._query import _format_age_hint
+        # <5min → 5..30min cut
+        self.assertNotEqual(_format_age_hint(299), _format_age_hint(300))
+        # 5..30min → 30..60min cut
+        self.assertNotEqual(_format_age_hint(1799), _format_age_hint(1800))
+        # 30..60min → ≥1h cut
+        self.assertNotEqual(_format_age_hint(3599), _format_age_hint(3600))
 
     def test_disabled_flag_bypasses_with_no_cache_flag(self):
         """DOC_INJECT_CACHE_ENABLED=False → from_cache=False even on 2nd call."""
