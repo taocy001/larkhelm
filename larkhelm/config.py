@@ -43,6 +43,7 @@ class _RuntimeConfig:
     SKIP_PERMISSIONS: bool
     RESPONSE_TIMEOUT: int
     HARD_TIMEOUT:     int
+    SHELL_TIMEOUT:    int
     MAX_CARD_LEN:     int
     ALLOWED_CHATS:    set
     GEMINI_IDLE_TTL:  int
@@ -124,6 +125,7 @@ DEFAULT_MODEL:    str
 SKIP_PERMISSIONS: bool
 RESPONSE_TIMEOUT: int
 HARD_TIMEOUT:     int
+SHELL_TIMEOUT:    int
 MAX_CARD_LEN:     int
 ALLOWED_CHATS:    set
 GEMINI_IDLE_TTL:  int
@@ -234,6 +236,7 @@ LLM_ROUTER_CIRCUIT_COOLDOWN_SEC: float = 30.0
 CASCADE_BACKOFF_MAX_ATTEMPTS: int = 3
 PLAN_RETRY_STRATEGY: str = "off"             # "now" | "manual" | "off"
 PLUGIN_REPORT_CARD_ENABLED: bool = False
+FAILURE_REPORT_CARD_ENABLED: bool = False
 ADMIN_CHAT_ID: str = ""
 MEMORY_GC_INTERVAL_HOURS: float = 6.0
 CREW_CHECKPOINT_TTL_DAYS: float = 7.0
@@ -549,7 +552,7 @@ def _init_app_config() -> None:
     """
     global config, APP_ID, APP_SECRET, CLAUDE_CMD, GEMINI_CMD, KIMI_CMD
     global DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, DEFAULT_MODEL
-    global SKIP_PERMISSIONS, RESPONSE_TIMEOUT, HARD_TIMEOUT, MAX_CARD_LEN
+    global SKIP_PERMISSIONS, RESPONSE_TIMEOUT, HARD_TIMEOUT, SHELL_TIMEOUT, MAX_CARD_LEN
     global ALLOWED_CHATS, GEMINI_IDLE_TTL, DEFAULT_CWD, CRON_TIMEZONE
     global MAX_AI_PROCS_CONFIG, MAX_AI_PROCS
     global PERM_HOOK_SCRIPT, PERM_SOCKET_PATH
@@ -570,7 +573,7 @@ def _init_app_config() -> None:
     global QUERY_SESSION_V2_TRAFFIC, INTENT_EMBEDDING_THRESHOLD
     global LLM_ROUTER_CIRCUIT_FAILURES, LLM_ROUTER_CIRCUIT_COOLDOWN_SEC
     global CASCADE_BACKOFF_MAX_ATTEMPTS, PLAN_RETRY_STRATEGY
-    global PLUGIN_REPORT_CARD_ENABLED, ADMIN_CHAT_ID
+    global PLUGIN_REPORT_CARD_ENABLED, FAILURE_REPORT_CARD_ENABLED, ADMIN_CHAT_ID
     global MEMORY_GC_INTERVAL_HOURS, CREW_CHECKPOINT_TTL_DAYS, DEV_STAGE_TIMEOUTS
     global RECENT_TURNS_CACHE_ENABLED, MEMORY_LEGACY_CACHE_ENABLED
     global DOC_INJECT_CACHE_ENABLED, DOC_INJECT_CACHE_TTL_SEC
@@ -635,6 +638,12 @@ def _init_app_config() -> None:
     SKIP_PERMISSIONS = bool(config.get("skip_permissions", True))
     RESPONSE_TIMEOUT = int(config.get("response_timeout", 300))   # soft timeout: release lock but don't kill process
     HARD_TIMEOUT     = int(config.get("hard_timeout", 21600))      # hard timeout: force kill (default 6 hours)
+    # P3-a (W17): /run shell timeout — was hardcoded 30s; floor at 1s.
+    _raw_shell_to    = config.get("shell_timeout_sec", 30)
+    try:
+        SHELL_TIMEOUT = max(1, int(_raw_shell_to))
+    except (TypeError, ValueError):
+        SHELL_TIMEOUT = 30
     MAX_CARD_LEN     = int(config.get("max_card_len", 3000))
     ALLOWED_CHATS    = set(config.get("allowed_chat_ids", []))
     GEMINI_IDLE_TTL  = int(config.get("gemini_idle_ttl", 1800))
@@ -803,10 +812,13 @@ def _init_app_config() -> None:
     DEFAULT_WIKI_PARENT_TOKEN = config.get("default_wiki_parent_token", "")
     DEFAULT_OWNER_OPEN_ID     = config.get("default_owner_open_id",     "")
 
-    # Phase 5: intent router / agent_hub flags (all optional, default off so
-    # phase4 behavior is unchanged when these keys are missing).
-    config.setdefault("intent_router_enabled", False)
-    config.setdefault("intent_router_traffic", 0.0)
+    # Phase 5: intent router / agent_hub flags (all optional). P1-4 flipped
+    # the default to a 10% gray rollout (intent_router_enabled=True,
+    # intent_router_traffic=0.1); set traffic to 0.0 or enabled to False to
+    # disable. Explicit user-provided values in config.json are preserved
+    # via setdefault (legacy `false` deployments stay unaffected).
+    config.setdefault("intent_router_enabled", True)
+    config.setdefault("intent_router_traffic", 0.1)
     # Default flipped from "llm" → "embedding" (Phase D-C, May 2026).
     # Embedding L2 is faster, deterministic, and cheaper than the cheap
     # LLM JSON path. When the ONNX runtime / model isn't available the
@@ -1004,6 +1016,7 @@ def _init_app_config() -> None:
     config.setdefault("cascade_backoff_max_attempts", 3)
     config.setdefault("plan_retry_strategy", "off")
     config.setdefault("plugin_report_card_enabled", False)
+    config.setdefault("failure_report_card_enabled", False)
     config.setdefault("admin_chat_id", "")
     config.setdefault("memory_gc_interval_hours", 6.0)
     config.setdefault("crew_checkpoint_ttl_days", 7.0)
@@ -1091,6 +1104,7 @@ def _init_app_config() -> None:
     PLAN_RETRY_STRATEGY = _strategy
 
     PLUGIN_REPORT_CARD_ENABLED = bool(config.get("plugin_report_card_enabled", False))
+    FAILURE_REPORT_CARD_ENABLED = bool(config.get("failure_report_card_enabled", False))
     ADMIN_CHAT_ID = str(config.get("admin_chat_id", "") or "")
 
     try:
@@ -1302,7 +1316,8 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         DEEPSEEK_MODEL=DEEPSEEK_MODEL,
         DEFAULT_MODEL=DEFAULT_MODEL,
         SKIP_PERMISSIONS=SKIP_PERMISSIONS, RESPONSE_TIMEOUT=RESPONSE_TIMEOUT,
-        HARD_TIMEOUT=HARD_TIMEOUT, MAX_CARD_LEN=MAX_CARD_LEN,
+        HARD_TIMEOUT=HARD_TIMEOUT, SHELL_TIMEOUT=SHELL_TIMEOUT,
+        MAX_CARD_LEN=MAX_CARD_LEN,
         ALLOWED_CHATS=ALLOWED_CHATS, GEMINI_IDLE_TTL=GEMINI_IDLE_TTL,
         MAX_AI_PROCS_CONFIG=MAX_AI_PROCS_CONFIG, MAX_AI_PROCS=MAX_AI_PROCS,
         DEFAULT_CWD=DEFAULT_CWD, CRON_TIMEZONE=CRON_TIMEZONE,

@@ -5,6 +5,7 @@
   "skip_permissions":  false,
   "response_timeout":  300,
   "hard_timeout":      21600,
+  "shell_timeout_sec": 30,
   "max_card_len":      3000,
   "allowed_chat_ids":  [],
   "gemini_idle_ttl":   1800,
@@ -27,9 +28,9 @@
   "deepseek_base_url": "https://api.deepseek.com",
   "deepseek_model":    "deepseek-chat",
 
-  "_comment_intent_router": "Phase 5 intent router. Off by default. Set intent_router_enabled=true and intent_router_traffic between 0.0 and 1.0 to gradually roll out natural-language Agent dispatch.",
-  "intent_router_enabled":  false,
-  "intent_router_traffic":  0.0,
+  "_comment_intent_router": "Phase 5 intent router. Defaults to 10% gray rollout (intent_router_enabled=true, intent_router_traffic=0.1). Set traffic to 0.0 or enabled to false to disable.",
+  "intent_router_enabled":  true,
+  "intent_router_traffic":  0.1,
   "intent_layer2_strategy": "llm",
   "agent_plugins":          [],
   "agent_acl":              {},
@@ -65,7 +66,7 @@
   "memory_global_profile_slot_enabled": false,
   "memory_project_section_enabled":   false,
 
-  "_comment_memory_phase_d2": "Phase D / Phase 2 — on-demand memory recall stack. All flags default to keyword-only (Phase 1 behaviour); flip `embedding_enabled=true` AND set `embedding_traffic>0` AND `embedding_backend!=\"none\"` to roll out hybrid recall. Stages roll out independently: Stage A (`memory_retriever_traffic`) is Phase 1, Stage B (`embedding_traffic`) is Phase 2. Both must hit for a chat to use hybrid; otherwise it stays on the Phase 1 keyword path. memory_retriever_mode='auto' means follow POLICY_TABLE per agent_type; override globally with 'keyword'|'embedding'|'hybrid'. memory_stale_window_days controls how many days of audit JSONL we scan to decide whether a slice has been forgotten; memory_stale_decay multiplies the relevance score of stale slices (0.5 = halve). memory_audit_rotate_max_mb gives the rollover threshold per day; memory_audit_retain_days unlinks anything older than this many days. embedding_model_path defaults to ~/.larkhelm/models/bge-small-zh-v1.5.onnx; download instructions: see README.md \"Phase D 召回灰度开关\".",
+  "_comment_memory_phase_d2": "Phase D / Phase 2 — on-demand memory recall stack. All flags default to keyword-only (Phase 1 behaviour); flip `embedding_enabled=true` AND set `embedding_traffic>0` AND `embedding_backend!=\"none\"` to roll out hybrid recall. Stages roll out independently: Stage A (`memory_retriever_traffic`) is Phase 1, Stage B (`embedding_traffic`) is Phase 2. Both must hit for a chat to use hybrid; otherwise it stays on the Phase 1 keyword path. memory_retriever_mode='auto' means follow POLICY_TABLE per agent_type; override globally with 'keyword'|'embedding'|'hybrid'. memory_stale_window_days controls how many days of audit JSONL we scan to decide whether a slice has been forgotten (default 30; runtime source of truth is larkhelm/config.py); memory_stale_decay multiplies the relevance score of stale slices (0.5 = halve). memory_audit_rotate_max_mb gives the rollover threshold per day; memory_audit_retain_days unlinks anything older than this many days. embedding_model_path defaults to ~/.larkhelm/models/bge-small-zh-v1.5.onnx; download instructions: see README.md \"Phase D 召回灰度开关\".",
   "memory_retriever_mode":         "auto",
   "embedding_backend":             "none",
   "embedding_http_endpoint":       "",
@@ -84,6 +85,11 @@
   "memory_llm_router_traffic":              0.0,
   "memory_llm_router_max_per_chat_per_min": 3,
   "memory_llm_router_cache_ttl_sec":        300,
+
+  "_comment_admin_cards": "P3 REQ-07 / P1-1a — orange admin cards for diagnostic failures. plugin_report_card_enabled pushes boot-time plugin load failures (PluginLoadReport) to admin_chat_id; failure_report_card_enabled is the P1-1a generic failure_report.emit() entry point (cascade backoff exhausted / circuit open / etc., wired in P1-1b/c). Both default false to stay byte-compatible. admin_chat_id is the target chat for both.",
+  "plugin_report_card_enabled":  false,
+  "failure_report_card_enabled": false,
+  "admin_chat_id":               "",
 
   "_comment_probe_models": "Optional. If omitted, installed CLIs are auto-discovered from PATH (no model pinning or capabilities). Uncomment and customize to pin models and enable orchestrator routing hints.",
   "probe_models": [
