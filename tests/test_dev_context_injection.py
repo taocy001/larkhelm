@@ -265,7 +265,13 @@ class TestWorkspaceMetaIO(unittest.TestCase):
             ws = Path(tmp)
             _write_workspace_meta(ws, task_hash="deadbeef", completed=True)
             meta = _read_workspace_meta(ws)
-            self.assertEqual(meta, {"task_hash": "deadbeef", "completed": True})
+            # B3 extended schema: core fields always present; new fields default to safe values
+            self.assertEqual(meta["task_hash"], "deadbeef")
+            self.assertTrue(meta["completed"])
+            self.assertEqual(meta.get("commit_sha", ""), "")
+            self.assertEqual(meta.get("finalized_at", 0.0), 0.0)
+            self.assertEqual(meta.get("chat_id", ""), "")
+            self.assertEqual(meta.get("plan_id", ""), "")
 
     def test_corrupted_meta_returns_empty(self):
         with tempfile.TemporaryDirectory() as tmp:

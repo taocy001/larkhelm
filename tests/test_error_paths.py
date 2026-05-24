@@ -170,6 +170,9 @@ def test_concurrent_state_write(isolated_state):
         th.join(timeout=10)
         assert not th.is_alive()
 
+    # Force-flush the debounced save before reading (avoids a 2s sleep).
+    _cs._save_state()
+
     # Verify the persisted file parses cleanly and contains the expected
     # number of chat ids; per-chat fields may interleave (last-writer-wins
     # per (chat_id, key)) but the JSON itself must be well-formed.
