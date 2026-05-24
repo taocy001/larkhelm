@@ -95,6 +95,93 @@ def test_breakpoint_clear_when_no_confirm_true(init_test_config):
     assert pm.breakpoint is False
 
 
+# ════════════════════════════════════════════════════════════════════════
+#  B1 — prompt contract pins: anchor rules, ban on line numbers,
+#  §6 Release Gate, architect self-check retry slot
+# ════════════════════════════════════════════════════════════════════════
+
+def test_b1_architect_has_self_retry_slot(init_test_config):
+    """architect spec must carry ``retry_target=['architect']`` /
+    ``max_retries=1`` so the PRD self-check gate can rerun it once."""
+    from larkhelm.crew._pipeline import _make_dev_pipeline
+    plan = _make_dev_pipeline("req", "/tmp/cwd", no_confirm=True)
+    architect = next(s for s in plan.agents if s.id == "architect")
+    assert architect.retry_target == ["architect"], (
+        f"architect.retry_target must be ['architect'] for B1 self-check, "
+        f"got {architect.retry_target!r}"
+    )
+    assert architect.max_retries == 1, (
+        f"architect.max_retries must be 1 for B1 self-check, "
+        f"got {architect.max_retries!r}"
+    )
+
+
+def test_b1_architect_prompt_carries_anchor_rules(init_test_config):
+    """architect system prompt must require anchors[].snippet and
+    forbid line numbers (CLAUDE.md §文件清单规则)."""
+    from larkhelm.crew._pipeline import _make_dev_pipeline
+    plan = _make_dev_pipeline("req", "/tmp/cwd", no_confirm=True)
+    architect = next(s for s in plan.agents if s.id == "architect")
+    sys = architect.system
+    # Must demand anchors metadata
+    assert "anchors" in sys
+    assert "snippet" in sys
+    # Must forbid line numbers explicitly
+    assert "严禁" in sys and "行号" in sys
+    # Must reference the grep -F locator path so downstream agents pick up
+    assert "grep -F" in sys or "grep `-F`" in sys
+
+
+def test_b1_implementer_and_fixer_prompt_use_grep_anchors(init_test_config):
+    """implementer + fixer must instruct using ``Grep -F snippet``
+    instead of line-number-based navigation."""
+    from larkhelm.crew._pipeline import _make_dev_pipeline
+    plan = _make_dev_pipeline("req", "/tmp/cwd", no_confirm=True)
+    for agent_id in ("implementer", "fixer"):
+        spec = next(s for s in plan.agents if s.id == agent_id)
+        sys = spec.system
+        assert "anchors" in sys or "anchor" in sys, (
+            f"{agent_id} prompt should reference anchors"
+        )
+        assert "Grep" in sys and "-F" in sys, (
+            f"{agent_id} prompt should use Grep -F"
+        )
+        assert "行号" in sys, (
+            f"{agent_id} prompt should mention 行号 (forbidden)"
+        )
+
+
+def test_b1_pm_prompt_has_release_gate_section(init_test_config):
+    """pm system prompt must require §6 Release Gate in the PRD."""
+    from larkhelm.crew._pipeline import _make_dev_pipeline
+    plan = _make_dev_pipeline("req", "/tmp/cwd", no_confirm=True)
+    pm = next(s for s in plan.agents if s.id == "pm")
+    assert "Release Gate" in pm.system
+    # Mention the "pytest --collect-only" rule (B1 review口径)
+    assert "--collect-only" in pm.system or "collect-only" in pm.system
+    # Mention the out-of-scope ticket section
+    assert "范围外问题" in pm.system
+
+
+def test_b1_qa_prompt_has_release_gate_scope_split(init_test_config):
+    """qa spec must distinguish task_list-inside vs outside failures."""
+    from larkhelm.crew._pipeline import _make_dev_pipeline
+    plan = _make_dev_pipeline("req", "/tmp/cwd", no_confirm=True)
+    qa = next(s for s in plan.agents if s.id == "qa")
+    assert "Release Gate" in qa.system
+    assert "范围外问题" in qa.system
+    # Mention the mypy 传染 rule
+    assert "传染" in qa.system
+
+
+def test_b1_reviewer_8th_check_binds_release_gate(init_test_config):
+    """reviewer's 8th item must reference Release Gate."""
+    from larkhelm.crew._pipeline import _make_dev_pipeline
+    plan = _make_dev_pipeline("req", "/tmp/cwd", no_confirm=True)
+    reviewer = next(s for s in plan.agents if s.id == "reviewer")
+    assert "Release Gate" in reviewer.system
+
+
 def test_pipeline_title_uses_first_line(init_test_config):
     from larkhelm.crew._pipeline import _make_dev_pipeline
     multi = "main requirement\n\n## context\nbackground stuff"

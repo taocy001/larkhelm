@@ -43,7 +43,11 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
                 "   - P2：可以实现（锦上添花，时间充裕时再做）\n"
                 "   格式：`| P0 | 功能描述 |`\n"
                 "4. **非功能需求**：性能、安全、兼容性等\n"
-                "5. **验收标准**：每条标准对应一个可执行的验证步骤\n\n"
+                "5. **验收标准**：每条标准对应一个可执行的验证步骤\n"
+                "6. **Release Gate**（B1 必填段，**逐字照写**，不要改写）：\n"
+                "   > task_list 内文件零新增 mypy / ruff / pytest 失败即放行；范围外失败开独立 ticket，\n"
+                "   > 写入 qa_report.md 末尾 `## 范围外问题` section，不阻塞本批 APPROVED / REJECTED 判定。\n"
+                "   > `pytest --collect-only` 失败一律阻塞（视为 collect-time 错误传染 task_list 内）。\n\n"
                 "完成 prd.md 后，还必须将需求池和验收标准以 JSON 格式保存到 "
                 ".crew_workspace/prd_criteria.json：\n"
                 '{"requirement_pool": [{"id": "REQ-01", "priority": "P0", "description": "功能描述"}], '
@@ -75,30 +79,47 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
                 '"desc": "一句话说明"}]}\n\n'
                 "**tasks.json**（工程师任务单）：\n"
                 '{"required_packages": ["package==version"], '
-                '"logic_analysis": [["文件路径", "该文件包含哪些类/函数，依赖哪些其他文件"]], '
+                '"logic_analysis": [["文件路径", "该文件包含哪些类/函数，依赖哪些其他文件", '
+                '{"anchors": [{"snippet": "原文整行 ≥30 char 字面字符串", "purpose": "插入点说明"}]}]], '
                 '"task_list": ["按依赖顺序排列的文件路径，被依赖的文件排在前面"]}\n\n'
                 "task_list 中的文件顺序至关重要：若 A 依赖 B，则 B 必须排在 A 前面。"
-                "path 均使用相对于项目根目录的路径。不要写实现代码。"
+                "path 均使用相对于项目根目录的路径。不要写实现代码。\n\n"
+                "## 锚点规则（B1 / 严格执行）\n"
+                "logic_analysis 每项第三槽（anchors）的 snippet 字段：\n"
+                "- **整行字面字符串**（≥30 字符；与目标文件中某一行 byte-for-byte 一致）\n"
+                "- 不含正则元字符也不含变量占位符；后续 implementer 用 `grep -F` 定位\n"
+                "- 单文件 1-5 条；命中 0 或 >5 一律视为 anchor 失效（self-check 会标 FAIL 把任务打回）\n\n"
+                "⚠️ **严禁使用行号当锚点**：不得在 logic_analysis / file_changes / design.md 任何字段中\n"
+                "写 `第 N 行` / `line N` / `L123` / `:42` 之类的行号字样——CLAUDE.md §文件清单规则\n"
+                "明确写过「行号一过几次重构就全错」。定位永远用 anchor snippet 字面字符串，不用行号。"
             ),
             prompt="请读取 PRD，了解现有代码，输出系统设计文档、文件变更清单和工程师任务单。\n\n"
                    "**重要**：请直接输出结果，不要等待用户确认，不要交互式提问。",
             depends_on=["pm"], timeout=_cfg.RESPONSE_TIMEOUT * 4,
             output_file="design.md",
+            # B1: PRD self-check fires after architect writes tasks.json /
+            # file_changes.json. On failure ``_run_agent_wrapper`` flips
+            # ``needs_retry=True`` (with prd_selfcheck.md feedback) and the
+            # scheduler reruns architect exactly once.
+            retry_target=["architect"], max_retries=1,
         ),
         AgentSpec(
             id="implementer", role="工程师", model="", task_profile="engineer",
             system=(
                 "你是一个资深工程师。按以下步骤实现功能：\n\n"
                 "## 准备阶段\n"
-                "1. 读取 .crew_workspace/tasks.json，获取 task_list（文件实现顺序）和 logic_analysis（每文件职责）\n"
+                "1. 读取 .crew_workspace/tasks.json，获取 task_list（文件实现顺序）和 logic_analysis（每文件职责 + 可选 anchors）\n"
                 "2. 读取 .crew_workspace/design.md，重点关注类图（Class Diagram）——这是实现合同，不得偏离\n"
                 "3. 如果 required_packages 不为空，先安装所需依赖\n\n"
                 "## 实现阶段（严格按 task_list 顺序逐文件处理）\n"
                 "对每个文件依次执行：\n"
                 "a. Read 读取现有文件内容（若文件已存在）\n"
                 "b. 对照 logic_analysis 中该文件的职责说明和类图中的接口定义实现代码\n"
-                "c. 实现完毕后立即运行该文件相关的测试（若有），确认无报错\n"
-                "d. 继续处理下一个文件\n\n"
+                "c. **定位插入点用 anchors[].snippet + Grep `-F` 字面匹配**——\n"
+                "   `Grep(pattern=<snippet>, path=<file>, output_mode='content', -n=true)`，\n"
+                "   绝不依赖行号；anchors 缺失或命中歧义时 Read 全文重新定位\n"
+                "d. 实现完毕后立即运行该文件相关的测试（若有），确认无报错\n"
+                "e. 继续处理下一个文件\n\n"
                 "## 完成阶段\n"
                 "所有文件实现完毕后，运行全量测试套件一次，将变更摘要写入 .crew_workspace/changes.md：\n"
                 "`文件路径 — 改动内容和原因`\n\n"
@@ -113,12 +134,13 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
             system=(
                 "你是一个资深工程师，专注于修复测试失败和审查反馈中发现的问题。\n\n"
                 "## 工作步骤\n"
-                "1. 读取 .crew_workspace/tasks.json，了解各文件的职责边界（logic_analysis），"
+                "1. 读取 .crew_workspace/tasks.json，了解各文件的职责边界（logic_analysis + anchors），"
                 "确保修复不超出该文件应负责的范围\n"
                 "2. 读取 .crew_workspace/qa_report.md，逐条理解每个 bug 和失败的验收标准\n"
                 "3. 读取 .crew_workspace/changes.md 了解上一轮已改动的内容，避免重复修改\n"
                 "4. 对照 .crew_workspace/design.md 的类图，确认修复方案不违背接口合同\n"
-                "5. 针对每个问题精准定位到对应文件，修复后立即运行该文件的测试确认修复成功\n"
+                "5. **用 anchors[].snippet + Grep `-F` 定位插入点**，绝不依赖行号；anchor 命中歧义\n"
+                "   时 Read 全文确认。修复后立即运行该文件的测试确认修复成功\n"
                 "6. 更新 .crew_workspace/changes.md，追加本轮修复内容\n\n"
                 "**注意**：只修复 qa_report.md 中明确列出的问题，不要顺手重构其他代码。"
             ),
@@ -148,6 +170,14 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
                 "|----|----|----|----|  \n"
                 "| AC-01 | ... | ✅ PASS / ❌ FAIL | 说明 |\n"
                 "每条标准必须有明确结论，不允许跳过。\n\n"
+                "## Release Gate 口径（B1 / 严格遵守）\n"
+                "对 pytest / ruff / mypy 失败，按 prd.md §6 Release Gate 判定：\n"
+                "- 失败发生在 task_list 内文件 → 计入 TESTS_FAILED 判定\n"
+                "- 失败发生在 task_list 外文件 → 写入 qa_report.md 末尾 `## 范围外问题` section\n"
+                "  （单独编号 EXT-01..N，含「位置 / 现象 / 根因猜测」三列），**不计入 TESTS_FAILED**\n"
+                "- `pytest --collect-only` 任何失败一律计入 TESTS_FAILED（导入级错误会传染 task_list）\n"
+                "- mypy 类型推断传染：若失败行在 task_list 外，但根因是 task_list 内文件改了签名，\n"
+                "  归到 task_list 内（在 EXT 段顶部加一行「根因传染：AC-01」并把这条 mypy 计入 FAILED）\n\n"
                 "对照 .crew_workspace/tasks.json 的 task_list，逐一检查每个文件是否已被实现，"
                 "以及 changes.md 中的实际改动是否覆盖了设计文档要求的所有变更。\n\n"
                 "## 阶段三：静态代码检查（在测试之后执行）\n"
@@ -185,8 +215,10 @@ def _make_dev_pipeline(requirement: str, cwd: str, no_confirm: bool = False,
                 "5. 性能：无明显 N+1 查询、无不必要循环、无内存泄漏风险\n"
                 "6. 测试覆盖：核心逻辑和边界条件是否有对应测试\n"
                 "7. 文档：公共接口和复杂逻辑是否有必要注释\n"
-                "8. 完整性：对照 .crew_workspace/tasks.json 的 task_list 和 changes.md，"
-                "确认 task_list 中每个文件均已实现，无漏改/多改文件；类图中的接口定义未被擅自修改\n\n"
+                "8. 完整性 + Release Gate：对照 .crew_workspace/tasks.json 的 task_list 和 changes.md，"
+                "确认 task_list 中每个文件均已实现，无漏改/多改文件；类图中的接口定义未被擅自修改。"
+                "按 prd.md §6 Release Gate 判定：task_list 内零新增 mypy/ruff/pytest 失败即可 APPROVED；"
+                "qa_report.md 的 `## 范围外问题` section 不阻塞本批，仅作为遗留 ticket 输出。\n\n"
                 "将检查结果输出到 .crew_workspace/review.md，不要自行修改代码。\n\n"
                 "⚠️ 输出的最后一行必须且只能是以下之一（不含其他字符）：\n"
                 "APPROVED\n"
