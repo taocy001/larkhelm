@@ -185,7 +185,12 @@ class MultiPlanState:
     current_idx:     int               = 0
     start_time:      float             = dataclasses.field(default_factory=time.time)
     _confirm_ev:     threading.Event   = dataclasses.field(default_factory=threading.Event)
-    _confirm_result: str               = "continue"  # "continue" | "skip" | "cancel" | "retry"
+    # Default to "cancel" to match the runtime contract: every entry into
+    # ``_wait_confirm`` resets ``_confirm_result = "cancel"`` so a timeout /
+    # bridge-death wakeup is treated as user-cancel (safe-by-default). The
+    # earlier ``"continue"`` default was dead code AND misleading — it
+    # suggested an unsupervised timeout would silently advance the plan.
+    _confirm_result: str               = "cancel"   # "continue" | "skip" | "cancel" | "retry"
     last_step_failed: bool             = False        # True when entering waiting after a failure
     max_retries:     int               = 1            # auto-retries before notifying user
     no_confirm:      bool              = False        # skip between-step confirmations
@@ -541,12 +546,13 @@ _PLANNER_SYSTEM = """\
 
 步骤类型：
 - [dev]    主要开发步骤（实现功能）
-- [fix]    修复问题
+- [review] 代码审查（只输出审查结论到 review.md，不修改代码）
+- [fix]    修复问题（通常承接前面的 [review] 或 [test] 失败）
 - [test]   运行测试或回归验证
 
 **规则：**
 - 步骤描述要具体，工程师能直接理解并开始工作
-- 只在必要时插入 [test]，避免冗余
+- 只在必要时插入 [review] 和 [test]，避免冗余
 - 不要输出序号、解释或额外说明，只输出步骤列表
 - **严格遵守用户指定的范围**：如果用户说"phase5到phase10"，只输出那几个 phase 的步骤，不要擅自补充范围之外的内容
 """
@@ -1176,7 +1182,7 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None, *,
 
         if state.cancel_ev.is_set() or not steps:
             with state.lock:
-                state.phase = PlanPhase.CANCELLED if state.cancel_ev.is_set() else "failed"
+                state.phase = PlanPhase.CANCELLED if state.cancel_ev.is_set() else PlanPhase.FAILED
             _update_plan_card(state)
             with _active_plans_lock:
                 _active_plans.pop(plan_id, None)
