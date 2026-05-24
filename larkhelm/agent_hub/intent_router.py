@@ -76,6 +76,30 @@ _EXPLICIT_PREFIXES: list[tuple[tuple[str, ...], str]] = [
 ]
 
 
+# ── P1-5b: dispatch-card layer badge map ────────────────────────────────
+# Only ``"L2"`` and ``"fallback"`` show a badge; every other layer value
+# (including ``"L1"`` whether or not the user typed an explicit slash
+# command, ``"microlearn"``, ``"override"``, and any future / unknown
+# value) falls through ``dict.get(layer, "")`` and renders as plain text.
+_LAYER_BADGE: dict[str, str] = {
+    "L2":       "(L2)",
+    "fallback": "(L2→chat)",
+}
+
+
+def format_dispatch_badge(intent: IntentResult) -> str:
+    """Render the layer badge appended to the dispatch card body.
+
+    Returns one of:
+      * ``""``           — layer ∈ {"L1", "explicit", "microlearn", "override", <unknown>}
+      * ``"(L2)"``       — layer == "L2"
+      * ``"(L2→chat)"``  — layer == "fallback"
+
+    Pure / O(1) / no side effects / never raises.
+    """
+    return _LAYER_BADGE.get(intent.layer, "")
+
+
 # ── L1 rule heuristics ─────────────────────────────────────────────────
 # Keyword rules + negative patterns + few-shot examples live in
 # ``intent_keywords`` for testability. The router scores each agent by
@@ -392,6 +416,17 @@ def _fallback(text: str) -> IntentResult:
     return IntentResult(agent_type="chat", layer="fallback", confidence=0.0, raw_text=text)
 
 
+def _bump_intent_layer(layer: str, outcome: str) -> None:
+    """P1-5a: best-effort layer counter bump. Never raises; never blocks
+    the classifier. Centralised so unit tests can monkey-patch this single
+    symbol rather than the whole metrics module."""
+    try:
+        from larkhelm.metrics import inc_intent_layer as _inc
+        _inc(layer, outcome)
+    except Exception:
+        pass
+
+
 def _resolve_microlearn(text: str) -> "IntentResult | None":
     """Phase D-D: feedback-driven LR classifier vote.
 
@@ -534,6 +569,7 @@ def resolve_intent(
 
     explicit = _match_prefix(text_l)
     if explicit:
+        _bump_intent_layer("explicit", "hit")
         return IntentResult(
             agent_type=explicit,
             is_explicit_command=True,
@@ -542,28 +578,59 @@ def resolve_intent(
             raw_text=stripped,
         )
 
+    l1_raised = False
     try:
         l1 = _resolve_l1(stripped, images, has_doc_urls)
     except Exception:
         l1 = None
+        l1_raised = True
+        _bump_intent_layer("l1", "error")
     if l1 is not None:
+        _bump_intent_layer("l1", "hit")
         # Fire-and-forget gray-zone capture — never blocks the L1 return.
         _maybe_record_l1_gray_zone(l1, chat_id, stripped)
         return l1
+    elif not l1_raised:
+        # Distinguish "tried but abstained" (clean) from "raised" (above):
+        # error and abstain are mutually exclusive per call.
+        _bump_intent_layer("l1", "abstain")
 
+    ml_raised = False
     try:
         ml = _resolve_microlearn(stripped)
     except Exception:
         ml = None
+        ml_raised = True
+        _bump_intent_layer("microlearn", "error")
     if ml is not None:
+        _bump_intent_layer("microlearn", "hit")
         return ml
+    elif not ml_raised:
+        # Symmetric with L1: count clean abstains so dashboards can see
+        # how often microlearn declines vs raises.
+        _bump_intent_layer("microlearn", "abstain")
 
     try:
         l2 = _resolve_l2(stripped)
     except Exception:
         l2 = _fallback(stripped)
+        _bump_intent_layer("l2", "error")
+    # L2 returns layer="L2" on success, layer="fallback" when none of the
+    # cheap-backend / embedding paths produced a usable result. Counting at
+    # the call site keeps the metric definition co-located with the
+    # decision (rather than spread across 4 `return _fallback(...)` sites
+    # inside _resolve_l2).
+    if l2.layer == "fallback":
+        _bump_intent_layer("fallback", "hit")
+        try:
+            from larkhelm.metrics import inc_intent_l2_fallback as _inc_fb
+            _inc_fb()
+        except Exception:
+            pass
+    else:
+        _bump_intent_layer("l2", "hit")
     _maybe_record_l2_dispatched(l2, chat_id, stripped)
     return l2
 
 
-__all__ = ["resolve_intent"]
+__all__ = ["resolve_intent", "format_dispatch_badge"]

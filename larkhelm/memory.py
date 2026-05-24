@@ -1249,6 +1249,15 @@ def _run_one_shot_with_backoff(
             except Exception:
                 pass
     if last_exc is not None:
+        # P1-5a (W14): backoff has truly exhausted — bump the exhaustion
+        # counter once before propagating. Sibling site in
+        # ``memory_extract_buffer._invoke_cascade_with_backoff`` does the
+        # same for the buffer-driven cascade path.
+        try:
+            from larkhelm.metrics import inc_cascade_backoff_exhausted
+            inc_cascade_backoff_exhausted()
+        except Exception:
+            pass
         raise last_exc
     return ""
 

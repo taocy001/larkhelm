@@ -19,6 +19,7 @@ from larkhelm.agent_hub.intent_feedback import (
     _new_feedback_id, consume_dispatch, record_signal, register_pending,
     track_dispatch,
 )
+from larkhelm.agent_hub.intent_router import format_dispatch_badge
 from larkhelm.agent_hub.intent_types import (
     AgentContext, AgentResult, IntentResult,
 )
@@ -83,9 +84,16 @@ class AgentDispatcher:
         register_pending(feedback_id, intent, ctx, text=ctx.text)
 
         title = _AGENT_TITLE.get(intent.agent_type, f"🤖 {intent.agent_type}")
+        layer_line = (
+            f"复杂度：{intent.complexity}　·　置信度：{intent.confidence:.2f}　·　"
+            f"层级：{intent.layer}"
+        )
+        badge = format_dispatch_badge(intent)
+        if badge:
+            layer_line += f" {badge}"
         body_lines = [
             f"已识别为 **{intent.agent_type}** 任务",
-            f"复杂度：{intent.complexity}　·　置信度：{intent.confidence:.2f}　·　层级：{intent.layer}",
+            layer_line,
         ]
         if intent.reasoning:
             body_lines.append(f"\n> {intent.reasoning[:200]}")

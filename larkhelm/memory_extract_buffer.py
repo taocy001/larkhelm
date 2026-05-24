@@ -262,6 +262,14 @@ class ExtractBuffer:
                 f"[CascadeBackoff] cascade gave up after {attempts} attempts "
                 f"for {chat_id[:8]}: {e}"
             )
+            # P1-5a (W14): expose backoff exhaustion so Grafana can see how
+            # often cascade extract finally fails — the _debug_log line alone
+            # was invisible to alerting.
+            try:
+                from larkhelm.metrics import inc_cascade_backoff_exhausted
+                inc_cascade_backoff_exhausted()
+            except Exception:
+                pass
 
     # ── test hook ──────────────────────────────────────────────────────
 

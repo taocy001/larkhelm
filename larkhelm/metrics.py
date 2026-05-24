@@ -269,6 +269,26 @@ class LarkhelmMetricsRegistry:
             ["signal_type"],
             registry=self._registry,
         )
+        # P1-5a (review_summary §3 ROI table + W8/W9/W14): observability for
+        # the intent classifier layers and cascade-backoff exhaustion. These
+        # were the three blind spots the operator-facing review flagged as
+        # blocking the Phase 5 default-on rollout (P1-4).
+        self.intent_layer_total = pc.Counter(
+            "larkhelm_intent_layer_total",
+            "Intent resolution outcomes per layer",
+            ["layer", "outcome"],
+            registry=self._registry,
+        )
+        self.intent_l2_fallback_total = pc.Counter(
+            "larkhelm_intent_l2_fallback_total",
+            "L2 classifier fallback to chat",
+            registry=self._registry,
+        )
+        self.cascade_backoff_exhausted_total = pc.Counter(
+            "larkhelm_cascade_backoff_exhausted_total",
+            "Memory cascade ExponentialBackoff retries exhausted (gave up)",
+            registry=self._registry,
+        )
 
     @property
     def available(self) -> bool:
@@ -649,6 +669,55 @@ def inc_intent_feedback(signal_type: str) -> None:
         reg.intent_feedback_total.labels(signal_type=str(signal_type)).inc()
     except Exception as e:
         safe_log(f"[Metrics] inc_intent_feedback failed (signal_type={signal_type}): {e}")
+
+
+def inc_intent_layer(layer: str, outcome: str) -> None:
+    """Bump ``larkhelm_intent_layer_total{layer, outcome}``.
+
+    P1-5a: Called from ``intent_router.resolve_intent`` at every layer
+    decision. ``layer`` ∈ {explicit, l1, microlearn, l2_embedding, l2_llm,
+    fallback}; ``outcome`` ∈ {hit, abstain, error}. Never raises.
+    """
+    reg = get_registry()
+    if not reg.available or reg.intent_layer_total is None:
+        return
+    try:
+        reg.intent_layer_total.labels(layer=str(layer), outcome=str(outcome)).inc()
+    except Exception as e:
+        safe_log(f"[Metrics] inc_intent_layer failed (layer={layer},outcome={outcome}): {e}")
+
+
+def inc_intent_l2_fallback() -> None:
+    """Bump ``larkhelm_intent_l2_fallback_total`` once per L2→chat fallback.
+
+    P1-5a: Counts every time the L2 path (embedding or LLM) couldn't
+    resolve and ``_fallback("chat")`` was returned. Used to gauge whether
+    raising L2 confidence thresholds is safe. Never raises.
+    """
+    reg = get_registry()
+    if not reg.available or reg.intent_l2_fallback_total is None:
+        return
+    try:
+        reg.intent_l2_fallback_total.inc()
+    except Exception as e:
+        safe_log(f"[Metrics] inc_intent_l2_fallback failed: {e}")
+
+
+def inc_cascade_backoff_exhausted() -> None:
+    """Bump ``larkhelm_cascade_backoff_exhausted_total`` when ``ExponentialBackoff``
+    in ``memory_extract_buffer`` / ``memory.cascade_extract`` gave up.
+
+    P1-5a / W14: previously the backoff exhaustion only landed in
+    ``_debug_log`` with no metric, so cascade losses were invisible to
+    Prometheus alerts. Never raises.
+    """
+    reg = get_registry()
+    if not reg.available or reg.cascade_backoff_exhausted_total is None:
+        return
+    try:
+        reg.cascade_backoff_exhausted_total.inc()
+    except Exception as e:
+        safe_log(f"[Metrics] inc_cascade_backoff_exhausted failed: {e}")
 
 
 def inc_workspace_hint(outcome: str) -> None:
