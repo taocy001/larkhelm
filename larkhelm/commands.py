@@ -2349,6 +2349,20 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
                         color="red")
         return
 
+    # Capture the pre-pull HEAD so the post-restart card can show
+    # ``<old> → <new>``. Best-effort: if anything goes wrong we just omit
+    # the prev_head field and the card falls back to "已升级到 <new>".
+    prev_head = ""
+    try:
+        _pr = subprocess.run(
+            ["git", "-C", str(source_dir), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if _pr.returncode == 0:
+            prev_head = _pr.stdout.strip()
+    except Exception as e:
+        _debug_log(f"[Upgrade] prev_head probe failed: {e}")
+
     # Step 1: git pull
     send_card_reply(chat_id, msg_id, "🔄 升级中", "正在拉取最新代码…", color="grey")
     try:
@@ -2429,12 +2443,40 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
         except Exception as e:
             _debug_log(f"[Upgrade] in-flight notify failed: {e}")
 
+    # Capture the new HEAD + subject so _post_init_notify can render a
+    # specific "升级 prev → new (<subject>)" confirmation. Best-effort:
+    # any failure simply omits the corresponding field.
+    new_head = ""
+    commit_subject = ""
+    try:
+        _nr = subprocess.run(
+            ["git", "-C", str(source_dir), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if _nr.returncode == 0:
+            new_head = _nr.stdout.strip()
+        _sr = subprocess.run(
+            ["git", "-C", str(source_dir), "log", "-1", "--format=%s"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if _sr.returncode == 0:
+            commit_subject = _sr.stdout.strip()
+    except Exception as e:
+        _debug_log(f"[Upgrade] new_head/subject probe failed: {e}")
+
     # Write a marker file so the new process can confirm back to the upgrade requester
     import json as _json
     _notify_path = _cfg.DATA_DIR / "_restart_notify.json"
+    _notify_payload = {"chat_id": chat_id, "ts": time.time()}
+    if prev_head:
+        _notify_payload["prev_head"] = prev_head
+    if new_head:
+        _notify_payload["new_head"] = new_head
+    if commit_subject:
+        _notify_payload["commit_subject"] = commit_subject
     try:
         _notify_path.write_text(
-            _json.dumps({"chat_id": chat_id, "ts": time.time()}),
+            _json.dumps(_notify_payload),
             encoding="utf-8",
         )
     except Exception as e:

@@ -189,7 +189,7 @@ def test_post_init_notify_sends_restart_card(monkeypatch, tmp_path, fake_cfg):
     sent = []
     monkeypatch.setattr(
         _lc, "send_card",
-        lambda chat, title, body, color="blue", **kw: sent.append((chat, title)),
+        lambda chat, title, body, color="blue", **kw: sent.append((chat, title, body)),
     )
     marker = fake_cfg.DATA_DIR / "_restart_notify.json"
     marker.write_text(json.dumps({"chat_id": "oc_x", "ts": 9e18}))
@@ -197,6 +197,60 @@ def test_post_init_notify_sends_restart_card(monkeypatch, tmp_path, fake_cfg):
     # File deleted, send_card invoked once with our chat_id.
     assert not marker.exists()
     assert sent and sent[0][0] == "oc_x"
+    # Bare payload (no prev/new/subject) keeps the minimal body.
+    assert "服务已成功重启" in sent[0][2]
+
+
+def test_post_init_notify_renders_prev_new_subject(monkeypatch, tmp_path, fake_cfg):
+    """When _do_upgrade writes prev_head / new_head / commit_subject, the
+    "升级完成" card should embed them so the operator can see *what* shipped."""
+    import json
+    import larkhelm.lark_client as _lc
+
+    sent = []
+    monkeypatch.setattr(
+        _lc, "send_card",
+        lambda chat, title, body, color="blue", **kw: sent.append((chat, title, body)),
+    )
+    marker = fake_cfg.DATA_DIR / "_restart_notify.json"
+    marker.write_text(json.dumps({
+        "chat_id": "oc_y",
+        "ts": 9e18,
+        "prev_head": "cd28e0b",
+        "new_head": "f998f87",
+        "commit_subject": "fix(upgrade): re-resolve SOURCE_DIR on entry",
+    }))
+    _br._post_init_notify(fake_cfg)
+    assert not marker.exists()
+    assert sent and sent[0][0] == "oc_y"
+    body = sent[0][2]
+    assert "cd28e0b" in body and "f998f87" in body, "diff arrow must show both hashes"
+    assert "fix(upgrade)" in body, "subject must appear"
+
+
+def test_post_init_notify_truncates_long_subject(monkeypatch, tmp_path, fake_cfg):
+    """Pathological 200-char commit subjects must not blow up the card."""
+    import json
+    import larkhelm.lark_client as _lc
+
+    sent = []
+    monkeypatch.setattr(
+        _lc, "send_card",
+        lambda chat, title, body, color="blue", **kw: sent.append(body),
+    )
+    long_subj = "x" * 200
+    marker = fake_cfg.DATA_DIR / "_restart_notify.json"
+    marker.write_text(json.dumps({
+        "chat_id": "oc_z", "ts": 9e18,
+        "new_head": "abcdef0", "commit_subject": long_subj,
+    }))
+    _br._post_init_notify(fake_cfg)
+    assert sent
+    body = sent[0]
+    assert "…" in body, "truncation ellipsis missing"
+    # No line longer than ~125 chars (120 + small overhead)
+    assert all(len(line) <= 125 for line in body.splitlines()), \
+        f"some body line exceeded budget: {[len(l) for l in body.splitlines()]}"
 
 
 # ── _handle_sigterm ──────────────────────────────────────────────────────

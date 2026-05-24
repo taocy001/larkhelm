@@ -524,8 +524,22 @@ def _post_init_notify(cfg) -> None:
             _nc = _nd.get("chat_id", "")
             if _nc and (time.time() - float(_nd.get("ts", 0))) < 300:
                 from larkhelm.lark_client import send_card as _send_card
+                _prev = _nd.get("prev_head", "")
+                _new = _nd.get("new_head", "")
+                _subj = _nd.get("commit_subject", "")
+                _body_lines = ["服务已成功重启并重新连接到飞书。"]
+                if _new:
+                    if _prev and _prev != _new:
+                        _body_lines.append(f"\n已升级 `{_prev}` → `{_new}`")
+                    else:
+                        _body_lines.append(f"\n当前版本：`{_new}`")
+                if _subj:
+                    # Truncate long subjects (commit messages can be 100+ chars
+                    # when the headline includes batched-change summaries).
+                    _short_subj = _subj if len(_subj) <= 120 else _subj[:117] + "…"
+                    _body_lines.append(f"\n> {_short_subj}")
                 _send_card(_nc, "✅ 升级完成，已重新连接",
-                           "服务已成功重启并重新连接到飞书。", color="green")
+                           "\n".join(_body_lines), color="green")
                 _debug_log(f"[Startup] upgrade restart notification sent to {_nc[:12]}")
     except Exception as _e:
         _debug_log(f"[Startup] restart notify error: {_e}")
