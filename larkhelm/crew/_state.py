@@ -212,10 +212,35 @@ def _git_head(cwd: str) -> str:
         return ""
 
 
-def _git_auto_commit(cwd: str, label: str) -> str:
-    """
-    Auto-commit all workspace changes and return the commit hash (empty string on failure).
-    Only runs when dev_auto_commit=True and there are uncommitted changes.
+def _git_auto_commit(
+    cwd: str,
+    label: str,
+    *,
+    add_targets: "list[str] | None" = None,
+    commit_message: "str | None" = None,
+) -> str:
+    """Auto-commit workspace changes and return the new commit hash.
+
+    Two modes (B2):
+
+    - ``add_targets=None`` (legacy): ``git add -A``. Used by per-agent
+      checkpoints (implementer / fixer) where the diff is bounded by the
+      single agent's work — accepting drift is OK there because the next
+      agent will inspect the commit anyway.
+
+    - ``add_targets=[...]`` (B2 finalize path): ``git add -- <list>``. Used
+      by ``workspace_finalize`` after ``review APPROVED`` to commit only
+      the curated white-list of paths (file_changes.json ∪ verified
+      drift). Reviewer-flagged risk: a bare ``-A`` here could pick up
+      unrelated dirty state from the user's parallel work.
+
+    Returns the new HEAD short hash, or empty string when:
+      - ``dev_auto_commit`` config is false (default)
+      - no dirty changes in ``cwd``
+      - any subprocess step fails (logged via ``_debug_log``)
+
+    ``commit_message`` overrides the default ``[dev:{label}] auto-checkpoint``
+    template (used by the finalize path to embed drift summary).
     """
     import larkhelm.config as _cfg
     if not _cfg.config.get("dev_auto_commit", False):
@@ -226,11 +251,22 @@ def _git_auto_commit(cwd: str, label: str) -> str:
                                capture_output=True, text=True, timeout=5, cwd=cwd)
         if not dirty.stdout.strip():
             return ""
-        subprocess.run(["git", "add", "-A"], cwd=cwd, timeout=10,
-                       capture_output=True, check=True)
+        if add_targets is None:
+            subprocess.run(["git", "add", "-A"], cwd=cwd, timeout=10,
+                           capture_output=True, check=True)
+        else:
+            # ``git add -- <paths>`` — empty list short-circuits to no-op.
+            if not add_targets:
+                _debug_log(f"[Git] auto-commit ({label}): empty add_targets, skipping")
+                return ""
+            subprocess.run(
+                ["git", "add", "--"] + list(add_targets),
+                cwd=cwd, timeout=15, capture_output=True, check=True,
+            )
+        msg = commit_message or f"[dev:{label}] auto-checkpoint"
         subprocess.run(
-            ["git", "commit", "--no-verify", "-m", f"[dev:{label}] auto-checkpoint"],
-            cwd=cwd, timeout=10, capture_output=True, check=True,
+            ["git", "commit", "--no-verify", "-m", msg],
+            cwd=cwd, timeout=15, capture_output=True, check=True,
         )
         return _git_head(cwd)
     except Exception as e:

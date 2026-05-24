@@ -54,6 +54,17 @@ _DISPLAY_LIMIT = 12
 # command anyway (the user will refine by hand).
 _COMMIT_TARGETS_LIMIT = 20
 
+# B2: Drift threshold for the finalize auto-commit path. When the user
+# enables ``dev_auto_commit=true`` and a /dev or /plan run lands on
+# review APPROVED, we want to commit — but ONLY if the working tree
+# state matches the run's declared ``file_changes.json``. If the run
+# touched ``drift_count`` files that were not declared, the safer
+# behaviour is to NOT commit and surface the drift in the summary card
+# so the user can decide. ``3`` chosen per reviewer guidance — a couple
+# of incidental file syncs are routine; more than that smells like the
+# run quietly modified files outside its declared scope.
+_DRIFT_THRESHOLD = 3
+
 
 # ── Public API ───────────────────────────────────────────────────────────
 
@@ -99,13 +110,27 @@ def finalize_workspace(chat_id: str, title: str, *, kind: str = "plan") -> None:
     except Exception as _e:
         _debug_log(f"[WorkspaceFinalize] review.md read failed: {_e}")
 
+    # ``review_meta_pre`` captured here so the B2 auto-commit can use
+    # ``meta.chat_id`` / ``meta.plan_id`` when writing the final extended
+    # schema below. We flip ``completed=true`` first (B3 invariant: the
+    # boolean must be set even if the auto-commit doesn't run, so future
+    # stale-checks honour the user's last successful run).
+    review_meta_pre: dict = {}
     if review_ok:
         try:
             from larkhelm.crew._commands import _read_workspace_meta, _write_workspace_meta
-            meta = _read_workspace_meta(ws)
-            task_hash = meta.get("task_hash", "") if isinstance(meta, dict) else ""
-            if task_hash and not meta.get("completed"):
-                _write_workspace_meta(ws, task_hash=task_hash, completed=True)
+            review_meta_pre = _read_workspace_meta(ws) or {}
+            task_hash = review_meta_pre.get("task_hash", "")
+            if task_hash and not review_meta_pre.get("completed"):
+                _write_workspace_meta(
+                    ws,
+                    task_hash=task_hash,
+                    completed=True,
+                    commit_sha=review_meta_pre.get("commit_sha", "") or "",
+                    finalized_at=review_meta_pre.get("finalized_at", 0.0) or 0.0,
+                    chat_id=review_meta_pre.get("chat_id", "") or "",
+                    plan_id=review_meta_pre.get("plan_id", "") or "",
+                )
                 _debug_log(
                     f"[WorkspaceFinalize] workspace_meta flipped to completed=true "
                     f"(task_hash={task_hash[:8]}, kind={kind}, title={title!r})"
@@ -121,13 +146,54 @@ def finalize_workspace(chat_id: str, title: str, *, kind: str = "plan") -> None:
     # the card.
     if not any(files.values()):
         return
+
+    # B2: opportunistic auto-commit on review APPROVED + dev_auto_commit=true.
+    # ``_maybe_auto_commit_finale`` is fail-soft; it returns a dict whose
+    # ``commit_sha`` field is "" on any of: feature disabled, drift exceeds
+    # threshold, git error, no review APPROVED, empty change set. The
+    # remaining card-rendering path is unchanged for the disabled / drift
+    # / failure cases, so /dev's existing UX is preserved.
+    commit_info: dict = {"commit_sha": "", "drift_count": 0,
+                         "drift_paths": [], "skipped_reason": ""}
+    if review_ok:
+        try:
+            commit_info = _maybe_auto_commit_finale(cwd, files, title)
+        except Exception as _e:
+            _debug_log(f"[WorkspaceFinalize] auto-commit raised: {_e}")
+        # B3: if we got a real sha, persist it + finalized_at into the
+        # extended workspace_meta schema so future stale-detection /
+        # ``/plan`` linking can disambiguate completed-and-committed
+        # runs from completed-but-not-committed ones.
+        sha = commit_info.get("commit_sha", "") if isinstance(commit_info, dict) else ""
+        if sha:
+            try:
+                import time as _time
+                from larkhelm.crew._commands import (
+                    _read_workspace_meta, _write_workspace_meta,
+                )
+                _meta = _read_workspace_meta(ws) or {}
+                if _meta.get("task_hash"):
+                    _write_workspace_meta(
+                        ws,
+                        task_hash=_meta["task_hash"],
+                        completed=True,
+                        commit_sha=sha,
+                        finalized_at=_time.time(),
+                        chat_id=_meta.get("chat_id", "") or "",
+                        plan_id=_meta.get("plan_id", "") or "",
+                    )
+            except Exception as _e:
+                _debug_log(f"[WorkspaceFinalize] meta sha-write failed: {_e}")
+
     # Gather "本次摘要" metrics (U15): review verdict + test pass rate (from
     # changes.md) + diff line counts (from git) + Feishu doc URLs (from
     # changes.md). All sources are read-only / fail-soft; if a signal is
     # absent the relevant line is just omitted from the summary block.
     metrics = _collect_run_metrics(ws, cwd, files)
     try:
-        body, color = _format_workspace_summary(files, review_ok, title, metrics)
+        body, color = _format_workspace_summary(
+            files, review_ok, title, metrics, commit_info=commit_info,
+        )
         kind_label = "Dev" if kind == "dev" else "Plan"
         send_card(chat_id, f"📦 {kind_label} 收尾 · 改动文件", body, color=color)
     except Exception as _e:
@@ -135,6 +201,138 @@ def finalize_workspace(chat_id: str, title: str, *, kind: str = "plan") -> None:
 
 
 # ── Internal helpers ─────────────────────────────────────────────────────
+
+
+def _compute_drift(declared: "list[str]", actual_dirty: "list[str]") -> dict:
+    """Compute drift between the run's declared file_changes.json and the
+    actual git-dirty working tree.
+
+    Pure function — no I/O. Returns a dict with these keys:
+
+      * ``in_both``      — declared ∩ actual, ordered like ``declared``
+      * ``drift``        — actual − declared (the run touched files it
+                           didn't declare; this is what trips the
+                           ``_DRIFT_THRESHOLD`` gate)
+      * ``missing``      — declared − actual (declared but no change; not
+                           necessarily a problem — could be a no-op edit
+                           that hit existing content)
+      * ``all_to_add``   — ``in_both ∪ drift``, the white-list that the
+                           safe auto-commit path stages
+
+    De-duped within each bucket; order-preserving for stable display.
+    """
+    declared_set = set(declared)
+    actual_set = set(actual_dirty)
+    in_both: list[str] = [p for p in declared if p in actual_set]
+    drift: list[str] = [p for p in actual_dirty if p not in declared_set]
+    missing: list[str] = [p for p in declared if p not in actual_set]
+    # Stable union for the commit white-list.
+    all_to_add: list[str] = []
+    seen: set[str] = set()
+    for p in in_both + drift:
+        if p not in seen:
+            seen.add(p)
+            all_to_add.append(p)
+    return {
+        "in_both":    in_both,
+        "drift":      drift,
+        "missing":    missing,
+        "all_to_add": all_to_add,
+    }
+
+
+def _maybe_auto_commit_finale(cwd: str, files: dict, title: str) -> dict:
+    """B2: opportunistic auto-commit on review APPROVED.
+
+    Behaviour matrix:
+
+      ============================  ====================================
+      Condition                     Outcome
+      ============================  ====================================
+      ``dev_auto_commit`` is false  No commit; returns empty sha.
+      Empty change set              No commit; returns empty sha.
+      ``len(drift) >= 3``           No commit; returns drift list for the
+                                    summary card so the user decides.
+      Otherwise                     ``git add -- <in_both ∪ drift>`` then
+                                    commit with a body that includes the
+                                    drift section; returns sha.
+      ============================  ====================================
+
+    Never raises — every external interaction is wrapped so the rest of
+    ``finalize_workspace`` keeps rendering the summary card even if git
+    blows up.
+    """
+    import larkhelm.config as _cfg
+    if not _cfg.config.get("dev_auto_commit", False):
+        return {"commit_sha": "", "drift_count": 0, "drift_paths": [],
+                "skipped_reason": "dev_auto_commit=false"}
+
+    declared = list(files.get("from_file_changes") or [])
+    actual_dirty = list(files.get("tracked_modified") or []) + \
+                   list(files.get("untracked") or [])
+    if not actual_dirty:
+        return {"commit_sha": "", "drift_count": 0, "drift_paths": [],
+                "skipped_reason": "no dirty changes"}
+
+    drift_info = _compute_drift(declared, actual_dirty)
+    drift_count = len(drift_info["drift"])
+    if drift_count >= _DRIFT_THRESHOLD:
+        return {
+            "commit_sha":      "",
+            "drift_count":     drift_count,
+            "drift_paths":     list(drift_info["drift"]),
+            "skipped_reason":  f"drift_count {drift_count} ≥ {_DRIFT_THRESHOLD}",
+        }
+
+    add_targets = drift_info["all_to_add"]
+    if not add_targets:
+        return {"commit_sha": "", "drift_count": 0, "drift_paths": [],
+                "skipped_reason": "no targets after drift filter"}
+
+    # Build a commit message that embeds the drift summary so future
+    # archeology can see what slipped past the declared scope without
+    # tripping the gate. Subject line is short and tagged so it groups
+    # well in ``git log --oneline``; body lists drift paths (if any).
+    title_short = (title or "").splitlines()[0][:60] or "auto-finalize"
+    msg_lines = [f"[finalize] {title_short}", ""]
+    if drift_info["in_both"]:
+        msg_lines.append(
+            f"Declared ({len(drift_info['in_both'])} file(s)):"
+        )
+        for p in drift_info["in_both"][:20]:
+            msg_lines.append(f"  - {p}")
+        if len(drift_info["in_both"]) > 20:
+            msg_lines.append(f"  - …+{len(drift_info['in_both']) - 20} more")
+        msg_lines.append("")
+    if drift_info["drift"]:
+        msg_lines.append(
+            f"Drift, auto-included ({len(drift_info['drift'])} file(s) "
+            f"below {_DRIFT_THRESHOLD}-threshold):"
+        )
+        for p in drift_info["drift"]:
+            msg_lines.append(f"  - {p}")
+        msg_lines.append("")
+    msg_lines.append("Auto-committed by larkhelm workspace_finalize (B2).")
+    commit_msg = "\n".join(msg_lines)
+
+    try:
+        from larkhelm.crew._state import _git_auto_commit
+        sha = _git_auto_commit(
+            cwd, "finalize",
+            add_targets=add_targets,
+            commit_message=commit_msg,
+        )
+    except Exception as _e:
+        _debug_log(f"[WorkspaceFinalize] _git_auto_commit raised: {_e}")
+        sha = ""
+
+    return {
+        "commit_sha":      sha,
+        "drift_count":     drift_count,
+        "drift_paths":     list(drift_info["drift"]),
+        "skipped_reason":  "" if sha else "git error or disabled",
+    }
+
 
 def _collect_plan_artifacts(ws: Path, cwd: str) -> dict:
     """Return a dict ``{tracked_modified: [...], untracked: [...], from_file_changes: [...]}``.
@@ -294,12 +492,16 @@ def _collect_run_metrics(ws: "Path", cwd: str, files: dict) -> dict:
 
 
 def _format_workspace_summary(files: dict, review_ok: bool, title: str,
-                              metrics: "dict | None" = None) -> tuple[str, str]:
+                              metrics: "dict | None" = None,
+                              *,
+                              commit_info: "dict | None" = None) -> tuple[str, str]:
     """Render the workspace-summary card body + colour.
 
     Body sections (omitted when empty):
       * 📊 本次摘要 (U15) — review verdict + test pass rate + diff stats
         + doc-URL count, when ``metrics`` is provided and non-empty
+      * 🔖 自动提交 (B2) — commit sha + drift status, when ``commit_info``
+        is provided
       * intent — files the run declared in file_changes.json
       * modified / untracked — current working-tree state
       * git-add hint — ready-to-paste shell line covering both
@@ -312,6 +514,27 @@ def _format_workspace_summary(files: dict, review_ok: bool, title: str,
         lines.append("**Review**: ✅ APPROVED — `workspace_meta.completed=true` 已刷")
     else:
         lines.append("**Review**: ⚠️ 未 APPROVED — `workspace_meta` 保留 `completed=false`")
+
+    # B2: 🔖 自动提交 — surface commit_sha or drift warning right at the
+    # top so the user notices before reading the file lists below.
+    if commit_info:
+        sha = commit_info.get("commit_sha", "")
+        drift = commit_info.get("drift_count", 0)
+        drift_paths = commit_info.get("drift_paths", []) or []
+        reason = commit_info.get("skipped_reason", "")
+        if sha:
+            extra = f"（漂移 {drift} 个已并入）" if drift else ""
+            lines.append(f"\n**🔖 自动提交**: `{sha}`{extra}")
+        elif drift_paths:
+            preview = ", ".join(f"`{p}`" for p in drift_paths[:5])
+            extra = f"，余 {len(drift_paths) - 5} 个" if len(drift_paths) > 5 else ""
+            lines.append(
+                f"\n**🔖 自动提交**: ⚠️ 已跳过——漂移 {drift} 个文件"
+                f"（≥ {_DRIFT_THRESHOLD}-threshold）：{preview}{extra}"
+            )
+            lines.append("> 请人工审视下方文件清单后手动执行 `git add` / `git commit`。")
+        elif reason and reason != "dev_auto_commit=false":
+            lines.append(f"\n**🔖 自动提交**: ⚠️ 已跳过（{reason}）")
 
     # 📊 本次摘要 (U15). Render only the rows we actually have data for,
     # so the section doesn't become a sea of "N/A".

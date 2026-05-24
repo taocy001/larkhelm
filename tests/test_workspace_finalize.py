@@ -690,5 +690,293 @@ class FormatWorkspaceSummaryWithMetricsTests(unittest.TestCase):
         self.assertLess(metrics_pos, files_pos)
 
 
+# ════════════════════════════════════════════════════════════════════════
+#  B2 — finalize auto-commit + drift detection
+# ════════════════════════════════════════════════════════════════════════
+
+
+class ComputeDriftTests(unittest.TestCase):
+    """``_compute_drift`` is a pure function — easy to pin exhaustively."""
+
+    def test_zero_drift_all_in_both(self):
+        d = wf_mod._compute_drift(["a.py", "b.py"], ["a.py", "b.py"])
+        self.assertEqual(d["in_both"], ["a.py", "b.py"])
+        self.assertEqual(d["drift"], [])
+        self.assertEqual(d["missing"], [])
+        self.assertEqual(d["all_to_add"], ["a.py", "b.py"])
+
+    def test_drift_unique_to_actual(self):
+        d = wf_mod._compute_drift(["a.py"], ["a.py", "x.py", "y.py"])
+        self.assertEqual(d["in_both"], ["a.py"])
+        self.assertEqual(d["drift"], ["x.py", "y.py"])
+        self.assertEqual(d["missing"], [])
+        # all_to_add preserves declared-first, then drift order
+        self.assertEqual(d["all_to_add"], ["a.py", "x.py", "y.py"])
+
+    def test_missing_declared_but_unmodified(self):
+        d = wf_mod._compute_drift(["a.py", "b.py"], ["a.py"])
+        self.assertEqual(d["in_both"], ["a.py"])
+        self.assertEqual(d["drift"], [])
+        self.assertEqual(d["missing"], ["b.py"])
+        self.assertEqual(d["all_to_add"], ["a.py"])
+
+    def test_dedup_within_all_to_add(self):
+        # Pathological: declared and actual both list "a.py" twice.
+        d = wf_mod._compute_drift(["a.py", "a.py"], ["a.py", "a.py", "b.py"])
+        self.assertEqual(d["all_to_add"], ["a.py", "b.py"])
+
+    def test_empty_inputs(self):
+        d = wf_mod._compute_drift([], [])
+        self.assertEqual(d["in_both"], [])
+        self.assertEqual(d["drift"], [])
+        self.assertEqual(d["all_to_add"], [])
+
+
+class MaybeAutoCommitFinaleTests(unittest.TestCase):
+
+    def _files(self, declared=(), modified=(), untracked=()):
+        return {
+            "from_file_changes": list(declared),
+            "tracked_modified":  list(modified),
+            "untracked":         list(untracked),
+        }
+
+    def test_disabled_flag_skips_commit(self):
+        with patch.dict(_cfg.config, {"dev_auto_commit": False}, clear=False):
+            info = wf_mod._maybe_auto_commit_finale(
+                "/tmp/x", self._files(declared=["a.py"], modified=["a.py"]),
+                "title",
+            )
+        self.assertEqual(info["commit_sha"], "")
+        self.assertEqual(info["skipped_reason"], "dev_auto_commit=false")
+
+    def test_no_dirty_changes_skips_commit(self):
+        with patch.dict(_cfg.config, {"dev_auto_commit": True}, clear=False):
+            info = wf_mod._maybe_auto_commit_finale(
+                "/tmp/x", self._files(declared=["a.py"]),
+                "title",
+            )
+        self.assertEqual(info["commit_sha"], "")
+        self.assertIn("no dirty", info["skipped_reason"])
+
+    def test_drift_above_threshold_skips_commit(self):
+        # 3 ≥ _DRIFT_THRESHOLD (3) — must skip.
+        with patch.dict(_cfg.config, {"dev_auto_commit": True}, clear=False):
+            info = wf_mod._maybe_auto_commit_finale(
+                "/tmp/x",
+                self._files(declared=["a.py"],
+                            modified=["a.py", "x.py"],
+                            untracked=["y.py", "z.py"]),
+                "title",
+            )
+        self.assertEqual(info["commit_sha"], "")
+        self.assertEqual(info["drift_count"], 3)
+        self.assertCountEqual(info["drift_paths"], ["x.py", "y.py", "z.py"])
+
+    def test_drift_below_threshold_calls_git(self):
+        """drift_count < 3 must invoke _git_auto_commit with explicit
+        add_targets covering declared ∪ drift."""
+        captured = {}
+
+        def fake_git_auto_commit(cwd, label, *, add_targets=None,
+                                 commit_message=None):
+            captured["cwd"] = cwd
+            captured["label"] = label
+            captured["add_targets"] = list(add_targets or [])
+            captured["commit_message"] = commit_message
+            return "abc1234"
+
+        with patch.dict(_cfg.config, {"dev_auto_commit": True}, clear=False), \
+             patch("larkhelm.crew._state._git_auto_commit", fake_git_auto_commit):
+            info = wf_mod._maybe_auto_commit_finale(
+                "/tmp/x",
+                self._files(declared=["a.py"],
+                            modified=["a.py"],
+                            untracked=["x.py"]),  # 1 drift, below threshold
+                "fix login",
+            )
+        self.assertEqual(info["commit_sha"], "abc1234")
+        self.assertEqual(captured["label"], "finalize")
+        self.assertEqual(captured["add_targets"], ["a.py", "x.py"])
+        # Subject embeds the title
+        self.assertIn("fix login", captured["commit_message"])
+        # Body lists the drift section
+        self.assertIn("Drift, auto-included", captured["commit_message"])
+        self.assertIn("x.py", captured["commit_message"])
+
+    def test_git_failure_returns_empty_sha(self):
+        def fake_git_auto_commit(cwd, label, **kwargs):
+            return ""   # git returned empty (e.g. exception inside)
+
+        with patch.dict(_cfg.config, {"dev_auto_commit": True}, clear=False), \
+             patch("larkhelm.crew._state._git_auto_commit", fake_git_auto_commit):
+            info = wf_mod._maybe_auto_commit_finale(
+                "/tmp/x",
+                self._files(declared=["a.py"], modified=["a.py"]),
+                "title",
+            )
+        self.assertEqual(info["commit_sha"], "")
+        self.assertIn("git error", info["skipped_reason"])
+
+    def test_zero_declared_full_drift_below_threshold_commits(self):
+        """When file_changes.json is empty but only 1-2 files are dirty,
+        we still want a commit (drift < threshold)."""
+        captured = {}
+
+        def fake_git_auto_commit(cwd, label, *, add_targets=None,
+                                 commit_message=None):
+            captured["add_targets"] = list(add_targets or [])
+            return "def5678"
+
+        with patch.dict(_cfg.config, {"dev_auto_commit": True}, clear=False), \
+             patch("larkhelm.crew._state._git_auto_commit", fake_git_auto_commit):
+            info = wf_mod._maybe_auto_commit_finale(
+                "/tmp/x",
+                self._files(declared=[], modified=["only.py"]),
+                "title",
+            )
+        self.assertEqual(info["commit_sha"], "def5678")
+        self.assertEqual(info["drift_count"], 1)
+        self.assertEqual(captured["add_targets"], ["only.py"])
+
+
+class FormatSummaryWithCommitInfoTests(unittest.TestCase):
+
+    def _files(self):
+        return {"from_file_changes": ["a.py"],
+                "tracked_modified": [], "untracked": []}
+
+    def test_commit_sha_rendered_when_present(self):
+        info = {"commit_sha": "abc1234", "drift_count": 0,
+                "drift_paths": [], "skipped_reason": ""}
+        body, color = wf_mod._format_workspace_summary(
+            self._files(), True, "MyPlan", commit_info=info)
+        self.assertIn("自动提交", body)
+        self.assertIn("`abc1234`", body)
+        self.assertEqual(color, "green")
+
+    def test_drift_warning_when_skipped(self):
+        info = {"commit_sha": "", "drift_count": 4,
+                "drift_paths": ["x.py", "y.py", "z.py", "w.py"],
+                "skipped_reason": "drift_count 4 ≥ 3"}
+        body, _ = wf_mod._format_workspace_summary(
+            self._files(), True, "P", commit_info=info)
+        self.assertIn("已跳过", body)
+        self.assertIn("漂移 4 个文件", body)
+        # All four drift paths visible (< 5 cap)
+        for p in ("x.py", "y.py", "z.py", "w.py"):
+            self.assertIn(p, body)
+        self.assertIn("手动执行", body)
+
+    def test_drift_warning_caps_path_preview_at_5(self):
+        info = {"commit_sha": "", "drift_count": 8,
+                "drift_paths": [f"p{i}.py" for i in range(8)],
+                "skipped_reason": "drift_count 8 ≥ 3"}
+        body, _ = wf_mod._format_workspace_summary(
+            self._files(), True, "P", commit_info=info)
+        self.assertIn("p0.py", body)
+        self.assertIn("p4.py", body)
+        self.assertNotIn("p5.py", body)
+        self.assertIn("余 3 个", body)
+
+    def test_disabled_reason_renders_nothing(self):
+        """When dev_auto_commit=false the rendered body should NOT show a
+        '⚠️ 已跳过' line — that would confuse users who never opted in."""
+        info = {"commit_sha": "", "drift_count": 0, "drift_paths": [],
+                "skipped_reason": "dev_auto_commit=false"}
+        body, _ = wf_mod._format_workspace_summary(
+            self._files(), True, "P", commit_info=info)
+        self.assertNotIn("自动提交", body)
+
+    def test_no_commit_info_argument_keeps_legacy_body(self):
+        """Pre-B2 callers that don't pass commit_info must see no
+        commit-related section at all."""
+        body, _ = wf_mod._format_workspace_summary(
+            self._files(), True, "MyPlan")
+        self.assertNotIn("自动提交", body)
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  B2 — _git_auto_commit(add_targets=...)
+# ════════════════════════════════════════════════════════════════════════
+
+
+class GitAutoCommitAddTargetsTests(unittest.TestCase):
+    """Verify the new white-list mode of ``_git_auto_commit`` (B2)."""
+
+    def setUp(self):
+        # Each call to subprocess.run gets recorded so we can introspect.
+        self.calls: list[list[str]] = []
+
+        def _fake_run(args, **kwargs):
+            self.calls.append(list(args))
+            ret = MagicMock()
+            ret.returncode = 0
+            ret.stdout = "M file.py\n" if args[:2] == ["git", "status"] else ""
+            ret.stderr = ""
+            return ret
+        self._fake_run = _fake_run
+
+    def _import_target(self):
+        from larkhelm.crew._state import _git_auto_commit
+        return _git_auto_commit
+
+    def test_add_targets_none_uses_full_add(self):
+        _git_auto_commit = self._import_target()
+        with patch.dict(_cfg.config, {"dev_auto_commit": True}, clear=False), \
+             patch("larkhelm.crew._state.subprocess.run", side_effect=self._fake_run), \
+             patch("larkhelm.crew._state._git_head", return_value="aaaa111"):
+            sha = _git_auto_commit("/tmp/x", "implementer")
+        self.assertEqual(sha, "aaaa111")
+        # One of the calls must be ``git add -A``
+        add_calls = [c for c in self.calls if c[:2] == ["git", "add"]]
+        self.assertTrue(any(c == ["git", "add", "-A"] for c in add_calls),
+                        f"expected `git add -A`, got {add_calls!r}")
+
+    def test_add_targets_list_uses_explicit_paths(self):
+        _git_auto_commit = self._import_target()
+        with patch.dict(_cfg.config, {"dev_auto_commit": True}, clear=False), \
+             patch("larkhelm.crew._state.subprocess.run", side_effect=self._fake_run), \
+             patch("larkhelm.crew._state._git_head", return_value="bbbb222"):
+            sha = _git_auto_commit(
+                "/tmp/x", "finalize",
+                add_targets=["a.py", "b/c.py"],
+                commit_message="[finalize] Custom",
+            )
+        self.assertEqual(sha, "bbbb222")
+        add_calls = [c for c in self.calls if c[:2] == ["git", "add"]]
+        self.assertTrue(
+            any(c == ["git", "add", "--", "a.py", "b/c.py"] for c in add_calls),
+            f"expected explicit `git add --`, got {add_calls!r}")
+        # Commit message override propagated
+        commit_calls = [c for c in self.calls if c[:2] == ["git", "commit"]]
+        self.assertTrue(any("[finalize] Custom" in (c[-1] if len(c) > 1 else "")
+                            for c in commit_calls))
+
+    def test_empty_add_targets_short_circuits(self):
+        _git_auto_commit = self._import_target()
+        with patch.dict(_cfg.config, {"dev_auto_commit": True}, clear=False), \
+             patch("larkhelm.crew._state.subprocess.run", side_effect=self._fake_run):
+            sha = _git_auto_commit(
+                "/tmp/x", "finalize",
+                add_targets=[],   # explicit empty white-list
+            )
+        self.assertEqual(sha, "")
+        # No ``git add`` / ``git commit`` should have run
+        self.assertFalse(any(c[:2] == ["git", "add"] for c in self.calls),
+                         f"expected no add call, got {self.calls!r}")
+        self.assertFalse(any(c[:2] == ["git", "commit"] for c in self.calls))
+
+    def test_disabled_flag_skips_everything(self):
+        _git_auto_commit = self._import_target()
+        with patch.dict(_cfg.config, {"dev_auto_commit": False}, clear=False), \
+             patch("larkhelm.crew._state.subprocess.run", side_effect=self._fake_run):
+            sha = _git_auto_commit(
+                "/tmp/x", "finalize", add_targets=["a.py"])
+        self.assertEqual(sha, "")
+        # No git invocation at all when flag is off
+        self.assertEqual(self.calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()
