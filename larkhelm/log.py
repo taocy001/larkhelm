@@ -20,6 +20,7 @@ from larkhelm.secure_io import secure_open
 __all__ = [
     "_log_lock", "log_entry", "_read_logs", "_read_logs_tail",
     "_get_recent_turns", "_get_recent_turns_uncached",
+    "_get_conv_seqno",
     "_debug_log", "safe_log", "lazy_debug_log",
     "info", "warn", "error",
     "Level", "current_log_level",
@@ -143,6 +144,14 @@ _TAIL_SCAN_DEFAULT_BYTES = 1 * 1024 * 1024  # 1 MiB tail window for _read_logs_t
 _jsonl_write_count = 0
 _JSONL_ROTATION_CHECK_EVERY = 1000  # check rotation every N log entries
 _rotation_lock = threading.Lock()   # separate lock so rotation never deadlocks with _log_lock
+
+# Per-chat conversation sequence number.  Incremented ONLY when a ``user`` or
+# ``assistant`` log entry is written (tool / shell / error / debug writes are
+# excluded).  Used as the ``_context_cache.RecentTurnsKey.conv_seqno`` so the
+# LRU cache for ``_get_recent_turns`` is invalidated by real turns only —
+# fixing the Hit=0 problem caused by the former mtime_ns key that changed on
+# every single ``log_entry`` write.  Access is guarded by ``_log_lock``.
+_chat_conv_seqno: dict[str, int] = {}
 
 # Pending Markdown shard-rotation events; appended by ``_log_file`` while it
 # holds ``_log_lock`` and drained by ``log_entry`` *after* release so the
@@ -300,6 +309,11 @@ def log_entry(
             print(f"[Log] JSONL 写入失败: {e}", file=sys.stderr)
         _jsonl_write_count += 1
         should_rotate = (_jsonl_write_count % _JSONL_ROTATION_CHECK_EVERY == 0)
+        # Bump per-chat conversation seqno for user/assistant entries only.
+        # Other roles (tool, shell, error, reset, …) do NOT invalidate the
+        # ``_get_recent_turns`` LRU cache — only real conversation turns do.
+        if role in ("user", "assistant"):
+            _chat_conv_seqno[chat_id] = _chat_conv_seqno.get(chat_id, 0) + 1
         # Drain any deferred Markdown-shard rotation messages while we still
         # hold the lock — the drain itself doesn't take any other lock.
         rotation_msgs: list[str] = []
@@ -311,6 +325,23 @@ def log_entry(
         rotate_jsonl_if_needed()
     for msg in rotation_msgs:
         info(msg)
+
+
+def _get_conv_seqno(chat_id: str) -> int:
+    """Return the conversation sequence number for *chat_id*.
+
+    The number is incremented each time a ``user`` or ``assistant`` entry
+    is written to ``all.jsonl`` via :func:`log_entry`.  Tool / shell / error
+    / debug entries do NOT bump the counter, so callers that read the same
+    conversation state multiple times within one request (e.g. the
+    dedup-prefix retry path in ``_do_query``) will see a stable key and
+    benefit from the ``_context_cache.cached_recent_turns`` LRU hit.
+
+    Thread-safe: reads the value under ``_log_lock`` (same lock as
+    ``log_entry``).  Returns 0 for an unknown chat_id (no turns logged yet).
+    """
+    with _log_lock:
+        return _chat_conv_seqno.get(chat_id, 0)
 
 
 def _read_logs(chat_id: str) -> list[dict]:
@@ -611,10 +642,12 @@ def _get_recent_turns(
     """Cached wrapper — delegates to :func:`_get_recent_turns_uncached`.
 
     Wraps the original tail-read implementation with the
-    ``_context_cache.cached_recent_turns`` LRU layer. The cache key
-    embeds ``(chat_id, max_turns, max_chars, dedup_prefix_hash,
-    all.jsonl mtime_ns + size)``, so any new ``log_entry`` write invalidates
-    the entry on the next read.
+    ``_context_cache.cached_recent_turns`` LRU layer.  The cache key embeds
+    ``(chat_id, max_turns, max_chars, conv_seqno)`` where ``conv_seqno`` is
+    the per-chat integer returned by :func:`_get_conv_seqno` — incremented
+    only on ``user`` / ``assistant`` writes.  Tool, shell, error, and debug
+    entries do NOT change the key, so retries within the same request share
+    the same cache slot (fixing the former Hit=0 caused by mtime_ns).
 
     When ``cfg.RECENT_TURNS_CACHE_ENABLED`` is False the body bypasses the
     cache and calls the uncached function directly (PR-prior byte-compat).
@@ -633,6 +666,7 @@ def _get_recent_turns(
         )
     return cached_recent_turns(
         chat_id, max_turns, max_chars, dedup_prefix,
+        conv_seqno=_get_conv_seqno(chat_id),
         loader=lambda: _get_recent_turns_uncached(
             chat_id, max_turns, max_chars, dedup_prefix=dedup_prefix,
         ),

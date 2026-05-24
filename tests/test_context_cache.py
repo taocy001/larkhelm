@@ -151,14 +151,10 @@ class CachedRecentTurnsTests(unittest.TestCase):
 
     def setUp(self):
         cc.reset_for_tests()
-        # Make sure all.jsonl exists so stat() returns real numbers
-        log_dir = Path(_cfg.LOG_DIR)
-        log_dir.mkdir(parents=True, exist_ok=True)
-        self.jsonl = log_dir / "all.jsonl"
-        self.jsonl.write_text('{"chat_id":"A","role":"user","content":"hi"}\n')
         _cfg.RECENT_TURNS_CACHE_ENABLED = True
 
     def test_hit_avoids_second_loader_call(self):
+        # Two calls with the same conv_seqno (default=0) → second is a hit.
         calls = [0]
 
         def loader():
@@ -171,29 +167,44 @@ class CachedRecentTurnsTests(unittest.TestCase):
         self.assertEqual(b, "fixed-result")
         self.assertEqual(calls[0], 1, "second call should have hit cache")
 
-    def test_mtime_change_invalidates(self):
+    def test_seqno_change_invalidates(self):
+        # A new user/assistant log entry bumps conv_seqno → cache miss.
         calls = [0]
 
         def loader():
             calls[0] += 1
             return f"v{calls[0]}"
 
-        a = cc.cached_recent_turns("chatA", 6, 2000, None, loader=loader)
-        # Advance mtime by one nanosecond by appending a byte.
-        with open(self.jsonl, "a") as f:
-            f.write('{"x":1}\n')
-        # Some filesystems quantise mtime; ensure ≥1ns separation by also
-        # setting utime explicitly.
-        new_t = time.time() + 1.0
-        os.utime(self.jsonl, (new_t, new_t))
-        b = cc.cached_recent_turns("chatA", 6, 2000, None, loader=loader)
-        self.assertEqual(calls[0], 2)
+        a = cc.cached_recent_turns("chatA", 6, 2000, None, conv_seqno=0,
+                                   loader=loader)
+        # Simulate a new conversation turn (seqno incremented by log_entry).
+        b = cc.cached_recent_turns("chatA", 6, 2000, None, conv_seqno=1,
+                                   loader=loader)
+        self.assertEqual(calls[0], 2, "different seqno → cache miss → loader called twice")
         self.assertNotEqual(a, b)
+
+    def test_same_seqno_is_hit(self):
+        # Tool / shell / error log entries do NOT change conv_seqno, so a
+        # retry within the same request sees the same key and hits the cache.
+        calls = [0]
+
+        def loader():
+            calls[0] += 1
+            return f"v{calls[0]}"
+
+        # First call (miss, seqno=5)
+        a = cc.cached_recent_turns("chatA", 6, 2000, None, conv_seqno=5,
+                                   loader=loader)
+        # Retry call (same seqno=5 — no new user/assistant entry yet) → hit
+        b = cc.cached_recent_turns("chatA", 6, 2000, None, conv_seqno=5,
+                                   loader=loader)
+        self.assertEqual(calls[0], 1, "same seqno → second call hits cache")
+        self.assertEqual(a, b)
 
     def test_dedup_prefix_excluded_from_key(self):
         # dedup_prefix is intentionally NOT part of the cache key (see
         # RecentTurnsKey docstring).  Two calls with different dedup_prefix
-        # values but the same (chat_id, max_turns, max_chars, mtime, size)
+        # values but the same (chat_id, max_turns, max_chars, conv_seqno)
         # should share the same cache entry — the second call is a hit.
         calls = [0]
 
@@ -203,7 +214,7 @@ class CachedRecentTurnsTests(unittest.TestCase):
 
         a = cc.cached_recent_turns("chatA", 6, 2000, "prefix-A", loader=loader)
         b = cc.cached_recent_turns("chatA", 6, 2000, "prefix-B", loader=loader)
-        self.assertEqual(calls[0], 1, "same mtime → second call is a cache hit")
+        self.assertEqual(calls[0], 1, "same conv_seqno → second call is a cache hit")
         self.assertEqual(a, b, "same cached payload returned for both calls")
 
     def test_lru_eviction_when_capacity_exceeded(self):

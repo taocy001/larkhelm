@@ -57,13 +57,25 @@ class RecentTurnsKey:
     chat_id: str
     max_turns: int
     max_chars: int
-    jsonl_mtime_ns: int
-    jsonl_size: int
-    # NOTE: dedup_prefix_hash intentionally excluded from the key.
+    conv_seqno: int
+    # Replaces the former ``jsonl_mtime_ns + jsonl_size`` pair. Those fields
+    # were updated by *every* ``log_entry`` write (tool calls, shell output,
+    # errors, …), so in practice the cache key changed between the
+    # ``_get_recent_turns`` call in ``_do_query`` and any retry call in the
+    # same request, making the LRU layer effectively dead (Hit=0 in all
+    # observed production runs).
+    #
+    # ``conv_seqno`` is a per-chat integer that is incremented ONLY when a
+    # ``user`` or ``assistant`` entry is written to ``all.jsonl`` (see
+    # ``log.log_entry`` / ``log._get_conv_seqno``). Tool / shell / error /
+    # debug writes do NOT bump the counter, so retries within the same
+    # request see the same key and produce a cache hit.
+    #
+    # NOTE: dedup_prefix intentionally excluded from the key.
     # The dedup filter is cheap (in-memory substring scan) and is applied
-    # INSIDE the loader; removing it from the key lets the exception-retry
-    # path in _query.py (line 843 → 846, dedup_prefix=P → None) share the
-    # same cache entry as the primary call — avoiding a second 100 KB read.
+    # INSIDE the loader; removing it from the key lets callers with different
+    # dedup_prefix values share the same cache entry — avoiding a second
+    # 100 KB read.
 
 
 @dataclass(frozen=True)
@@ -409,6 +421,7 @@ def cached_recent_turns(
     max_chars: int,
     dedup_prefix: Optional[str],
     *,
+    conv_seqno: int = 0,
     loader: Callable[[], str],
 ) -> str:
     """LRU-cached wrapper for ``log._get_recent_turns_uncached``.
@@ -417,16 +430,22 @@ def cached_recent_turns(
 
       * ``chat_id`` — turns are per-chat by construction.
       * ``max_turns`` / ``max_chars`` — caller-controlled limits.
-      * ``jsonl_mtime_ns`` + ``jsonl_size`` — the only signal larkhelm
-        sees when a new turn arrives. ext4/xfs preserve both on each
-        ``log_entry`` append, so any new write invalidates the entry.
+      * ``conv_seqno`` — per-chat integer incremented only on ``user`` /
+        ``assistant`` log entries (see ``log._get_conv_seqno``). Tool,
+        shell, error, and debug writes do NOT bump the counter, so retries
+        within the same ``_do_query`` call share the same cache slot and
+        produce a cache hit instead of a redundant 100 KB disk read.
+
+    The former ``jsonl_mtime_ns + jsonl_size`` pair was updated by every
+    ``log_entry`` write, causing the LRU to produce Hit=0 in all observed
+    production runs. ``conv_seqno`` fixes this: only real conversation
+    turns (user/assistant) bust the cache.
 
     ``dedup_prefix`` is intentionally NOT part of the key: it is applied
     inside the loader and its effect is cheap (substring scan on in-memory
     strings).  Excluding it from the key means the exception-retry path in
-    ``_query.py`` (``dedup_prefix=P`` → exception → ``dedup_prefix=None``)
-    can share the same cache slot as the primary call instead of doing a
-    second 100 KB tail-read.
+    ``_query.py`` (``dedup_prefix=P`` → retry with ``dedup_prefix=None``)
+    can share the same cache slot as the primary call.
 
     Cache disabled (config flag off) → directly returns ``loader()``;
     no metric, no debug log.
@@ -434,19 +453,11 @@ def cached_recent_turns(
     if not _config_flag("RECENT_TURNS_CACHE_ENABLED", True):
         return loader()
 
-    try:
-        import larkhelm.config as _cfg
-        jsonl_path = Path(_cfg.LOG_DIR) / "all.jsonl"
-    except Exception:
-        jsonl_path = None
-    mtime_ns, size = _stat_file(jsonl_path)
-
     key = RecentTurnsKey(
         chat_id=chat_id,
         max_turns=int(max_turns),
         max_chars=int(max_chars),
-        jsonl_mtime_ns=mtime_ns,
-        jsonl_size=size,
+        conv_seqno=int(conv_seqno),
     )
 
     hit, value = _recent_turns_cache.get(key)
@@ -458,7 +469,7 @@ def cached_recent_turns(
     value = loader()
     evicted = _recent_turns_cache.put(key, value)
     _inc_outcome("recent_turns", "miss")
-    _log_event("recent_turns", "miss", f"chat={chat_id[:8]} size={size}")
+    _log_event("recent_turns", "miss", f"chat={chat_id[:8]} seqno={conv_seqno}")
     if evicted is not None:
         _inc_outcome("recent_turns", "evict")
         _log_event("recent_turns", "evict", f"chat={evicted.chat_id[:8]}")
