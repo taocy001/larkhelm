@@ -917,6 +917,65 @@ def _run_agent_wrapper(state: CrewState, agent_id: str) -> None:
                 break
             # Sync output_file before updating state to avoid holding the lock during IO
             feishu_url = _sync_output_file(state, agent_id)
+            # B1: PRD self-check gate — fires once after architect writes
+            # tasks.json / prd_criteria.json / file_changes.json. On any
+            # ``❌`` finding we flip ``needs_retry=True`` and stuff a
+            # pointer to ``.crew_workspace/prd_selfcheck.md`` into
+            # architect's feedback slot so the retry round sees the
+            # diagnosis prepended to its prompt. The architect spec has
+            # ``retry_target=["architect"], max_retries=1`` so the
+            # scheduler reruns it exactly once; a second failure falls
+            # through to existing exhaustion handling (no hard-fail —
+            # we'd rather ship a borderline PRD than block the user).
+            if not needs_retry and agent_id == "architect":
+                try:
+                    from larkhelm.crew._prd_selfcheck import run_prd_selfcheck
+                    cwd_for_check = _get_cwd(state.chat_id)
+                    passed, report = run_prd_selfcheck(cwd_for_check)
+                    if not passed:
+                        needs_retry = True
+                        # Write to feedback inside the lock — same field that
+                        # ``_run_agent`` will read on the retry pass.
+                        with state.lock:
+                            state.agents[agent_id].feedback = (
+                                "PRD self-check 失败（B1 gate）。请读取 "
+                                ".crew_workspace/prd_selfcheck.md 修正 anchors / "
+                                "AC how_to_verify 占位符 / file_changes 路径不一致 "
+                                "三类问题后重新生成 tasks.json / prd_criteria.json / "
+                                "file_changes.json。"
+                                + (f"\n\n以下是首轮自检完整报告（供参考）：\n\n{report}"
+                                   if len(report) < 4000 else "")
+                            )
+                        _debug_log("[Crew] architect PRD self-check FAILED, pending retry")
+                except Exception as e:
+                    # Self-check is a soft gate — never block the pipeline
+                    # if its internals raise. Just log and let architect's
+                    # output through.
+                    _debug_log(f"[Crew] architect PRD self-check hook raised: {e}")
+            # B4: reconcile file_changes.json drift after implementer/fixer.
+            # The architect's declared list is best-effort; agents
+            # routinely modify files outside the declared scope (tests,
+            # neighbouring doc syncs). Reconciling here keeps the
+            # artifact honest before B2 finalize reads it for its
+            # drift-threshold decision. Fail-soft.
+            if not needs_retry and agent_id in ("implementer", "fixer"):
+                try:
+                    from larkhelm.crew._workspace_reconcile import (
+                        reconcile_file_changes,
+                    )
+                    reconcile_file_changes(_get_cwd(state.chat_id))
+                except Exception as e:
+                    _debug_log(f"[Crew] workspace reconcile failed ({agent_id}): {e}")
+            # B4: stamp schema_version=2 on tasks.json once architect has
+            # emitted anchor metadata. No-op when anchors are absent.
+            if not needs_retry and agent_id == "architect":
+                try:
+                    from larkhelm.crew._workspace_reconcile import (
+                        stamp_schema_version_on_tasks,
+                    )
+                    stamp_schema_version_on_tasks(_get_cwd(state.chat_id))
+                except Exception as e:
+                    _debug_log(f"[Crew] tasks.json schema stamp failed: {e}")
             # Auto-commit after code-modification agents succeed (when dev_auto_commit=true)
             commit_hash = ""
             if not needs_retry and agent_id in ("implementer", "fixer"):
