@@ -73,6 +73,7 @@ def inject_doc_and_memory(
     doc_auto_inject: bool,
     has_doc_urls: bool,
     sender_open_id: "str | None" = None,
+    skip_recent_turns: bool = False,
 ) -> tuple[str, str, list[str]]:
     """Combined doc-injection + memory-context build (pure-ish wrapper).
 
@@ -81,6 +82,14 @@ def inject_doc_and_memory(
     the side effects ``_do_query`` was performing inline. The split is
     purely structural: lift one big nested block into a named function
     so it can be replaced/stubbed in tests.
+
+    ``skip_recent_turns=True`` mirrors the ``CLI_SKIP_RECENT_TURNS_WHEN_SID``
+    pre-read skip in ``_do_query``: when the caller already knows the CLI
+    backend has a live session (``--resume <sid>``), there is no need to
+    tail-read 100 KB of ``all.jsonl`` — the session already carries the
+    prior turns, and injecting them again wastes ~500 input tokens / call.
+    QuerySession callers should resolve the sid before calling this helper
+    and pass ``skip_recent_turns=True`` when appropriate.
 
     Returns ``(enriched_msg, memory_ctx, deduped_recent_turns)``.
     On any failure each component degrades to its empty equivalent
@@ -103,22 +112,26 @@ def inject_doc_and_memory(
         from larkhelm.memory import load_memory
         from larkhelm.memory_context import extract_work_context
 
-        dedup_prefix: str | None = None
-        try:
-            session_raw = load_memory(chat_id)
-            wc = extract_work_context(session_raw)
-            dedup_prefix = wc or None
-        except Exception as e:
-            _debug_log(f"[QueryPure] work_context extract error: {e}")
-            dedup_prefix = None
+        recent_list: list[str] = []
+        if skip_recent_turns:
+            _debug_log(f"[QueryPure] skip recent_turns (pre-read) chat={chat_id[:8]}")
+        else:
+            dedup_prefix: str | None = None
+            try:
+                session_raw = load_memory(chat_id)
+                wc = extract_work_context(session_raw)
+                dedup_prefix = wc or None
+            except Exception as e:
+                _debug_log(f"[QueryPure] work_context extract error: {e}")
+                dedup_prefix = None
 
-        try:
-            raw_recent = _get_recent_turns(chat_id, dedup_prefix=dedup_prefix) or ""
-        except Exception as e:
-            _debug_log(f"[QueryPure] dedup recent_turns error: {e}, retrying without prefix")
-            raw_recent = _get_recent_turns(chat_id) or ""
+            try:
+                raw_recent = _get_recent_turns(chat_id, dedup_prefix=dedup_prefix) or ""
+            except Exception as e:
+                _debug_log(f"[QueryPure] dedup recent_turns error: {e}, retrying without prefix")
+                raw_recent = _get_recent_turns(chat_id) or ""
 
-        recent_list = [ln for ln in raw_recent.splitlines() if ln.strip()] if raw_recent else []
+            recent_list = [ln for ln in raw_recent.splitlines() if ln.strip()] if raw_recent else []
 
         try:
             from larkhelm.memory import get_memory_context_v2

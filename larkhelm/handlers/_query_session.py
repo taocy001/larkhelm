@@ -83,6 +83,7 @@ class QuerySession:
     eyes_reaction_id: "str | None" = None
     successful_spec: object = None
     output: "str | None" = None
+    _initial_spec: object = None  # resolved by _resolve_initial_model; None on failure
 
     # ─────────────────────────────────────────────────────────────────
     # Public entry point
@@ -146,6 +147,7 @@ class QuerySession:
                     doc_auto_inject=_cfg.DOC_AUTO_INJECT,
                     has_doc_urls=has_doc_urls,
                     sender_open_id=self.sender_open_id,
+                    skip_recent_turns=self._should_skip_recent_turns(),
                 )
                 self.message = enriched
                 recent_turns = "\n".join(deduped)
@@ -191,11 +193,38 @@ class QuerySession:
             # cargo-cult justification flagged by P1 review).
             from larkhelm.router import resolve_backend as _resolve
             has_docs = bool(_query_pure.extract_feishu_urls(self.message))
-            spec = _resolve(self.chat_id, self.message, bool(self.images), has_docs,
-                            self.force_backend_id)
-            self.m_name = spec.display_name
+            self._initial_spec = _resolve(self.chat_id, self.message, bool(self.images), has_docs,
+                                          self.force_backend_id)
+            self.m_name = self._initial_spec.display_name
         except Exception:
-            pass
+            self._initial_spec = None
+
+    def _should_skip_recent_turns(self) -> bool:
+        """Mirror the CLI_SKIP_RECENT_TURNS_WHEN_SID pre-read skip from ``_do_query``.
+
+        Returns True when the resolved backend is a CLI provider (claude_cli /
+        gemini_cli / kimi_cli) AND a live session ID already exists for this
+        chat — resuming such a session means the prior turns are already in
+        the session context and re-injecting them via the system channel is a
+        ~500-token waste per call.
+
+        Defaults to False on any resolution failure so the caller degrades
+        safely to the full read path.
+        """
+        if not bool(getattr(_cfg, "CLI_SKIP_RECENT_TURNS_WHEN_SID", True)):
+            return False
+        spec = getattr(self, "_initial_spec", None)
+        if spec is None:
+            return False
+        try:
+            _cli_providers = {"claude_cli", "gemini_cli", "kimi_cli"}
+            if spec.provider not in _cli_providers:
+                return False
+            from larkhelm.chat_state import _load_sid
+            sid = _load_sid(self.chat_id, spec.id)
+            return bool(sid)
+        except Exception:
+            return False
 
     def emit_init_card(self, cwd: str) -> "str | None":
         card_json = _query_pure.build_init_card(self.m_name, cwd, self.chat_id)
