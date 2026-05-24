@@ -637,7 +637,10 @@ class QuerySession:
 
     def _maybe_queue_behind_crew(self) -> bool:
         try:
-            from larkhelm.crew._state import is_crew_running, subscribe_crew_done
+            from larkhelm.crew._state import (
+                current_owner, describe_active_owner, is_crew_running,
+                owner_kind, subscribe_crew_done,
+            )
             if not is_crew_running(self.chat_id):
                 return False
         except Exception as e:
@@ -646,9 +649,25 @@ class QuerySession:
 
         existing_mid = _set_pending(self.chat_id, self.message, self.model, self.user_msg_id)
         preview = self.message[:80].replace("\n", " ")
+        # C5 #14: mirror the legacy ``_query.py`` queue card — pick the
+        # title and body to match the actual slot owner instead of always
+        # saying "Crew" (``is_crew_running`` is True for ``/plan`` owners
+        # too). Same family as C4 #11 / #12. Kept in sync with the
+        # legacy path; see the matching block in ``_query.py``.
+        owner_token = current_owner(self.chat_id)
+        kind = owner_kind(owner_token)
+        if kind == "plan":
+            _q_title = "⏳ Plan 运行中"
+            _q_body_lead = f"当前 {describe_active_owner(owner_token)} 完成后自动执行"
+        elif kind == "crew":
+            _q_title = "⏳ Crew 运行中"
+            _q_body_lead = "当前 Crew 任务完成后自动执行"
+        else:
+            _q_title = "⏳ 任务运行中"
+            _q_body_lead = "当前任务完成后自动执行"
         card = _make_card(
-            "⏳ Crew 运行中",
-            f"当前 Crew 任务完成后自动执行：\n\n> {preview}",
+            _q_title,
+            f"{_q_body_lead}：\n\n> {preview}",
             color="orange",
             buttons=[("❌ 取消排队", f"cancel_queue:{self.chat_id}")],
         )

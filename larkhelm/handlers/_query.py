@@ -519,13 +519,35 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
 
     # Queue behind crew if one is running for this chat
     try:
-        from larkhelm.crew._state import is_crew_running, subscribe_crew_done
+        from larkhelm.crew._state import (
+            current_owner, describe_active_owner, is_crew_running,
+            owner_kind, subscribe_crew_done,
+        )
         if is_crew_running(chat_id):
             existing_mid = _set_pending(chat_id, message, model, user_msg_id)
             preview = message[:80].replace("\n", " ")
+            # C5 #14: ``is_crew_running`` is True for any ``_active_crew``
+            # owner — including ``/plan``. Pre-C5 the card hardcoded
+            # "⏳ Crew 运行中" + "当前 Crew 任务完成后自动执行" so when
+            # the user was actually queued behind a plan they got the
+            # wrong command name on every wait card (same family as
+            # C4 #11 / #12). Decode the owner token and pick the title
+            # and body to match. Falls back to the conservative "task"
+            # wording for any unknown future owner class.
+            owner_token = current_owner(chat_id)
+            kind = owner_kind(owner_token)
+            if kind == "plan":
+                _q_title = "⏳ Plan 运行中"
+                _q_body_lead = f"当前 {describe_active_owner(owner_token)} 完成后自动执行"
+            elif kind == "crew":
+                _q_title = "⏳ Crew 运行中"
+                _q_body_lead = "当前 Crew 任务完成后自动执行"
+            else:
+                _q_title = "⏳ 任务运行中"
+                _q_body_lead = "当前任务完成后自动执行"
             crew_queue_card = _make_card(
-                "⏳ Crew 运行中",
-                f"当前 Crew 任务完成后自动执行：\n\n> {preview}",
+                _q_title,
+                f"{_q_body_lead}：\n\n> {preview}",
                 color="orange",
                 buttons=[("❌ 取消排队", f"cancel_queue:{chat_id}")]
             )

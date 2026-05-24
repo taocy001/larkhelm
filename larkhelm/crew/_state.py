@@ -43,6 +43,34 @@ def describe_active_owner(owner: str) -> str:
         return f"`/plan` 任务 (id={plan_id})"
     return f"`/crew` 或 `/dev` 任务 (id={owner[:8]})"
 
+
+def current_owner(chat_id: str) -> str:
+    """Snapshot the ``_active_crew`` owner token for ``chat_id``.
+
+    Returns an empty string when the slot is free. Acquires
+    ``_active_crew_lock`` once so callers don't need to import both the
+    dict and the lock — keeps cross-module wiring trivial and races out.
+    Use ``describe_active_owner`` on the returned token to render a
+    user-facing label.
+    """
+    with _active_crew_lock:
+        return _active_crew.get(chat_id, "")
+
+
+def owner_kind(owner: str) -> str:
+    """Classify an owner token: ``"plan"`` / ``"crew"`` / ``""`` (free).
+
+    Pure-string sister of :func:`describe_active_owner` for call sites
+    that need to branch on owner type (e.g. card title rendering)
+    without parsing the human-readable description. ``""`` lets the
+    caller distinguish "no owner" from an unknown future owner class.
+    """
+    if not owner:
+        return ""
+    if owner.startswith("plan:"):
+        return "plan"
+    return "crew"
+
 # Subscribers waiting for crew to finish (protected by _active_crew_lock)
 _crew_done_subscribers: dict[str, list[threading.Event]] = {}  # chat_id → [Event]
 

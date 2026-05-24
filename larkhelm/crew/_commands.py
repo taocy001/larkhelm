@@ -499,6 +499,47 @@ def _build_available_models_section() -> str:
     return "\n".join(lines)
 
 
+def _agents_from_manager_plan(raw_agents: list[dict], max_agents: int) -> list[AgentSpec]:
+    """Map Manager-LLM-emitted agent dicts to ``AgentSpec`` objects.
+
+    C5 #13: Manager LLM is *supposed* to emit ``model`` per agent (see
+    ``_MANAGER_PROMPT_TPL`` + ``_build_available_models_section``). Pre-
+    C5 the defensive default ``a.get("model", "claude")`` silently pinned
+    every field-less agent to Claude even when Claude was unhealthy /
+    disabled, which broke dispatch with no operator signal. With the
+    ``task_profile`` infrastructure available since C3, the safer
+    fallback is ``model=""`` + ``task_profile="engineer"`` so the
+    dispatcher's ``rank_for_task`` picks the highest-ranked healthy
+    tool-capable backend. ``engineer`` is the right profile because
+    Manager-planned agents typically do non-trivial research /
+    implementation work — pure-chat tasks don't go through Manager
+    planning. Explicit ``model`` (when Manager provides it) still wins,
+    preserving legacy plan-JSON contracts.
+
+    Factored out of ``_crew_plan`` so the JSON-parse → AgentSpec mapping
+    is unit-testable without driving the full Manager subprocess. Pure
+    function; no I/O.
+    """
+    import larkhelm.config as _cfg
+    out: list[AgentSpec] = []
+    for a in raw_agents[:max_agents]:
+        explicit_model = a.get("model", "")
+        out.append(AgentSpec(
+            id=a["id"], role=a["role"],
+            model=explicit_model,
+            task_profile=a.get("task_profile") or (
+                "" if explicit_model else "engineer"
+            ),
+            system=a.get("system", ""),
+            prompt=a["prompt"],
+            depends_on=a.get("depends_on", []),
+            timeout=min(max(int(a.get("timeout", _cfg.RESPONSE_TIMEOUT)), 60),
+                        _cfg.HARD_TIMEOUT // 2),
+            output_file=a.get("output_file", ""),
+        ))
+    return out
+
+
 def _crew_plan(chat_id: str, requirement: str, cwd: str,
                max_agents: int, cancel_ev: threading.Event) -> CrewPlan:
     """Call the Manager LLM (Claude tool_use) to generate a task plan. Returns None on failure."""
@@ -669,18 +710,7 @@ def _crew_plan(chat_id: str, requirement: str, cwd: str,
             _debug_log(f"[Crew] Manager: dependency cycle: {cycle}")
             return None
 
-        agents = [
-            AgentSpec(
-                id=a["id"], role=a["role"], model=a.get("model", "claude"),
-                system=a.get("system", ""),
-                prompt=a["prompt"],
-                depends_on=a.get("depends_on", []),
-                timeout=min(max(int(a.get("timeout", _cfg.RESPONSE_TIMEOUT)), 60),
-                            _cfg.HARD_TIMEOUT // 2),
-                output_file=a.get("output_file", ""),
-            )
-            for a in raw_agents[:max_agents]
-        ]
+        agents = _agents_from_manager_plan(raw_agents, max_agents)
         return CrewPlan(
             title=plan_input.get("title", requirement[:30]),
             agents=agents,
@@ -1265,6 +1295,7 @@ def _run_pipeline_inner(
     from larkhelm.crew._state import (
         _active_crew, _active_crew_lock, _active_crew_states,
         _git_head, clear_recent_crew_context, _signal_crew_done,
+        describe_active_owner,
     )
     from larkhelm.lark_client import _pin_task_card, _reply_card_raw, _send_card_raw, send_card
 
@@ -1273,8 +1304,19 @@ def _run_pipeline_inner(
 
     with _active_crew_lock:
         if chat_id in _active_crew:
-            send_card(chat_id, "⚠️ Crew 已在运行",
-                      "当前已有 crew 任务在运行，发送 `/cancel` 停止后再试。",
+            # C5 #15 (sister of C4 #11/#12 + C5 #14): the other two
+            # ``_active_crew`` writers (``_run_generic_crew_inner_impl``
+            # at 925, ``_run_dev_crew_inner_impl`` at 1090) already
+            # decode the owner token via ``describe_active_owner``. This
+            # third conflict-card site — reached when a Phase 5
+            # PipelineAgent dispatches into a chat that's already
+            # serialised behind ``/plan`` (or another crew) — was the
+            # last hard-coded "Crew 已在运行" + "crew 任务" lie. Same
+            # owner-aware re-route as the sister sites so the operator
+            # knows whether to cancel a plan or a crew.
+            owner_desc = describe_active_owner(_active_crew[chat_id])
+            send_card(chat_id, "⚠️ 任务冲突",
+                      f"当前 chat 正在运行 {owner_desc}，发送 `/cancel` 停止后再试。",
                       color="orange")
             return
         _active_crew[chat_id] = crew_id
