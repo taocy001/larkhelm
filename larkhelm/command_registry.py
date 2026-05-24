@@ -401,12 +401,22 @@ def _default_registrations() -> None:
     def _h_skill(ctx: DispatchContext) -> None:
         from larkhelm.commands import _cmd_skill
         _cmd_skill(ctx.chat_id, ctx.raw_args, ctx.msg_id)
-    register(CommandSpec(name="/skill", handler=_h_skill, match_kind="prefix"))
+    register(CommandSpec(
+        name="/skill",
+        handler=_h_skill,
+        match_kind="prefix",
+        description="动态 Skill 管理（list / info / new / edit / disable / enable / delete / reload）",
+    ))
 
     def _h_pipeline(ctx: DispatchContext) -> None:
         from larkhelm.commands import _cmd_pipeline
         _cmd_pipeline(ctx.chat_id, ctx.raw_args, ctx.msg_id)
-    register(CommandSpec(name="/pipeline", handler=_h_pipeline, match_kind="prefix"))
+    register(CommandSpec(
+        name="/pipeline",
+        handler=_h_pipeline,
+        match_kind="prefix",
+        description="Pipeline 管理（list / info / new / edit / disable / enable / delete / reload）",
+    ))
 
     # ── /crew / /dev / /plan (async, error-carded) ─────────────────
     def _h_crew(ctx: DispatchContext) -> None:
@@ -456,6 +466,7 @@ def _default_registrations() -> None:
         handler=_h_hotfix,
         match_kind="prefix",
         usage_card="`/hotfix <问题描述>` — 两阶段定点修复（工程师直接修复 → 审查员验证）",
+        description="两阶段定点修复 Pipeline：工程师直接修复 → 审查员验证",
         run_async=True,
         thread_label="Hotfix",
     ))
@@ -468,6 +479,7 @@ def _default_registrations() -> None:
         handler=_h_review,
         match_kind="prefix",
         usage_card="`/review <代码或文件描述>` — 完整代码审查，输出结构化 review.md",
+        description="完整代码审查 Pipeline，输出结构化 review.md",
         run_async=True,
         thread_label="Review",
     ))

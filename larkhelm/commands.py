@@ -118,6 +118,10 @@ _HELP_LAYOUT: tuple = (
     ("static", "reset_detail"),
     ("static", "memory_detail"),
     ("static", "doc_section"),
+    ("group", "🔀 Pipeline 快捷命令", (
+        "/hotfix", "/review",
+        "/skill", "/pipeline",
+    )),
     ("group", "📦 其他命令", (
         "/voice", "/cron",
         ("/btw", "快问，不占主锁"),
