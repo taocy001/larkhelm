@@ -2318,11 +2318,29 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
     import sys as _sys
     from larkhelm.concurrency import set_shutting_down, wait_for_idle
 
+    # Guard: ``SOURCE_DIR`` must point at an actual git repo. For editable
+    # installs ``_init_runtime`` sets this to the repo root directly; for
+    # non-editable installs it's recovered from the dist-info
+    # ``direct_url.json`` (see ``config.py``). When neither succeeds (e.g.
+    # wheel install from PyPI, or local source directory was deleted after
+    # install) we surface a clear diagnostic instead of letting ``git pull``
+    # bail with a confusing "fatal: not a git repository" message.
+    source_dir = Path(_cfg.SOURCE_DIR)
+    if not (source_dir / ".git").exists():
+        send_card_reply(chat_id, msg_id, "❌ 升级失败",
+                        f"`SOURCE_DIR` 不是 git 仓库：`{source_dir}`\n\n"
+                        f"editable 安装：`pipx install -e <repo>` 或 "
+                        f"`pip install -e <repo>`；\n"
+                        f"非 editable 安装：保留原始源目录不要删 —— "
+                        f"`/upgrade` 依赖 dist-info `direct_url.json` 定位",
+                        color="red")
+        return
+
     # Step 1: git pull
     send_card_reply(chat_id, msg_id, "🔄 升级中", "正在拉取最新代码…", color="grey")
     try:
         r = subprocess.run(
-            ["git", "-C", str(_cfg.SOURCE_DIR), "pull"],
+            ["git", "-C", str(source_dir), "pull"],
             capture_output=True, text=True, timeout=60,
         )
     except Exception as e:
@@ -2339,16 +2357,25 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
         send_card_reply(chat_id, msg_id, "✅ 已是最新版本", output, color="green")
         return
 
-    # Step 2: reinstall package into the running venv so execv picks up new code.
-    # Use -e (editable) so the venv stays linked to SOURCE_DIR and future git pulls
-    # are live without another pip install.
+    # Step 2: reinstall package into the running venv so execv picks up new
+    # code. Editable installs reuse ``pip install -e`` (re-links the venv
+    # to ``source_dir`` — cheap, idempotent). Non-editable installs use
+    # ``--force-reinstall`` to re-stage the package files in site-packages
+    # without converting the install to editable (operator chose non-
+    # editable for a reason; don't silently flip the install mode).
     send_card_reply(chat_id, msg_id, "🔄 升级中",
                     f"**拉取完成：**\n```\n{output[:400]}\n```\n\n"
                     "正在安装新版本…", color="blue")
+    pip_install_cmd = [
+        _sys.executable, "-m", "pip", "install", "--no-deps", "-q",
+    ]
+    if getattr(_cfg, "EDITABLE_INSTALL", False):
+        pip_install_cmd += ["-e", str(source_dir)]
+    else:
+        pip_install_cmd += ["--force-reinstall", str(source_dir)]
     try:
         ri = subprocess.run(
-            [_sys.executable, "-m", "pip", "install", "--no-deps", "-q", "-e",
-             str(_cfg.SOURCE_DIR)],
+            pip_install_cmd,
             capture_output=True, text=True, timeout=120,
         )
         if ri.returncode != 0:

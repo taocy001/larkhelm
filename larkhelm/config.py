@@ -82,6 +82,12 @@ class _RuntimeConfig:
     VOICE_KEEP_AUDIO:        bool
     MEMORY_LIMIT_MB:         int
     CREW_BREAKPOINT_TIMEOUT_SEC: int
+    # ``/upgrade`` install-mode flag: True when ``SOURCE_DIR`` resolved to a
+    # git repo via editable install (``pip install -e``), False when resolved
+    # via ``direct_url.json`` (``pipx install <local-path>``) or fell back to
+    # the package directory. ``commands._do_upgrade`` branches on this to
+    # pick ``pip install -e`` vs ``pip install --force-reinstall``.
+    EDITABLE_INSTALL: bool = False
     # P2 toggles
     METRICS_TEXT_LEGACY:                bool = False
     ANTHROPIC_EXTENDED_CACHE_ENABLED:   bool = True
@@ -177,8 +183,57 @@ LOGGED_IN_OPEN_ID:   str   # open_id of the user who completed `larkhelm user-lo
 # Permission approval socket path (derived from PID; fixed once _init_runtime sets it)
 PERM_HOOK_SCRIPT: str
 PERM_SOCKET_PATH: str
-SOURCE_DIR: "Path"  # source repo root directory (auto-detected for editable installs)
+SOURCE_DIR: "Path"  # source repo root directory (auto-detected for editable
+                    # installs; for non-editable installs resolved via the
+                    # dist-info ``direct_url.json`` when it points at a local
+                    # path that is itself a git repo — see _init_runtime)
+EDITABLE_INSTALL: bool = False  # True iff /upgrade can rely on `pip install -e`
+                                # for the live reinstall; False switches the
+                                # upgrade path to `--force-reinstall` against
+                                # the (still local) source dir
 BACKEND_REGISTRY: "object"  # BackendRegistry singleton (set by _init_runtime)
+
+
+def _resolve_source_dir(config_file: Path) -> tuple[Path, bool]:
+    """Resolve ``(SOURCE_DIR, EDITABLE_INSTALL)`` from the install layout.
+
+    Strategy:
+      1. **Editable install** — ``config.py`` lives at ``<repo>/larkhelm/config.py``
+         and ``<repo>/.git`` exists. Return ``(<repo>, True)``.
+      2. **Non-editable install from a local path** — ``config.py`` lives at
+         ``<site-packages>/larkhelm/config.py``; pip records the original
+         source path in ``<site-packages>/larkhelm-*.dist-info/direct_url.json``
+         as ``{"url": "file:///abs/path", "dir_info": {}}``. When that path
+         still exists *and* is a git repo, return ``(<that-path>, False)``.
+      3. **Last-resort fallback** — return ``(<package-dir>, False)``. ``/upgrade``
+         will detect this via its own ``not a git repo`` guard and produce a
+         clear error card.
+
+    Pulled out of ``_init_runtime`` so unit tests can exercise the resolver
+    against a synthetic site-packages layout without booting the full config.
+    """
+    repo_candidate = config_file.parent.parent
+    if (repo_candidate / ".git").exists():
+        return repo_candidate, True
+
+    site_dir = config_file.parent.parent
+    try:
+        for dist in site_dir.glob("larkhelm-*.dist-info"):
+            du = dist / "direct_url.json"
+            if not du.exists():
+                continue
+            data = json.loads(du.read_text(encoding="utf-8"))
+            url = str(data.get("url", ""))
+            if not url.startswith("file://"):
+                continue
+            local = Path(url[len("file://"):])
+            if (local / ".git").exists():
+                return local, False
+    except Exception as e:
+        print(f"[config] direct_url.json scan failed (ignored): {e}",
+              file=sys.stderr)
+
+    return config_file.parent, False
 
 # Voice configuration (M3.2)
 VOICE_ENABLED:           bool
@@ -958,13 +1013,10 @@ def _init_app_config() -> None:
     PERM_HOOK_SCRIPT  = str(Path(__file__).parent / "perm_hook.py")
     PERM_SOCKET_PATH  = str(DATA_DIR / "perm.sock")
 
-    global SOURCE_DIR
-    # For editable installs __file__ = <repo>/larkhelm/config.py; two levels up is the repo root
-    _candidate = Path(__file__).parent.parent
-    if (_candidate / ".git").exists():
-        SOURCE_DIR = _candidate          # git repo root (editable install)
-    else:
-        SOURCE_DIR = Path(__file__).parent  # fall back to package directory for non-editable installs
+    global SOURCE_DIR, EDITABLE_INSTALL
+    _resolved_src, _is_editable = _resolve_source_dir(Path(__file__))
+    SOURCE_DIR = _resolved_src
+    EDITABLE_INSTALL = _is_editable
 
     # ── P1-3 / P1-5 / P1-6 / P1-8 new keys ─────────────────────────────────
     # All default to "feature off" so byte-compat with master holds when the
