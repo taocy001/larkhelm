@@ -11,7 +11,7 @@ import threading
 from typing import Any, Literal
 
 
-AgentType = Literal["dev", "crew", "plan", "chat", "doc", "search"]
+AgentType = Literal["dev", "crew", "plan", "chat", "doc", "file", "search", "reviewer", "shell", "translate", "github", "calendar", "history_search"]
 Complexity = Literal["simple", "medium", "complex"]
 LatencyTier = Literal["instant", "fast", "medium", "slow"]
 SessionPolicy = Literal["inherit", "isolated", "ephemeral"]
@@ -61,6 +61,7 @@ class AgentContext:
     cwd:              str
     session_policy:   str = "inherit"           # SessionPolicy literal
     force_backend_id: str | None = None
+    files:            list | None = None
     extra:            dict = dataclasses.field(default_factory=dict)
 
 

@@ -2392,3 +2392,554 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
     time.sleep(1)   # Give send_card enough time to deliver
     _os.execv(_sys.executable, _sys.argv)
 
+
+# ═══════════════════════════════════════════════════
+#  /skill — dynamic Skill management
+# ═══════════════════════════════════════════════════
+
+def _cmd_skill(chat_id: str, args: str, msg_id: str = None):
+    """Handle /skill subcommands: list / info / new / edit / disable / enable / delete / reload."""
+    parts = args.strip().split(None, 1)
+    sub = parts[0].lower() if parts else "list"
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    try:
+        from larkhelm.agent_hub.skill_registry import SKILL_REGISTRY
+        from larkhelm.agent_hub.skill_types import SkillDef
+    except Exception as e:
+        send_card_reply(chat_id, msg_id, "❌ Skill 系统不可用", str(e), color="red")
+        return
+
+    # ── list ────────────────────────────────────────────────────────
+    if sub == "list":
+        all_skills = SKILL_REGISTRY.list_all(include_disabled=True)
+        if not all_skills:
+            send_card_reply(chat_id, msg_id, "📦 Skills", "_暂无已注册的 skill_", color="blue")
+            return
+        lines = []
+        for sk in all_skills:
+            status = "✅" if sk.enabled else "⛔"
+            tag = f"[{sk.source}]" if sk.source != "builtin" else ""
+            lines.append(f"{status} **`{sk.id}`** {tag} — {sk.name}\n  _{sk.description[:60]}_")
+        body = "\n\n".join(lines)
+        body += f"\n\n共 {len(all_skills)} 个 skill。用 `/skill info <id>` 查看详情，`/skill new` 创建自定义 skill。"
+        send_card_reply(chat_id, msg_id, f"📦 Skills ({len(all_skills)})", body, color="blue")
+        return
+
+    # ── info ────────────────────────────────────────────────────────
+    if sub == "info":
+        if not rest:
+            send_card_reply(chat_id, msg_id, "⚠️ 用法", "`/skill info <id>`", color="orange")
+            return
+        sk = SKILL_REGISTRY.get(rest)
+        if sk is None:
+            send_card_reply(chat_id, msg_id, "❓ 未找到", f"Skill `{rest}` 不存在。", color="orange")
+            return
+        injectors = ", ".join(sk.context_injectors) or "（无）"
+        kws = "\n".join(f"  - `{k.pattern}` ({k.strength})" for k in sk.l1_keywords) or "  （无）"
+        body = (
+            f"**ID：** `{sk.id}`\n"
+            f"**名称：** {sk.name}\n"
+            f"**来源：** {sk.source}\n"
+            f"**启用：** {'是' if sk.enabled else '否'}\n"
+            f"**后端 profile：** {sk.backend_profile}\n"
+            f"**上下文注入器：** {injectors}\n"
+            f"**L1 关键词：**\n{kws}\n"
+            f"\n**系统提示词：**\n```\n{sk.system_prompt or '（空）'}\n```"
+        )
+        if sk.strip_trigger_pattern:
+            body += f"\n**过滤正则：** `{sk.strip_trigger_pattern}`"
+        send_card_reply(chat_id, msg_id, f"📦 Skill: {sk.id}", body, color="turquoise")
+        return
+
+    # ── disable ─────────────────────────────────────────────────────
+    if sub == "disable":
+        if not rest:
+            send_card_reply(chat_id, msg_id, "⚠️ 用法", "`/skill disable <id>`", color="orange")
+            return
+        sk = SKILL_REGISTRY.get(rest)
+        if sk is None:
+            send_card_reply(chat_id, msg_id, "❓ 未找到", f"Skill `{rest}` 不存在。", color="orange")
+            return
+        if not sk.enabled:
+            send_card_reply(chat_id, msg_id, "ℹ️ 已禁用", f"Skill `{rest}` 已经是禁用状态。", color="blue")
+            return
+        SKILL_REGISTRY.update(rest, enabled=False)
+        send_card_reply(chat_id, msg_id, "⛔ 已禁用", f"Skill `{rest}` 已禁用。重新启用：`/skill enable {rest}`", color="orange")
+        return
+
+    # ── enable ──────────────────────────────────────────────────────
+    if sub == "enable":
+        if not rest:
+            send_card_reply(chat_id, msg_id, "⚠️ 用法", "`/skill enable <id>`", color="orange")
+            return
+        sk = SKILL_REGISTRY.get(rest)
+        if sk is None:
+            send_card_reply(chat_id, msg_id, "❓ 未找到", f"Skill `{rest}` 不存在。", color="orange")
+            return
+        if sk.enabled:
+            send_card_reply(chat_id, msg_id, "ℹ️ 已启用", f"Skill `{rest}` 已经是启用状态。", color="blue")
+            return
+        SKILL_REGISTRY.update(rest, enabled=True)
+        send_card_reply(chat_id, msg_id, "✅ 已启用", f"Skill `{rest}` 已启用。", color="green")
+        return
+
+    # ── delete ──────────────────────────────────────────────────────
+    if sub == "delete":
+        if not rest:
+            send_card_reply(chat_id, msg_id, "⚠️ 用法", "`/skill delete <id>`", color="orange")
+            return
+        sk = SKILL_REGISTRY.get(rest)
+        if sk is None:
+            send_card_reply(chat_id, msg_id, "❓ 未找到", f"Skill `{rest}` 不存在。", color="orange")
+            return
+        if sk.source == "builtin":
+            send_card_reply(
+                chat_id, msg_id, "⚠️ 内置 Skill 不可删除",
+                f"内置 Skill `{rest}` 无法删除，但可以禁用：`/skill disable {rest}`",
+                color="orange",
+            )
+            return
+        SKILL_REGISTRY.unregister(rest, delete_file=True)
+        send_card_reply(chat_id, msg_id, "✅ 已删除", f"Skill `{rest}` 已删除。", color="green")
+        return
+
+    # ── reload ──────────────────────────────────────────────────────
+    if sub == "reload":
+        try:
+            from pathlib import Path
+            data_dir = Path(getattr(_cfg, "DATA_DIR", ""))
+            if not data_dir:
+                send_card_reply(chat_id, msg_id, "⚠️ 无法重载", "DATA_DIR 未配置。", color="orange")
+                return
+            loaded = SKILL_REGISTRY.load_from_dir(data_dir / "skills")
+            if loaded:
+                names = ", ".join(f"`{s.id}`" for s in loaded)
+                send_card_reply(chat_id, msg_id, "✅ 重载完成", f"已加载 {len(loaded)} 个 skill：{names}", color="green")
+            else:
+                send_card_reply(chat_id, msg_id, "ℹ️ 无更新", f"`{data_dir / 'skills'}` 中未找到新 skill 文件。", color="blue")
+        except Exception as e:
+            send_card_reply(chat_id, msg_id, "❌ 重载失败", str(e), color="red")
+        return
+
+    # ── new ─────────────────────────────────────────────────────────
+    if sub == "new":
+        template = {
+            "id": "my_skill",
+            "name": "我的 Skill",
+            "description": "这是一个自定义 Skill，用于 L2 分类",
+            "system_prompt": "你是专业的…助手。请根据以下内容回答：",
+            "backend_profile": "chat",
+            "context_injectors": [],
+            "strip_trigger_pattern": "",
+            "l1_keywords": [
+                {"pattern": "关键词", "strength": 0.85, "note": "触发关键词"}
+            ],
+            "source": "user",
+            "enabled": True,
+        }
+        body = (
+            "请将以下 JSON 修改后**回复本消息**，即可创建新 Skill：\n\n"
+            "```json\n"
+            + json.dumps(template, ensure_ascii=False, indent=2)
+            + "\n```\n\n"
+            "**字段说明：**\n"
+            "- `id`：唯一标识符（英文小写+下划线）\n"
+            "- `backend_profile`：`chat` / `planner` / `engineer` / `reviewer`\n"
+            "- `context_injectors`：可选 `web_search` / `shell_exec` / `bm25_history`\n"
+            "- `l1_keywords`：L1 路由关键词；`pattern` 以 `re:` 开头则为正则\n\n"
+            "回复格式：直接粘贴 JSON（无需 /skill 前缀）。"
+        )
+        send_card_reply(chat_id, msg_id, "📦 创建新 Skill", body, color="blue")
+        return
+
+    # ── edit ────────────────────────────────────────────────────────
+    if sub == "edit":
+        if not rest:
+            send_card_reply(chat_id, msg_id, "⚠️ 用法", "`/skill edit <id>`", color="orange")
+            return
+        sk = SKILL_REGISTRY.get(rest)
+        if sk is None:
+            send_card_reply(chat_id, msg_id, "❓ 未找到", f"Skill `{rest}` 不存在。", color="orange")
+            return
+        body = (
+            f"以下是 Skill `{rest}` 的当前定义。修改后**回复本消息**即可更新：\n\n"
+            f"```json\n{sk.to_json()}\n```\n\n"
+            "⚠️ 内置 skill 修改后 `source` 将变为 `user`（下次重启不会恢复）。"
+        )
+        send_card_reply(chat_id, msg_id, f"📦 编辑 Skill: {sk.id}", body, color="turquoise")
+        return
+
+    # ── import ──────────────────────────────────────────────────────
+    if sub == "import":
+        # rest is a JSON string pasted by the user after /skill import
+        if not rest:
+            send_card_reply(chat_id, msg_id, "⚠️ 用法",
+                            "`/skill import <json>` 或直接回复 JSON 给 `/skill new` / `/skill edit`",
+                            color="orange")
+            return
+        _import_skill_json(chat_id, msg_id, rest, SKILL_REGISTRY)
+        return
+
+    # ── fallback help ────────────────────────────────────────────────
+    send_card_reply(
+        chat_id, msg_id,
+        "📦 /skill 命令",
+        (
+            "**用法：**\n"
+            "- `/skill list` — 列出所有 skill\n"
+            "- `/skill info <id>` — 查看 skill 详情\n"
+            "- `/skill new` — 向导式创建新 skill\n"
+            "- `/skill edit <id>` — 修改已有 skill\n"
+            "- `/skill import <json>` — 从 JSON 导入 skill\n"
+            "- `/skill disable <id>` — 禁用 skill\n"
+            "- `/skill enable <id>` — 启用 skill\n"
+            "- `/skill delete <id>` — 删除用户 skill\n"
+            "- `/skill reload` — 从磁盘热重载 skill 文件"
+        ),
+        color="blue",
+    )
+
+
+def _import_skill_json(chat_id: str, msg_id: str, text: str, registry) -> None:
+    """Parse *text* as JSON SkillDef and register it.  Called from /skill import."""
+    import re as _re
+    # Extract JSON from code fence if present.
+    fence = _re.search(r"```(?:json)?\s*\n?(.*?)```", text, _re.DOTALL)
+    raw = fence.group(1).strip() if fence else text.strip()
+    try:
+        from larkhelm.agent_hub.skill_types import SkillDef
+        sk = SkillDef.from_json(raw)
+        if not sk.id:
+            raise ValueError("id 字段不能为空")
+        # Force source = user so the skill is persisted and non-builtin
+        if sk.source == "builtin":
+            sk = SkillDef.from_dict({**sk.to_dict(), "source": "user"})
+        registry.register(sk)
+        send_card_reply(
+            chat_id, msg_id, "✅ Skill 已保存",
+            f"Skill `{sk.id}`（{sk.name}）已注册并持久化。\n"
+            f"立即生效，无需重启。用 `/skill info {sk.id}` 验证。",
+            color="green",
+        )
+    except Exception as e:
+        send_card_reply(
+            chat_id, msg_id, "❌ 导入失败",
+            f"JSON 解析或字段校验失败：\n```\n{e}\n```\n\n请检查格式后重试。",
+            color="red",
+        )
+
+
+# ═══════════════════════════════════════════════════
+#  /pipeline — dynamic Pipeline management
+# ═══════════════════════════════════════════════════
+
+def _cmd_pipeline(chat_id: str, args: str, msg_id: str = None):
+    """Handle /pipeline subcommands: list / info / new / edit / disable / enable / delete / reload / import."""
+    parts = args.strip().split(None, 1)
+    sub = parts[0].lower() if parts else "list"
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    try:
+        from larkhelm.agent_hub.pipeline_registry import PIPELINE_REGISTRY
+        from larkhelm.agent_hub.pipeline_types import PipelineDef
+    except Exception as e:
+        send_card_reply(chat_id, msg_id, "❌ Pipeline 系统不可用", str(e), color="red")
+        return
+
+    # ── list ────────────────────────────────────────────────────────
+    if sub == "list":
+        all_pipelines = PIPELINE_REGISTRY.list_all(include_disabled=True)
+        if not all_pipelines:
+            send_card_reply(chat_id, msg_id, "🔀 Pipelines", "_暂无已注册的 pipeline_", color="blue")
+            return
+        lines = []
+        for pd in all_pipelines:
+            status = "✅" if pd.enabled else "⛔"
+            tag = f"[{pd.source}]" if pd.source != "builtin" else ""
+            lines.append(
+                f"{status} **`{pd.id}`** {tag} — {pd.name}（{len(pd.stages)} 阶段）\n"
+                f"  _{pd.description[:60]}_"
+            )
+        body = "\n\n".join(lines)
+        body += (
+            f"\n\n共 {len(all_pipelines)} 个 pipeline。"
+            "用 `/pipeline info <id>` 查看详情，`/pipeline new` 创建自定义 pipeline。"
+        )
+        send_card_reply(chat_id, msg_id, f"🔀 Pipelines ({len(all_pipelines)})", body, color="blue")
+        return
+
+    # ── info ────────────────────────────────────────────────────────
+    if sub == "info":
+        if not rest:
+            send_card_reply(chat_id, msg_id, "⚠️ 用法", "`/pipeline info <id>`", color="orange")
+            return
+        pd = PIPELINE_REGISTRY.get(rest)
+        if pd is None:
+            send_card_reply(chat_id, msg_id, "❓ 未找到", f"Pipeline `{rest}` 不存在。", color="orange")
+            return
+        kws = "\n".join(
+            f"  - `{k.get('pattern')}` ({k.get('strength', 0.80)})"
+            for k in pd.l1_keywords
+        ) or "  （无）"
+        stage_lines = "\n".join(
+            f"  {i+1}. `{s.get('id', '?')}` [{s.get('task_profile', s.get('model', '?'))}]"
+            f" — {s.get('role', '?')}"
+            for i, s in enumerate(pd.stages)
+        ) or "  （无）"
+        body = (
+            f"**ID：** `{pd.id}`\n"
+            f"**名称：** {pd.name}\n"
+            f"**来源：** {pd.source}\n"
+            f"**启用：** {'是' if pd.enabled else '否'}\n"
+            f"**阶段数：** {len(pd.stages)}\n"
+            f"\n**阶段列表：**\n{stage_lines}\n"
+            f"\n**L1 关键词：**\n{kws}"
+        )
+        if pd.synthesis_prompt:
+            body += f"\n\n**综合 prompt：** _{pd.synthesis_prompt[:80]}_"
+        send_card_reply(chat_id, msg_id, f"🔀 Pipeline: {pd.id}", body, color="turquoise")
+        return
+
+    # ── disable ─────────────────────────────────────────────────────
+    if sub == "disable":
+        if not rest:
+            send_card_reply(chat_id, msg_id, "⚠️ 用法", "`/pipeline disable <id>`", color="orange")
+            return
+        pd = PIPELINE_REGISTRY.get(rest)
+        if pd is None:
+            send_card_reply(chat_id, msg_id, "❓ 未找到", f"Pipeline `{rest}` 不存在。", color="orange")
+            return
+        if not pd.enabled:
+            send_card_reply(chat_id, msg_id, "ℹ️ 已禁用", f"Pipeline `{rest}` 已经是禁用状态。", color="blue")
+            return
+        updated = PipelineDef.from_dict({**pd.to_dict(), "enabled": False})
+        PIPELINE_REGISTRY.register(updated, persist=(pd.source != "builtin"))
+        send_card_reply(
+            chat_id, msg_id, "⛔ 已禁用",
+            f"Pipeline `{rest}` 已禁用。重新启用：`/pipeline enable {rest}`",
+            color="orange",
+        )
+        return
+
+    # ── enable ──────────────────────────────────────────────────────
+    if sub == "enable":
+        if not rest:
+            send_card_reply(chat_id, msg_id, "⚠️ 用法", "`/pipeline enable <id>`", color="orange")
+            return
+        pd = PIPELINE_REGISTRY.get(rest)
+        if pd is None:
+            send_card_reply(chat_id, msg_id, "❓ 未找到", f"Pipeline `{rest}` 不存在。", color="orange")
+            return
+        if pd.enabled:
+            send_card_reply(chat_id, msg_id, "ℹ️ 已启用", f"Pipeline `{rest}` 已经是启用状态。", color="blue")
+            return
+        updated = PipelineDef.from_dict({**pd.to_dict(), "enabled": True})
+        PIPELINE_REGISTRY.register(updated, persist=(pd.source != "builtin"))
+        send_card_reply(chat_id, msg_id, "✅ 已启用", f"Pipeline `{rest}` 已启用。", color="green")
+        return
+
+    # ── delete ──────────────────────────────────────────────────────
+    if sub == "delete":
+        if not rest:
+            send_card_reply(chat_id, msg_id, "⚠️ 用法", "`/pipeline delete <id>`", color="orange")
+            return
+        pd = PIPELINE_REGISTRY.get(rest)
+        if pd is None:
+            send_card_reply(chat_id, msg_id, "❓ 未找到", f"Pipeline `{rest}` 不存在。", color="orange")
+            return
+        if pd.source == "builtin":
+            send_card_reply(
+                chat_id, msg_id, "⚠️ 内置 Pipeline 不可删除",
+                f"内置 Pipeline `{rest}` 无法删除，但可以禁用：`/pipeline disable {rest}`",
+                color="orange",
+            )
+            return
+        PIPELINE_REGISTRY.unregister(rest, delete_file=True)
+        send_card_reply(chat_id, msg_id, "✅ 已删除", f"Pipeline `{rest}` 已删除。", color="green")
+        return
+
+    # ── reload ──────────────────────────────────────────────────────
+    if sub == "reload":
+        try:
+            data_dir = Path(getattr(_cfg, "DATA_DIR", ""))
+            if not data_dir:
+                send_card_reply(chat_id, msg_id, "⚠️ 无法重载", "DATA_DIR 未配置。", color="orange")
+                return
+            loaded = PIPELINE_REGISTRY.load_from_dir(data_dir / "pipelines")
+            if loaded:
+                names = ", ".join(f"`{p.id}`" for p in loaded)
+                send_card_reply(chat_id, msg_id, "✅ 重载完成", f"已加载 {len(loaded)} 个 pipeline：{names}", color="green")
+            else:
+                send_card_reply(
+                    chat_id, msg_id, "ℹ️ 无更新",
+                    f"`{data_dir / 'pipelines'}` 中未找到新 pipeline 文件。",
+                    color="blue",
+                )
+        except Exception as e:
+            send_card_reply(chat_id, msg_id, "❌ 重载失败", str(e), color="red")
+        return
+
+    # ── new ─────────────────────────────────────────────────────────
+    if sub == "new":
+        template = {
+            "id": "my_pipeline",
+            "name": "我的 Pipeline",
+            "description": "自定义多阶段流水线",
+            "stages": [
+                {
+                    "id": "implementer",
+                    "role": "工程师",
+                    "model": "",
+                    "task_profile": "engineer",
+                    "system": "你是一个资深工程师，负责实现以下需求。",
+                    "prompt": "请实现：{requirement}",
+                    "depends_on": [],
+                    "timeout_factor": 8,
+                    "output_file": "changes.md",
+                },
+                {
+                    "id": "reviewer",
+                    "role": "代码审查员",
+                    "model": "",
+                    "task_profile": "reviewer",
+                    "system": "你是严格的代码审查员，审查实现质量。",
+                    "prompt": "请审查 changes.md 中的改动，输出到 review.md。",
+                    "depends_on": ["implementer"],
+                    "timeout_factor": 4,
+                    "output_file": "review.md",
+                },
+            ],
+            "synthesis_prompt": "请综合输出修复报告和审查结论。",
+            "l1_keywords": [
+                {"pattern": "我的关键词", "strength": 0.85, "note": "触发这条 pipeline"}
+            ],
+            "source": "user",
+            "enabled": True,
+        }
+        body = (
+            "请将以下 JSON 修改后**回复本消息**，即可创建新 Pipeline：\n\n"
+            "```json\n"
+            + json.dumps(template, ensure_ascii=False, indent=2)
+            + "\n```\n\n"
+            "**字段说明：**\n"
+            "- `id`：唯一标识符（英文小写+连字符）\n"
+            "- `task_profile`：`planner` / `engineer` / `qa` / `reviewer` / `chat`\n"
+            "- `timeout_factor`：超时 = `response_timeout × factor`（例：`8` ≈ 40min）\n"
+            "- `depends_on`：前置 stage 的 `id` 列表（空 = 立即执行）\n"
+            "- `output_file`：stage 结果写入 `.crew_workspace/` 的文件名\n"
+            "- `l1_keywords`：L1 路由关键词；`pattern` 以 `re:` 开头则为正则\n\n"
+            "回复格式：直接粘贴 JSON（无需 /pipeline 前缀）。"
+        )
+        send_card_reply(chat_id, msg_id, "🔀 创建新 Pipeline", body, color="blue")
+        return
+
+    # ── edit ────────────────────────────────────────────────────────
+    if sub == "edit":
+        if not rest:
+            send_card_reply(chat_id, msg_id, "⚠️ 用法", "`/pipeline edit <id>`", color="orange")
+            return
+        pd = PIPELINE_REGISTRY.get(rest)
+        if pd is None:
+            send_card_reply(chat_id, msg_id, "❓ 未找到", f"Pipeline `{rest}` 不存在。", color="orange")
+            return
+        body = (
+            f"以下是 Pipeline `{rest}` 的当前定义。修改后**回复本消息**即可更新：\n\n"
+            f"```json\n{pd.to_json()}\n```\n\n"
+            "⚠️ 内置 pipeline 修改后 `source` 将变为 `user`（下次重启不会恢复）。"
+        )
+        send_card_reply(chat_id, msg_id, f"🔀 编辑 Pipeline: {pd.id}", body, color="turquoise")
+        return
+
+    # ── import ──────────────────────────────────────────────────────
+    if sub == "import":
+        if not rest:
+            send_card_reply(
+                chat_id, msg_id, "⚠️ 用法",
+                "`/pipeline import <json>` 或直接回复 JSON 给 `/pipeline new` / `/pipeline edit`",
+                color="orange",
+            )
+            return
+        _import_pipeline_json(chat_id, msg_id, rest, PIPELINE_REGISTRY)
+        return
+
+    # ── fallback help ────────────────────────────────────────────────
+    send_card_reply(
+        chat_id, msg_id,
+        "🔀 /pipeline 命令",
+        (
+            "**用法：**\n"
+            "- `/pipeline list` — 列出所有 pipeline\n"
+            "- `/pipeline info <id>` — 查看 pipeline 详情\n"
+            "- `/pipeline new` — 向导式创建新 pipeline\n"
+            "- `/pipeline edit <id>` — 修改已有 pipeline\n"
+            "- `/pipeline import <json>` — 从 JSON 导入 pipeline\n"
+            "- `/pipeline disable <id>` — 禁用 pipeline\n"
+            "- `/pipeline enable <id>` — 启用 pipeline\n"
+            "- `/pipeline delete <id>` — 删除用户 pipeline\n"
+            "- `/pipeline reload` — 从磁盘热重载 pipeline 文件"
+        ),
+        color="blue",
+    )
+
+
+def _import_pipeline_json(chat_id: str, msg_id: str, text: str, registry) -> None:
+    """Parse *text* as JSON PipelineDef and register it.  Called from /pipeline import."""
+    import re as _re
+    fence = _re.search(r"```(?:json)?\s*\n?(.*?)```", text, _re.DOTALL)
+    raw = fence.group(1).strip() if fence else text.strip()
+    try:
+        from larkhelm.agent_hub.pipeline_types import PipelineDef
+        pd = PipelineDef.from_json(raw)
+        if not pd.id:
+            raise ValueError("id 字段不能为空")
+        if pd.source == "builtin":
+            pd = PipelineDef.from_dict({**pd.to_dict(), "source": "user"})
+        registry.register(pd)
+        send_card_reply(
+            chat_id, msg_id, "✅ Pipeline 已保存",
+            f"Pipeline `{pd.id}`（{pd.name}）已注册并持久化，共 {len(pd.stages)} 个阶段。\n"
+            f"立即生效，无需重启。用 `/pipeline info {pd.id}` 验证。",
+            color="green",
+        )
+    except Exception as e:
+        send_card_reply(
+            chat_id, msg_id, "❌ 导入失败",
+            f"JSON 解析或字段校验失败：\n```\n{e}\n```\n\n请检查格式后重试。",
+            color="red",
+        )
+
+
+# ═══════════════════════════════════════════════════
+#  /hotfix / /review — Pipeline shortcut entry points
+# ═══════════════════════════════════════════════════
+
+def _cmd_hotfix(chat_id: str, args: str, msg_id: str = None, *, sender_open_id: str = "") -> None:
+    """Run the built-in 'hotfix' pipeline: engineer → reviewer."""
+    _run_named_pipeline(chat_id, "hotfix", args, msg_id, sender_open_id=sender_open_id)
+
+
+def _cmd_review(chat_id: str, args: str, msg_id: str = None, *, sender_open_id: str = "") -> None:
+    """Run the built-in 'review-only' pipeline: standalone code reviewer."""
+    _run_named_pipeline(chat_id, "review-only", args, msg_id, sender_open_id=sender_open_id)
+
+
+def _run_named_pipeline(
+    chat_id: str, pipeline_id: str, requirement: str,
+    msg_id: str = None, *, sender_open_id: str = "",
+) -> None:
+    """Look up *pipeline_id* in PIPELINE_REGISTRY and execute it via run_pipeline."""
+    from larkhelm.agent_hub.pipeline_registry import PIPELINE_REGISTRY
+    from larkhelm.crew._commands import run_pipeline
+
+    cwd = _get_chat_state(chat_id).get("cwd", "") or ""
+    plan = PIPELINE_REGISTRY.build_plan(pipeline_id, requirement, cwd)
+    if plan is None:
+        send_card_reply(
+            chat_id, msg_id, "❌ Pipeline 不可用",
+            f"Pipeline `{pipeline_id}` 未找到或已禁用。用 `/pipeline list` 查看可用列表。",
+            color="red",
+        )
+        return
+    run_pipeline(chat_id, plan, requirement, msg_id, sender_open_id=sender_open_id)
+

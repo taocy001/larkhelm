@@ -420,20 +420,56 @@ def handle_message(data: P2ImMessageReceiveV1):
                 _query_sender_open_id.set(sender_open_id or "")
             except Exception:
                 pass
-            threading.Thread(
-                target=_do_query,
-                kwargs={
-                    "chat_id": chat_id,
-                    "message": _file_text,
-                    "model": _target_model,
-                    "user_msg_id": message.message_id,
-                    "files": _file_result.files,
-                    "trace_id": _trace_id,
-                    "sender_open_id": sender_open_id,
-                },
-                daemon=True,
-                name=f"file-query-{chat_id[:8]}",
-            ).start()
+
+            # Route through AgentDispatcher when intent router is active so
+            # FileAgent benefits from ACL, audit, and reswitch hooks.
+            _dispatched_via_agent = False
+            if _intent_router_active(chat_id):
+                try:
+                    from larkhelm.agent_hub import AgentContext, AgentDispatcher
+                    from larkhelm.agent_hub.intent_types import IntentResult
+                    _file_intent = IntentResult(
+                        agent_type="file",
+                        sub_intent="file_analysis",
+                        confidence=1.0,
+                        is_explicit_command=False,
+                        layer="override",
+                    )
+                    _file_ctx = AgentContext(
+                        chat_id=chat_id,
+                        user_msg_id=message.message_id,
+                        text=_file_text,
+                        images=None,
+                        parent_id=getattr(message, "parent_id", None),
+                        cancel_ev=_get_cancel_event(chat_id),
+                        cwd=_get_cwd(chat_id),
+                        files=_file_result.files,
+                    )
+                    threading.Thread(
+                        target=AgentDispatcher().dispatch,
+                        args=(_file_intent, _file_ctx),
+                        daemon=True,
+                        name=f"file-agent-{chat_id[:8]}",
+                    ).start()
+                    _dispatched_via_agent = True
+                except Exception as _fae:
+                    _debug_log(f"[FileAgent] AgentDispatcher route failed, falling back: {_fae}")
+
+            if not _dispatched_via_agent:
+                threading.Thread(
+                    target=_do_query,
+                    kwargs={
+                        "chat_id": chat_id,
+                        "message": _file_text,
+                        "model": _target_model,
+                        "user_msg_id": message.message_id,
+                        "files": _file_result.files,
+                        "trace_id": _trace_id,
+                        "sender_open_id": sender_open_id,
+                    },
+                    daemon=True,
+                    name=f"file-query-{chat_id[:8]}",
+                ).start()
             return
 
         elif message.message_type == "audio":

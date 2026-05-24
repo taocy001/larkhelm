@@ -1220,6 +1220,117 @@ def _run_dev_crew_inner_impl(chat_id: str, requirement: str, user_msg_id: str,
             _debug_log(f"[Dev] milestone record failed: {_e}")
 
 
+def run_pipeline(
+    chat_id: str,
+    plan: "CrewPlan",
+    requirement: str,
+    user_msg_id: str | None,
+    *,
+    sender_open_id: str = "",
+) -> None:
+    """Run an arbitrary pre-built :class:`~larkhelm.crew_types.CrewPlan` as a dev pipeline.
+
+    Unlike ``cmd_dev``, this function does **not** manage workspace stale-detection
+    or augment the requirement with memory/chat context — the caller is responsible
+    for those if needed.  Used by :class:`~larkhelm.agent_hub.builtin.pipeline_agent.DevPipelineAgent`
+    to execute registered pipeline variants (e.g. ``hotfix``, ``review-only``).
+    """
+    crew_id = uuid.uuid4().hex[:12]
+    _register_crew_thread(crew_id, threading.current_thread())
+    try:
+        _run_pipeline_inner(chat_id, plan, requirement, user_msg_id, crew_id,
+                            sender_open_id=sender_open_id)
+    finally:
+        _unregister_crew_thread(crew_id)
+        try:
+            from larkhelm.token_stats import evict_crew_agent_tokens
+            evict_crew_agent_tokens(f"{chat_id}__crew_{crew_id}")
+        except Exception as e:
+            _debug_log(f"[Crew] run_pipeline token eviction failed: {e}")
+
+
+def _run_pipeline_inner(
+    chat_id: str,
+    plan: "CrewPlan",
+    requirement: str,
+    user_msg_id: str | None,
+    crew_id: str,
+    *,
+    sender_open_id: str = "",
+) -> None:
+    import larkhelm.config as _cfg
+    from larkhelm.concurrency import _get_cancel_event
+    from larkhelm.crew._failure_card import emit_terminal_failure
+    from larkhelm.crew._runner import _run_crew
+    from larkhelm.crew._state import (
+        _active_crew, _active_crew_lock, _active_crew_states,
+        _git_head, clear_recent_crew_context, _signal_crew_done,
+    )
+    from larkhelm.lark_client import _pin_task_card, _reply_card_raw, _send_card_raw, send_card
+
+    cancel_ev = _get_cancel_event(chat_id)
+    cwd       = __import__("larkhelm.chat_state", fromlist=["_get_cwd"])._get_cwd(chat_id)
+
+    with _active_crew_lock:
+        if chat_id in _active_crew:
+            send_card(chat_id, "⚠️ Crew 已在运行",
+                      "当前已有 crew 任务在运行，发送 `/cancel` 停止后再试。",
+                      color="orange")
+            return
+        _active_crew[chat_id] = crew_id
+        cancel_ev.clear()
+
+    log_entry(chat_id, "user", requirement, model="crew")
+    clear_recent_crew_context(chat_id)
+
+    try:
+        from larkhelm.card_builder import _make_card
+        stage_ids = " → ".join(spec.id for spec in plan.agents)
+        init_card = _make_card(
+            f"⚡ {plan.title}",
+            f"**需求：** {requirement[:200]}\n\n**流程：** {stage_ids}",
+            color="blue",
+        )
+        if user_msg_id:
+            card_mid = _reply_card_raw(user_msg_id, init_card, in_thread=False)
+        else:
+            card_mid = _send_card_raw(chat_id, init_card)
+        if card_mid:
+            _pin_task_card(chat_id, card_mid)
+
+        state = CrewState(
+            crew_id=crew_id, chat_id=chat_id, plan=plan,
+            agents={spec.id: AgentState(spec=spec) for spec in plan.agents},
+            card_mid=card_mid, cancel_ev=cancel_ev, phase="planned", kind="dev",
+            git_head_before=_git_head(cwd),
+            trigger_msg_id=user_msg_id,
+            sender_open_id=sender_open_id,
+        )
+        _crew_update_card(state)
+        with _active_crew_lock:
+            _active_crew_states[chat_id] = state
+
+        # Total timeout: sum of all stage timeouts + 20% buffer
+        total_timeout = int(sum(spec.timeout for spec in plan.agents) * 1.2) or _cfg.RESPONSE_TIMEOUT * 12
+        try:
+            _run_crew(state, total_timeout)
+        except Exception as e:
+            _debug_log(f"[Crew] _run_pipeline_inner uncaught: {e}")
+            emit_terminal_failure(chat_id, kind="dev", reason="未捕获异常导致任务终止", exc=e)
+            raise
+
+    finally:
+        with _active_crew_lock:
+            _active_crew.pop(chat_id, None)
+            _active_crew_states.pop(chat_id, None)
+            _signal_crew_done(chat_id)
+        try:
+            from larkhelm.memory import record_milestone
+            record_milestone(chat_id, "dev", summary=requirement)
+        except Exception as _e:
+            _debug_log(f"[Crew] run_pipeline milestone failed: {_e}")
+
+
 def immediate_cancel_crew(chat_id: str) -> bool:
     """Called immediately when the user clicks the cancel button: removes card buttons and shows
     'cancelling' status without waiting for agents to actually stop. _run_crew will update the

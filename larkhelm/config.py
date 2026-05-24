@@ -104,6 +104,12 @@ class _RuntimeConfig:
     FILE_TEXT_EXTENSIONS:  "frozenset[str]" = frozenset()
     FILE_PDF_ENABLED:      bool = True
     FILE_PDF_LIB:          str = "PyPDF2"
+    # SearchAgent (agent_hub.builtin.search_agent)
+    SEARCH_API_PROVIDER:   str = "ddg"    # "ddg" (no key) | "brave"
+    SEARCH_API_KEY:        str = ""
+    # GitHubAgent (agent_hub.builtin.github_agent)
+    GITHUB_TOKEN:          str = ""
+    GITHUB_REPO:           str = ""       # "owner/repo" default; inferred from git remote if empty
 
 # ── Runtime config (assigned by _init_runtime()) ────────────────────────
 CONFIG_PATH: Path
@@ -290,6 +296,12 @@ FILE_TEXT_EXTENSIONS: "frozenset[str]" = frozenset({
 })
 FILE_PDF_ENABLED: bool = True
 FILE_PDF_LIB: str = "PyPDF2"
+# SearchAgent
+SEARCH_API_PROVIDER: str = "ddg"
+SEARCH_API_KEY: str = ""
+# GitHubAgent
+GITHUB_TOKEN: str = ""
+GITHUB_REPO: str = ""
 # Single source of truth for accepted voice languages — referenced by both
 # config validation (_init_runtime) and the /voice command handler.
 _VOICE_LANG_WHITELIST: "frozenset[str]" = frozenset({"zh", "en", "auto"})
@@ -1252,6 +1264,12 @@ def _init_app_config() -> None:
         })
     FILE_PDF_ENABLED = bool(config.get("file_pdf_enabled", True))
     FILE_PDF_LIB = str(config.get("file_pdf_lib", "PyPDF2") or "PyPDF2")
+    global SEARCH_API_PROVIDER, SEARCH_API_KEY
+    SEARCH_API_PROVIDER = str(config.get("search_api_provider", "ddg") or "ddg").lower()
+    SEARCH_API_KEY = str(config.get("search_api_key", "") or "")
+    global GITHUB_TOKEN, GITHUB_REPO
+    GITHUB_TOKEN = str(config.get("github_token", "") or "")
+    GITHUB_REPO = str(config.get("github_repo", "") or "")
 
     _raw_timeouts = config.get("dev_stage_timeouts") or {}
     _clean_timeouts: "dict[str, int]" = {}
@@ -1376,6 +1394,10 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         FILE_TEXT_EXTENSIONS=FILE_TEXT_EXTENSIONS,
         FILE_PDF_ENABLED=FILE_PDF_ENABLED,
         FILE_PDF_LIB=FILE_PDF_LIB,
+        SEARCH_API_PROVIDER=SEARCH_API_PROVIDER,
+        SEARCH_API_KEY=SEARCH_API_KEY,
+        GITHUB_TOKEN=GITHUB_TOKEN,
+        GITHUB_REPO=GITHUB_REPO,
     )
 
 

@@ -73,6 +73,8 @@ _EXPLICIT_PREFIXES: list[tuple[tuple[str, ...], str]] = [
     (("/dev",), "dev"),
     (("/crew",), "crew"),
     (("/plan",), "plan"),
+    (("/hotfix",), "hotfix"),
+    (("/review",), "review-only"),
 ]
 
 
@@ -184,6 +186,38 @@ def _resolve_l1(text: str, images: list | None, has_doc_urls: bool) -> IntentRes
                     )
         except Exception:
             continue
+
+    # Step 2b: dynamic keyword rules from SkillRegistry and PipelineRegistry.
+    # These extend the static rules so user-created Skills/Pipelines are
+    # immediately routable without a restart.
+    import re as _re
+
+    def _score_dynamic_rules(rules: "list[tuple[str, str, float, str]]") -> None:
+        for (raw_pattern, agent_id, strength, note) in rules:
+            if agent_id in blocked:
+                continue
+            try:
+                if raw_pattern.startswith("re:"):
+                    matched = bool(_re.search(raw_pattern[3:], text, _re.IGNORECASE))
+                else:
+                    matched = raw_pattern.lower() in text_l
+                if matched and strength > scores.get(agent_id, 0.0):
+                    scores[agent_id] = strength
+                    evidence.setdefault(agent_id, []).append(raw_pattern[:30])
+            except Exception:
+                continue
+
+    try:
+        from larkhelm.agent_hub.skill_registry import SKILL_REGISTRY
+        _score_dynamic_rules(SKILL_REGISTRY.get_l1_rules())
+    except Exception:
+        pass
+
+    try:
+        from larkhelm.agent_hub.pipeline_registry import PIPELINE_REGISTRY
+        _score_dynamic_rules(PIPELINE_REGISTRY.get_l1_rules())
+    except Exception:
+        pass
 
     # Step 3: doc-URL + write-verb still gets its own promotion (matches
     # the prior _NEW_DOC_OBJECT_RE guarded behaviour) since the URL is a
