@@ -206,7 +206,10 @@ def resume_interrupted_crews():
         if data.get("version") != 1:
             continue
         phase = data.get("phase", "")
-        if phase in ("done", "cancelled", "failed", "user_cancelled"):
+        # P2-3a (W4/W6): "timeout" is the new terminal state for breakpoint
+        # auto-cancel; treated as terminal here so existing checkpoints with
+        # the legacy "cancelled" value still resume identically.
+        if phase in ("done", "cancelled", "failed", "user_cancelled", "timeout"):
             # Already finished; clean up
             try:
                 Path(cp_path).unlink()

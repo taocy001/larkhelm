@@ -147,14 +147,16 @@ def test_emit_terminal_failure_redacts_exc(
 
 # ── emit_breakpoint_timeout ─────────────────────────────────────────
 
-def test_emit_breakpoint_timeout_sets_phase_cancelled(
+def test_emit_breakpoint_timeout_sets_phase_timeout(
     init_test_config, fake_crew_state, fake_card_sender,
 ):
+    """P2-3a (W4/W6): phase is now ``"timeout"`` instead of ``"cancelled"``
+    so user-initiated cancel vs auto-timeout stay distinguishable."""
     from larkhelm.crew._failure_card import emit_breakpoint_timeout
     state = fake_crew_state(["pm"])
     state.breakpoint_agent_id = "pm"
     emit_breakpoint_timeout(state)
-    assert state.phase == "cancelled"
+    assert state.phase == "timeout"
 
 
 def test_emit_breakpoint_timeout_writes_agent_error(
@@ -164,7 +166,9 @@ def test_emit_breakpoint_timeout_writes_agent_error(
     state = fake_crew_state(["pm"])
     state.breakpoint_agent_id = "pm"
     emit_breakpoint_timeout(state)
-    assert "等待人工确认超时" in state.agents["pm"].error
+    # P3-b (W18): error now includes the wait age before "人工确认".
+    err = state.agents["pm"].error
+    assert "等待" in err and "人工确认" in err and "自动取消" in err
 
 
 def test_emit_breakpoint_timeout_sends_orange_card(
@@ -188,7 +192,7 @@ def test_emit_breakpoint_timeout_no_breakpoint_agent(
     state = fake_crew_state(["pm"])
     state.breakpoint_agent_id = ""
     emit_breakpoint_timeout(state)
-    assert state.phase == "cancelled"
+    assert state.phase == "timeout"
 
 
 # ── never-raises contract: emit_terminal_failure + emit_breakpoint_timeout ──
@@ -236,4 +240,4 @@ def test_emit_breakpoint_timeout_never_raises_on_lark_error(
     # Must not raise.
     emit_breakpoint_timeout(state)
     # State mutation must still complete despite the doomed card push.
-    assert state.phase == "cancelled"
+    assert state.phase == "timeout"

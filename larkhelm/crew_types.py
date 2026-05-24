@@ -67,9 +67,15 @@ class CrewPhase(Enum):
     BREAKPOINT   = "breakpoint"  # Paused at breakpoint, awaiting human confirmation
     SYNTHESIZING = "synthesizing"# Synthesis phase
     DONE         = "done"        # Completed
-    CANCELLED    = "cancelled"   # Cancelled
+    CANCELLED    = "cancelled"   # Cancelled (user-initiated)
     FAILED       = "failed"      # Failed
     PAUSED       = "paused"      # Paused (user-initiated pause)
+    # P2-3a (W4/W6): breakpoint timeout now writes "timeout" instead of
+    # "cancelled" so the cancel-by-user vs auto-timeout cases stay
+    # distinguishable. Readers that haven't been updated will see the new
+    # string verbatim (str compare) — there is no enum→enum migration; only
+    # the value at the emission site changed.
+    TIMEOUT      = "timeout"     # Auto-cancelled because a wait (e.g. breakpoint) expired
 
 
 @dataclasses.dataclass

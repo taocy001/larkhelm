@@ -60,15 +60,16 @@ def test_breakpoint_timeout_emits_card(
     )
 
 
-def test_breakpoint_timeout_marks_phase_cancelled(
+def test_breakpoint_timeout_marks_phase_timeout(
     init_test_config, fake_agent_spec, fake_card_sender, monkeypatch,
 ):
+    """P2-3a (W4/W6): breakpoint auto-cancel now writes ``phase="timeout"``."""
     import larkhelm.config as _cfg
     monkeypatch.setattr(_cfg, "CREW_BREAKPOINT_TIMEOUT_SEC", 2)
     from larkhelm.crew._runner import _wait_for_breakpoint
     state = _make_breakpoint_state(fake_agent_spec)
     _wait_for_breakpoint(state, "pm")
-    assert state.phase == "cancelled"
+    assert state.phase == "timeout"
 
 
 def test_breakpoint_user_confirm_short_circuits(

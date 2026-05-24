@@ -107,6 +107,11 @@ def _build_card(state: CrewState) -> str:
         color = "yellow"
     elif phase == "cancelled":
         title, color = f"🛑 {_label} 已取消  ({elapsed})", "orange"
+    elif phase == "timeout":
+        # P2-3a (W4/W6): breakpoint auto-cancel — orange like ``cancelled``
+        # so visual contract matches, but title is distinct so users see
+        # the "auto" semantics rather than a self-initiated cancel.
+        title, color = f"⏳ {_label} 等待超时  ({elapsed})", "orange"
     else:
         title, color = f"❌ {_label} 失败  ({elapsed})", "red"
 
@@ -165,7 +170,7 @@ def _build_card(state: CrewState) -> str:
                 _debug_log(f"[crew_card] file list build failed: {e}")
 
     # Agent details (shown during running/synthesizing/breakpoint/done; flat markdown to avoid nested collapsibles)
-    if phase in ("running", "synthesizing", "breakpoint", "done", "cancelled", "failed"):
+    if phase in ("running", "synthesizing", "breakpoint", "done", "cancelled", "failed", "timeout"):
         agent_blocks: list[str] = []
         for spec in plan.agents:
             a = agents.get(spec.id)

@@ -174,14 +174,16 @@ class FailureCardConsumerRoundTripTests(unittest.TestCase):
 
     # ── breakpoint timeout → _build_card ───────────────────────────────
 
-    def test_breakpoint_timeout_renders_cancelled_phase(self):
+    def test_breakpoint_timeout_renders_timeout_phase(self):
         """``emit_breakpoint_timeout`` flips ``state.phase`` to
-        "cancelled". _build_card must then render the orange-cancelled
-        title — proving the state-mutation→card-render pipeline closes.
+        "timeout" (P2-3a / W4 / W6: distinct from user-initiated
+        "cancelled"). _build_card must then render the orange
+        wait-timeout title — proving the state-mutation→card-render
+        pipeline closes.
 
         We use MagicMock (not lambda no-op) for send_card so we can
         ALSO assert the orange-banner contract (color="orange" + a
-        cancelled-flavored title). Round-1 reviewer (NH-02) noted the
+        timeout-flavored title). Round-1 reviewer (NH-02) noted the
         original lambda silently masked any wrong-args regression.
         """
         from unittest.mock import MagicMock
@@ -197,7 +199,7 @@ class FailureCardConsumerRoundTripTests(unittest.TestCase):
                    send_card_mock):
             emit_breakpoint_timeout(state)
 
-        self.assertEqual(state.phase, "cancelled")
+        self.assertEqual(state.phase, "timeout")
 
         # Tightened: send_card must be called with color="orange" (the
         # documented Phase C UX contract for breakpoint timeout) and
@@ -217,8 +219,8 @@ class FailureCardConsumerRoundTripTests(unittest.TestCase):
 
         card_json = _build_card(state)
         text = json.dumps(card_json, ensure_ascii=False)
-        self.assertIn("已取消", text,
-                      "cancelled phase doesn't render the 已取消 title — "
+        self.assertIn("等待超时", text,
+                      "timeout phase doesn't render the 等待超时 title — "
                       "phase→card-title mapping broken")
 
 

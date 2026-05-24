@@ -147,6 +147,20 @@ def emit_terminal_failure(
             pass
 
 
+def _fmt_wait_age(seconds: float) -> str:
+    """Render wait duration as 「X 分钟」/「X 小时 Y 分钟」for age hints."""
+    if seconds < 60:
+        return "不到 1 分钟"
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"{minutes} 分钟"
+    hours = minutes // 60
+    rem_min = minutes % 60
+    if rem_min == 0:
+        return f"{hours} 小时"
+    return f"{hours} 小时 {rem_min} 分钟"
+
+
 def emit_breakpoint_timeout(state: CrewState) -> None:
     """Update the existing crew card to indicate a breakpoint auto-cancel.
 
@@ -154,18 +168,32 @@ def emit_breakpoint_timeout(state: CrewState) -> None:
     继续/取消 within ``CREW_BREAKPOINT_TIMEOUT_SEC``. The runner sets
     ``state.cancel_ev`` separately; this function is just the user-
     facing banner.
+
+    P2-3a (W4/W6): writes ``phase="timeout"`` (new ``CrewPhase.TIMEOUT``
+    value) instead of the historical ``"cancelled"`` so user-cancel vs
+    auto-timeout stay distinguishable in checkpoints / metrics.
+    P3-b (W18): the banner body now states **how long we actually
+    waited** before timing out so users have a sense of the deadline.
     """
     try:
+        # Resolve the configured deadline best-effort — fall back to the
+        # documented default (1800s) so a stripped config can't crash here.
+        try:
+            import larkhelm.config as _cfg
+            timeout_s = float(getattr(_cfg, "CREW_BREAKPOINT_TIMEOUT_SEC", 1800) or 1800)
+        except Exception:
+            timeout_s = 1800.0
+        age_text = _fmt_wait_age(timeout_s)
         try:
             with state.lock:
-                state.phase = "cancelled"
+                state.phase = "timeout"
                 # Stamp the breakpoint agent's error so the agent details
                 # pane shows why the task ended.
                 bp_id = state.breakpoint_agent_id
                 if bp_id and bp_id in state.agents:
                     ag = state.agents[bp_id]
                     if not ag.error:
-                        ag.error = "⏳ 等待人工确认超时，已自动取消"
+                        ag.error = f"⏳ 等待 {age_text}人工确认无响应，已自动取消"
         except Exception as e:
             _debug_log(f"[Crew] emit_breakpoint_timeout: state mutation failed: {e}")
         try:
@@ -178,7 +206,7 @@ def emit_breakpoint_timeout(state: CrewState) -> None:
             send_card(
                 state.chat_id,
                 "⏳ 等待人工确认超时",
-                f"**{state.plan.title}** 已自动取消。\n\n"
+                f"**{state.plan.title}** 已自动取消（等待 {age_text}无响应）。\n\n"
                 "需要继续时请重新发送 `/dev` 或 `/crew` 命令；"
                 "已完成的阶段会从断点恢复。",
                 color="orange",
