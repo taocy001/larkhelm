@@ -2339,13 +2339,15 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
         send_card_reply(chat_id, msg_id, "✅ 已是最新版本", output, color="green")
         return
 
-    # Step 2: reinstall package into the running venv so execv picks up new code
+    # Step 2: reinstall package into the running venv so execv picks up new code.
+    # Use -e (editable) so the venv stays linked to SOURCE_DIR and future git pulls
+    # are live without another pip install.
     send_card_reply(chat_id, msg_id, "🔄 升级中",
                     f"**拉取完成：**\n```\n{output[:400]}\n```\n\n"
                     "正在安装新版本…", color="blue")
     try:
         ri = subprocess.run(
-            [_sys.executable, "-m", "pip", "install", "--no-deps", "-q",
+            [_sys.executable, "-m", "pip", "install", "--no-deps", "-q", "-e",
              str(_cfg.SOURCE_DIR)],
             capture_output=True, text=True, timeout=120,
         )
@@ -2390,11 +2392,14 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
     except Exception as e:
         _debug_log(f"[Upgrade] failed to write restart notify: {e}")
 
-    # Step 3: replace process in-place with os.execv (PID unchanged, transparent to systemd)
+    # Step 3: replace process in-place with os.execv.
+    # Must pass [executable, '-m', 'larkhelm'] + original args explicitly — passing sys.argv
+    # directly is wrong because sys.argv[0] is the __main__.py path, not the program name,
+    # so the new Python process would try to open sys.argv[1] ('start') as a script.
     _debug_log("[Upgrade] os.execv replacing process")
     send_card_reply(chat_id, msg_id, "🔄 升级中", "服务正在重启，连接将在数秒内恢复…", color="blue")
     time.sleep(1)   # Give send_card enough time to deliver
-    _os.execv(_sys.executable, _sys.argv)
+    _os.execv(_sys.executable, [_sys.executable, "-m", "larkhelm"] + _sys.argv[1:])
 
 
 # ═══════════════════════════════════════════════════
