@@ -135,6 +135,7 @@ class SkillExecutor(AgentExecutor):
                 user_msg_id=ctx.user_msg_id,
                 parent_id=ctx.parent_id,
                 force_backend_id=backend_id or ctx.force_backend_id,
+                sender_open_id=ctx.extra.get("sender_open_id", ""),
             )
             return AgentResult(
                 success=True,

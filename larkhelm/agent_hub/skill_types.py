@@ -77,7 +77,6 @@ class SkillDef:
     context_injectors: list[str] = dataclasses.field(default_factory=list)
     strip_trigger_pattern: str = ""                    # regex: remove trigger words
     l1_keywords: list[KeywordRuleSpec] = dataclasses.field(default_factory=list)
-    parameters: dict[str, Any] = dataclasses.field(default_factory=dict)
     enabled: bool = True
     version: int = 1
     source: str = "builtin"                            # builtin | user | plugin
