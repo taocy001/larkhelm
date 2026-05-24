@@ -141,6 +141,7 @@
       "type": "object",
       "additionalProperties": { "type": "integer", "minimum": 1 }
     },
+    "workspace_finalize_prompt_age_sec":  { "type": "number",  "minimum": 0.0 },
 
     "probe_models": {
       "type": "array",

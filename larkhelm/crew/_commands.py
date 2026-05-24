@@ -112,6 +112,20 @@ def _augment_requirement_with_context(requirement: str, chat_id: str, cwd: str, 
 
 
 def _read_workspace_meta(ws_path: Path) -> dict:
+    """Read workspace_meta.json. Returns {} on missing / parse error.
+
+    Schema (B3 extended):
+        {
+          "task_hash":     str,   # stable hash of the run's requirement
+          "completed":     bool,  # flipped to true by workspace_finalize on APPROVED
+          "commit_sha":    str,   # B2/B3: short hash of the finalize auto-commit (when any)
+          "finalized_at":  float, # B3: unix ts of the finalize commit; 0 means never finalized
+          "chat_id":       str,   # B3: chat that started the run; "" = legacy (treat as current)
+          "plan_id":       str,   # B3: optional plan-step id ("" for vanilla /dev)
+        }
+    Old 2-field metas (just task_hash + completed) still parse cleanly via
+    ``dict.get(...)`` with safe defaults.
+    """
     meta_file = ws_path / "workspace_meta.json"
     if meta_file.exists():
         try:
@@ -121,11 +135,125 @@ def _read_workspace_meta(ws_path: Path) -> dict:
     return {}
 
 
-def _write_workspace_meta(ws_path: Path, task_hash: str, completed: bool = False) -> None:
+def _write_workspace_meta(
+    ws_path: Path,
+    task_hash: str,
+    completed: bool = False,
+    *,
+    commit_sha: str = "",
+    finalized_at: float = 0.0,
+    chat_id: str = "",
+    plan_id: str = "",
+) -> None:
+    """Write the extended workspace_meta.json schema (B3).
+
+    Optional fields default to empty / 0.0 so legacy callers
+    (``_write_workspace_meta(ws_path, task_hash, completed=False)``) keep
+    working byte-identically: the JSON for those calls degrades to
+    ``{"task_hash":..., "completed":..., "commit_sha":"", "finalized_at":0.0,
+    "chat_id":"", "plan_id":""}``. New consumers should pass at least
+    ``chat_id`` so future stale-detection can disambiguate per-chat.
+    """
     ws_path.mkdir(parents=True, exist_ok=True)
-    (ws_path / "workspace_meta.json").write_text(
-        json.dumps({"task_hash": task_hash, "completed": completed})
-    )
+    payload = {
+        "task_hash":    task_hash,
+        "completed":    bool(completed),
+        "commit_sha":   commit_sha or "",
+        "finalized_at": float(finalized_at or 0.0),
+        "chat_id":      chat_id or "",
+        "plan_id":      plan_id or "",
+    }
+    (ws_path / "workspace_meta.json").write_text(json.dumps(payload))
+
+
+def _handle_stale_workspace(
+    ws_path: Path,
+    *,
+    chat_id: str,
+    new_task_hash: str,
+    meta: dict,
+) -> "tuple[bool, str]":
+    """B3 helper — decide whether the *next* task should reuse this workspace.
+
+    Returns ``(should_reuse, notice_text)``. ``should_reuse=True`` means
+    the caller can keep ``meta`` and use the existing PRD/design artefacts
+    (the existing resume path); ``False`` means the caller should clear
+    and write a fresh ``workspace_meta``. ``notice_text`` is a non-empty
+    string when the user should see a warning card explaining why an
+    in-progress workspace was just discarded.
+
+    The decision matrix (most-specific to least):
+
+      ============================================  ================
+      Condition                                     Outcome
+      ============================================  ================
+      same task_hash, not completed, not stale-age  reuse, no notice
+      completed (any task_hash)                     fresh, no notice
+      task_hash differs + meta.chat_id != chat_id   fresh, no notice
+          (legacy meta with empty chat_id is        (silent multi-chat
+           treated as belonging to the current      hand-off — reviewer
+           chat — strictly preserves prior          guidance)
+           single-chat behaviour)
+      task_hash differs + same chat + age < prompt  fresh, **notice**
+          age cutoff                                (user kicked off a
+                                                    new task while an old
+                                                    one was still pending
+                                                    — surface what got
+                                                    discarded)
+      task_hash differs + same chat + age >= cutoff fresh, no notice
+                                                    (stale, silently OK)
+      ============================================  ================
+
+    Stale-age cutoff comes from ``workspace_finalize_prompt_age_sec``
+    (default 3600s). ``_WORKSPACE_STALE_TTL`` (24h) is still applied
+    upstream as the absolute kill-switch.
+    """
+    import larkhelm.config as _cfg
+    if not meta:
+        return False, ""
+
+    completed = bool(meta.get("completed"))
+    if completed:
+        return False, ""
+
+    old_hash = meta.get("task_hash") or ""
+    old_chat = meta.get("chat_id") or ""
+
+    if old_hash == new_task_hash:
+        # Same task continuing — caller has the rest of the stale-age
+        # logic (24h TTL); we just say "yes, reuse".
+        return True, ""
+
+    # Different task. Decide whether to notify.
+    meta_path = ws_path / "workspace_meta.json"
+    age_sec = 0.0
+    try:
+        if meta_path.exists():
+            age_sec = time.time() - meta_path.stat().st_mtime
+    except OSError:
+        age_sec = 0.0
+
+    # ``getattr(..., 3600.0)`` covers a stripped config; we do NOT use
+    # ``or 3600.0`` because an explicit 0.0 from config.json is the
+    # documented way to silence the notice (per CLAUDE.md).
+    prompt_age = float(getattr(_cfg, "WORKSPACE_FINALIZE_PROMPT_AGE_SEC", 3600.0))
+
+    # Multi-chat collision — legacy metas have old_chat="" and are treated
+    # as belonging to the current chat for byte-compat.
+    if old_chat and old_chat != chat_id:
+        return False, ""
+
+    if age_sec < prompt_age:
+        # Recently-touched same-chat workspace mid-task — warn the user.
+        old_summary = (old_hash[:12] if old_hash else "(unknown)")
+        notice = (
+            f"⚠️ 检测到本 chat 还有未完成的旧任务（task_hash={old_summary}, "
+            f"age={int(age_sec)}s < {int(prompt_age)}s）。"
+            "已为新任务清理 workspace；如需续跑请重新发送旧需求。"
+        )
+        return False, notice
+
+    return False, ""
 
 
 def _clear_workspace(ws_path: Path) -> None:
@@ -931,6 +1059,18 @@ def _run_dev_crew_inner_impl(chat_id: str, requirement: str, user_msg_id: str,
                 is_stale_age = age_sec > _WORKSPACE_STALE_TTL
             except OSError as _e:
                 _debug_log(f"[Dev] workspace_meta stat failed: {_e}")
+        # B3: when discarding a same-chat mid-task workspace within the
+        # ``workspace_finalize_prompt_age_sec`` window, surface a notice
+        # card so the user knows what got dropped. Multi-chat collisions
+        # (meta.chat_id != current chat) are silent per reviewer guidance.
+        stale_notice = ""
+        if meta and not is_stale_age and not meta.get("completed"):
+            _should_reuse, stale_notice = _handle_stale_workspace(
+                ws_path,
+                chat_id=chat_id,
+                new_task_hash=task_hash,
+                meta=meta,
+            )
         if meta and (
             meta.get("task_hash") != task_hash
             or meta.get("completed")
@@ -940,13 +1080,25 @@ def _run_dev_crew_inner_impl(chat_id: str, requirement: str, user_msg_id: str,
                 _debug_log(f"[Dev] clearing stale workspace (age > {_WORKSPACE_STALE_TTL}s)")
             _clear_workspace(ws_path)
             meta = {}
+            if stale_notice:
+                try:
+                    from larkhelm.lark_client import send_card
+                    send_card(chat_id, "⚠️ Workspace 接力",
+                              stale_notice, color="orange")
+                except Exception as _e:
+                    _debug_log(f"[Dev] stale notice card failed: {_e}")
 
         # force_replan=True (--no-confirm) always runs full pipeline.
         has_design    = (ws_path / "design.md").exists() and (ws_path / "tasks.json").exists()
         skip_planning = bool(meta) and has_design and not force_replan
 
         if not meta:
-            _write_workspace_meta(ws_path, task_hash=task_hash, completed=False)
+            _write_workspace_meta(
+                ws_path,
+                task_hash=task_hash,
+                completed=False,
+                chat_id=chat_id,
+            )
 
         # Build augmented requirement that includes recent chat turns + global/project
         # memory so PM agent isn't context-blind. WITHOUT this, /dev only saw the

@@ -241,6 +241,10 @@ ADMIN_CHAT_ID: str = ""
 MEMORY_GC_INTERVAL_HOURS: float = 6.0
 CREW_CHECKPOINT_TTL_DAYS: float = 7.0
 DEV_STAGE_TIMEOUTS: "dict[str, int]" = {}
+# B3: window during which a different-task workspace_meta under the same
+# chat surfaces a "stale workspace was discarded" notice card. Set to 0 to
+# silence the notice entirely (still clears the workspace). Floor 0.
+WORKSPACE_FINALIZE_PROMPT_AGE_SEC: float = 3600.0
 
 # ── Context-injection cache flags (REQ-01..04) ────────────────────────────
 # All default to safe values: REQ-01..03 caches default ON because the
@@ -575,6 +579,7 @@ def _init_app_config() -> None:
     global CASCADE_BACKOFF_MAX_ATTEMPTS, PLAN_RETRY_STRATEGY
     global PLUGIN_REPORT_CARD_ENABLED, FAILURE_REPORT_CARD_ENABLED, ADMIN_CHAT_ID
     global MEMORY_GC_INTERVAL_HOURS, CREW_CHECKPOINT_TTL_DAYS, DEV_STAGE_TIMEOUTS
+    global WORKSPACE_FINALIZE_PROMPT_AGE_SEC
     global RECENT_TURNS_CACHE_ENABLED, MEMORY_LEGACY_CACHE_ENABLED
     global DOC_INJECT_CACHE_ENABLED, DOC_INJECT_CACHE_TTL_SEC
     global CLI_SKIP_RECENT_TURNS_WHEN_SID
@@ -1021,6 +1026,10 @@ def _init_app_config() -> None:
     config.setdefault("memory_gc_interval_hours", 6.0)
     config.setdefault("crew_checkpoint_ttl_days", 7.0)
     config.setdefault("dev_stage_timeouts", {})
+    # B3: stale-workspace notice window. Discarding a different-task
+    # workspace_meta within this many seconds (same chat) surfaces an
+    # orange notice card. Set 0 to silence.
+    config.setdefault("workspace_finalize_prompt_age_sec", 3600.0)
 
     try:
         QUERY_SESSION_V2_TRAFFIC = max(
@@ -1120,6 +1129,14 @@ def _init_app_config() -> None:
         )
     except (TypeError, ValueError):
         CREW_CHECKPOINT_TTL_DAYS = 7.0
+
+    # B3: stale-workspace notice window (floor 0 disables the notice).
+    try:
+        WORKSPACE_FINALIZE_PROMPT_AGE_SEC = max(
+            0.0, float(config.get("workspace_finalize_prompt_age_sec", 3600.0) or 3600.0),
+        )
+    except (TypeError, ValueError):
+        WORKSPACE_FINALIZE_PROMPT_AGE_SEC = 3600.0
 
     # Context-injection cache flags (REQ-01..04). Defaults preserve PR-prior
     # behaviour: caches on (loaders byte-identical, just memoized) and the
