@@ -19,7 +19,7 @@ LarkHelm 是一个运行在飞书（Lark）中的 AI 助手平台，可以使用
 
 - **实时流式卡片**：工具调用过程可视化，支持进度显示、耗时统计，可一键取消
 - **多 Agent 协作**：`/crew` 动态规划多 Agent 并行执行；`/dev` 完整软件工程流水线（PM → 架构师 → 工程师 → QA → 审查员）
-- **飞书文档集成**：crew/dev 产出自动写入飞书云盘/Wiki；`/doc`、`/wiki` 命令读写文档；消息中的文档链接自动注入上下文
+- **飞书文档集成**：crew/dev 产出自动写入飞书云盘/Wiki；消息中的文档链接自动注入上下文；文档写入走 `larkhelm doc` CLI 或意图识别（智能编排开启时由 DocAgent 自动触发）
 - **上下文感知**：回复任意历史消息时自动注入被回复消息内容；回复 crew 结果卡片可直接追问
 - **多模态输入**：支持图片消息，Claude 原生识图
 - **多模型支持**：每个会话独立切换 Claude / Gemini / Kimi
@@ -56,7 +56,7 @@ LarkHelm 是一个运行在飞书（Lark）中的 AI 助手平台，可以使用
    | `im:message.group_at_msg:readonly` | 接收群聊 @ 消息事件 |
    | `im:message.reactions:read` | 读取 emoji 反应（触发重试） |
    | `im:message.reactions:write_only` | 发送处理中/完成 emoji |
-   | `docx:document` | 读写飞书新版文档（`/doc` 命令） |
+   | `docx:document` | 读写飞书新版文档（URL 自动注入、`larkhelm doc` CLI、DocAgent）|
    | `drive:drive` | 云盘文件夹操作、文档所有权转移 |
    | `drive:file` | 文档权限管理 |
    | `drive:file:upload` | 上传文件到云盘 |
@@ -131,9 +131,17 @@ cd larkhelm
 | `default_wiki_space_id` | crew/dev 文档默认写入的 Wiki 空间 ID | — |
 | `doc_write_backend` | 文档写入后端：`auto`/`feishu`/`local` | `auto` |
 | `doc_auto_inject` | 消息中的文档链接自动注入上下文 | `true` |
-| `doc_write_confirm` | `/doc write` 覆写前要求确认 | `true` |
+| `doc_write_confirm` | DocAgent / CLI 覆写文档前要求确认 | `true` |
 | `mcp_config_file` | MCP 配置文件路径（可选） | — |
 | `timezone` | 定时任务时区 | `Asia/Shanghai` |
+| `intent_router_enabled` | Phase 5 智能编排总开关；翻 `true` 才会按下方 traffic 灰度自然语言分派 | `true` |
+| `intent_router_traffic` | 智能编排灰度比例（`0.0`–`1.0`，按 chat_id 哈希分桶） | `0.1` |
+| `crew_breakpoint_timeout_sec` | `/crew` 断点等待用户点「继续 / 取消」的最长秒数；超时自动取消并推橙色卡 | `1800` |
+| `failure_report_card_enabled` | cascade backoff exhausted / circuit open 等诊断失败推送到 admin chat 的橙色卡片总开关 | `false` |
+| `admin_chat_id` | 失败 / 插件加载报告卡片的目标 chat_id；为空时退回 `default_owner_open_id` 私聊 | — |
+
+> 更细的 P1/P2/P3 灰度旋钮（cache、stale 阈值、断路器、循环节流等）见
+> `larkhelm_config.example.json` 注释块与 `CLAUDE.md → Config`。
 
 > **P1 迭代默认变更**（v0.8）：
 > - `memory_session_layer_smart=true` —— session 记忆三段（工作上下文 / 决策 /
@@ -321,16 +329,18 @@ sudo systemctl restart larkhelm
 
 **飞书文档**
 
-| 命令 | 功能 |
-|---|---|
-| `/doc read <url>` | 读取飞书文档/Wiki/表格内容并注入上下文 |
-| `/doc append <url> <内容>` | 追加内容到文档末尾 |
-| `/doc write <url> <内容>` | 覆盖写入文档（需确认） |
-| `/doc create <标题> [文件夹/Wiki]` | 创建新文档 |
-| `/doc setfolder <url>` | 设置默认云盘文件夹 |
-| `/doc ls [url]` | 列出文件夹内容 |
-| `/doc wiki list [space_id]` | 列出知识库节点 |
-| `/doc wiki create <space_id> <标题>` | 在知识库创建新页面 |
+LarkHelm 没有 `/doc` 用户命令，统一两条入口：
+
+- **读**：在消息里粘贴飞书 `docx` / `wiki` / `sheets` URL，bridge 自动读取并注入上下文（无需任何命令）。
+- **写**：用 `larkhelm doc` CLI，或开启智能编排后由 DocAgent 接管。CLI 可在飞书内 `/run`，也可在终端直跑：
+
+  ```bash
+  cat report.md | larkhelm doc create "报告标题"
+  cat more.md   | larkhelm doc append "https://feishu.cn/docx/<token>"
+  cat fix.md    | larkhelm doc write  "https://feishu.cn/docx/<token>"
+  ```
+
+  `intent_router_enabled=true` 时，自然语言「帮我把这段写进文档 X」会被 DocAgent 自动识别并调用 `doc_handlers.py` 内的同一套 dispatcher。默认开启 10% 灰度，详见下文「Phase 5 智能编排」。
 
 **其他**
 
@@ -513,10 +523,27 @@ larkhelm memory unstale --slice-id <12hex>
 | `embedding_http_timeout_sec` | `5.0` | 单次 HTTP 请求超时 |
 | `embedding_enabled` | `false` | Stage B 灰度总开关 |
 | `embedding_traffic` | `0.0` | Stage B hash 分桶比例（0..1） |
-| `memory_stale_window_days` | `90` | 多少天未命中视为 stale |
+| `memory_stale_window_days` | `30` | 多少天未命中视为 stale |
 | `memory_stale_decay` | `0.5` | stale 召回 relevance 乘子 |
 | `memory_audit_rotate_max_mb` | `32` | 单文件 rotate 阈值 |
 | `memory_audit_retain_days` | `30` | rotated 文件保留天数 |
+
+#### Memory LLM Router（Stage C，可选）
+
+在 Stage A/B 之上叠加一层 cheap-LLM 决策：高复杂度 `/crew` `/dev` 任务从
+top-N 候选池里挑相关 slice。**默认全关**——与 Stage A/B hash 桶正交，**三者
+同时命中**才会真正调用 LLM；任何失败路径都 fail-open 回 Stage A/B 输出，
+不影响主流程。
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `memory_llm_router_enabled` | `false` | Stage C 总开关 |
+| `memory_llm_router_traffic` | `0.0` | Stage C 灰度比例（与 A/B 独立 salt） |
+| `memory_llm_router_max_per_chat_per_min` | `3` | 单聊每分钟最多调用次数（成本封顶） |
+| `memory_llm_router_cache_ttl_sec` | `300` | 相同 (query, candidate_set) 复用 verdict 的 TTL |
+
+调用率与 fail-open 比例同样汇入 `larkhelm memory audit-summary`；
+开启 Stage C 前请先观察一周 Stage A/B 是否稳定（fail_open_rate < 1%）。
 
 ### 监控集成（Prometheus）
 
@@ -575,7 +602,7 @@ LarkHelm is an AI assistant platform that runs inside Feishu (Lark), supporting 
 
 - **Streaming cards**: tool call visualization with progress, timing, and one-click cancel
 - **Multi-agent orchestration**: `/crew` for dynamic parallel agent planning; `/dev` for a full software engineering pipeline (PM → Architect → Engineer → QA → Reviewer)
-- **Feishu document integration**: crew/dev outputs auto-written to Drive/Wiki; `/doc` and `/wiki` commands for read/write; document URLs in messages auto-injected as context
+- **Feishu document integration**: crew/dev outputs auto-written to Drive/Wiki; document URLs in messages auto-injected as context; document writes go through the `larkhelm doc` CLI or the DocAgent (when intent router is on)
 - **Context awareness**: replying to any message auto-injects the quoted content; replying to a crew result card continues the conversation in context
 - **Multimodal input**: send images directly, Claude reads them natively
 - **Multi-model**: switch Claude / Gemini / Kimi independently per conversation
@@ -612,7 +639,7 @@ LarkHelm is an AI assistant platform that runs inside Feishu (Lark), supporting 
    | `im:message.group_at_msg:readonly` | Receive group @-mention events |
    | `im:message.reactions:read` | Read emoji reactions (retry trigger) |
    | `im:message.reactions:write_only` | Send processing/done emoji indicators |
-   | `docx:document` | Read and write Feishu documents (`/doc` commands) |
+   | `docx:document` | Read and write Feishu documents (URL auto-inject, `larkhelm doc` CLI, DocAgent) |
    | `drive:drive` | Drive folder operations, document ownership transfer |
    | `drive:file` | Document permission management |
    | `drive:file:upload` | Upload files to Drive |
@@ -687,9 +714,18 @@ Config file location:
 | `default_wiki_space_id` | Wiki space ID for crew/dev document output | — |
 | `doc_write_backend` | Document backend: `auto` / `feishu` / `local` | `auto` |
 | `doc_auto_inject` | Auto-inject linked document content as context | `true` |
-| `doc_write_confirm` | Require confirmation before `/doc write` overwrites | `true` |
+| `doc_write_confirm` | Require confirmation before DocAgent / CLI overwrites a document | `true` |
 | `mcp_config_file` | Path to MCP config file (optional) | — |
 | `timezone` | Timezone for cron tasks | `Asia/Shanghai` |
+| `intent_router_enabled` | Master switch for Phase 5 intent routing; flip `true` and dial `intent_router_traffic` to roll out natural-language agent dispatch | `true` |
+| `intent_router_traffic` | Intent router rollout ratio (`0.0`–`1.0`, hashed per chat_id) | `0.1` |
+| `crew_breakpoint_timeout_sec` | Seconds `/crew` waits for the user's 继续/取消 click before auto-cancelling and emitting an orange card | `1800` |
+| `failure_report_card_enabled` | Push diagnostic-failure orange cards (cascade backoff exhausted / circuit open / etc.) to admin chat | `false` |
+| `admin_chat_id` | Target chat_id for failure / plugin-load report cards; falls back to `default_owner_open_id` DM when empty | — |
+
+> Finer P1/P2/P3 knobs (caches, stale thresholds, circuit breakers, loop
+> throttles) live in the annotation blocks inside
+> `larkhelm_config.example.json` and the `CLAUDE.md → Config` table.
 
 ### Enable Voice Transcription
 
@@ -803,16 +839,18 @@ All commands start with `/`.
 
 **Feishu Documents**
 
-| Command | Action |
-|---|---|
-| `/doc read <url>` | Read document/Wiki/sheet and inject as context |
-| `/doc append <url> <content>` | Append content to a document |
-| `/doc write <url> <content>` | Overwrite document content (requires confirmation) |
-| `/doc create <title> [folder/wiki]` | Create a new document |
-| `/doc setfolder <url>` | Set default Drive folder |
-| `/doc ls [url]` | List folder contents |
-| `/doc wiki list [space_id]` | List Wiki space nodes |
-| `/doc wiki create <space_id> <title>` | Create a new Wiki node |
+LarkHelm has no `/doc` user command — there are two unified entry points:
+
+- **Read**: paste a Feishu `docx` / `wiki` / `sheets` URL into the message — the bridge auto-fetches the content and injects it as context. No command needed.
+- **Write**: use the `larkhelm doc` CLI, or let DocAgent take over once intent routing is enabled. The CLI runs anywhere, including inside Feishu via `/run`:
+
+  ```bash
+  cat report.md | larkhelm doc create "Report Title"
+  cat more.md   | larkhelm doc append "https://feishu.cn/docx/<token>"
+  cat fix.md    | larkhelm doc write  "https://feishu.cn/docx/<token>"
+  ```
+
+  When `intent_router_enabled=true`, a natural-language request like "save this to doc X" is auto-routed to DocAgent, which calls the same dispatcher in `doc_handlers.py`. Defaults to a 10% gray rollout — see the intent-routing section.
 
 **Other**
 

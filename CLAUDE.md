@@ -57,63 +57,76 @@ CLI --data-dir > LARKHELM_DATA_DIR env > /var/lib/larkhelm > ~/.local/share/lark
 
 ### Config fields
 
+> **本表只列 agent 在改代码时高频会碰到 / 必须尊重的字段**——凭证、超时、
+> 行为开关、灰度总开关。完整字段清单（含 doc/voice/health/embedding/P1·P2·P3
+> 灰度旋钮共 80+ 项）见：
+>
+> - `larkhelm_config.example.json` — 带 `_comment_*` 注释的运行示例与默认值
+> - `README.md → 配置文件` / `### Phase D 召回灰度开关` / `### 启用语音功能` — 用户面字段说明
+> - `larkhelm/config.py` `setdefault(...)` 调用列表 — **运行时真源**
+> - `.crew_workspace/config_diff.md` — 四方比对矩阵
+>
+> 新增字段时同步：`config.py` setdefault + `larkhelm_config.example.json` +
+> （对用户可见时）`README.md` 配置表。
+
+**凭证与超时**
+
 | Field | Purpose |
 |---|---|
 | `APP_ID`, `APP_SECRET` | Feishu app credentials (required) |
-| `claude_command`, `gemini_command` | CLI binary paths (default: `"claude"`, `"gemini"`) |
-| `default_model` | `"claude"` or `"gemini"` |
+| `claude_command`, `gemini_command`, `kimi_command` | CLI binary paths (default: 命令名) |
+| `default_model` | `"claude"` / `"gemini"` / `"kimi"` / `"deepseek"` |
 | `default_cwd` | Initial working directory for AI subprocess |
 | `skip_permissions` | Auto-confirm Claude permission prompts |
-| `response_timeout` | Soft timeout seconds per query (default: 300) |
-| `hard_timeout` | Hard timeout seconds per query (default: 21600，即 6 小时) |
-| `max_card_len` | Feishu card char limit (default: 3000) |
-| `allowed_chat_ids` | Whitelist of chat IDs (empty = all allowed) |
-| `gemini_idle_ttl` | Gemini process idle TTL in seconds (default: 1800) |
-| `max_ai_procs` | 并发 AI 子进程上限：正整数 / `"auto"` / 缺省（默认 `"auto"`，根据 cgroup MemoryMax 或物理 RAM 探测，公式见 `runner_base._compute_max_procs`） |
-| `timezone` | Cron task timezone (e.g. `"Asia/Shanghai"`) |
-| `voice_enabled` | M3.2 语音转文字总开关（默认 `false`；关闭时 bridge 行为完全不变） |
-| `voice_model_size` | faster-whisper 模型规格 `tiny`/`base`/`small`/`medium`/`large-v3`（默认 `"small"`） |
-| `voice_compute_type` | faster-whisper compute_type，例如 `int8` / `float16`（默认 `"int8"`） |
-| `voice_max_duration_ms` | 单条音频上限毫秒，floor `1000`（默认 `180000`） |
-| `voice_default_lang` | 全局默认转录语种 `zh` / `en` / `auto`（默认 `"zh"`） |
-| `voice_merge_window_sec` | 多条语音消息合并窗口秒数，floor `0`（`0` = 禁用合并；默认 `0`） |
-| `voice_max_merge` | 单次最多合并几条语音，floor `1`（默认 `5`） |
-| `voice_keep_audio` | 转录后是否保留原音频文件（默认 `false`，即转录完即删） |
-| `metrics_text_legacy` | P2 REQ-01：强制 `/metrics` 走 P1 手写文本路径，即使 prometheus-client 已装。默认 `false`；翻 `true` 用于 bisect 指标回归 |
-| `memory_extract_buffer_window_sec` | P2 REQ-06：session→cascade buffer 合并窗口（秒）；默认 `0` = 禁用 buffer，每次 update 立即 cascade（P1 byte-compat），>0 合并 |
-| `memory_session_smart_compress` | P2 REQ-07：session-layer 走句子级评分 + top-K（确定性，无 LLM），默认 `false` = P1 尾截断 |
-| `memory_global_profile_slot_enabled` | P2 REQ-05.1：global memory 按 style/format/domain/expertise 4 槽位写入（每槽 ≤200 chars），默认 `false` = 整段文本 |
-| `memory_project_section_enabled` | P2 REQ-05.2：project memory 按 TechStack/Conventions/Architecture/Constraints 4 段写入，默认 `false` = 整段文本 |
-| `query_session_v2_traffic` | P3 REQ-02：v2 路径灰度比 0.0–1.0；默认 `0.0` = legacy。`query_session_v2_enabled=true` 时强制走 v2（traffic 视为 1.0）|
-| `intent_embedding_top_k_threshold` | P3 REQ-03：embedding L2 分类器最低 cosine 置信，默认 `0.30`；低于则退回 LLM JSON 路径 |
-| `llm_router_circuit_failures` | P3 REQ-04：cheap 后端连续失败阈值，超过则开断路，默认 `5` |
-| `llm_router_circuit_cooldown_sec` | P3 REQ-04：断路 cool-down 秒数，默认 `30.0`；超过后允许 1 次半开探测 |
-| `cascade_backoff_max_attempts` | P3 REQ-05：memory cascade / extract buffer 的 ExponentialBackoff 最大尝试次数，默认 `3` 即 sleep 序列 `[1.0s, 2.0s]`；要 `[1.0s, 2.0s, 4.0s]` 共 3 次 sleep 需显式设为 `4`（单次 sleep cap 30s）|
-| `plan_retry_strategy` | P3 REQ-06：`/plan` step 失败时的重试策略，`now`/`manual`/`off`，默认 `off` = 保持 P0-P2 行为 |
-| `plugin_report_card_enabled` | P3 REQ-07：boot 后将 plugin 加载失败汇总成飞书橙色卡片推送给 admin，默认 `false` |
-| `admin_chat_id` | P3 REQ-07：失败卡片目标 chat_id；为空时退回 `default_owner_open_id` 私聊；都空则只 log |
-| `memory_gc_interval_hours` | P3 REQ-08：MemoryGC daemon tick 周期（小时），默认 `6.0`；`0` = 走 P2 的 boot-only 一次性扫描 |
-| `crew_checkpoint_ttl_days` | P3 REQ-09：`.crew_workspace/*/crew_checkpoint.json` 孤儿清理 TTL，默认 `7.0` 天 |
-| `dev_stage_timeouts` | P3 REQ-10：`/dev` 单 stage 超时覆盖（秒），形如 `{"pm": 600, "implementer": 7200}`；未列出的 stage 走默认公式 |
-| `recent_turns_cache_enabled` | P1 REQ-01：`_get_recent_turns` 走 LRU 缓存（key = chat_id + max_turns + max_chars + dedup_prefix_hash + all.jsonl mtime_ns + size），默认 `true`；flip `false` 直走原 tail-read 路径用于 bisect |
-| `memory_legacy_cache_enabled` | P1 REQ-02：memory `_layer_global / _layer_project / _layer_session` 走 LRU 缓存（key = layer + path + mtime_ns），默认 `true`；包含 `global_slots` / `project_sections` 两个独立 layer，单层 LRU 容量 128 |
-| `doc_inject_cache_enabled` | P1 REQ-03：`_inject_doc_context` 走 TTL 缓存（key = chat_id + doc_type + token + max_chars），默认 `true`；`DocPermissionError` 与 `DocError` 不入缓存（用户可现场授权重试）|
-| `doc_inject_cache_ttl_sec` | P1 REQ-03 / P4 REQ-04：TTL 秒数，floor `1`（`0` 视为关闭，回退到默认值）。默认 `600`（P3 之前为 `300`）；命中时 `_inject_doc_context` 在文档头部加「（缓存版本，N 分钟前读取，如内容已变请提示刷新）」age hint（P4 REQ-05），且 metric outcome 是 `hit_with_age_hint` 而非 `hit`（P4 REQ-06）|
-| `workspace_hint_keyword_gate` | P3 REQ-02：bool，默认 `false`。`true` 时 `.crew_workspace/` 文件清单仅当用户消息正则匹配 `(workspace\|计划\|任务\|设计\|prd\|design\|tasks\|review\|qa\|crew)`（大小写不敏感）才注入；未命中则整段跳过并 bump `larkhelm_workspace_hint_total{outcome="skipped_by_gate"}`。即使 `true` + 命中关键词，文案仍是 P3 REQ-01 的被动条件式（「如果与本次问题相关，再读取；否则忽略」）|
-| `stats_agent_type_breakdown_enabled` | P5 REQ-09：bool，默认 `true`。`/stats` 的 Crew Agents 块按 agent_type 桶（planner/engineer/qa/reviewer/chat/dev/crew/plan/doc/其它）降序输出每桶 `agents/合计 tokens/费用`。`false` 时退回 P2 单行汇总（`**🤖 Crew Agents（本进程）**` 不带「按类型」），用于桶数过多导致卡片溢出 `max_card_len` 的极端情况 |
-| `cli_skip_recent_turns_when_sid` | P1 REQ-04：CLI（claude/kimi/gemini）`sid` 非空时跳过 recent_turns 注入；`deepseek_api` 在 `load_history` 非空时同步跳过。默认 `true`；flip `false` 恢复每次注入（多花 ~500 input tokens / call）|
-| `anthropic_extended_cache_enabled` | bool 默认 `true`。Anthropic API 适配器请求时携带 `anthropic-beta: extended-cache-ttl-2025-04-11` header 并将 `cache_control.ttl` 升级为 `1h`；若该 beta 在该账号未开通而被拒，进程内自动回退到 5min ephemeral 并写一次 `[anthropic_api]` 调试日志，整进程不再重试。设为 `false` 强制保留 5min |
-| `claude_session_auto_reset_enabled` | P0 缓存出血面收敛：当 `claude --resume` 累积 prefix 越过下面两个阈值任一时，自动调 `_clear_sid("claude", chat_id)` + 清零累计器 + 写 milestone + 触发 `larkhelm_session_auto_reset_total{reason}`。默认 `true`；翻 `false` 关掉自动 reset（仍统计累计，仅不触发） |
-| `claude_session_reset_cache_tokens` | P0：单 session 累计 `usage.cache_read` 触发自动 reset 的阈值（tokens），默认 `5000000`（5M）。`reason="cache_tokens"` |
-| `claude_session_reset_turns` | P0：单 session 累计 `record_token_usage(model="claude")` 调用次数触发自动 reset 的阈值，默认 `50`。`reason="turns"` |
-| `chat_agent_cheap_routing_enabled` | P1 缓存出血面收敛：`ChatAgent.execute` 调 `resolve_backend_for_task(profile=chat, cost_ceiling=0.10)` 把 chat 流量导向 DeepSeek/Kimi 等 cheap backend；rank 无健康候选时回落 `_get_chat_model` 并写 `[ChatAgent] fell back to chat model`。默认 `true`；翻 `false` 直接走用户偏好 model |
-| `recent_crew_sticky_ttl_sec` | P2：sticky crew context（`get_recent_crew_context` / `consume_recent_crew_context`）生存秒数，floor 60s。默认 `1800`（30 min；之前硬编码 7200/2h）。过期时 `_recent_crew_by_chat` 懒删除并 bump `larkhelm_sticky_context_evicted_total{reason="ttl"}` |
-| `recent_crew_sticky_max_injections` | P2：同一 sticky entry 经 `consume_recent_crew_context` 注入到主路径 prompt 多少次后强制淘汰，默认 `5`。`0` = 禁用 per-count 淘汰（仅 TTL）。淘汰时 bump `larkhelm_sticky_context_evicted_total{reason="max_injections"}` |
+| `response_timeout` | 软超时（秒），AI 无更新即释放主锁，后台继续；默认 `300` |
+| `hard_timeout` | 硬超时（秒），强制 kill 子进程；默认 `21600`（6h） |
+| `shell_timeout_sec` | `/run` 命令硬超时；默认 `30`，floor 1s（不走 `response_timeout` / `hard_timeout`） |
+| `max_card_len` | Feishu card char limit；默认 `3000` |
+| `max_ai_procs` | 并发 AI 子进程上限：`正整数` / `"auto"` / 缺省（默认 `"auto"`，由 `runner_base._compute_max_procs` 按 cgroup MemoryMax 或物理 RAM 探测） |
+| `allowed_chat_ids` | 白名单 chat ID 列表，空 = 不限制 |
+| `gemini_idle_ttl` / `timezone` | 见 README |
+
+**关键行为开关**（改记忆 / cache / runner 代码必看）
+
+| Field | Purpose |
+|---|---|
+| `anthropic_extended_cache_enabled` | 默认 `true`。Anthropic API 适配器带 `anthropic-beta: extended-cache-ttl-2025-04-11` header 并将 `cache_control.ttl` 升级为 `1h`；该 beta 未开通时进程内自动回退 5min ephemeral，整进程不再重试。设 `false` 强制保留 5min |
+| `claude_session_auto_reset_enabled` | 默认 `true`。`claude --resume` 累积 prefix 越过下面任一阈值时自动 `_clear_sid + reset` 并写 milestone；翻 `false` 仅统计不触发 |
+| `claude_session_reset_cache_tokens` | 累计 `usage.cache_read` 阈值，默认 `5_000_000`（5M）；`reason="cache_tokens"` |
+| `claude_session_reset_turns` | 累计 `record_token_usage(model="claude")` 次数阈值，默认 `50`；`reason="turns"` |
+| `chat_agent_cheap_routing_enabled` | 默认 `true`。`ChatAgent.execute` 调 `resolve_backend_for_task(profile=chat, cost_ceiling=0.10)` 走 DeepSeek/Kimi 等 cheap backend；无健康候选时回落 `_get_chat_model` |
+| `cli_skip_recent_turns_when_sid` | 默认 `true`。`sid` 非空时跳过 recent_turns 注入（多省 ~500 input tokens / call）；flip `false` 强制每次注入 |
+| `memory_extract_buffer_window_sec` | 默认 `0` = 禁 buffer，每次 update 立即 cascade（P1 byte-compat）；>0 合并 |
+| `memory_session_smart_compress` | 默认 `false` = 尾截断；翻 `true` 走句子级评分 + top-K（确定性，无 LLM） |
+| `memory_global_profile_slot_enabled` | 默认 `false` = 整段文本；翻 `true` 走 4 槽位（style/format/domain/expertise，≤200 chars 每槽） |
+| `memory_project_section_enabled` | 默认 `false` = 整段文本；翻 `true` 走 4 段（TechStack/Conventions/Architecture/Constraints） |
+| `recent_turns_cache_enabled` | 默认 `true`，`_get_recent_turns` 走 LRU；flip `false` 直走 tail-read（bisect 用） |
+| `memory_legacy_cache_enabled` | 默认 `true`，三层 memory 走 LRU（key = layer + path + mtime_ns），单层容量 128 |
+| `doc_inject_cache_enabled` / `doc_inject_cache_ttl_sec` | 默认 `true` / `600`s。命中时 `_inject_doc_context` 加 age hint，metric outcome = `hit_with_age_hint`；`DocPermissionError` 与 `DocError` 不入缓存 |
+| `workspace_hint_keyword_gate` | 默认 `false`。`true` 时 `.crew_workspace/` 文件清单仅匹配 `(workspace|计划|任务|设计|prd|design|tasks|review|qa|crew)` 时注入 |
+| `recent_crew_sticky_ttl_sec` | sticky crew context 生存秒数，floor 60s，默认 `1800`（30 min） |
+| `recent_crew_sticky_max_injections` | sticky entry 注入到 prompt 多少次后强制淘汰，默认 `5`；`0` = 仅 TTL 淘汰 |
+
+**灰度总开关 / 失败上报**
+
+| Field | Purpose |
+|---|---|
+| `intent_router_enabled` / `intent_router_traffic` | Phase 5 智能编排总开关 + 0.0–1.0 灰度。默认开启 10% 灰度（`enabled=true` + `traffic=0.1`）；详细分层开关（L1/microlearn/feedback）见 `larkhelm_config.example.json`，升档/回滚流程见 `.crew_workspace/intent_router_rollout.md` |
+| `query_session_v2_traffic` | `_do_query` v2 灰度比 0.0–1.0；默认 `0.0`。`query_session_v2_enabled=true` 时强制 v2 |
+| `metrics_text_legacy` | 默认 `false`；`true` 强制 `/metrics` 走 P1 手写文本（bisect 指标回归用） |
+| `plan_retry_strategy` | `/plan` step 失败重试策略：`now` / `manual` / `off`，默认 `off`（保持 P0-P2 行为） |
+| `cascade_backoff_max_attempts` | memory cascade / extract buffer 的 ExponentialBackoff 最大尝试次数，默认 `3`（即 sleep `[1.0s, 2.0s]`，单次 cap 30s） |
+| `llm_router_circuit_failures` / `llm_router_circuit_cooldown_sec` | cheap 后端连续失败阈值（默认 `5`）+ cool-down 秒（默认 `30.0`）；改 `memory_circuit.py` 必看 |
+| `failure_report_card_enabled` / `plugin_report_card_enabled` | 默认 `false`。失败 / 插件加载诊断卡片总开关，目标 chat 由 `admin_chat_id`（默认 `""`） 决定，为空时退回 `default_owner_open_id` 私聊 |
+| `crew_checkpoint_ttl_days` / `dev_stage_timeouts` | crew 孤儿 checkpoint TTL（默认 `7.0`）+ `/dev` 单 stage 超时覆盖（默认 `{}`，未列 stage 走默认公式） |
+| `memory_gc_interval_hours` | MemoryGC daemon tick 周期（小时），默认 `6.0`；`0` = boot-only 一次性扫描 |
+| `stats_agent_type_breakdown_enabled` | `/stats` Crew Agents 按 agent_type 分桶输出，默认 `true`；`false` 退回单行汇总 |
+| `voice_enabled` | 语音转写总开关，默认 `false`；其余 `voice_*` 见 README §启用语音功能 |
 
 > **超时层级说明**：
 > - `response_timeout`（软超时）：AI 响应无更新超过此时长，释放主锁但后台继续运行，默认 300s
 > - `hard_timeout`（硬超时）：强制终止子进程，默认 21600s
-> - Shell 命令（`/run`）：默认 30s 硬超时，可通过 `shell_timeout_sec` 调整（floor 1s），不走 `response_timeout` / `hard_timeout`
+> - Shell 命令（`/run`）：默认 30s 硬超时，由 `shell_timeout_sec` 调整（floor 1s），不走 `response_timeout` / `hard_timeout`
 
 ## Architecture
 
@@ -293,7 +306,7 @@ fenced code blocks, and block quotes.
 
 ### 6. Phase 5 智能编排层 (`larkhelm/agent_hub/`)
 
-Phase 5 引入意图识别 + Agent 分发层，与现有显式命令**并存**（不替换）。**默认全关**（`intent_router_enabled=false` + `intent_router_traffic=0.0`），关闭时 `_message.py` 完全不 import `agent_hub`。
+Phase 5 引入意图识别 + Agent 分发层，与现有显式命令**并存**（不替换）。**默认 10% 灰度**（`intent_router_enabled=true` + `intent_router_traffic=0.1`），关闭时 `_message.py` 不 import `agent_hub`；升档 / 回滚 SOP 见 [`.crew_workspace/intent_router_rollout.md`](.crew_workspace/intent_router_rollout.md)。
 
 - 包结构、灰度开关、扩展信号采集、第三方 Agent 接入：详见 [`.crew_workspace/design.md`](.crew_workspace/design.md) §Phase 5
 - 关键审计 / 反馈 JSONL：`DATA_DIR/intent_*.jsonl`（0600 权限）
@@ -506,6 +519,8 @@ register(CommandSpec(
     run_async=False,              # IO 阻塞 > 1s 的处理器设为 True，会自动包 daemon thread + 错误卡
     thread_label="new_cmd",       # run_async=True 时显示在错误卡里的标签
     hidden=False,                 # /help 是否列出（M1 增 description/examples 字段后由 help 渲染器消费）
+    description="单行命令描述（≤80 字）",          # P1-2a 元数据，仅供未来 help 渲染器与第三方插件消费
+    examples=("/new_cmd foo", "/new_cmd bar"),  # 0–3 条可粘贴样例（每条 ≤120 字，不含占位符）
 ))
 ```
 
