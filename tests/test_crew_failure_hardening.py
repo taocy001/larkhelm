@@ -928,3 +928,153 @@ def test_layer2_legitimate_review_with_few_citations_passes(
     _write_workspace_file(tmp_path, "review_security.md", body)
 
     assert _validate_output_artifact(state, "sec", result="ack") == ""
+
+
+# ── SEC-v2-MED-1 metric pinning ───────────────────────────────────────
+#
+# The behavioural tests above pin "file rejected" / "file passes" but
+# don't actually verify the ``larkhelm_crew_validate_anthropic_loose_total``
+# counter increments correctly. These three cases lock the counter
+# contract end-to-end so a future refactor can't silently drop the
+# metric or mis-label it. Mirrors the metric-pin style used by
+# ``tests/test_cascade_backoff_metric.py`` for the cascade counter.
+
+
+def _read_anthropic_loose_counter(outcome: str) -> "float | None":
+    """Pull the live value of the labelled counter or skip when prom-client
+    is absent (CI-without-extras). Returns float on hit, None on skip.
+    """
+    pytest = __import__("pytest")
+    pytest.importorskip("prometheus_client")
+    from larkhelm import metrics as _met
+    reg = _met.get_registry()
+    counter = getattr(reg, "crew_validate_anthropic_loose_total", None)
+    if not reg.available or counter is None:
+        pytest.skip("prometheus-client not installed in this venv")
+    try:
+        return counter.labels(outcome=outcome)._value.get()
+    except Exception:
+        pytest.skip("prometheus_client internal shape changed")
+
+
+def test_anthropic_loose_case_a_full_shape_enforced_bumps_metric(
+    init_test_config, fake_crew_state, fake_agent_spec, monkeypatch, tmp_path,
+):
+    """Case A (enforced): full ``<function_calls>`` + ``<invoke name=`` +
+    ``</function_calls>`` structural shape with the gate ON →
+    ``_validate_output_artifact`` rejects the artifact AND
+    ``larkhelm_crew_validate_anthropic_loose_total{outcome="hit_enforced"}``
+    bumps exactly once. ``hit_observed`` must NOT bump (gate is ON).
+    """
+    from larkhelm.crew._runner import _validate_output_artifact
+
+    before_enforced = _read_anthropic_loose_counter("hit_enforced")
+    before_observed = _read_anthropic_loose_counter("hit_observed")
+
+    state = fake_crew_state(["arch"])
+    state.agents["arch"].spec = fake_agent_spec(id="arch", output_file="design.md")
+    _patch_cwd(monkeypatch, tmp_path)
+    _write_workspace_file(
+        tmp_path, "design.md",
+        "# Architecture\n\n"
+        "Proceeding with the plan.\n\n"
+        "<function_calls>\n<invoke name=\"Read\">\n</invoke>\n</function_calls>\n",
+    )
+    issue = _validate_output_artifact(state, "arch", result="ack")
+    assert issue, "case A should reject the artifact under default gate"
+    assert "Anthropic" in issue or "function_calls" in issue
+
+    after_enforced = _read_anthropic_loose_counter("hit_enforced")
+    after_observed = _read_anthropic_loose_counter("hit_observed")
+    assert after_enforced == before_enforced + 1, (
+        f"hit_enforced should bump by 1; "
+        f"got {before_enforced!r} → {after_enforced!r}"
+    )
+    assert after_observed == before_observed, (
+        f"hit_observed must not bump while gate is ON; "
+        f"got {before_observed!r} → {after_observed!r}"
+    )
+
+
+def test_anthropic_loose_case_b_bare_tag_mention_no_metric_bump(
+    init_test_config, fake_crew_state, fake_agent_spec, monkeypatch, tmp_path,
+):
+    """Case B (no match): a narrative-prose mention of the tag NAME
+    alone (no invoke + close trio) must NOT match the structural regex,
+    so neither ``hit_enforced`` nor ``hit_observed`` bumps. Mirrors a
+    README / CLAUDE.md / agent-doc citation of the protocol.
+    """
+    from larkhelm.crew._runner import _validate_output_artifact
+
+    before_enforced = _read_anthropic_loose_counter("hit_enforced")
+    before_observed = _read_anthropic_loose_counter("hit_observed")
+
+    state = fake_crew_state(["docs"])
+    state.agents["docs"].spec = fake_agent_spec(id="docs", output_file="readme.md")
+    _patch_cwd(monkeypatch, tmp_path)
+    _write_workspace_file(
+        tmp_path, "readme.md",
+        "# Architecture notes\n\n"
+        "Claude streams tool calls via <function_calls> elements wrapping\n"
+        "individual invocations. The runner translates these into tool_use\n"
+        "events before they reach the agent's output_file.\n",
+    )
+    assert _validate_output_artifact(state, "docs", result="ack") == ""
+
+    after_enforced = _read_anthropic_loose_counter("hit_enforced")
+    after_observed = _read_anthropic_loose_counter("hit_observed")
+    assert after_enforced == before_enforced, (
+        f"hit_enforced must not bump on bare-tag mention; "
+        f"got {before_enforced!r} → {after_enforced!r}"
+    )
+    assert after_observed == before_observed, (
+        f"hit_observed must not bump on bare-tag mention; "
+        f"got {before_observed!r} → {after_observed!r}"
+    )
+
+
+def test_anthropic_loose_case_c_gate_off_observes_without_quarantine(
+    init_test_config, fake_crew_state, fake_agent_spec, monkeypatch, tmp_path,
+):
+    """Case C (observe-only): full structural shape with the gate OFF →
+    ``_validate_output_artifact`` returns "" (file passes) AND
+    ``larkhelm_crew_validate_anthropic_loose_total{outcome="hit_observed"}``
+    bumps exactly once. ``hit_enforced`` must NOT bump.
+    """
+    import larkhelm.config as _cfg
+    from larkhelm.crew._runner import _validate_output_artifact
+
+    before_enforced = _read_anthropic_loose_counter("hit_enforced")
+    before_observed = _read_anthropic_loose_counter("hit_observed")
+
+    # Snapshot + override the gate for this test scope only — pytest's
+    # monkeypatch reverts on teardown so other tests still see the
+    # default-true config.
+    original_cfg = getattr(_cfg, "config", {})
+    monkeypatch.setattr(
+        _cfg, "config",
+        {**original_cfg, "crew_sentinel_anthropic_loose_enabled": False},
+    )
+
+    state = fake_crew_state(["arch"])
+    state.agents["arch"].spec = fake_agent_spec(id="arch", output_file="design.md")
+    _patch_cwd(monkeypatch, tmp_path)
+    _write_workspace_file(
+        tmp_path, "design.md",
+        "# Architecture\n\n"
+        "<function_calls>\n<invoke name=\"Read\">\n</invoke>\n</function_calls>\n",
+    )
+    assert _validate_output_artifact(state, "arch", result="ack") == "", (
+        "Gate-off should let the structural leak through (observe-only)"
+    )
+
+    after_enforced = _read_anthropic_loose_counter("hit_enforced")
+    after_observed = _read_anthropic_loose_counter("hit_observed")
+    assert after_observed == before_observed + 1, (
+        f"hit_observed should bump by 1 with gate OFF; "
+        f"got {before_observed!r} → {after_observed!r}"
+    )
+    assert after_enforced == before_enforced, (
+        f"hit_enforced must not bump while gate is OFF; "
+        f"got {before_enforced!r} → {after_enforced!r}"
+    )
