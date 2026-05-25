@@ -228,7 +228,7 @@ Crew agent 的 `output_file` 在**写盘前**和**验证时**都过 sentinel sca
 
 - agent 的 prose output **不要直引** `<｜｜DSML｜｜tool_call` / `<tool_calls>` / `<function_calls>` 等 token；必须引用时套 ```` ``` ```` fenced block 或 `` ` `` inline backticks，让 `_strip_code_evidence` 能正确 scrub
 - 非-tool-capable backend（`tags` 不含 `tools`）**不要 dispatch** 给有 `output_file` 的 agent；resolver Path 2（F3，`_backend_has_tools` gate）已硬拦，走 `BackendRegistry.rank_for_task` 路径也需要 `task_profile.require_tools=True`
-- 已知缺口：SEC-CRIT-4 layer-2 启发式仍未补——攻击者用引用形式包裹 sentinel 仍可绕过 scrubber；release-blocker 工单见 `.crew_workspace/review_security.md` § SEC-CRIT-4
+- SEC-CRIT-4 layer-2 启发式（已落地，默认 observe-only）：`_validate_output_artifact` 末段调 `_layer2_check`，layer-1 miss 后按 `raw_hits` + `drop_ratio` 二段判定，默认 `crew_sentinel_layer2_enabled=false` + `traffic=0.0` 只走 observe（`larkhelm_crew_validate_layer2_total{outcome, mode}` 始终 emit），等运营校准阈值后再翻 `true` 强制；阈值 `crew_sentinel_layer2_raw_threshold=3` / `drop_ratio=0.30` / `paranoid_threshold=5`，全部走 `setdefault` 可覆盖。背景见 `.crew_workspace/review_security.md` § SEC-CRIT-4
 
 ### 智能编排 (`agent_hub/`) · Phase 5
 > 详细设计见 [`.crew_workspace/design.md`](.crew_workspace/design.md) §Phase 5
@@ -601,6 +601,7 @@ register(CommandSpec(
 | `larkhelm_intent_layer_total` | Counter | `layer`,`outcome` | P1-5a (review_summary §3 / W8/W9)：`resolve_intent` 每条消息按命中层 +1；`layer` ∈ {`explicit`, `l1`, `microlearn`, `l2`, `fallback`}, `outcome` ∈ {`hit`, `abstain`, `error`}。同一消息可能 bump 多次（L1 abstain → L2 hit），Grafana 查命中率用 `outcome="hit"` |
 | `larkhelm_intent_l2_fallback_total` | Counter | — | P1-5a (W22)：L2（embedding 或 LLM）无法解析，回落 `chat` 时 +1。和 `larkhelm_intent_layer_total{layer="fallback",outcome="hit"}` 同步 bump，用于一眼看到 L2→chat 失败率 |
 | `larkhelm_cascade_backoff_exhausted_total` | Counter | — | P1-5a (W14)：memory cascade ExponentialBackoff 用完最大重试次数仍失败时 +1。`memory._run_one_shot_with_backoff` 和 `memory_extract_buffer._invoke_cascade_with_backoff` 两个调用点都会 bump |
+| `larkhelm_crew_validate_layer2_total` | Counter | `outcome`,`mode` | SEC-CRIT-4：`crew/_runner.py:_validate_output_artifact` 走 layer-2 sentinel 启发式时 +1。`outcome` ∈ {`hit_drop_ratio`（raw≥阈值 且 drop_ratio>阈值）, `hit_paranoid`（raw≥paranoid 阈值）, `abstain`（raw>0 但未触发）}；`mode` ∈ {`enforced`（`crew_sentinel_layer2_enabled=true` 且 chat_id 落在 traffic 桶内 → 真拒绝）, `observe`（gray 未启用 → 仅 metric）}。`raw_hits=0` 时不 bump（避免噪声）|
 
 Prometheus scrape 配置示例：
 

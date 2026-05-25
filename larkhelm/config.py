@@ -1112,6 +1112,25 @@ def _init_app_config() -> None:
     config.setdefault("memory_gc_interval_hours", 6.0)
     config.setdefault("crew_checkpoint_ttl_days", 7.0)
     config.setdefault("dev_stage_timeouts", {})
+    # SEC-CRIT-4 layer-2 sentinel heuristic (review_security.md). The
+    # layer-1 ``_strip_code_evidence`` + sentinel scan in
+    # ``crew/_runner.py:_validate_output_artifact`` is bypassable by an
+    # attacker who wraps tool-call tokens in fenced / inline-backtick /
+    # blockquote citations. Layer-2 runs AFTER layer-1 misses and counts
+    # raw sentinel occurrences (pre-scrub) — if there are too many
+    # citations hiding sentinels (drop_ratio heuristic) or just a
+    # paranoid raw count, layer-2 rejects regardless of citation form.
+    # Default OFF (traffic=0.0); enable gradually via traffic dial.
+    # Salted hash bucket by chat_id (uses _gating.hash_traffic_active) so
+    # the same chat is consistently enrolled/excluded.
+    config.setdefault("crew_sentinel_layer2_enabled", False)
+    config.setdefault("crew_sentinel_layer2_traffic", 0.0)
+    # Layer-2 thresholds (tunable; defaults are intuition-based, will be
+    # calibrated against real crew run data once gray rollout collects
+    # ≥ 1 week of `larkhelm_crew_validate_layer2_total` metric).
+    config.setdefault("crew_sentinel_layer2_raw_threshold", 3)
+    config.setdefault("crew_sentinel_layer2_drop_ratio", 0.30)
+    config.setdefault("crew_sentinel_layer2_paranoid_threshold", 5)
     # B3: stale-workspace notice window. Discarding a different-task
     # workspace_meta within this many seconds (same chat) surfaces an
     # orange notice card. Set 0 to silence.

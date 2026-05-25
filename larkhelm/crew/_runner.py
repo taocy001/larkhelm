@@ -209,6 +209,20 @@ def _validate_output_artifact(state: CrewState, agent_id: str, result: str) -> s
         for s in _OUTPUT_SENTINELS:
             if s in prose:
                 return f"{label} contains tool-call sentinel {s!r}"
+        # SEC-CRIT-4 layer-2 heuristic (review_security.md). Layer-1
+        # above (`s in prose`) is bypassable by wrapping sentinels in
+        # fenced / inline-backtick / blockquote citations — the scrubber
+        # strips them, prose ends up clean, layer-1 misses. Layer-2
+        # counts RAW sentinel occurrences (pre-scrub) and rejects when
+        # heavy citation density hides too many of them (drop_ratio
+        # heuristic) or when the raw count is paranoid-high regardless
+        # of citation form. Gated by `crew_sentinel_layer2_enabled` +
+        # traffic dial; metric is always emitted (observe mode) so
+        # thresholds can be calibrated against real crew runs before
+        # flipping enforcement on.
+        l2_label = _layer2_check(state, label, content, prose)
+        if l2_label:
+            return l2_label
         # JSON validation runs on the full content — the file is supposed
         # to be parseable end-to-end, fences would already invalidate it.
         if spec.output_file and spec.output_file.endswith(".json"):
@@ -217,6 +231,76 @@ def _validate_output_artifact(state: CrewState, agent_id: str, result: str) -> s
             except Exception as e:
                 return f"{label} is not valid JSON: {type(e).__name__}: {str(e)[:120]}"
     return ""
+
+
+def _layer2_check(
+    state: CrewState, label: str, content: str, prose: str,
+) -> str:
+    """SEC-CRIT-4 layer-2 sentinel heuristic. See `_validate_output_artifact`.
+
+    Returns a non-empty failure label when layer-2 enforces (gated on +
+    threshold trips), else "". Always observable via
+    `larkhelm_crew_validate_layer2_total{outcome, mode}` — when traffic
+    bucket misses we still bump the metric with ``mode="observe"`` so
+    operators can pre-calibrate thresholds. Never raises.
+    """
+    try:
+        raw_hits = sum(content.count(s) for s in _OUTPUT_SENTINELS)
+    except Exception:
+        return ""
+    if raw_hits == 0:
+        return ""  # nothing to evaluate; no metric noise either
+
+    drop_ratio = 1.0 - (len(prose) / max(len(content), 1))
+
+    try:
+        import larkhelm.config as _cfg
+        cfg = getattr(_cfg, "config", {}) or {}
+        raw_threshold = int(cfg.get("crew_sentinel_layer2_raw_threshold", 3))
+        ratio_threshold = float(cfg.get("crew_sentinel_layer2_drop_ratio", 0.30))
+        paranoid_threshold = int(
+            cfg.get("crew_sentinel_layer2_paranoid_threshold", 5)
+        )
+    except Exception:
+        raw_threshold, ratio_threshold, paranoid_threshold = 3, 0.30, 5
+
+    if raw_hits >= paranoid_threshold:
+        outcome = "hit_paranoid"
+        msg = (
+            f"{label} has {raw_hits} sentinels — likely tool-call leak "
+            f"[layer-2 paranoid ≥{paranoid_threshold}]"
+        )
+    elif raw_hits >= raw_threshold and drop_ratio > ratio_threshold:
+        outcome = "hit_drop_ratio"
+        msg = (
+            f"{label} has {raw_hits} sentinels behind heavy quoting "
+            f"(drop_ratio={drop_ratio:.0%}) — suspected wrapper bypass "
+            f"[layer-2 drop_ratio>{ratio_threshold:.0%}]"
+        )
+    else:
+        outcome = "abstain"
+        msg = ""
+
+    try:
+        from larkhelm._gating import hash_traffic_active
+        enforced = hash_traffic_active(
+            str(getattr(state, "chat_id", "") or ""),
+            enabled_key="crew_sentinel_layer2_enabled",
+            traffic_key="crew_sentinel_layer2_traffic",
+            default_enabled=False,
+            default_traffic=0.0,
+        )
+    except Exception:
+        enforced = False
+    try:
+        from larkhelm.metrics import inc_crew_validate_layer2
+        inc_crew_validate_layer2(
+            outcome=outcome, mode="enforced" if enforced else "observe",
+        )
+    except Exception:
+        pass
+
+    return msg if (enforced and outcome != "abstain") else ""
 
 
 def _quarantine_invalid_output(state: CrewState, agent_id: str) -> None:

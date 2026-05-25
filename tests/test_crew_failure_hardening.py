@@ -645,3 +645,172 @@ def test_validate_anthropic_sentinel_in_fenced_quote_does_not_trip(
         "These are stripped before the sentinel scan.\n",
     )
     assert _validate_output_artifact(state, "docs", result="ack") == ""
+
+
+# ── SEC-CRIT-4 — layer-2 sentinel heuristic ──────────────────────────
+#
+# Layer-1 (`_strip_code_evidence` + `s in prose`) is bypassable by
+# wrapping tool-call tokens in fenced / inline-backtick / blockquote
+# citations. Layer-2 counts RAW sentinel occurrences (pre-scrub) and
+# rejects on either:
+#   (a) raw_hits >= raw_threshold (3) AND drop_ratio > 30%
+#   (b) raw_hits >= paranoid_threshold (5)  [regardless of drop_ratio]
+#
+# Gated by `crew_sentinel_layer2_enabled` + traffic dial. When the gate
+# is off (default), the metric still fires with mode="observe" so
+# operators can pre-calibrate thresholds against real crew runs.
+
+
+def _set_layer2_config(
+    *, enabled: bool, traffic: float = 1.0,
+    raw_threshold: int = 3, drop_ratio: float = 0.30,
+    paranoid_threshold: int = 5,
+) -> None:
+    """Set layer-2 flags on the in-memory ``larkhelm.config.config`` dict.
+    ``init_test_config`` re-runs ``_init_runtime`` per test, so these
+    mutations don't bleed into other tests.
+    """
+    import larkhelm.config as _cfg
+    _cfg.config["crew_sentinel_layer2_enabled"] = enabled
+    _cfg.config["crew_sentinel_layer2_traffic"] = float(traffic)
+    _cfg.config["crew_sentinel_layer2_raw_threshold"] = int(raw_threshold)
+    _cfg.config["crew_sentinel_layer2_drop_ratio"] = float(drop_ratio)
+    _cfg.config["crew_sentinel_layer2_paranoid_threshold"] = int(paranoid_threshold)
+
+
+def _wrapper_bypass_payload(n_sentinels: int, *, prose_padding: int = 0) -> str:
+    """Build content where N sentinels each sit inside inline backticks
+    (layer-1 scrubs them → prose hits == 0). ``prose_padding`` adds N
+    extra characters of unrelated prose to dilute drop_ratio.
+    """
+    sentinel = "<｜｜DSML｜｜tool_call"  # one of the 7 in _OUTPUT_SENTINELS
+    sentinel_lines = "\n".join(f"see token `{sentinel}` here" for _ in range(n_sentinels))
+    pad = ("more prose. " * (max(prose_padding, 0) // 12 + 1))[:prose_padding]
+    return f"# Review\n\n{sentinel_lines}\n\n{pad}\n"
+
+
+def test_layer2_observe_only_when_disabled(
+    init_test_config, fake_crew_state, fake_agent_spec, monkeypatch, tmp_path,
+):
+    """Default config (enabled=False) → validator must NOT reject even when
+    layer-2 thresholds are tripped. Metric fires with mode="observe" so
+    operators can see the would-be reject rate before flipping enforcement.
+    """
+    from larkhelm.crew._runner import _validate_output_artifact
+    _set_layer2_config(enabled=False)
+    state = fake_crew_state(["rv"])
+    state.agents["rv"].spec = fake_agent_spec(id="rv", output_file="review.md")
+    _patch_cwd(monkeypatch, tmp_path)
+    # 6 sentinels (>= paranoid_threshold 5) all in inline-backticks →
+    # layer-1 misses, layer-2 in observe mode must NOT reject.
+    _write_workspace_file(tmp_path, "review.md", _wrapper_bypass_payload(6))
+
+    assert _validate_output_artifact(state, "rv", result="ack") == ""
+
+
+def test_layer2_enforces_paranoid_threshold(
+    init_test_config, fake_crew_state, fake_agent_spec, monkeypatch, tmp_path,
+):
+    """Config on (enabled + traffic=1.0) + 5+ wrapped sentinels → reject
+    with paranoid label, regardless of drop_ratio.
+    """
+    from larkhelm.crew._runner import _validate_output_artifact
+    _set_layer2_config(enabled=True, traffic=1.0)
+    state = fake_crew_state(["rv"])
+    state.agents["rv"].spec = fake_agent_spec(id="rv", output_file="review.md")
+    _patch_cwd(monkeypatch, tmp_path)
+    _write_workspace_file(tmp_path, "review.md", _wrapper_bypass_payload(6))
+
+    msg = _validate_output_artifact(state, "rv", result="ack")
+    assert msg
+    assert "paranoid" in msg
+    assert "6 sentinels" in msg
+
+
+def test_layer2_enforces_drop_ratio_heuristic(
+    init_test_config, fake_crew_state, fake_agent_spec, monkeypatch, tmp_path,
+):
+    """3 wrapped sentinels (>= raw_threshold) + drop_ratio > 30% → reject
+    with drop_ratio label.
+    """
+    from larkhelm.crew._runner import _validate_output_artifact
+    _set_layer2_config(enabled=True, traffic=1.0)
+    state = fake_crew_state(["rv"])
+    state.agents["rv"].spec = fake_agent_spec(id="rv", output_file="review.md")
+    _patch_cwd(monkeypatch, tmp_path)
+    # 3 sentinels in inline backticks, minimal padding → high drop_ratio
+    # because backtick-wrapping strips ~25 chars per occurrence (the
+    # token itself is ~22 chars + 2 backticks).
+    _write_workspace_file(tmp_path, "review.md", _wrapper_bypass_payload(3))
+
+    msg = _validate_output_artifact(state, "rv", result="ack")
+    assert msg
+    assert "drop_ratio" in msg
+    assert "3 sentinels" in msg
+
+
+def test_layer2_abstains_below_raw_threshold(
+    init_test_config, fake_crew_state, fake_agent_spec, monkeypatch, tmp_path,
+):
+    """Exactly 2 wrapped sentinels (< raw_threshold 3) + drop_ratio > 30%
+    → abstain. Boundary pin: raw_threshold is exclusive on the low side,
+    inclusive on the trigger side (>=3).
+    """
+    from larkhelm.crew._runner import _validate_output_artifact
+    _set_layer2_config(enabled=True, traffic=1.0)
+    state = fake_crew_state(["rv"])
+    state.agents["rv"].spec = fake_agent_spec(id="rv", output_file="review.md")
+    _patch_cwd(monkeypatch, tmp_path)
+    _write_workspace_file(tmp_path, "review.md", _wrapper_bypass_payload(2))
+
+    assert _validate_output_artifact(state, "rv", result="ack") == ""
+
+
+def test_layer2_abstains_when_drop_ratio_low(
+    init_test_config, fake_crew_state, fake_agent_spec, monkeypatch, tmp_path,
+):
+    """4 wrapped sentinels (>= raw_threshold) BUT diluted with enough
+    plain prose that drop_ratio ≤ 30% → abstain on the drop_ratio rule.
+    Paranoid threshold (5) also not yet tripped. Boundary pin for the
+    AND-condition in the drop_ratio branch.
+    """
+    from larkhelm.crew._runner import _validate_output_artifact
+    _set_layer2_config(enabled=True, traffic=1.0)
+    state = fake_crew_state(["rv"])
+    state.agents["rv"].spec = fake_agent_spec(id="rv", output_file="review.md")
+    _patch_cwd(monkeypatch, tmp_path)
+    # 4 sentinels (< paranoid 5), heavily padded prose so backtick-strip
+    # removes < 30% of total content. Each sentinel inline occupies ~25
+    # chars; with 4 of them ~100 chars get scrubbed, so total must be
+    # > ~333 chars for drop_ratio ≤ 30%.
+    _write_workspace_file(
+        tmp_path, "review.md", _wrapper_bypass_payload(4, prose_padding=2000),
+    )
+
+    assert _validate_output_artifact(state, "rv", result="ack") == ""
+
+
+def test_layer2_legitimate_review_with_few_citations_passes(
+    init_test_config, fake_crew_state, fake_agent_spec, monkeypatch, tmp_path,
+):
+    """Realistic positive: a real reviewer report that cites the DSML
+    token 1-2 times inside fenced blocks alongside lots of legitimate
+    prose. Must pass under enforced mode (raw_hits < raw_threshold).
+    Pins that the heuristic doesn't fire on the original 2026-05-25
+    27 KB SecurityExpert false-positive shape.
+    """
+    from larkhelm.crew._runner import _validate_output_artifact
+    _set_layer2_config(enabled=True, traffic=1.0)
+    state = fake_crew_state(["sec"])
+    state.agents["sec"].spec = fake_agent_spec(id="sec", output_file="review_security.md")
+    _patch_cwd(monkeypatch, tmp_path)
+    body = (
+        "# Security review v2\n\n"
+        "## Finding 1\n"
+        "DocsExpert emitted `<｜｜DSML｜｜tool_call` once as raw text — "
+        "see `review_docs.md.invalid`. Quarantine path worked.\n\n"
+        + ("This is legitimate analysis prose. " * 200)  # ~7 KB padding
+    )
+    _write_workspace_file(tmp_path, "review_security.md", body)
+
+    assert _validate_output_artifact(state, "sec", result="ack") == ""

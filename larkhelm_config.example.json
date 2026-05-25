@@ -51,6 +51,13 @@
   "_comment_crew_phase_c": "Phase C crew enhancements. crew_breakpoint_timeout_sec controls how long /dev waits for the user to click 继续/取消 before auto-cancelling (default 1800s = 30 min). task_profiles are referenced by larkhelm/crew/_backend_resolver.py — the in-code defaults are authoritative; this comment lists them for operator awareness: planner / engineer / qa / reviewer / chat. To override per-profile capability weights in the future, populate task_profiles[<name>] with required_capabilities / latency_pref / require_tools.",
   "crew_breakpoint_timeout_sec":   1800,
 
+  "_comment_crew_sentinel_layer2": "SEC-CRIT-4 layer-2 sentinel heuristic (see .crew_workspace/review_security.md). Layer-1 in crew/_runner.py:_validate_output_artifact is bypassable by wrapping tool-call tokens in fenced / inline-backtick / blockquote citations — the scrubber strips them, layer-1 misses. Layer-2 counts RAW sentinel occurrences (pre-scrub) and rejects on either: (a) raw_hits >= raw_threshold AND drop_ratio (1 - prose_len/content_len) > drop_ratio, or (b) raw_hits >= paranoid_threshold regardless of citation form. Defaults are intuition-based; the larkhelm_crew_validate_layer2_total{outcome, mode} Counter ALWAYS fires (mode=observe when traffic bucket misses) so operators can calibrate thresholds before flipping crew_sentinel_layer2_enabled=true. Roll out gradually via crew_sentinel_layer2_traffic (chat_id-salted bucket).",
+  "crew_sentinel_layer2_enabled":             false,
+  "crew_sentinel_layer2_traffic":             0.0,
+  "crew_sentinel_layer2_raw_threshold":       3,
+  "crew_sentinel_layer2_drop_ratio":          0.30,
+  "crew_sentinel_layer2_paranoid_threshold":  5,
+
   "_comment_p1": "P1 iteration knobs (all disabled by default). health_endpoint_port=0 disables the HTTP /health /ready /metrics endpoint (Prometheus-compatible); set a port > 0 (eg. 9300) and configure your reverse proxy to scrape it. health_bind_addr defaults to 127.0.0.1 — DO NOT bind 0.0.0.0 unless behind an authenticated proxy. query_session_v2_enabled enables the QuerySession rewrite of _do_query (PR2, default false). memory_session_layer_smart enables three-section smart_truncate per memory_session_layer_budgets (default true; flip to false for byte-compat with pre-P1). memory_cascade_midflight_cancel makes background memory extracts abort their LLM call as soon as a new chat turn lands (default true; flip false to fall back to post-LLM cancel only).",
   "health_endpoint_port":           0,
   "health_bind_addr":               "127.0.0.1",

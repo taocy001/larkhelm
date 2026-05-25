@@ -289,6 +289,20 @@ class LarkhelmMetricsRegistry:
             "Memory cascade ExponentialBackoff retries exhausted (gave up)",
             registry=self._registry,
         )
+        # SEC-CRIT-4 layer-2 sentinel heuristic outcomes. Bumped exactly
+        # once per artifact validation that has ≥1 raw sentinel match
+        # (layer-1 already missed at this point). ``outcome`` ∈
+        # {hit_drop_ratio, hit_paranoid, abstain}. ``mode`` ∈
+        # {enforced, observe} — observe means traffic bucket missed or
+        # crew_sentinel_layer2_enabled=false, so the artifact was NOT
+        # rejected; track it anyway so operators can calibrate thresholds
+        # against real crew runs before enforcing.
+        self.crew_validate_layer2_total = pc.Counter(
+            "larkhelm_crew_validate_layer2_total",
+            "Layer-2 sentinel heuristic outcomes",
+            ["outcome", "mode"],
+            registry=self._registry,
+        )
 
     @property
     def available(self) -> bool:
@@ -718,6 +732,32 @@ def inc_cascade_backoff_exhausted() -> None:
         reg.cascade_backoff_exhausted_total.inc()
     except Exception as e:
         safe_log(f"[Metrics] inc_cascade_backoff_exhausted failed: {e}")
+
+
+def inc_crew_validate_layer2(outcome: str, mode: str) -> None:
+    """Bump ``larkhelm_crew_validate_layer2_total{outcome, mode}``.
+
+    Called from ``crew/_runner.py:_validate_output_artifact`` exactly once
+    per artifact whose pre-scrub content contains ≥ 1 raw sentinel match
+    (layer-1 missed). Never raises. Safe when prometheus-client is absent.
+
+    Args:
+        outcome: ``"hit_drop_ratio"`` / ``"hit_paranoid"`` / ``"abstain"``
+        mode: ``"enforced"`` (artifact rejected) / ``"observe"``
+              (gray rollout missed; metric only, no rejection)
+    """
+    reg = get_registry()
+    if not reg.available or reg.crew_validate_layer2_total is None:
+        return
+    try:
+        reg.crew_validate_layer2_total.labels(
+            outcome=str(outcome), mode=str(mode),
+        ).inc()
+    except Exception as e:
+        safe_log(
+            f"[Metrics] inc_crew_validate_layer2 failed "
+            f"(outcome={outcome}, mode={mode}): {e}"
+        )
 
 
 def inc_workspace_hint(outcome: str) -> None:
