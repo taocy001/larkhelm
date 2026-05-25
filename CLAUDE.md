@@ -204,6 +204,32 @@ Project is structured as the `larkhelm/` package. 核心模块按角色分组：
 - `crew_types.py` — `AgentSpec` / `AgentState` / `CrewState` / `CrewPhase` 等数据类型
 - `crew_card.py` — Crew 飞书卡片构建与心跳推送
 
+### Crew 输出协议防护层（F1-F6 + LOW2/LOW3）
+
+Crew agent 的 `output_file` 在**写盘前**和**验证时**都过 sentinel scan，防止非-tool backend（如 DeepSeek）把内部 tool-call token 当 markdown 流出污染下游 stage。所有 helper 都集中在 `crew/_runner.py`。
+
+关键 helper（grep anchor 见函数名）：
+
+| 名称 | 作用 |
+|---|---|
+| `_OUTPUT_SENTINELS` | 7 个 token 串，覆盖 DeepSeek DSML（`<｜｜DSML｜｜tool_call`）/ OpenAI（`<tool_calls>`）/ Anthropic XML（`<function_calls>` / `<invoke name=`）三套风格 |
+| `_strip_code_evidence` | 剥 fenced (```` ``` ````) / inline-backtick (`` ` ``) / blockquote (`>`) 三种合法引用形式，scrub 后再做 sentinel scan，避免误伤合法 review / 文档 |
+| `_validate_output_artifact` | 写盘后扫描；命中后调 `_quarantine_invalid_output` 把文件改名为 `<output>.invalid` 留证 |
+| `_persist_result_to_output_file_if_missing` | 写盘前 pre-scan（LOW2）；命中即 skip persist 防止 corrupt 文件出现在 disk 上 |
+| `_sanitize_quarantined_content` | synth 阶段从 `.invalid` 读 sanitized 摘要喂给 final reviewer（F5） |
+| `_banner_throttle_should_send` | F6 红 banner 去重：throttle key `(crew_id, agent_id)`，单 crew 同 agent 只推一次 |
+
+用户面：
+
+- 红色 banner 卡片由 `_failure_card.emit_agent_failure(stage=...)` 推送，`stage ∈ {validate, backend_select, oom, timeout}` 才会推；其他 stage（如普通 `run` 异常）走 `_debug_log` + 中性失败卡，不触发红 banner
+- `.crew_workspace/<output>.invalid` 是被 quarantine 的可疑输出，可手动 inspect 后删除；synth 阶段已自动消费 sanitized 摘要
+
+约束（写新 backend / agent 必看）：
+
+- agent 的 prose output **不要直引** `<｜｜DSML｜｜tool_call` / `<tool_calls>` / `<function_calls>` 等 token；必须引用时套 ```` ``` ```` fenced block 或 `` ` `` inline backticks，让 `_strip_code_evidence` 能正确 scrub
+- 非-tool-capable backend（`tags` 不含 `tools`）**不要 dispatch** 给有 `output_file` 的 agent；resolver Path 2（F3，`_backend_has_tools` gate）已硬拦，走 `BackendRegistry.rank_for_task` 路径也需要 `task_profile.require_tools=True`
+- 已知缺口：SEC-CRIT-4 layer-2 启发式仍未补——攻击者用引用形式包裹 sentinel 仍可绕过 scrubber；release-blocker 工单见 `.crew_workspace/review_security.md` § SEC-CRIT-4
+
 ### 智能编排 (`agent_hub/`) · Phase 5
 > 详细设计见 [`.crew_workspace/design.md`](.crew_workspace/design.md) §Phase 5
 - `intent_types.py` / `agent_base.py` — `AgentExecutor` ABC + `AGENT_REGISTRY` 单例
@@ -692,6 +718,15 @@ resp = client.sheets.v3.spreadsheet_sheet.query(
 | 高危—业务静默失败 | `_debug_log` + 用户 ⚠️ 卡片 | `/reset` API history 清除失败 |
 | 中危—辅助操作失败 | `_debug_log` 记录，不打断主流程 | token 统计、回调、所有权转移、memory 加载 |
 | 低危/零危—可接受静默 | 保持 `except Exception: pass` | `proc.kill()`、stderr drain、调试 I/O |
+| **第四类**—红色 banner（throttled 强提醒） | `emit_agent_failure` 推红色 banner 卡 + `_debug_log`，**必须** throttle 防 alert fatigue | crew agent 的 `validate` / `backend_select` / `oom` / `timeout` 四个 stage（见 `crew/_failure_card.py:emit_agent_failure`） |
+
+**第四类准入门槛**（新加红 banner 路径前必须满足）：
+
+1. 操作员收到后有具体可执行动作（不是「试试看再跑一次」——那是中危）
+2. 已 throttle（per `(subject_id, agent/stage)` 或 LRU），单一事件不会刷屏
+3. 文案走 `_safe_error_repr` → `redact_error`，不带 token / 凭证 / 绝对路径
+
+新增 stage 时同步更新 `_failure_card.emit_agent_failure` 顶部 stage 白名单注释，并在 `tests/test_crew_failure_card.py` 加 pin。
 
 **日志格式**（写入 `_cfg.DEBUG_LOG`）：
 
