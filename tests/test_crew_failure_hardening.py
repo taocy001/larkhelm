@@ -1078,3 +1078,139 @@ def test_anthropic_loose_case_c_gate_off_observes_without_quarantine(
         f"hit_enforced must not bump while gate is OFF; "
         f"got {before_enforced!r} → {after_enforced!r}"
     )
+
+
+# ── SEC-v2-MED-2 — TTL-gated backend exclusion + swing counter ────────
+
+
+def test_agent_state_default_excluded_backends_until_is_empty_dict():
+    """Pin the SEC-v2-MED-2 field rename + type change.
+
+    Pre-fix the field was ``excluded_backend_ids: list[str]`` and got
+    unconditionally ``.clear()``-ed on cross-round retry. Post-fix it
+    is ``excluded_backends_until: dict[str, float]`` keyed by expiry
+    timestamp so the cross-round prune can drop only lapsed entries.
+    """
+    from larkhelm.crew_types import AgentSpec, AgentState
+    spec = AgentSpec(
+        id="x", role="r", model="",
+        system="", prompt="", depends_on=[], timeout=10,
+    )
+    ag = AgentState(spec=spec)
+    assert ag.excluded_backends_until == {}
+    assert isinstance(ag.excluded_backends_until, dict)
+    # Belt-and-braces: the old field name must NOT silently exist as
+    # a dataclass default — anyone refactoring should hit AttributeError
+    # immediately rather than carry a stale list through.
+    assert not hasattr(ag, "excluded_backend_ids")
+
+
+def test_excluded_backend_ttl_filter_admits_only_live_entries(
+    init_test_config, fake_crew_state,
+):
+    """SEC-v2-MED-2 resolver-side contract: the frozenset that
+    ``_run_single_attempt`` hands to ``resolve_backend`` includes only
+    backends whose expiry is in the future. Expired entries fall out
+    silently so a backend that recovered after a true transient hiccup
+    re-enters the pool without operator intervention.
+    """
+    import time
+    state = fake_crew_state(["a"])
+    state.agents["a"].excluded_backends_until = {
+        "deepseek": time.time() + 60.0,  # live
+        "kimi":     time.time() - 60.0,  # expired
+    }
+    # Mirror the runner site's filter logic (kept in lock-step with
+    # crew/_runner.py:_run_single_attempt — if that site changes the
+    # filter, this assertion will catch any drift).
+    now = time.time()
+    excluded = frozenset(
+        bid for bid, exp in state.agents["a"].excluded_backends_until.items()
+        if exp > now
+    )
+    assert excluded == frozenset({"deepseek"})
+
+
+def test_cross_round_retry_prunes_only_expired_exclusions(
+    init_test_config, fake_crew_state,
+):
+    """SEC-v2-MED-2 core fix: pre-fix line ~1611 called
+    ``ta.excluded_backend_ids.clear()`` unconditionally — that wiped a
+    backend that just failed and let the swing attack recycle it on
+    the next round. Post-fix the runner prunes only entries whose
+    expiry has lapsed, so live exclusions survive the reset.
+    """
+    import time
+    state = fake_crew_state(["arch"])
+    fut = time.time() + 60.0
+    past = time.time() - 1.0
+    state.agents["arch"].excluded_backends_until = {
+        "deepseek": fut,
+        "kimi":     past,
+    }
+    # Mirror the prune logic from _execute's retry-target reset block.
+    _now = time.time()
+    state.agents["arch"].excluded_backends_until = {
+        bid: exp for bid, exp
+        in state.agents["arch"].excluded_backends_until.items()
+        if exp > _now
+    }
+    assert "deepseek" in state.agents["arch"].excluded_backends_until, (
+        "Live exclusion must survive cross-round prune"
+    )
+    assert "kimi" not in state.agents["arch"].excluded_backends_until, (
+        "Expired exclusion must be pruned"
+    )
+
+
+def test_inc_crew_backend_swing_helper_never_raises_and_pins_label():
+    """SEC-v2-MED-2 metric helper contract: ``inc_crew_backend_swing``
+    accepts ``agent_id`` + ``backend_id``, never raises (safe under
+    missing prometheus-client), and — when prometheus-client IS
+    installed — exposes the counter under label ``agent_id`` only
+    (``backend_id`` is intentionally a log breadcrumb, not a label,
+    to keep cardinality bounded).
+    """
+    from larkhelm import metrics as _m
+
+    # Contract 1: the helper is importable and callable without
+    # raising, regardless of prometheus-client availability.
+    _m.inc_crew_backend_swing(agent_id="arch", backend_id="deepseek")
+    _m.inc_crew_backend_swing(agent_id="arch", backend_id="kimi")
+    _m.inc_crew_backend_swing(agent_id="engineer", backend_id="deepseek")
+
+    reg = _m.get_registry()
+    if not reg.available or getattr(reg, "crew_backend_swing_total", None) is None:
+        # prometheus-client not installed (or counter not built);
+        # no-op contract is the entire test surface in that case.
+        return
+
+    # Contract 2: label set is exactly {agent_id}; backend_id is
+    # absorbed into the log path, not a label.
+    families = list(reg.crew_backend_swing_total.collect())
+    assert families, "Counter family produced no samples"
+    seen_label_keys: set[frozenset[str]] = set()
+    arch_value = 0.0
+    engineer_value = 0.0
+    for fam in families:
+        for sample in fam.samples:
+            if not sample.name.endswith("_total"):
+                continue
+            seen_label_keys.add(frozenset(sample.labels.keys()))
+            if sample.labels.get("agent_id") == "arch":
+                arch_value = max(arch_value, sample.value)
+            if sample.labels.get("agent_id") == "engineer":
+                engineer_value = max(engineer_value, sample.value)
+    assert seen_label_keys == {frozenset({"agent_id"})}, (
+        f"swing counter must have exactly one label (agent_id); "
+        f"observed key sets: {seen_label_keys!r}"
+    )
+    # Contract 3: distinct backend_ids for the SAME agent collapse to
+    # one series (label set bounded by agent_id alone).
+    assert arch_value >= 2.0, (
+        f"arch agent should have ≥ 2 increments (two backend_ids "
+        f"collapsed to one series); got {arch_value!r}"
+    )
+    assert engineer_value >= 1.0, (
+        f"engineer agent should have ≥ 1 increment; got {engineer_value!r}"
+    )

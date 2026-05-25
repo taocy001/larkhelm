@@ -881,11 +881,17 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
         # (Phase C path), then falls back to legacy model-string handling
         # for backward-compat. The resolved BackendSpec drives the branch
         # selection below via its ``provider`` field.
-        # F4 (2026-05-25): honour any per-agent transient exclusions
-        # stamped by ``_run_agent_wrapper`` after a validate failure, so
-        # the retry picks a different backend.
+        # F4 (2026-05-25) + SEC-v2-MED-2 (review_security_v2): honour any
+        # per-agent transient exclusions stamped by ``_run_agent_wrapper``
+        # after a validate failure, so the retry picks a different
+        # backend. The map is keyed by expiry timestamp; only entries
+        # whose cool-down has NOT lapsed gate the resolver. Expired
+        # entries fall out naturally here and are pruned later in
+        # ``_execute``'s retry-target reset block.
+        _now_excl = time.time()
         excluded = frozenset(
-            state.agents[agent_id].excluded_backend_ids or ()
+            bid for bid, exp in (state.agents[agent_id].excluded_backends_until or {}).items()
+            if exp > _now_excl
         )
         try:
             resolved = resolve_backend(spec, exclude_backend_ids=excluded)
@@ -1196,18 +1202,49 @@ def _run_agent_wrapper(state: CrewState, agent_id: str) -> None:
                     # the corrupt prior file and short-circuit.
                     _quarantine_invalid_output(state, agent_id)
                     failed_backend_id = state.agents[agent_id].actual_backend_id
+                    repeat_swing = False
                     with state.lock:
                         state.agents[agent_id].status     = AgentStatus.PENDING
                         state.agents[agent_id].start_time = None
                         state.agents[agent_id].result     = ""
                         if failed_backend_id:
-                            excluded_list = state.agents[agent_id].excluded_backend_ids
-                            if failed_backend_id not in excluded_list:
-                                excluded_list.append(failed_backend_id)
+                            excluded_map = state.agents[agent_id].excluded_backends_until
+                            # SEC-v2-MED-2: pre-existing entry (even if
+                            # it just expired) means we already excluded
+                            # this backend earlier in the crew → re-
+                            # failure is the swing signal we report.
+                            repeat_swing = failed_backend_id in excluded_map
+                            # TTL stamp; cool-down sourced from config
+                            # (default 60s, floor 0 = disabled). Reading
+                            # _cfg.config lazily keeps the runner import-
+                            # safe when config has not been initialised
+                            # (test bootstrap).
+                            try:
+                                import larkhelm.config as _cfg_swing
+                                cooldown = max(0.0, float(
+                                    getattr(_cfg_swing, "config", {}).get(
+                                        "crew_backend_exclusion_cooldown_sec", 60.0,
+                                    ) or 60.0
+                                ))
+                            except (TypeError, ValueError):
+                                cooldown = 60.0
+                            excluded_map[failed_backend_id] = time.time() + cooldown
+                    if repeat_swing:
+                        try:
+                            from larkhelm.metrics import inc_crew_backend_swing
+                            inc_crew_backend_swing(
+                                agent_id=agent_id,
+                                backend_id=failed_backend_id,
+                            )
+                        except Exception as e:
+                            _debug_log(
+                                f"[Crew] {agent_id} swing-metric emit failed: {e}"
+                            )
                     warn(
                         f"[Crew] {agent_id} output validation failed "
                         f"({artifact_issue}) — retrying on a different backend "
-                        f"(excluded: {failed_backend_id or '<unknown>'})"
+                        f"(excluded: {failed_backend_id or '<unknown>'}"
+                        f"{', swing-repeat' if repeat_swing else ''})"
                     )
                     time.sleep(1)
                     continue
@@ -1599,16 +1636,25 @@ def _execute(state: CrewState, total_timeout: int):
                     ta.needs_retry = False
                     ta.retry_count += 1
                     ta.round_label = f"Round {ta.retry_count + 1}"
-                    # F4 follow-up (reviewer MED): clear the within-attempt
-                    # backend exclusion so a higher-level retry trigger
-                    # (architect-self-check retry, qa→fixer retry, etc.)
-                    # starts fresh. A backend that was tool-incapable on
-                    # round 1 may have become healthy / unsticky by round
-                    # 2; carrying the exclusion across rounds risks the
-                    # crew silently de-prioritising the orchestrator for
-                    # the entire run when a single transient hiccup
-                    # poisoned the list.
-                    ta.excluded_backend_ids.clear()
+                    # F4 follow-up + SEC-v2-MED-2 (review_security_v2):
+                    # prune ONLY entries whose TTL has lapsed. Previously
+                    # this was an unconditional ``.clear()`` so a
+                    # transiently-unhappy backend could recover by round
+                    # 2 — but that also let an attacker swing the pool
+                    # (force backend A to validate-fail → A excluded →
+                    # B succeeds → QA fails → clear wipes A → next
+                    # round A admitted → A fails again, burning tokens
+                    # each round). The TTL prune keeps a freshly-failed
+                    # backend out across the immediate retry; legitimate
+                    # transient recoveries still re-enter once their
+                    # cool-down lapses (``crew_backend_exclusion_cooldown_sec``,
+                    # default 60s; 0 restores pre-fix unconditional clear).
+                    _now_prune = time.time()
+                    ta.excluded_backends_until = {
+                        bid: exp for bid, exp
+                        in ta.excluded_backends_until.items()
+                        if exp > _now_prune
+                    }
                     # Only inject feedback into upstream retry_target agents (e.g. engineer), not into self
                     if tid != spec.id:
                         ta.feedback = feedback

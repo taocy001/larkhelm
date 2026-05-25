@@ -1141,6 +1141,19 @@ def _init_app_config() -> None:
     # — the structural shape only arises from real leakage. Flip false
     # to disable enforcement and fall back to metric-only observation.
     config.setdefault("crew_sentinel_anthropic_loose_enabled", True)
+    # SEC-v2-MED-2 (review_security_v2): TTL (seconds) for per-agent
+    # backend exclusion entries. ``_run_agent_wrapper`` stamps a
+    # failing backend with ``time.time() + this`` after a validate
+    # failure; cross-round retry-target reset prunes only entries
+    # whose expiry has lapsed (was unconditional ``.clear()`` before
+    # the fix). 60s default is long enough to span one wave-level
+    # retry — breaking the backend-swing DoS where an attacker
+    # repeatedly poisons one backend each round — yet short enough
+    # that a backend recovered after a true transient hiccup re-enters
+    # the candidate pool within the same crew. Set to 0 to restore
+    # pre-fix byte-compatible behaviour (every cross-round retry
+    # clears every exclusion).
+    config.setdefault("crew_backend_exclusion_cooldown_sec", 60.0)
     # B3: stale-workspace notice window. Discarding a different-task
     # workspace_meta within this many seconds (same chat) surfaces an
     # orange notice card. Set 0 to silence.

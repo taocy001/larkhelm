@@ -316,6 +316,21 @@ class LarkhelmMetricsRegistry:
             ["outcome"],
             registry=self._registry,
         )
+        # SEC-v2-MED-2 (review_security_v2): backend "swing" detector.
+        # Bumped each time ``_run_agent_wrapper`` writes a backend id
+        # into the agent's ``excluded_backends_until`` map that
+        # ALREADY had a (possibly expired) entry — i.e. the same
+        # backend has been excluded twice during this crew run.
+        # Healthy crews emit zero of these; a steady rate signals
+        # an attacker repeatedly poisoning the preferred backend to
+        # burn tokens on retries. Label cardinality is bounded by
+        # the agent-id set defined in the crew plan (~5-10 per crew).
+        self.crew_backend_swing_total = pc.Counter(
+            "larkhelm_crew_backend_swing_total",
+            "Same backend re-excluded within a crew (swing/DoS signal)",
+            ["agent_id"],
+            registry=self._registry,
+        )
 
     @property
     def available(self) -> bool:
@@ -773,6 +788,28 @@ def inc_crew_validate_layer2(outcome: str, mode: str) -> None:
         )
 
 
+def inc_crew_backend_swing(agent_id: str, backend_id: str) -> None:
+    """Bump ``larkhelm_crew_backend_swing_total{agent_id}``.
+
+    SEC-v2-MED-2: called from ``crew/_runner._run_agent_wrapper`` each
+    time we re-exclude the same backend on a retry round. The
+    ``backend_id`` flows into the log breadcrumb only (not exported
+    as a label) to keep series cardinality bounded. Never raises;
+    safe when prometheus-client is absent.
+    """
+    reg = get_registry()
+    if (not reg.available
+            or getattr(reg, "crew_backend_swing_total", None) is None):
+        return
+    try:
+        reg.crew_backend_swing_total.labels(agent_id=str(agent_id)).inc()
+    except Exception as e:
+        safe_log(
+            f"[Metrics] inc_crew_backend_swing failed "
+            f"(agent_id={agent_id}, backend_id={backend_id}): {e}"
+        )
+
+
 def inc_crew_validate_anthropic_loose(outcome: str) -> None:
     """Bump ``larkhelm_crew_validate_anthropic_loose_total{outcome}``.
 
@@ -869,6 +906,7 @@ __all__ = [
     "inc_sticky_context_evicted",
     "inc_workspace_hint",
     "inc_intent_feedback",
+    "inc_crew_backend_swing",
     # Module-level Counter aliases (resolved lazily via __getattr__):
     "WORKSPACE_HINT_TOTAL",
     "SESSION_AUTO_RESET_TOTAL",

@@ -132,18 +132,25 @@ class AgentState:
     # the Phase-C ``task_profile`` migration left ``spec.model=""`` by
     # default and the card was rendering "[] PM" instead of "[claude] PM".
     actual_backend_id: str    = ""
-    # F4 (2026-05-25): backend ids excluded from ``resolve_backend`` for
-    # THIS agent only — populated by ``_run_agent_wrapper`` after a
-    # validate-failure attempt so the retry picks a different backend
-    # instead of re-running the same tool-incapable model (the previous
-    # same-backend retry policy was token waste because backend-intrinsic
-    # failures are not transient). Scope: WITHIN a single agent run
-    # (attempt 0 → attempt 1). Cleared in ``_runner._execute``'s
-    # retry-target reset block so a higher-level retry trigger
-    # (architect self-check retry / qa→fixer retry / reviewer retry)
-    # restarts backend selection from a clean slate — a backend that
-    # was transiently unhappy on round 1 may have recovered by round 2.
-    excluded_backend_ids: list[str] = dataclasses.field(default_factory=list)
+    # F4 (2026-05-25) + SEC-v2-MED-2 (review_security_v2): backend ids
+    # excluded from ``resolve_backend`` for THIS agent only, mapped to
+    # the unix timestamp at which the exclusion lapses.
+    #
+    # F4 origin: populated by ``_run_agent_wrapper`` after a validate-
+    # failure attempt so the retry picks a different backend instead of
+    # re-running the same tool-incapable model (backend-intrinsic
+    # failures are not transient, same-backend retry is token waste).
+    #
+    # SEC-v2-MED-2: was a ``list[str]`` cleared unconditionally at
+    # cross-round retry in ``_runner._execute``. An attacker who could
+    # repeatedly force backend A to validate-fail used that clear to
+    # swing the pool every round (A excluded → B succeeds → QA fails →
+    # reset wipes A → A admitted → A fails again, burning tokens each
+    # round). The TTL keeps a freshly-failed backend out across the
+    # immediate retry; legitimate transient recoveries still re-enter
+    # once their cool-down lapses (``crew_backend_exclusion_cooldown_sec``,
+    # default 60s). Set the cooldown to 0 to restore pre-fix behaviour.
+    excluded_backends_until: dict[str, float] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass
