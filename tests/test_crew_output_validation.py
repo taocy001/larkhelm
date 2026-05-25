@@ -155,13 +155,20 @@ def test_validate_empty_result_and_no_file_is_ok(
 
 # ── sentinel buried past 8 KiB head is NOT scanned (deliberate cap) ──
 
-def test_validate_only_scans_head_8kib(
+def test_validate_full_scan_catches_leak_past_8kib(
     init_test_config, fake_crew_state, fake_agent_spec, monkeypatch, tmp_path,
 ):
-    """Tool-call leakage always appears at the head; capping at 8 KiB keeps
-    the validator O(1) per agent regardless of artifact size. This pins
-    that behavior — a legitimate doc that quotes the sentinel deep in the
-    body should not trip the validator.
+    """Updated for F2 (2026-05-25): the 8 KiB cap was removed because it
+    created a false sense of safety — the SecurityExpert false positive
+    sat at line 12 (well inside the cap), and a real tail-leak past
+    the cap was silently let through. Post-F2 the scan reads the full
+    artifact; a raw (un-quoted) sentinel anywhere in the file trips.
+
+    To exempt a legitimate inline citation of the token, wrap it in
+    inline backticks ``` `<｜｜DSML｜｜tool_call>` ``` or a fenced
+    block — both are scrubbed by ``_strip_code_evidence`` before the
+    sentinel scan (see ``test_validate_strips_*_citation`` in
+    ``test_crew_failure_hardening.py``).
     """
     from larkhelm.crew._runner import _validate_output_artifact
     state = fake_crew_state(["pm"])
@@ -171,6 +178,31 @@ def test_validate_only_scans_head_8kib(
     _write_workspace_file(
         tmp_path, "prd.md",
         padding + "\n附录：演示 <｜｜DSML｜｜tool_call> 这种 token 长这样。\n",
+    )
+    # Pre-F2: returned "" (capped at 8 KiB, leak past it unseen).
+    # Post-F2: returns sentinel violation — bare-quoted token in prose.
+    issue = _validate_output_artifact(state, "pm", result="")
+    assert issue, "F2 full-scan should catch the tail leak"
+    assert "sentinel" in issue
+
+
+def test_validate_inline_backtick_citation_past_8kib_passes(
+    init_test_config, fake_crew_state, fake_agent_spec, monkeypatch, tmp_path,
+):
+    """Companion to the test above: when the deep-body sentinel mention
+    is wrapped in inline backticks (legitimate citation), the
+    ``_strip_code_evidence`` scrubber removes it BEFORE sentinel scan,
+    so the full-scan does NOT trip. Pins the F1 inline-strip combined
+    with F2 full-scan working together.
+    """
+    from larkhelm.crew._runner import _validate_output_artifact
+    state = fake_crew_state(["pm"])
+    state.agents["pm"].spec = fake_agent_spec(id="pm", output_file="prd.md")
+    _patch_cwd(monkeypatch, tmp_path)
+    padding = "clean line\n" * 1000
+    _write_workspace_file(
+        tmp_path, "prd.md",
+        padding + "\n附录：演示 `<｜｜DSML｜｜tool_call>` 这种 token 长这样。\n",
     )
     assert _validate_output_artifact(state, "pm", result="") == ""
 

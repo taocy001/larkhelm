@@ -4,6 +4,7 @@ larkhelm · Crew Agent executor
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import threading
 import time
@@ -54,37 +55,106 @@ _OUTPUT_SENTINELS: tuple[str, ...] = (
     "<|tool_call",              # generic OpenAI-style sentinel leak
     "<tool_call>",
     "<tool_calls>",
+    # LOW3 (2026-05-25 review_followup): Anthropic XML-style markers in
+    # case a non-tool backend ever streams Claude-shaped tool tokens raw
+    # into prose. ``<function_calls>`` matches the literal opening tag and
+    # ``<invoke name=`` catches the inner element even if the outer tag is
+    # split or lowercased. Caveat: discussions / docs that legitimately
+    # quote these (e.g. CLAUDE.md sections) must wrap them in fenced
+    # code or inline backticks so ``_strip_code_evidence`` removes them
+    # before the scan — they will not appear in crew agent output files.
+    "<function_calls>",
+    "<invoke name=",
 )
 
 
-def _strip_fenced_code_blocks(text: str) -> str:
-    """Remove ```...``` fenced blocks from ``text`` so downstream sentinel
-    scans only see narrative prose, not quoted evidence.
+def _strip_code_evidence(text: str) -> str:
+    """Remove all "quoted evidence" forms so downstream sentinel scans only
+    see narrative prose, not legitimate citations of upstream corruption.
 
-    Motivation: documentation agents (QA, implementer-when-it-bails-out,
-    reviewer) legitimately quote upstream corrupt output inside a code
-    fence as evidence — see ``changes.md`` lines 22-35 of the 2026-05-22
-    failure where the implementer embedded the full ``<｜｜DSML｜｜...>``
-    block to explain why it couldn't proceed. Without this strip, those
-    fenced quotes would trip the sentinel detector and the validator
-    would mark legitimate bail-out reports as FAILED.
+    Three forms scrubbed:
+
+      1. ``` ``` ... ``` ``` triple-backtick fenced blocks
+      2. ``` ` ... ` ``` single-backtick inline code spans
+      3. ``> `` blockquote lines (often used to quote raw model output)
+
+    Motivation: review / QA / docs agents legitimately quote upstream
+    corruption as evidence — e.g. a reviewer writing about a prior
+    SecurityExpert failure may put the offending token inside ` ` `
+    inline spans (see ``review_security.md.invalid`` line 12 of the
+    2026-05-25 failure: ``review_docs.md.invalid 是 DeepSeek 错误吐出
+    的 `<｜｜DSML｜｜tool_calls>` 文本``). Pre-F1+F2 only the triple-
+    fence form was stripped, so the inline-backtick quote tripped the
+    sentinel and the entire 27 KB legitimate report was quarantined.
 
     Tradeoff: a malicious / sloppy backend could wrap its own leaked
-    tool-call output in a pseudo-fence to bypass detection. Considered
-    out of scope — the realistic adversary is "fenced quoted evidence",
-    not "adversarially-crafted fence wrapper".
+    tool-call output in any of these forms to bypass detection. We
+    accept this — the realistic adversary is "an agent quoting evidence
+    in prose", not "an attacker crafting fake quote wrappers".
     """
-    if "```" not in text:
-        return text
-    out: list[str] = []
-    in_fence = False
-    for line in text.split("\n"):
-        if line.lstrip().startswith("```"):
-            in_fence = not in_fence
-            continue   # drop the fence marker itself too
-        if not in_fence:
-            out.append(line)
-    return "\n".join(out)
+    # Pass 1: drop ``` fenced blocks line-by-line. Tracks the open state
+    # across lines because fence markers always live on their own line.
+    if "```" in text:
+        out: list[str] = []
+        in_fence = False
+        for line in text.split("\n"):
+            if line.lstrip().startswith("```"):
+                in_fence = not in_fence
+                continue
+            if not in_fence:
+                out.append(line)
+        text = "\n".join(out)
+    # Pass 2: drop blockquote lines (``>`` at line start, optional leading
+    # whitespace). These often quote raw model outputs in reviews.
+    if ">" in text:
+        text = "\n".join(
+            ln for ln in text.split("\n")
+            if not ln.lstrip().startswith(">")
+        )
+    # Pass 3: strip ``` ` ... ` ``` inline spans. Non-greedy match capped
+    # within a single line so an unmatched stray backtick doesn't swallow
+    # the rest of the document. ``re.DOTALL`` deliberately NOT set.
+    if "`" in text:
+        text = re.sub(r"`[^`\n]+`", "", text)
+    return text
+
+
+# Back-compat alias — older tests / external callers import the original
+# name. New code should call ``_strip_code_evidence`` directly.
+_strip_fenced_code_blocks = _strip_code_evidence
+
+
+def _sanitize_quarantined_content(raw: str) -> str:
+    """Best-effort recovery of prose from a ``<output>.invalid`` artifact
+    so :func:`_synthesize` can surface a useful excerpt of an agent's
+    work even after quarantine.
+
+    F5 (2026-05-25): two passes —
+
+      1. drop any LINE that still contains a tool-call sentinel (we
+         already know the file is poisoned somewhere; this strips the
+         specific token occurrence so the synth can never re-leak it
+         into ``final_review.md``).
+      2. run :func:`_strip_code_evidence` on the remainder so any inline
+         backtick / fenced quote that survived line-drop is removed too.
+
+    Returns ``""`` when nothing usable remains — caller falls back to
+    the in-memory ``result`` / error-only summary.
+    """
+    if not raw:
+        return ""
+    kept: list[str] = []
+    for line in raw.splitlines():
+        if any(s in line for s in _OUTPUT_SENTINELS):
+            continue
+        kept.append(line)
+    cleaned = _strip_code_evidence("\n".join(kept)).strip()
+    # Reject if scrubbing left nothing meaningful — guards against the
+    # docs-agent case where the entire .invalid file was sentinel markup
+    # and nothing else (537 bytes of pure DSML).
+    if len(cleaned) < 50:
+        return ""
+    return cleaned
 
 
 def _validate_output_artifact(state: CrewState, agent_id: str, result: str) -> str:
@@ -95,15 +165,19 @@ def _validate_output_artifact(state: CrewState, agent_id: str, result: str) -> s
       1. Tool-call protocol tokens leaked into the artifact (see
          ``_OUTPUT_SENTINELS``). Downstream stages would parse these as
          markdown content and silently produce garbage. Sentinels inside
-         fenced code blocks are ignored — see ``_strip_fenced_code_blocks``.
+         quoted citations (fenced / inline-backtick / blockquote) are
+         scrubbed first — see ``_strip_code_evidence``.
       2. ``.json`` ``output_file`` that is not parseable JSON. Downstream
          stages crash on ``json.load`` mid-wave. JSON validation does NOT
          strip fences (the whole file must parse).
 
     Scans the on-disk artifact when present (post Write tool) and falls back
-    to the in-memory ``result`` otherwise. Only inspects the first 8 KiB —
-    sentinels always appear at the head of the artifact, and capping the
-    scan keeps the validator O(1) per agent regardless of artifact size.
+    to the in-memory ``result`` otherwise. F1+F2 (2026-05-25): the scrubber
+    now strips inline-backtick and blockquote citations in addition to
+    fenced blocks, and the scan runs on the FULL prose body rather than
+    capping at 8 KiB — the cap created a false sense of safety (the
+    SecurityExpert false-positive sat in line 12, well inside the cap)
+    and full-scan cost on 30 KB reports is sub-millisecond.
     Never raises — defects in this helper must not crash the crew wrapper.
     """
     try:
@@ -127,12 +201,13 @@ def _validate_output_artifact(state: CrewState, agent_id: str, result: str) -> s
         candidates.append(("result", result))
 
     for label, content in candidates:
-        # Sentinel scan: strip fences first so legitimate quoted evidence
-        # in docs (QA / implementer bail-out / review) does not trip.
-        prose = _strip_fenced_code_blocks(content)
-        head = prose[:8192]
+        # Sentinel scan: strip all "quoted evidence" forms first so
+        # legitimate citations of upstream corruption (in QA, reviewer,
+        # docs bail-out reports) do not trip. See `_strip_code_evidence`
+        # docstring for the three forms recognised.
+        prose = _strip_code_evidence(content)
         for s in _OUTPUT_SENTINELS:
-            if s in head:
+            if s in prose:
                 return f"{label} contains tool-call sentinel {s!r}"
         # JSON validation runs on the full content — the file is supposed
         # to be parseable end-to-end, fences would already invalidate it.
@@ -259,6 +334,23 @@ def _persist_result_to_output_file_if_missing(
     if not result or len(result) < 200:
         # Result is just a closing marker; the agent presumably called Write
         # itself with the real payload. Don't risk overwriting a good file.
+        return
+    # LOW2 (2026-05-25 review_followup): scan for tool-call sentinels
+    # BEFORE atomic-writing. Without this, a corrupt result reaches disk
+    # and only ``_validate_output_artifact`` (caller's next step) flags it
+    # — at which point we have to ``_quarantine_invalid_output`` and a
+    # concurrent reader may have already seen the poisoned file. Skipping
+    # the write keeps the agent in its current state and lets the normal
+    # FAILED → retry-on-different-backend path take over.
+    prose = _strip_code_evidence(result)
+    hit_sentinel = next((s for s in _OUTPUT_SENTINELS if s in prose), None)
+    if hit_sentinel:
+        warn(
+            f"[Crew] {agent_id} safety-net skipped persist: result contains "
+            f"tool-call sentinel {hit_sentinel!r} after code-evidence strip; "
+            f"backend leaked a tool token into prose. Letting validator "
+            f"surface the failure on the in-memory result instead."
+        )
         return
     try:
         from larkhelm.chat_state import _get_cwd
@@ -599,8 +691,14 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
         # (Phase C path), then falls back to legacy model-string handling
         # for backward-compat. The resolved BackendSpec drives the branch
         # selection below via its ``provider`` field.
+        # F4 (2026-05-25): honour any per-agent transient exclusions
+        # stamped by ``_run_agent_wrapper`` after a validate failure, so
+        # the retry picks a different backend.
+        excluded = frozenset(
+            state.agents[agent_id].excluded_backend_ids or ()
+        )
         try:
-            resolved = resolve_backend(spec)
+            resolved = resolve_backend(spec, exclude_backend_ids=excluded)
         except NoBackendAvailableError:
             # Re-raise so the wrapper can record the failure and surface
             # a "无可用 backend" card; not retried because this is a config
@@ -895,14 +993,32 @@ def _run_agent_wrapper(state: CrewState, agent_id: str) -> None:
             artifact_issue = _validate_output_artifact(state, agent_id, result)
             if artifact_issue:
                 if proc_attempt == 0:
-                    warn(
-                        f"[Crew] {agent_id} output validation failed "
-                        f"({artifact_issue}) — retrying with same backend"
-                    )
+                    # F4 (2026-05-25): exclude the failing backend from
+                    # the retry's resolve_backend() so we don't burn
+                    # another 5 min on the same tool-incapable model.
+                    # Validate failures are backend-intrinsic (model can't
+                    # tool_use → emits protocol tokens as plain text);
+                    # same-backend retry was guaranteed-loss. The retry
+                    # falls back to the next-ranked healthy backend that
+                    # passes the task_profile filter (or the orchestrator
+                    # when nothing else qualifies). Quarantine first so
+                    # the safety-net rewrite from attempt 1 doesn't see
+                    # the corrupt prior file and short-circuit.
+                    _quarantine_invalid_output(state, agent_id)
+                    failed_backend_id = state.agents[agent_id].actual_backend_id
                     with state.lock:
                         state.agents[agent_id].status     = AgentStatus.PENDING
                         state.agents[agent_id].start_time = None
                         state.agents[agent_id].result     = ""
+                        if failed_backend_id:
+                            excluded_list = state.agents[agent_id].excluded_backend_ids
+                            if failed_backend_id not in excluded_list:
+                                excluded_list.append(failed_backend_id)
+                    warn(
+                        f"[Crew] {agent_id} output validation failed "
+                        f"({artifact_issue}) — retrying on a different backend "
+                        f"(excluded: {failed_backend_id or '<unknown>'})"
+                    )
                     time.sleep(1)
                     continue
                 last_exc = RuntimeError(
@@ -1293,6 +1409,16 @@ def _execute(state: CrewState, total_timeout: int):
                     ta.needs_retry = False
                     ta.retry_count += 1
                     ta.round_label = f"Round {ta.retry_count + 1}"
+                    # F4 follow-up (reviewer MED): clear the within-attempt
+                    # backend exclusion so a higher-level retry trigger
+                    # (architect-self-check retry, qa→fixer retry, etc.)
+                    # starts fresh. A backend that was tool-incapable on
+                    # round 1 may have become healthy / unsticky by round
+                    # 2; carrying the exclusion across rounds risks the
+                    # crew silently de-prioritising the orchestrator for
+                    # the entire run when a single transient hiccup
+                    # poisoned the list.
+                    ta.excluded_backend_ids.clear()
                     # Only inject feedback into upstream retry_target agents (e.g. engineer), not into self
                     if tid != spec.id:
                         ta.feedback = feedback
@@ -1581,7 +1707,34 @@ def _synthesize(state: CrewState) -> str:
                     f"Full output: {result_file}"
                 )
         elif a.status == AgentStatus.FAILED:
-            if a.result:
+            # F5 (2026-05-25): when validate quarantined an output_file to
+            # ``<name>.invalid``, try to recover sanitized prose for the
+            # synth so good content isn't thrown away on a false-positive
+            # quarantine (e.g. SecurityExpert 2026-05-25: 27 KB legitimate
+            # report quarantined for an inline-backtick mention of a
+            # sentinel token). The recovered text is run through the same
+            # ``_strip_code_evidence`` scrubber AND has lines containing
+            # sentinels dropped wholesale, so the synth never sees raw
+            # protocol tokens.
+            recovered = ""
+            if spec.output_file:
+                inv_path = Path(_cwd_synth) / ".crew_workspace" / f"{spec.output_file}.invalid"
+                if inv_path.exists():
+                    try:
+                        raw_inv = inv_path.read_text(encoding="utf-8", errors="replace")
+                        recovered = _sanitize_quarantined_content(raw_inv)
+                    except Exception as _re:
+                        _debug_log(f"[Crew] {spec.id}: read .invalid failed: {_re}")
+            if recovered:
+                preview = recovered[:CREW_RESULT_PREVIEW]
+                suffix  = "…(truncated)" if len(recovered) > CREW_RESULT_PREVIEW else ""
+                parts.append(
+                    f"## {spec.role} ({spec.id})\n"
+                    f"⚠️ Output quarantined as `{spec.output_file}.invalid` "
+                    f"(reason: {a.error[:120]}); sanitized excerpt below:\n\n"
+                    f"{preview}{suffix}"
+                )
+            elif a.result:
                 # Partial output from timeout or similar; include in synthesis, annotate truncation
                 preview = a.result[:CREW_RESULT_PREVIEW]
                 suffix  = "…(truncated due to timeout)" if len(a.result) > CREW_RESULT_PREVIEW else "(truncated due to timeout)"

@@ -98,9 +98,27 @@ def _is_legacy_direct(model: str) -> bool:
     return model.startswith("hermes_")
 
 
+def _backend_has_tools(spec: "BackendSpec") -> bool:
+    """Return True iff ``spec`` advertises ``"tools"`` in its tags.
+
+    F3 (2026-05-25): mirrors the gate inside
+    :meth:`BackendRegistry.rank_for_task` so Path 2 (legacy direct
+    dispatch by ``spec.model`` string) honours the same tool-capability
+    contract as Path 1 (task_profile-based ranking). Backends without
+    a tool layer (API-only DeepSeek, etc.) cannot honour an agent's
+    Read / Write contract — they emit the protocol tokens as plain text
+    and silently corrupt ``output_file``.
+    """
+    try:
+        return "tools" in (spec.tags or [])
+    except Exception:
+        return False
+
+
 def resolve_backend(
     spec: AgentSpec,
     fallback_orchestrator: bool = True,
+    exclude_backend_ids: "frozenset[str] | None" = None,
 ) -> "BackendSpec":
     """Return the BackendSpec that should serve ``spec``.
 
@@ -117,11 +135,18 @@ def resolve_backend(
          ``BACKEND_REGISTRY.get_orchestrator()``.
       4. Nothing usable → :class:`NoBackendAvailableError`.
 
+    ``exclude_backend_ids`` (F4 2026-05-25): a per-call set of backend
+    ids to skip across Path 1 / 2 / 3. Lets the runner's retry loop
+    re-route around a backend that just emitted a contract-violating
+    artifact, without poisoning the registry's global health state for
+    other concurrent agents.
+
     Importing ``BACKEND_REGISTRY`` lazily inside the function keeps this
     module safe to import from ``crew_types`` consumers without hauling
     the registry's startup chain into early bootstrap.
     """
     from larkhelm.backend_registry import BACKEND_REGISTRY
+    excluded = frozenset(exclude_backend_ids or ())
 
     # Path 1 — task_profile (preferred new path)
     profile_name = spec.task_profile or ""
@@ -134,6 +159,8 @@ def resolve_backend(
             )
         else:
             ranked = BACKEND_REGISTRY.rank_for_task(profile)
+            if excluded:
+                ranked = [s for s in ranked if s.id not in excluded]
             if ranked:
                 return ranked[0]
             _debug_log(
@@ -142,7 +169,7 @@ def resolve_backend(
             )
 
     # Path 2 — legacy direct-dispatch model strings
-    if _is_legacy_direct(spec.model):
+    if _is_legacy_direct(spec.model) and spec.model not in excluded:
         if spec.model.startswith("hermes_"):
             # Synthetic spec — hermes is an orchestrator macro, not a backend.
             from larkhelm.backend_registry import BackendSpec as _BS
@@ -157,20 +184,42 @@ def resolve_backend(
             )
         legacy = BACKEND_REGISTRY.get(spec.model)
         if legacy is not None and legacy.enabled and legacy.healthy:
-            return legacy
-        # Disabled or unhealthy — keep falling through to the orchestrator
-        # rather than handing the runner a dead spec.
-        _debug_log(
-            f"[Crew] BackendResolver: legacy model={spec.model!r} unavailable "
-            f"(spec={'present' if legacy else 'missing'}, "
-            f"enabled={getattr(legacy, 'enabled', '?')}, "
-            f"healthy={getattr(legacy, 'healthy', '?')}); falling through"
-        )
+            # F3 (2026-05-25): require_tools gate. Path 1 has had this
+            # check since the 2026-05-22 DSML leak; Path 2 (Manager-LLM
+            # emitting explicit ``model="deepseek"``) bypassed it. The
+            # 2026-05-25 DocsExpert failure was exactly this: Manager
+            # planned the docs-review agent with model="deepseek" +
+            # output_file="review_docs.md"; DeepSeek can't tool_use, so
+            # it dumped DSML tokens as plain text, safety-net captured
+            # those as the file, validator quarantined. Refuse the
+            # dispatch upfront when the agent has a declared output_file
+            # but the chosen backend lacks tool capability — let the
+            # caller decide to abort / fall through to orchestrator
+            # rather than burning 5 min on a guaranteed corrupt run.
+            if spec.output_file and not _backend_has_tools(legacy):
+                _debug_log(
+                    f"[Crew] BackendResolver: refusing legacy model={spec.model!r} "
+                    f"for agent with output_file={spec.output_file!r} — backend "
+                    f"lacks tool capability (would leak protocol tokens). "
+                    "Falling through to orchestrator."
+                )
+                # Intentional fall-through to Path 3.
+            else:
+                return legacy
+        else:
+            # Disabled or unhealthy — keep falling through to the orchestrator
+            # rather than handing the runner a dead spec.
+            _debug_log(
+                f"[Crew] BackendResolver: legacy model={spec.model!r} unavailable "
+                f"(spec={'present' if legacy else 'missing'}, "
+                f"enabled={getattr(legacy, 'enabled', '?')}, "
+                f"healthy={getattr(legacy, 'healthy', '?')}); falling through"
+            )
 
     # Path 3 — orchestrator fallback
     if fallback_orchestrator:
         orch = BACKEND_REGISTRY.get_orchestrator()
-        if orch is not None:
+        if orch is not None and orch.id not in excluded:
             return orch
 
     # Path 4 — nothing usable

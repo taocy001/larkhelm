@@ -17,12 +17,42 @@ Design reference: ``.crew_workspace/design.md`` §6.2.
 """
 from __future__ import annotations
 
+import threading
 import time
 
 from larkhelm.crew_types import AgentStatus, CrewState
 from larkhelm.crew_card import _crew_update_card
 from larkhelm.lark_client import send_card
 from larkhelm.log import _debug_log, redact_error
+
+
+# F6 (2026-05-25): per-process throttle for the standalone red banner so
+# that a stuck retry loop or duplicate ``emit_agent_failure`` call (the
+# function is called from the wrapper but also potentially from other
+# heartbeat paths) cannot spam a chat. Keyed by ``(crew_id, agent_id)``
+# so each agent gets at most ONE red banner per crew run; in-memory dict
+# is sufficient — crew_id is unique per ``/crew`` invocation and the set
+# never grows past ``agents_per_crew * concurrent_crews``.
+_banner_lock = threading.Lock()
+_banner_seen: set[tuple[str, str]] = set()
+
+
+def _banner_throttle_should_send(crew_id: str, agent_id: str) -> bool:
+    """Return True iff we haven't already sent a red banner for this
+    (crew_id, agent_id) pair in the current process lifetime.
+    """
+    key = (crew_id or "", agent_id or "")
+    with _banner_lock:
+        if key in _banner_seen:
+            return False
+        _banner_seen.add(key)
+    return True
+
+
+def _reset_banner_throttle_for_tests() -> None:
+    """Test-only hook to clear the throttle set between unit tests."""
+    with _banner_lock:
+        _banner_seen.clear()
 
 
 # ── OOM classification ──────────────────────────────────────────────
@@ -103,6 +133,44 @@ def emit_agent_failure(
             _crew_update_card(state)
         except Exception as e:
             _debug_log(f"[Crew] emit_agent_failure: card update failed: {e}")
+
+        # F6 (2026-05-25): in-place card patch is invisible to a user
+        # whose Feishu chat scrolled past the crew card or whose
+        # heartbeat thread already stopped (2026-05-25 incident: agent_3
+        # + agent_6 both validate-failed, but no banner ever surfaced).
+        # Send a dedicated red banner for actionable stages so the user
+        # sees the failure even in those cases. Throttled by
+        # (crew_id, agent_id) so a retry storm can't spam the chat.
+        if stage in ("validate", "backend_select", "oom", "timeout"):
+            try:
+                if _banner_throttle_should_send(state.crew_id, agent_id):
+                    role = ""
+                    try:
+                        role = state.agents[agent_id].spec.role or ""
+                    except Exception:
+                        pass
+                    suffix = f"（{role}）" if role else ""
+                    title = f"⚠️ {agent_id} 失败 · {stage}{suffix}"
+                    body_lines = [f"**原因**：{cleaned}"]
+                    # When a quarantined .invalid file exists, point the
+                    # user at it so they can recover content manually if
+                    # the synth's sanitized excerpt isn't sufficient.
+                    try:
+                        spec = state.agents[agent_id].spec
+                        if stage == "validate" and spec.output_file:
+                            body_lines.append(
+                                f"\n📄 原始输出已隔离为 "
+                                f"`.crew_workspace/{spec.output_file}.invalid`，"
+                                "如内容有效可手动 `mv` 去掉后缀恢复。"
+                            )
+                    except Exception:
+                        pass
+                    send_card(
+                        state.chat_id, title, "\n".join(body_lines),
+                        color="red",
+                    )
+            except Exception as e:
+                _debug_log(f"[Crew] emit_agent_failure: red banner failed: {e}")
 
         _debug_log(f"[Crew] {agent_id}: {stage} failed: {cleaned}")
     except Exception as e:
