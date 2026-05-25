@@ -602,15 +602,16 @@ def test_safety_net_evidence_write_failure_does_not_raise(
     assert not (tmp_path / ".crew_workspace" / "prd.md").exists()
 
 
-# ── LOW3 — Anthropic XML-style tool sentinels ─────────────────────────
+# ── LOW3 / SEC-v2-MED-1 — Anthropic XML structural sentinel ──────────
 
 
-def test_validate_catches_anthropic_function_calls_sentinel(
+def test_validate_catches_anthropic_function_calls_structural_leak(
     init_test_config, fake_crew_state, fake_agent_spec, monkeypatch, tmp_path,
 ):
-    """LOW3 (review_followup): non-tool backends may eventually stream
-    Anthropic-shaped tool tokens raw. ``<function_calls>`` must trip
-    sentinel scan just like the DeepSeek DSML variants.
+    """LOW3 origin + SEC-v2-MED-1 refinement: a real Anthropic-shaped
+    tool-call leak (opening + invoke + closing within window) must
+    still trip. The fix narrowed the match to the FULL structural
+    shape — this test confirms the shape itself is still detected.
     """
     from larkhelm.crew._runner import _validate_output_artifact
     state = fake_crew_state(["arch"])
@@ -624,14 +625,18 @@ def test_validate_catches_anthropic_function_calls_sentinel(
     )
     issue = _validate_output_artifact(state, "arch", result="ack")
     assert issue
-    assert "sentinel" in issue
+    # SEC-v2-MED-1 emits the dedicated "structural Anthropic tool-call
+    # XML" label; the legacy "sentinel" label still passes for backward
+    # compat callers, but we expect the structural one here.
+    assert "Anthropic" in issue or "function_calls" in issue
 
 
 def test_validate_anthropic_sentinel_in_fenced_quote_does_not_trip(
     init_test_config, fake_crew_state, fake_agent_spec, monkeypatch, tmp_path,
 ):
-    """Negative pin for LOW3: legitimate docs/reviews quoting the
-    Anthropic tag inside a fenced block must still pass.
+    """Negative pin: legitimate docs/reviews quoting the Anthropic tag
+    inside a fenced block must still pass (the scrubber removes it
+    before either substring or structural scan).
     """
     from larkhelm.crew._runner import _validate_output_artifact
     state = fake_crew_state(["docs"])
@@ -643,6 +648,115 @@ def test_validate_anthropic_sentinel_in_fenced_quote_does_not_trip(
         "Claude tool-use tokens look like:\n\n"
         "```\n<function_calls>\n<invoke name=\"X\">\n</invoke>\n</function_calls>\n```\n\n"
         "These are stripped before the sentinel scan.\n",
+    )
+    assert _validate_output_artifact(state, "docs", result="ack") == ""
+
+
+# ── SEC-v2-MED-1: structural-only loose tier ──────────────────────────
+
+
+def test_validate_anthropic_bare_function_calls_mention_no_longer_trips(
+    init_test_config, fake_crew_state, fake_agent_spec, monkeypatch, tmp_path,
+):
+    """SEC-v2-MED-1: a narrative-prose mention of the tag NAME alone
+    (no invoke + close trio) must NOT trigger quarantine. Pre-fix the
+    LOW3 bare-substring scan rejected this; post-fix only the full
+    structural shape rejects.
+
+    Common legitimate cases: README discussing tool-use protocol,
+    CLAUDE.md project notes, agent prompt examples.
+    """
+    from larkhelm.crew._runner import _validate_output_artifact
+    state = fake_crew_state(["docs"])
+    state.agents["docs"].spec = fake_agent_spec(id="docs", output_file="readme.md")
+    _patch_cwd(monkeypatch, tmp_path)
+    _write_workspace_file(
+        tmp_path, "readme.md",
+        "# Architecture notes\n\n"
+        "Claude streams tool calls via <function_calls> elements wrapping\n"
+        "individual invocations. The runner translates these into tool_use\n"
+        "events before they reach the agent's output_file.\n",
+    )
+    assert _validate_output_artifact(state, "docs", result="ack") == ""
+
+
+def test_validate_anthropic_invoke_name_alone_no_longer_trips(
+    init_test_config, fake_crew_state, fake_agent_spec, monkeypatch, tmp_path,
+):
+    """SEC-v2-MED-1: same as above but with only the inner element
+    mention. Pre-fix the LOW3 bare-substring scan caught this too.
+    """
+    from larkhelm.crew._runner import _validate_output_artifact
+    state = fake_crew_state(["docs"])
+    state.agents["docs"].spec = fake_agent_spec(id="docs", output_file="design.md")
+    _patch_cwd(monkeypatch, tmp_path)
+    _write_workspace_file(
+        tmp_path, "design.md",
+        "# Tool dispatch design\n\n"
+        "Each invocation block uses <invoke name=\"...\"> to address the\n"
+        "specific tool. The dispatcher routes by the name attribute.\n",
+    )
+    assert _validate_output_artifact(state, "docs", result="ack") == ""
+
+
+def test_validate_anthropic_loose_disabled_falls_back_to_metric_only(
+    init_test_config, fake_crew_state, fake_agent_spec, monkeypatch, tmp_path,
+):
+    """SEC-v2-MED-1 gate flip: with
+    ``crew_sentinel_anthropic_loose_enabled=false`` the structural
+    regex still runs (for the metric) but the artifact passes — the
+    metric records ``hit_observed`` rather than ``hit_enforced``.
+    """
+    import larkhelm.config as _cfg
+    from larkhelm.crew._runner import _validate_output_artifact
+
+    # Snapshot + override the gate for this test scope only.
+    original_cfg = getattr(_cfg, "config", {})
+    monkeypatch.setattr(
+        _cfg, "config",
+        {**original_cfg, "crew_sentinel_anthropic_loose_enabled": False},
+    )
+
+    state = fake_crew_state(["arch"])
+    state.agents["arch"].spec = fake_agent_spec(id="arch", output_file="design.md")
+    _patch_cwd(monkeypatch, tmp_path)
+    _write_workspace_file(
+        tmp_path, "design.md",
+        "# Architecture\n\n"
+        "<function_calls>\n<invoke name=\"Read\">\n</invoke>\n</function_calls>\n",
+    )
+    assert _validate_output_artifact(state, "arch", result="ack") == "", (
+        "Gate-off should let the structural leak through (metric-only)"
+    )
+
+
+def test_validate_anthropic_far_apart_tags_do_not_trip(
+    init_test_config, fake_crew_state, fake_agent_spec, monkeypatch, tmp_path,
+):
+    """SEC-v2-MED-1: the structural regex caps the gap between
+    ``<function_calls>`` opening, ``<invoke name=`` inner, and
+    ``</function_calls>`` closing at 4 KiB. Documents that mention each
+    tag in different sections (far apart) must NOT match — the
+    structural pattern only fires for an actual emitted tool-call
+    block, not for unrelated discussion that happens to use both
+    tag names.
+    """
+    from larkhelm.crew._runner import _validate_output_artifact
+    state = fake_crew_state(["docs"])
+    state.agents["docs"].spec = fake_agent_spec(id="docs", output_file="docs.md")
+    _patch_cwd(monkeypatch, tmp_path)
+    # 8 KiB of unrelated prose between the three tokens to exceed the
+    # 4 KiB inner window cap. The cap allows the regex to skip up to
+    # 4 KiB between EACH pair, so we space them 5 KiB apart to be sure
+    # neither pair fits.
+    pad = ("legit prose discussing crew design.\n" * 200)   # ~ 7 KiB
+    _write_workspace_file(
+        tmp_path, "docs.md",
+        f"# Doc\n\nIntro mentions <function_calls> as a concept.\n\n"
+        f"{pad}\n"
+        f"Later section mentions <invoke name=\"X\"> separately.\n\n"
+        f"{pad}\n"
+        f"Closing section mentions </function_calls> at the very end.\n",
     )
     assert _validate_output_artifact(state, "docs", result="ack") == ""
 

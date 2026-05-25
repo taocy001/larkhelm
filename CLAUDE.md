@@ -212,7 +212,9 @@ Crew agent 的 `output_file` 在**写盘前**和**验证时**都过 sentinel sca
 
 | 名称 | 作用 |
 |---|---|
-| `_OUTPUT_SENTINELS` | 7 个 token 串，覆盖 DeepSeek DSML（`<｜｜DSML｜｜tool_call`）/ OpenAI（`<tool_calls>`）/ Anthropic XML（`<function_calls>` / `<invoke name=`）三套风格 |
+| `_OUTPUT_SENTINELS` | 6 个**严格** token 串，覆盖 DeepSeek DSML（`<｜｜DSML｜｜tool_call`）/ OpenAI（`<tool_calls>`）两套风格，bare substring match 即拒。Anthropic XML（`<function_calls>` / `<invoke name=`）已移出本列表 — 见下方 `_ANTHROPIC_LOOSE_SENTINEL_RE` |
+| `_ANTHROPIC_LOOSE_SENTINEL_RE` | SEC-v2-MED-1：Anthropic XML 走**结构正则**而非裸字符串。匹配 `<function_calls>` + `<invoke name=` + `</function_calls>` 三段在 4 KiB 窗口内同时出现的完整 shape — 这种 shape 只有非-tool backend 真泄漏才会出现。narrative prose 单独提及任一 tag 不命中（修了 LOW3 把 Claude API 文档 / 项目 README / CLAUDE.md 自身误标的问题）|
+| `_anthropic_loose_check` | 调用 `_ANTHROPIC_LOOSE_SENTINEL_RE`，命中即视为 sentinel-class 违约；按 `crew_sentinel_anthropic_loose_enabled` gate enforce/observe，metric `larkhelm_crew_validate_anthropic_loose_total{outcome}` 始终 emit |
 | `_strip_code_evidence` | 剥 fenced (```` ``` ````) / inline-backtick (`` ` ``) / blockquote (`>`) 三种合法引用形式，scrub 后再做 sentinel scan，避免误伤合法 review / 文档 |
 | `_validate_output_artifact` | 写盘后扫描；命中后调 `_quarantine_invalid_output` 把文件改名为 `<output>.invalid` 留证 |
 | `_persist_result_to_output_file_if_missing` | 写盘前 pre-scan（LOW2）；命中即 skip persist 防止 corrupt 文件出现在 disk 上 |
@@ -226,9 +228,10 @@ Crew agent 的 `output_file` 在**写盘前**和**验证时**都过 sentinel sca
 
 约束（写新 backend / agent 必看）：
 
-- agent 的 prose output **不要直引** `<｜｜DSML｜｜tool_call` / `<tool_calls>` / `<function_calls>` 等 token；必须引用时套 ```` ``` ```` fenced block 或 `` ` `` inline backticks，让 `_strip_code_evidence` 能正确 scrub
+- agent 的 prose output **不要直引** `<｜｜DSML｜｜tool_call` / `<tool_calls>` 等严格 sentinel；必须引用时套 ```` ``` ```` fenced block 或 `` ` `` inline backticks，让 `_strip_code_evidence` 能正确 scrub。Anthropic XML（`<function_calls>` / `<invoke name=`）由结构正则把关——单独提及任一 tag 现在**允许直引**，只有 opening + invoke + closing 三段同时出现的完整 shape 才被拒
 - 非-tool-capable backend（`tags` 不含 `tools`）**不要 dispatch** 给有 `output_file` 的 agent；resolver Path 2（F3，`_backend_has_tools` gate）已硬拦，走 `BackendRegistry.rank_for_task` 路径也需要 `task_profile.require_tools=True`
 - SEC-CRIT-4 layer-2 启发式（已落地，默认 observe-only）：`_validate_output_artifact` 末段调 `_layer2_check`，layer-1 miss 后按 `raw_hits` + `drop_ratio` 二段判定，默认 `crew_sentinel_layer2_enabled=false` + `traffic=0.0` 只走 observe（`larkhelm_crew_validate_layer2_total{outcome, mode}` 始终 emit），等运营校准阈值后再翻 `true` 强制；阈值 `crew_sentinel_layer2_raw_threshold=3` / `drop_ratio=0.30` / `paranoid_threshold=5`，全部走 `setdefault` 可覆盖。背景见 `.crew_workspace/review_security.md` § SEC-CRIT-4
+- SEC-v2-MED-1 Anthropic XML 结构检查（已落地，**默认 enforced**）：`crew_sentinel_anthropic_loose_enabled=true` 时 `<function_calls>` + `<invoke name=` + `</function_calls>` 三段完整 shape 命中即拒，命中时 `larkhelm_crew_validate_anthropic_loose_total{outcome="hit_enforced"}` +1；翻 `false` 进 observe-only（`hit_observed`），保留 metric 但不 quarantine。结构正则的窗口上限 4 KiB，跨段提及任一 tag 不命中（修了 LOW3 bare-substring 误报）。背景见 `.crew_workspace/review_security_v2.md` § SEC-v2-MED-1
 
 ### 智能编排 (`agent_hub/`) · Phase 5
 > 详细设计见 [`.crew_workspace/design.md`](.crew_workspace/design.md) §Phase 5
@@ -602,6 +605,7 @@ register(CommandSpec(
 | `larkhelm_intent_l2_fallback_total` | Counter | — | P1-5a (W22)：L2（embedding 或 LLM）无法解析，回落 `chat` 时 +1。和 `larkhelm_intent_layer_total{layer="fallback",outcome="hit"}` 同步 bump，用于一眼看到 L2→chat 失败率 |
 | `larkhelm_cascade_backoff_exhausted_total` | Counter | — | P1-5a (W14)：memory cascade ExponentialBackoff 用完最大重试次数仍失败时 +1。`memory._run_one_shot_with_backoff` 和 `memory_extract_buffer._invoke_cascade_with_backoff` 两个调用点都会 bump |
 | `larkhelm_crew_validate_layer2_total` | Counter | `outcome`,`mode` | SEC-CRIT-4：`crew/_runner.py:_validate_output_artifact` 走 layer-2 sentinel 启发式时 +1。`outcome` ∈ {`hit_drop_ratio`（raw≥阈值 且 drop_ratio>阈值）, `hit_paranoid`（raw≥paranoid 阈值）, `abstain`（raw>0 但未触发）}；`mode` ∈ {`enforced`（`crew_sentinel_layer2_enabled=true` 且 chat_id 落在 traffic 桶内 → 真拒绝）, `observe`（gray 未启用 → 仅 metric）}。`raw_hits=0` 时不 bump（避免噪声）|
+| `larkhelm_crew_validate_anthropic_loose_total` | Counter | `outcome` | SEC-v2-MED-1：`crew/_runner.py:_anthropic_loose_check` 结构正则命中即 +1。`outcome` ∈ {`hit_enforced`（gate `crew_sentinel_anthropic_loose_enabled=true` → 真拒绝）, `hit_observed`（gate `false` → 仅 metric，文件放行）}。abstain（regex miss）不 bump 避免每次 validate 都灌噪声。Grafana 看「Anthropic XML 误报回退/正报命中」就盯这个 counter |
 
 Prometheus scrape 配置示例：
 

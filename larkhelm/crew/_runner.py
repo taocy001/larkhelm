@@ -55,16 +55,35 @@ _OUTPUT_SENTINELS: tuple[str, ...] = (
     "<|tool_call",              # generic OpenAI-style sentinel leak
     "<tool_call>",
     "<tool_calls>",
-    # LOW3 (2026-05-25 review_followup): Anthropic XML-style markers in
-    # case a non-tool backend ever streams Claude-shaped tool tokens raw
-    # into prose. ``<function_calls>`` matches the literal opening tag and
-    # ``<invoke name=`` catches the inner element even if the outer tag is
-    # split or lowercased. Caveat: discussions / docs that legitimately
-    # quote these (e.g. CLAUDE.md sections) must wrap them in fenced
-    # code or inline backticks so ``_strip_code_evidence`` removes them
-    # before the scan — they will not appear in crew agent output files.
-    "<function_calls>",
-    "<invoke name=",
+)
+
+# SEC-v2-MED-1 (2026-05-25 review_security_v2): Anthropic XML-style
+# markers were briefly added to ``_OUTPUT_SENTINELS`` (LOW3, batch
+# e15e2a4) as bare-substring matches. That over-fired on legitimate
+# narrative prose that mentioned ``<function_calls>`` or ``<invoke
+# name=`` — Claude API docs, agent prompt examples, project README
+# tool-use sections, the larkhelm CLAUDE.md itself. The false-positive
+# surface was unacceptable now that we deploy on a corpus that talks
+# about agent tool-use as a topic.
+#
+# Replacement: require the FULL structural shape — an opening
+# ``<function_calls>`` token, an inner ``<invoke name=`` element, and a
+# closing ``</function_calls>`` — all within a bounded window. The shape
+# only arises when a non-tool backend emitted unwrapped tool-call
+# markup; ambient discussion of any single tag (even both in the same
+# document) does not match. ``re.DOTALL`` so the inner ``<invoke …>``
+# span may cross lines. The 4 KiB window cap prevents a malformed /
+# legitimate document with the two tag names far apart from being
+# flagged.
+#
+# Caveat: a malicious / sloppy backend that produces a legitimately-
+# shaped open+invoke+close trio will still trip — that is the desired
+# semantic. Discussion documents must wrap the example in fences /
+# inline backticks (``_strip_code_evidence`` removes those before the
+# scan), same contract as the strict sentinels above.
+_ANTHROPIC_LOOSE_SENTINEL_RE = re.compile(
+    r"<function_calls>.{0,4096}?<invoke\s+name=.{0,4096}?</function_calls>",
+    re.DOTALL,
 )
 
 
@@ -209,6 +228,15 @@ def _validate_output_artifact(state: CrewState, agent_id: str, result: str) -> s
         for s in _OUTPUT_SENTINELS:
             if s in prose:
                 return f"{label} contains tool-call sentinel {s!r}"
+        # SEC-v2-MED-1: structural Anthropic-XML check on the scrubbed
+        # prose. Single tag mentions are noise (docs / READMEs talk about
+        # them); only the full opening + invoke + closing trio is a real
+        # leak. Gated by `crew_sentinel_anthropic_loose_enabled` (default
+        # true). Metric always emitted so operators can spot misuse even
+        # when the gate is off.
+        loose_label = _anthropic_loose_check(label, prose)
+        if loose_label:
+            return loose_label
         # SEC-CRIT-4 layer-2 heuristic (review_security.md). Layer-1
         # above (`s in prose`) is bypassable by wrapping sentinels in
         # fenced / inline-backtick / blockquote citations — the scrubber
@@ -231,6 +259,56 @@ def _validate_output_artifact(state: CrewState, agent_id: str, result: str) -> s
             except Exception as e:
                 return f"{label} is not valid JSON: {type(e).__name__}: {str(e)[:120]}"
     return ""
+
+
+def _anthropic_loose_check(label: str, prose: str) -> str:
+    """SEC-v2-MED-1 (2026-05-25 review_security_v2): structural check
+    for Anthropic-shaped tool-call leakage in already-scrubbed prose.
+
+    Returns a non-empty failure label when the structural pattern fires
+    AND the loose tier is enabled, else "". Always observable via
+    ``larkhelm_crew_validate_anthropic_loose_total{outcome}`` so
+    operators see misuse counts even when the gate is off.
+
+    Outcomes:
+      * ``hit_enforced``  — pattern matched AND gate enabled → reject
+      * ``hit_observed``  — pattern matched AND gate disabled → metric only
+      * ``abstain``       — pattern did NOT match (no metric noise here)
+
+    Never raises — defects in this helper must not crash the wrapper.
+    """
+    try:
+        m = _ANTHROPIC_LOOSE_SENTINEL_RE.search(prose)
+    except Exception:
+        return ""
+    if m is None:
+        return ""
+
+    try:
+        import larkhelm.config as _cfg
+        cfg = getattr(_cfg, "config", {}) or {}
+        enabled = bool(cfg.get("crew_sentinel_anthropic_loose_enabled", True))
+    except Exception:
+        enabled = True
+
+    outcome = "hit_enforced" if enabled else "hit_observed"
+    try:
+        from larkhelm.metrics import inc_crew_validate_anthropic_loose
+        inc_crew_validate_anthropic_loose(outcome)
+    except Exception as e:
+        _debug_log(f"[Crew] anthropic_loose metric emit failed: {e}")
+
+    if not enabled:
+        return ""
+
+    # Trim the match preview to keep the failure label tight for cards.
+    snippet = m.group(0)
+    if len(snippet) > 120:
+        snippet = snippet[:117] + "…"
+    return (
+        f"{label} contains structural Anthropic tool-call XML "
+        f"(<function_calls>…<invoke name=…</function_calls>): {snippet!r}"
+    )
 
 
 def _layer2_check(

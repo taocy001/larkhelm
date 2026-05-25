@@ -58,6 +58,9 @@
   "crew_sentinel_layer2_drop_ratio":          0.30,
   "crew_sentinel_layer2_paranoid_threshold":  5,
 
+  "_comment_crew_sentinel_anthropic_loose": "SEC-v2-MED-1 (see .crew_workspace/review_security_v2.md). Earlier batch added <function_calls> + <invoke name= to _OUTPUT_SENTINELS as bare substring matches — that over-fired on narrative prose that legitimately mentions either tag (Claude API docs, agent prompt tutorials, larkhelm CLAUDE.md sections). Replaces with a structural regex that requires the FULL opening + invoke + closing trio within a 4 KiB window — the shape only arises from a real non-tool backend leak. crew/_runner.py:_anthropic_loose_check emits larkhelm_crew_validate_anthropic_loose_total{outcome=hit_enforced|hit_observed} on every match so operators can verify the structural pattern matches reality even when enforcement is off. Default true (we want enforcement immediately — false positives on the structural shape are not plausible). Flip to false to fall back to metric-only observation.",
+  "crew_sentinel_anthropic_loose_enabled":    true,
+
   "_comment_p1": "P1 iteration knobs (all disabled by default). health_endpoint_port=0 disables the HTTP /health /ready /metrics endpoint (Prometheus-compatible); set a port > 0 (eg. 9300) and configure your reverse proxy to scrape it. health_bind_addr defaults to 127.0.0.1 — DO NOT bind 0.0.0.0 unless behind an authenticated proxy. query_session_v2_enabled enables the QuerySession rewrite of _do_query (PR2, default false). memory_session_layer_smart enables three-section smart_truncate per memory_session_layer_budgets (default true; flip to false for byte-compat with pre-P1). memory_cascade_midflight_cancel makes background memory extracts abort their LLM call as soon as a new chat turn lands (default true; flip false to fall back to post-LLM cancel only).",
   "health_endpoint_port":           0,
   "health_bind_addr":               "127.0.0.1",

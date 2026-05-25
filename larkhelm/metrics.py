@@ -303,6 +303,19 @@ class LarkhelmMetricsRegistry:
             ["outcome", "mode"],
             registry=self._registry,
         )
+        # SEC-v2-MED-1 (review_security_v2): structural Anthropic XML
+        # leak check. ``outcome`` ∈ {hit_enforced, hit_observed} —
+        # ``hit_enforced`` rejects the artifact, ``hit_observed`` only
+        # fires when the gate is OFF so operators can spot real-world
+        # match rates before flipping enforcement. Abstain is intentionally
+        # not bumped (the regex misses on 99%+ of artifacts; emitting
+        # ``abstain`` per validate call would flood the series).
+        self.crew_validate_anthropic_loose_total = pc.Counter(
+            "larkhelm_crew_validate_anthropic_loose_total",
+            "SEC-v2-MED-1 structural Anthropic XML check outcomes",
+            ["outcome"],
+            registry=self._registry,
+        )
 
     @property
     def available(self) -> bool:
@@ -757,6 +770,33 @@ def inc_crew_validate_layer2(outcome: str, mode: str) -> None:
         safe_log(
             f"[Metrics] inc_crew_validate_layer2 failed "
             f"(outcome={outcome}, mode={mode}): {e}"
+        )
+
+
+def inc_crew_validate_anthropic_loose(outcome: str) -> None:
+    """Bump ``larkhelm_crew_validate_anthropic_loose_total{outcome}``.
+
+    SEC-v2-MED-1: called from ``crew/_runner.py:_anthropic_loose_check``
+    each time the structural Anthropic-XML regex matches in
+    scrubbed prose. Outcomes: ``"hit_enforced"`` (gate on → artifact
+    rejected) / ``"hit_observed"`` (gate off → metric-only). Never
+    raises; safe when prometheus-client is absent.
+
+    Abstain is intentionally NOT bumped — the regex misses on 99%+ of
+    artifacts so per-call emission would flood the series.
+    """
+    reg = get_registry()
+    if (not reg.available
+            or getattr(reg, "crew_validate_anthropic_loose_total", None) is None):
+        return
+    try:
+        reg.crew_validate_anthropic_loose_total.labels(
+            outcome=str(outcome),
+        ).inc()
+    except Exception as e:
+        safe_log(
+            f"[Metrics] inc_crew_validate_anthropic_loose failed "
+            f"(outcome={outcome}): {e}"
         )
 
 

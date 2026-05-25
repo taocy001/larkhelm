@@ -1131,6 +1131,16 @@ def _init_app_config() -> None:
     config.setdefault("crew_sentinel_layer2_raw_threshold", 3)
     config.setdefault("crew_sentinel_layer2_drop_ratio", 0.30)
     config.setdefault("crew_sentinel_layer2_paranoid_threshold", 5)
+    # SEC-v2-MED-1 (review_security_v2): structural-only check for
+    # Anthropic XML-style tool-call leaks. Replaces the LOW3 bare-
+    # substring scan for ``<function_calls>`` / ``<invoke name=`` —
+    # those tokens legitimately appear in narrative prose (Claude API
+    # docs, agent prompt examples, larkhelm CLAUDE.md). The structural
+    # regex requires the full opening + invoke + closing trio within a
+    # 4 KiB window. Default ON because we want enforcement immediately
+    # — the structural shape only arises from real leakage. Flip false
+    # to disable enforcement and fall back to metric-only observation.
+    config.setdefault("crew_sentinel_anthropic_loose_enabled", True)
     # B3: stale-workspace notice window. Discarding a different-task
     # workspace_meta within this many seconds (same chat) surfaces an
     # orange notice card. Set 0 to silence.
