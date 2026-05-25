@@ -335,6 +335,19 @@ def _persist_result_to_output_file_if_missing(
         # Result is just a closing marker; the agent presumably called Write
         # itself with the real payload. Don't risk overwriting a good file.
         return
+    # Resolve ``out_path`` up front so both the LOW2 skip-path and the
+    # normal write-path can use it (skip-path needs it for the evidence
+    # sidecar, see SEC-v2-HIGH-1 below).
+    try:
+        from larkhelm.chat_state import _get_cwd
+        cwd = _get_cwd(state.chat_id)
+        out_path = Path(cwd) / ".crew_workspace" / spec.output_file
+    except Exception as e:  # noqa: BLE001 — safety net must never raise
+        _debug_log(
+            f"[Crew] {agent_id} safety-net cwd lookup failed: {e}; "
+            f"abandoning persist (validator will run on in-memory result)."
+        )
+        return
     # LOW2 (2026-05-25 review_followup): scan for tool-call sentinels
     # BEFORE atomic-writing. Without this, a corrupt result reaches disk
     # and only ``_validate_output_artifact`` (caller's next step) flags it
@@ -351,11 +364,26 @@ def _persist_result_to_output_file_if_missing(
             f"backend leaked a tool token into prose. Letting validator "
             f"surface the failure on the in-memory result instead."
         )
+        # SEC-v2-HIGH-1 (2026-05-25 review_security_v2): preserve the raw
+        # in-memory result on disk under ``.invalid.prerun`` so incident
+        # response keeps evidence even when we skip the real persist.
+        # Without this, the only signal is one ``warn(...)`` line that ages
+        # out of LARKHELM debug log after 30 days. ``.invalid`` (no suffix)
+        # is reserved for ``_quarantine_invalid_output`` — already-written
+        # files moved aside. ``.invalid.prerun`` is the pre-write twin and
+        # is never read by synth (sanitizer only globs ``.invalid``), so
+        # this is purely a forensic artefact.
+        try:
+            ev_path = out_path.with_suffix(out_path.suffix + ".invalid.prerun")
+            ev_path.parent.mkdir(parents=True, exist_ok=True)
+            ev_path.write_text(result, encoding="utf-8")
+        except Exception as e:  # noqa: BLE001 — evidence persist is best-effort
+            _debug_log(
+                f"[Crew] {agent_id} safety-net evidence write failed: {e}; "
+                f"in-memory warn above is the only signal."
+            )
         return
     try:
-        from larkhelm.chat_state import _get_cwd
-        cwd = _get_cwd(state.chat_id)
-        out_path = Path(cwd) / ".crew_workspace" / spec.output_file
         existing_size = 0
         if out_path.exists():
             try:

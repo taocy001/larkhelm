@@ -512,6 +512,96 @@ def test_safety_net_still_persists_when_sentinels_only_in_fenced_quote(
     assert "tool_calls" in out_path.read_text(), "original quote preserved"
 
 
+def test_safety_net_persists_evidence_when_skipping_for_sentinel(
+    init_test_config, fake_crew_state, fake_agent_spec, monkeypatch, tmp_path,
+):
+    """SEC-v2-HIGH-1 (review_security_v2): when LOW2 pre-scan trips and
+    the safety-net skips the real persist, the raw in-memory result must
+    still land on disk under ``<output>.invalid.prerun`` for forensic
+    inspection. Without it, the only signal is a single ``warn(...)`` line
+    that ages out of the debug log after 30 days, and operators can't
+    reconstruct what the backend actually emitted.
+
+    Pins:
+      * ``<output>`` itself is NOT written (LOW2 contract holds)
+      * ``<output>.invalid.prerun`` contains the full raw result verbatim
+      * ``.invalid`` (no suffix — owned by ``_quarantine_invalid_output``
+        for already-written files) is NOT created — the two suffixes have
+        distinct lifecycles
+    """
+    from larkhelm.crew._runner import _persist_result_to_output_file_if_missing
+    state = fake_crew_state(["pm"])
+    state.agents["pm"].spec = fake_agent_spec(id="pm", output_file="prd.md")
+    _patch_cwd(monkeypatch, tmp_path)
+
+    bare_leak = (
+        "Here is the PRD.\n\n"
+        "<｜｜DSML｜｜tool_calls>\n"
+        "<｜｜DSML｜｜invoke name=\"Write\">\n"
+        + ("padding line.\n" * 30)  # > 200 chars threshold
+    )
+    _persist_result_to_output_file_if_missing(state, "pm", bare_leak)
+
+    workspace = tmp_path / ".crew_workspace"
+    out_path = workspace / "prd.md"
+    prerun_path = workspace / "prd.md.invalid.prerun"
+    quarantine_path = workspace / "prd.md.invalid"
+
+    assert not out_path.exists(), "real output must not land when sentinel hit"
+    assert prerun_path.exists(), (
+        f"SEC-v2-HIGH-1: evidence sidecar missing — incident response loses "
+        f"the raw payload. workspace contents: "
+        f"{sorted(p.name for p in workspace.iterdir())}"
+    )
+    saved = prerun_path.read_text(encoding="utf-8")
+    assert saved == bare_leak, (
+        "evidence sidecar must preserve the raw in-memory result verbatim "
+        "(no scrubbing); reviewers need the original token stream to debug"
+    )
+    assert not quarantine_path.exists(), (
+        "``.invalid`` (no suffix) is owned by _quarantine_invalid_output for "
+        "already-written files; pre-write evidence belongs under .invalid.prerun"
+    )
+
+
+def test_safety_net_evidence_write_failure_does_not_raise(
+    init_test_config, fake_crew_state, fake_agent_spec, monkeypatch, tmp_path,
+):
+    """SEC-v2-HIGH-1 negative pin: even if the evidence write itself
+    fails (e.g. read-only disk), the safety-net must not raise — it is a
+    best-effort forensic artefact, not a correctness gate. LOW2's main
+    contract (real output suppressed) must still hold.
+    """
+    from larkhelm.crew._runner import _persist_result_to_output_file_if_missing
+    state = fake_crew_state(["pm"])
+    state.agents["pm"].spec = fake_agent_spec(id="pm", output_file="prd.md")
+    _patch_cwd(monkeypatch, tmp_path)
+
+    # Force evidence write to explode: monkeypatch Path.write_text to raise
+    # only when targeting the .prerun sidecar so the existing safety-net
+    # write logic stays unaffected for other tests.
+    import pathlib
+    real_write_text = pathlib.Path.write_text
+
+    def _exploding_write_text(self, *args, **kwargs):
+        if str(self).endswith(".invalid.prerun"):
+            raise OSError("simulated read-only disk")
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "write_text", _exploding_write_text)
+
+    bare_leak = (
+        "Here is the PRD.\n\n"
+        "<｜｜DSML｜｜tool_calls>\n"
+        + ("padding line.\n" * 30)
+    )
+    # Must not raise:
+    _persist_result_to_output_file_if_missing(state, "pm", bare_leak)
+
+    # Real output still suppressed (LOW2 contract still holds):
+    assert not (tmp_path / ".crew_workspace" / "prd.md").exists()
+
+
 # ── LOW3 — Anthropic XML-style tool sentinels ─────────────────────────
 
 
