@@ -116,7 +116,7 @@ class _RuntimeConfig:
     FILE_TEXT_EXTENSIONS:  "frozenset[str]" = frozenset()
     FILE_PDF_ENABLED:      bool = True
     FILE_PDF_LIB:          str = "PyPDF2"
-    # SearchAgent (agent_hub.builtin.search_agent)
+    # search skill (web_search injector)
     SEARCH_API_PROVIDER:   str = "ddg"    # "ddg" (no key) | "brave"
     SEARCH_API_KEY:        str = ""
     # GitHubAgent (agent_hub.builtin.github_agent)
@@ -361,7 +361,7 @@ FILE_TEXT_EXTENSIONS: "frozenset[str]" = frozenset({
 })
 FILE_PDF_ENABLED: bool = True
 FILE_PDF_LIB: str = "PyPDF2"
-# SearchAgent
+# search skill
 SEARCH_API_PROVIDER: str = "ddg"
 SEARCH_API_KEY: str = ""
 # GitHubAgent

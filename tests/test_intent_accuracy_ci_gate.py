@@ -78,5 +78,44 @@ class TestIntentAccuracyCIGate(unittest.TestCase):
                           f"fixture missing rows for {required!r} (regression on this branch goes undetected)")
 
 
+# REQ-10: L1 routing for new builtin Skills (refactor / security-scan / standup)
+# These are parametrized as individual test functions so a single regression
+# is visible as a named failure rather than buried inside a loop.
+
+class TestNewSkillRouting(unittest.TestCase):
+    """AC-09: new Skills (refactor / security-scan / standup) must be reachable
+    via L1 keyword rules without L2 fallback."""
+
+    def _assert_routes_to_skill(self, text: str, expected_agent: str) -> None:
+        result = resolve_intent(text)
+        self.assertEqual(
+            result.agent_type, expected_agent,
+            f"Expected agent_type={expected_agent!r} for {text!r}; "
+            f"got agent_type={result.agent_type!r} (layer={result.layer!r})"
+        )
+        self.assertEqual(
+            result.layer, "L1",
+            f"Expected L1 routing for {text!r}; got layer={result.layer!r}"
+        )
+
+    def test_refactor_zh_trigger(self):
+        self._assert_routes_to_skill("帮我重构这段代码", "refactor")
+
+    def test_refactor_en_trigger(self):
+        self._assert_routes_to_skill("refactor this function", "refactor")
+
+    def test_security_scan_zh_trigger(self):
+        self._assert_routes_to_skill("安全扫描这段代码有没有漏洞", "security-scan")
+
+    def test_security_scan_en_trigger(self):
+        self._assert_routes_to_skill("security scan for vulnerabilities", "security-scan")
+
+    def test_standup_zh_trigger(self):
+        self._assert_routes_to_skill("帮我写个站会报告", "standup")
+
+    def test_standup_en_trigger(self):
+        self._assert_routes_to_skill("write a standup report", "standup")
+
+
 if __name__ == "__main__":
     unittest.main()

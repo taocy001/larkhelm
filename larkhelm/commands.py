@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 import larkhelm.config as _cfg
-from larkhelm.log import _debug_log, log_entry, _read_logs
+from larkhelm.log import _debug_log, log_entry, _read_logs, warn
 from larkhelm.chat_state import (
     _get_cwd, _set_chat_field, _get_chat_state, _get_chat_model,
     _load_sid, _clear_sid, _register_btw_msg,
@@ -216,6 +216,34 @@ def _strip_at_mention(text: str) -> str:
 #  Command implementations
 # ═══════════════════════════════════════════════════
 
+def _reset_backend(
+    chat_id: str,
+    msg_id: str | None,
+    backend: str,
+    *,
+    clear_counters: bool = False,
+) -> None:
+    """Clear session ID + optionally zero session counters for one backend.
+
+    Sends a success card on completion. Handles API history clear for
+    backends that support it (gemini, kimi). clear_counters=True zeroes
+    claude_session_guard counters — used for claude and full-reset paths.
+    """
+    _clear_sid(chat_id, backend)
+    if clear_counters:
+        clear_session_counters(chat_id)
+    label_map = {
+        "claude": "Claude",
+        "gemini": "Gemini",
+        "kimi": "Kimi",
+        "deepseek": "DeepSeek",
+    }
+    label = label_map.get(backend, backend)
+    send_card_reply(chat_id, msg_id, "♻️ 已重置",
+                    f"{label} 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
+                    color="green")
+
+
 def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
     """Unified reset logic. which=None resets everything; otherwise 'claude'/'gemini'/'perm'."""
     # Trigger memory snapshot before clearing session (async, non-blocking)
@@ -310,6 +338,7 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
                             color="green")
     elif which == "deepseek":
         _clear_sid(chat_id, "deepseek")
+        clear_session_counters(chat_id)
         log_entry(chat_id, "reset", "reset:deepseek", model="system")
         send_card_reply(chat_id, msg_id, "♻️ 已重置",
                         "DeepSeek 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
@@ -2424,7 +2453,9 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
     from larkhelm.crew import cancel_all_crews, wait_crews_done
     cancel_all_crews(reason="服务升级中，Crew 任务重启后将自动恢复")
     wait_crews_done(timeout=30.0)
-    wait_for_idle(timeout=60.0)
+    idle_ok = wait_for_idle(timeout=60.0)
+    if not idle_ok:
+        warn("[Upgrade] wait_for_idle timed out — proceeding with execv while queries still in flight")
 
     # Always notify any chat that still has an in-flight query — the execv
     # below severs the lark-oapi WebSocket and freezes their streaming cards

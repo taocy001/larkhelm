@@ -1647,9 +1647,13 @@ def record_milestone(chat_id: str, kind: str, summary: str = "") -> None:
         _debug_log(f"[Memory] milestone log_entry failed: {e}")
 
     # 2. Debounced force-refresh.
-    now = _time.time()
+    now = _time.monotonic()
     with _milestone_meta:
         last = _last_milestone_ts.get(chat_id, 0.0)
+        if last > 1e7:
+            _debug_log(f"[Memory] evicting epoch-scale milestone ts for {chat_id[:8]}")
+            del _last_milestone_ts[chat_id]
+            last = 0.0
         if now - last < _MILESTONE_DEBOUNCE_SEC:
             _debug_log(
                 f"[Memory] milestone {kind} debounced for {chat_id[:8]} "

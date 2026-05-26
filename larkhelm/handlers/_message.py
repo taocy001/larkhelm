@@ -28,7 +28,7 @@ from larkhelm._message_pure import (
 )
 from larkhelm.chat_state import (
     _get_chat_model, _get_cwd, _is_btw_reply, _register_btw_msg, _set_chat_field,
-    _get_voice_lang, _get_chat_state,
+    _get_voice_lang, _get_chat_state, _pop_chat_field,
 )
 from larkhelm.concurrency import (
     _get_chat_lock, _trigger_cancel, _reset_cancel, _pop_pending,
@@ -316,6 +316,8 @@ def handle_message(data: P2ImMessageReceiveV1):
                     return
             except Exception as e:
                 _debug_log(f"[Post] parse error: {e}")
+                send_card(chat_id, "⚠️ 消息解析失败",
+                          "富文本消息解析出错，请尝试以纯文本发送。", color="orange")
                 return
         elif message.message_type == "file":
             # Parse file metadata common to all file branches.
@@ -329,23 +331,24 @@ def handle_message(data: P2ImMessageReceiveV1):
                 return
 
             # ── Branch 1: memory import (zip uploaded after /memory import) ──
-            state = _get_chat_state(chat_id)
-            _pending_ts = state.get("pending_memory_import")
+            # _pop_chat_field atomically claims the pending slot; prevents two
+            # concurrent file uploads from both entering the import path.
+            _pending_ts = _pop_chat_field(chat_id, "pending_memory_import")
             _PENDING_TTL = 600
             if _pending_ts:
                 # Accept both timestamp (new) and boolean True (legacy); expire after 10 minutes
                 if isinstance(_pending_ts, float) and time.time() - _pending_ts > _PENDING_TTL:
-                    _set_chat_field(chat_id, "pending_memory_import", False)
                     send_card_reply(chat_id, message.message_id, "⏰ 等待超时",
                                     "导入等待已过期（10 分钟），请重新执行 `/memory import`。",
                                     color="orange")
                     return
-                # Only accept .zip files (validate before clearing flag so user can retry)
+                # Only accept .zip files; restore flag so the user can retry with a valid file.
                 if not file_name.lower().endswith(".zip"):
+                    _set_chat_field(chat_id, "pending_memory_import", _pending_ts)
                     send_card_reply(chat_id, message.message_id, "⚠️ 格式错误",
                                     "请发送 `.zip` 格式的导出文件。", color="orange")
                     return
-                _set_chat_field(chat_id, "pending_memory_import", False)
+                # Flag already cleared by _pop_chat_field; proceed with import.
                 placeholder = send_card_reply(chat_id, message.message_id, "📥 导入中",
                                               "正在下载并导入记忆数据…", color="grey")
                 try:
@@ -390,6 +393,8 @@ def handle_message(data: P2ImMessageReceiveV1):
 
             # ── Branch 2: general file analysis (FILE_ENABLED gate) ──
             if not getattr(_cfg, "FILE_ENABLED", True):
+                send_card(chat_id, "⚠️ 文件处理未启用",
+                          "当前配置未启用文件处理功能，无法解析此文件。", color="orange")
                 return
 
             from larkhelm.file_handler import process_file as _process_file
@@ -403,6 +408,8 @@ def handle_message(data: P2ImMessageReceiveV1):
                 return
 
             if not _file_result.has_content:
+                send_card(chat_id, "⚠️ 文件无法处理",
+                          "文件内容为空或格式不受支持。", color="orange")
                 return
 
             if _file_result.warnings:

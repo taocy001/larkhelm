@@ -33,6 +33,80 @@ class TestExplicitPrefixes(unittest.TestCase):
         self.assertNotEqual(intent.layer, "L1")
 
 
+class TestDynamicRuleEdgeCases(unittest.TestCase):
+    """AC-02, AC-06, AC-07: edge cases for _score_dynamic_rules and skill defs."""
+
+    def test_empty_re_pattern_skipped(self):
+        """AC-02: a dynamic rule with 're:' prefix but empty pattern must not raise
+        and must not match anything (previously caused re.error or wrong match)."""
+        from larkhelm.agent_hub import intent_router
+        from larkhelm.agent_hub.skill_registry import SkillRegistry
+
+        fake_registry = SkillRegistry()
+        fake_registry._rules = [("re:", "some_agent", 0.99, "empty re")]
+
+        original_get = None
+        try:
+            from larkhelm.agent_hub import skill_registry as _sr
+            original_get = _sr.SKILL_REGISTRY.get_l1_rules
+            _sr.SKILL_REGISTRY.get_l1_rules = lambda: [("re:", "some_agent", 0.99, "empty re")]
+            result = resolve_intent("帮我翻译 hello world")
+        finally:
+            if original_get is not None:
+                from larkhelm.agent_hub import skill_registry as _sr
+                _sr.SKILL_REGISTRY.get_l1_rules = original_get
+
+        # The key requirement: no exception raised. The empty 're:' must have been skipped.
+        self.assertIsNotNone(result)
+        self.assertNotEqual(result.agent_type, "some_agent",
+                            "empty re: pattern must not match anything")
+
+    def test_re_pattern_compiled_once(self):
+        """AC-06: the same regex pattern must be compiled only once and cached in
+        _re_pattern_cache regardless of how many messages trigger it."""
+        from larkhelm.agent_hub import intent_router
+
+        # Reset the cache to get a clean baseline
+        intent_router._re_pattern_cache.clear()
+
+        pat = r"test_unique_pattern_\d+"
+        from larkhelm.agent_hub import skill_registry as _sr
+        original_get = _sr.SKILL_REGISTRY.get_l1_rules
+        _sr.SKILL_REGISTRY.get_l1_rules = lambda: [(f"re:{pat}", "some_agent", 0.5, "")]
+        try:
+            resolve_intent("no match here 123")
+            resolve_intent("another message 456")
+        finally:
+            _sr.SKILL_REGISTRY.get_l1_rules = original_get
+
+        # The pattern should now be in the cache
+        self.assertIn(pat, intent_router._re_pattern_cache,
+                      "regex pattern was not added to _re_pattern_cache after use")
+        import re
+        cached = intent_router._re_pattern_cache[pat]
+        self.assertIsInstance(cached, re.Pattern,
+                              "_re_pattern_cache value should be a compiled re.Pattern")
+
+    def test_reviewer_skill_strip_pattern(self):
+        """AC-07: reviewer skill must have a non-empty, valid strip_trigger_pattern."""
+        import re
+        from larkhelm.agent_hub.builtin.skills._defs import _BUILTIN_SKILL_DICTS
+        reviewer = next(
+            (s for s in _BUILTIN_SKILL_DICTS if s["id"] == "reviewer"), None
+        )
+        self.assertIsNotNone(reviewer, "reviewer skill not found in _BUILTIN_SKILL_DICTS")
+        pattern = reviewer.get("strip_trigger_pattern", "")
+        self.assertTrue(bool(pattern),
+                        "reviewer strip_trigger_pattern must be non-empty")
+        # Must compile without error
+        compiled = re.compile(pattern)
+        # Must strip known trigger phrases
+        sample = "帮我review 以下代码"
+        stripped = re.sub(compiled, "", sample).strip()
+        self.assertEqual(stripped, "以下代码",
+                         f"strip_trigger_pattern did not strip trigger; got {stripped!r}")
+
+
 class TestL1Rules(unittest.TestCase):
 
     def test_dev_trigger_zh(self):

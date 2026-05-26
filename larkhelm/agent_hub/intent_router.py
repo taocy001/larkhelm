@@ -26,6 +26,7 @@ from larkhelm.agent_hub.intent_types import IntentResult
 _EMB_CACHE_LOCK: threading.Lock = threading.Lock()
 _EMB_CLASSIFIER: Any = None
 _EMB_SIGNATURE: str = ""
+_re_pattern_cache: dict[str, re.Pattern] = {}
 
 
 def _emb_signature(descriptions: list[tuple[str, str]], threshold: float) -> str:
@@ -190,15 +191,20 @@ def _resolve_l1(text: str, images: list | None, has_doc_urls: bool) -> IntentRes
     # Step 2b: dynamic keyword rules from SkillRegistry and PipelineRegistry.
     # These extend the static rules so user-created Skills/Pipelines are
     # immediately routable without a restart.
-    import re as _re
-
     def _score_dynamic_rules(rules: "list[tuple[str, str, float, str]]") -> None:
         for (raw_pattern, agent_id, strength, note) in rules:
             if agent_id in blocked:
                 continue
             try:
                 if raw_pattern.startswith("re:"):
-                    matched = bool(_re.search(raw_pattern[3:], text, _re.IGNORECASE))
+                    pat = raw_pattern[3:]
+                    if not pat:
+                        continue
+                    compiled = _re_pattern_cache.get(pat)
+                    if compiled is None:
+                        compiled = re.compile(pat, re.IGNORECASE)
+                        _re_pattern_cache[pat] = compiled
+                    matched = bool(compiled.search(text))
                 else:
                     matched = raw_pattern.lower() in text_l
                 if matched and strength > scores.get(agent_id, 0.0):

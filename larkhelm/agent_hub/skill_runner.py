@@ -19,15 +19,13 @@ that is prepended to the AI call.
 Built-in injectors
 ~~~~~~~~~~~~~~~~~~
 ``web_search``
-    DuckDuckGo / Brave web search.  Extracted from the old ``SearchAgent``.
+    DuckDuckGo / Brave web search.
 
 ``shell_exec``
-    Execute a shell command (with dangerous-command rejection).  Extracted from
-    the old ``ShellAgent``.
+    Execute a shell command (with dangerous-command rejection).
 
 ``bm25_history``
-    BM25 retrieval over the chat's memory files.  Extracted from the old
-    ``HistorySearchAgent``.
+    BM25 retrieval over the chat's memory files.
 
 Registering custom injectors
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

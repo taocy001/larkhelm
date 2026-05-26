@@ -1,6 +1,7 @@
 """larkhelm · persistent chat state (cwd/model/crons/voice_lang per-chat override), session IDs, btw message ID tracking, pending doc write"""
 from __future__ import annotations
 
+import copy
 import json
 import threading
 import time
@@ -28,6 +29,8 @@ __all__ = [
     "_get_claude_session_counters",
     "_increment_claude_session_counters",
     "_clear_claude_session_counters",
+    "_pop_chat_field",
+    "_flush_save",
 ]
 
 # ═══════════════════════════════════════════════════
@@ -52,6 +55,21 @@ def _schedule_save() -> None:
         t.daemon = True
         _save_timer = t
         t.start()
+
+
+def _flush_save() -> None:
+    """Cancel any pending debounced save and write state to disk immediately.
+
+    Used in tests and upgrade paths that call _load_global_state() right
+    after mutations — without this the debounce window would swallow the write.
+    Thread-safe: uses _save_timer_lock before touching the timer.
+    """
+    global _save_timer
+    with _save_timer_lock:
+        if _save_timer is not None:
+            _save_timer.cancel()
+            _save_timer = None
+    _save_state()
 
 
 def _load_global_state() -> None:
@@ -85,13 +103,28 @@ def _save_state() -> None:
 
 def _get_chat_state(chat_id: str) -> dict:
     with _state_lock:
-        return dict(_chat_state_store.setdefault(chat_id, {}))
+        return copy.deepcopy(_chat_state_store.setdefault(chat_id, {}))
 
 
 def _set_chat_field(chat_id: str, key: str, value: object) -> None:
     with _state_lock:
         _chat_state_store.setdefault(chat_id, {})[key] = value
     _schedule_save()
+
+
+def _pop_chat_field(chat_id: str, key: str, default=None) -> object:
+    """Atomically read and remove a field from the chat state.
+
+    Combining the read and delete under one lock acquisition prevents the
+    TOCTOU race where two concurrent callers both observe a truthy value
+    and both proceed to act on it (e.g. two concurrent file uploads both
+    claiming the pending_memory_import slot).
+    """
+    with _state_lock:
+        value = _chat_state_store.setdefault(chat_id, {}).pop(key, default)
+    if value != default:
+        _schedule_save()
+    return value
 
 
 # ═══════════════════════════════════════════════════

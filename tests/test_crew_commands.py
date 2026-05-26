@@ -1,6 +1,7 @@
 """Tests for ``crew/_commands`` argument parsing and terminal-failure plumbing."""
 from __future__ import annotations
 
+import json
 import threading
 
 
@@ -194,11 +195,10 @@ def test_generic_crew_clears_stale_cancel_event(
 def test_generic_crew_fallback_single_agent_uses_task_profile(
     init_test_config, fake_card_sender, fake_backend_registry, monkeypatch,
 ):
-    """C4 #10 (sister of C3 #8): when Manager planning fails AND the cancel
-    event isn't set, the fallback CrewPlan must route through
-    ``task_profile`` instead of hardcoding ``model="claude"``. Pins both
-    the migration AND guards against any future regression that pins a
-    specific backend at construction time.
+    """When Manager planning fails AND the cancel event isn't set, the fallback
+    CrewPlan must use task_profile='chat' (model='') so the dispatcher's
+    rank_for_task picks the highest-ranked healthy backend dynamically,
+    rather than hardcoding Claude regardless of the chat's configuration.
     """
     from larkhelm.concurrency import _get_cancel_event
     import larkhelm.crew._commands as _c
@@ -236,18 +236,14 @@ def test_generic_crew_fallback_single_agent_uses_task_profile(
     assert len(specs) == 1, f"fallback should be a single-agent CrewPlan; got {specs}"
     spec = specs[0]
     assert spec.id == "agent_1"
-    # The actual migration: ``model`` must be empty so resolve_backend
-    # walks the task_profile path; ``task_profile`` must be set.
+    # Manager fallback uses task_profile='chat' + model='' so rank_for_task
+    # picks the highest-ranked healthy backend dynamically.
     assert spec.model == "", (
-        f"fallback agent still hardcodes model={spec.model!r}; "
-        "C3 #8 / C4 #10 migration requires model=''"
+        f"fallback agent should have model='' to allow dynamic backend selection; got model={spec.model!r}"
     )
-    assert spec.task_profile, "fallback agent must declare a task_profile"
-    # Profile choice itself is a contract: ``chat`` because the fallback is
-    # a generic helper with no tool / vision requirement; heavier profiles
-    # would silently demand tool-capable backends and surprise on rank.
     assert spec.task_profile == "chat", (
-        f"fallback profile should be 'chat'; got {spec.task_profile!r}"
+        f"fallback task_profile should be 'chat' for dynamic backend dispatch; "
+        f"got task_profile={spec.task_profile!r}"
     )
 
 
@@ -746,4 +742,56 @@ def test_owner_kind_classifies_known_tokens():
     )
     assert owner_kind("plan:") == "plan", (
         "even an empty plan_id still classifies as plan kind"
+    )
+
+
+# ── _repair_plan_json ────────────────────────────────────────────────────
+
+
+def test_repair_plan_json_passes_valid_json_unchanged():
+    """Clean JSON must survive _repair_plan_json without modification."""
+    from larkhelm.crew._commands import _repair_plan_json
+    raw = '{"title": "test", "agents": [{"id": "a1"}], "synthesis_prompt": ""}'
+    result = _repair_plan_json(raw)
+    assert result == json.loads(raw)
+
+
+def test_repair_plan_json_fixes_trailing_comma_in_array():
+    """Trailing comma before ] — the actual error Claude produced on 2026-05-26."""
+    from larkhelm.crew._commands import _repair_plan_json
+    raw = '{"agents": [{"id": "a1", "role": "reviewer",}], "synthesis_prompt": ""}'
+    result = _repair_plan_json(raw)
+    assert result is not None
+    assert result["agents"][0]["id"] == "a1"
+
+
+def test_repair_plan_json_fixes_trailing_comma_in_object():
+    """Trailing comma before } in the top-level object."""
+    from larkhelm.crew._commands import _repair_plan_json
+    raw = '{"title": "t", "agents": [], "synthesis_prompt": "",}'
+    result = _repair_plan_json(raw)
+    assert result is not None
+    assert result["title"] == "t"
+
+
+def test_repair_plan_json_returns_none_for_structurally_broken_json():
+    """Genuinely broken JSON (missing brackets, etc.) must return None, not raise."""
+    from larkhelm.crew._commands import _repair_plan_json
+    result = _repair_plan_json('{"agents": [{"id": "a1"')  # unclosed
+    assert result is None
+
+
+def test_repair_plan_json_returns_none_for_empty_string():
+    from larkhelm.crew._commands import _repair_plan_json
+    assert _repair_plan_json("") is None
+
+
+def test_repair_plan_json_size_guard():
+    """AC-08: inputs larger than 50_000 chars must return None (DoS guard)."""
+    from larkhelm.crew._commands import _repair_plan_json
+    oversized = '{"a": "' + "x" * 50_000 + '"}'
+    result = _repair_plan_json(oversized)
+    assert result is None, (
+        f"_repair_plan_json should return None for inputs > 50_000 chars; "
+        f"got {result!r}"
     )

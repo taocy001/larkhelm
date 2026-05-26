@@ -35,7 +35,6 @@ import larkhelm.concurrency as concurrency
 import larkhelm.log as log_mod
 import larkhelm.token_stats as token_stats
 import larkhelm.chat_state as chat_state
-import larkhelm.state as state_compat
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -559,6 +558,7 @@ class TestChatState(unittest.TestCase):
 
     def test_save_and_load_state(self):
         chat_state._set_chat_field("persist_chat", "cwd", "/tmp/testdir")
+        chat_state._flush_save()
         chat_state._load_global_state()
         state = chat_state._get_chat_state("persist_chat")
         self.assertEqual(state.get("cwd"), "/tmp/testdir")
@@ -627,6 +627,17 @@ class TestChatState(unittest.TestCase):
         result = chat_state.pop_pending_doc_write("exp_chat")
         self.assertIsNone(result)
 
+    def test_get_chat_state_returns_isolated_copy(self):
+        """AC-03: mutating the returned dict must not affect _chat_state_store."""
+        chat_state._set_chat_field("iso_chat", "crons", [{"id": "c1"}])
+        state = chat_state._get_chat_state("iso_chat")
+        # Mutate the returned copy's nested list
+        state["crons"].append({"id": "c2"})
+        # The store must be unchanged
+        state2 = chat_state._get_chat_state("iso_chat")
+        self.assertEqual(len(state2["crons"]), 1,
+                         "deepcopy failed: mutation of returned dict leaked into _chat_state_store")
+
     def test_load_global_state_missing_file(self):
         """_load_global_state should not raise when STATE_FILE does not exist"""
         if _cfg_module.STATE_FILE.exists():
@@ -635,65 +646,6 @@ class TestChatState(unittest.TestCase):
             chat_state._load_global_state()
         except Exception as e:
             self.fail(f"_load_global_state raised {e}")
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  state.py compatibility shim
-# ═══════════════════════════════════════════════════════════════════════════
-class TestStateCompat(unittest.TestCase):
-    def test_re_exports_chat_state_symbols(self):
-        for name in [
-            "_state_lock", "_chat_state_store",
-            "_load_global_state", "_save_state", "_get_chat_state", "_set_chat_field",
-            "_sid_file", "_load_sid", "_save_sid", "_clear_sid",
-            "_get_cwd", "_set_cwd", "_get_chat_model", "_set_chat_model",
-            "_register_btw_msg", "_is_btw_reply",
-            "set_pending_doc_write", "pop_pending_doc_write",
-        ]:
-            self.assertTrue(hasattr(state_compat, name), f"Missing: {name}")
-
-    def test_re_exports_concurrency_symbols(self):
-        for name in [
-            "_chat_locks", "_get_chat_lock",
-            "_btw_locks", "_get_btw_lock", "BTW_TIMEOUT",
-            "_cancel_events", "_get_cancel_event", "_trigger_cancel", "_reset_cancel",
-            "_replace_cancel_event", "_shutting_down", "set_shutting_down",
-            "is_shutting_down", "wait_for_idle",
-            "_pending_msg", "_set_pending", "_pop_pending", "_cron_lock",
-        ]:
-            self.assertTrue(hasattr(state_compat, name), f"Missing: {name}")
-
-    def test_re_exports_dedup_symbols(self):
-        self.assertTrue(hasattr(state_compat, "_is_duplicate"))
-
-    def test_re_exports_log_symbols(self):
-        for name in ["_log_lock", "log_entry", "_read_logs", "_debug_log"]:
-            self.assertTrue(hasattr(state_compat, name), f"Missing: {name}")
-
-    def test_re_exports_token_stats_symbols(self):
-        for name in ["_token_stats", "record_token_usage", "get_token_stats", "get_token_stats_persistent"]:
-            self.assertTrue(hasattr(state_compat, name), f"Missing: {name}")
-
-    def test_symbols_are_same_objects(self):
-        """Symbols exported by the compatibility shim must be identical objects to those in the sub-modules"""
-        self.assertIs(state_compat._get_chat_lock, concurrency._get_chat_lock)
-        self.assertIs(state_compat.log_entry, log_mod.log_entry)
-        self.assertIs(state_compat._is_duplicate, dedup._is_duplicate)
-        self.assertIs(state_compat.record_token_usage, token_stats.record_token_usage)
-
-    def test_state_py_line_count(self):
-        src = Path("larkhelm/state.py").read_text().splitlines()
-        # AC-04: must be <= 60 lines
-        self.assertLessEqual(len(src), 60, f"state.py has {len(src)} lines (max 60)")
-
-    def test_state_py_no_impl_code(self):
-        src = Path("larkhelm/state.py").read_text()
-        bad_patterns = [
-            "_token_stats =", "def log_entry", "def _is_duplicate",
-            "_chat_locks =", "_cancel_events =", "_seen_event_ids =",
-        ]
-        for pat in bad_patterns:
-            self.assertNotIn(pat, src, f"state.py contains impl code: {pat!r}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

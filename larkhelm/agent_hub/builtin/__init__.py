@@ -13,11 +13,7 @@ Agents (Python classes, stateful)
     subprocess / session / multi-step logic.  They live as Python classes.
 
 Skills (data-driven, stateless)
-    ``translate``, ``reviewer``, ``search``, ``shell``, ``history_search``
-
-    These are thin pattern wrappers: strip trigger words → (optional)
-    context injection → system prompt → ``_do_query``.  They are defined
-    as :class:`~larkhelm.agent_hub.skill_types.SkillDef` dicts in
+    Defined as :class:`~larkhelm.agent_hub.skill_types.SkillDef` dicts in
     ``builtin/skills/_defs.py`` and executed by a generic
     :class:`~larkhelm.agent_hub.skill_runner.SkillExecutor`.
 
@@ -26,12 +22,6 @@ Skills (data-driven, stateless)
     * Add new Skills via ``/skill new`` or by dropping a JSON file in
       ``DATA_DIR/skills/``.
     * Disable Skills at runtime via ``/skill disable <id>``.
-
-The previous Python implementations
-(``translate_agent.py``, ``review_agent.py``, ``search_agent.py``,
-``shell_agent.py``, ``history_search_agent.py``) are **preserved as
-reference** in this package but are no longer imported or registered here.
-The SkillDef-based executors override them via AGENT_REGISTRY.
 """
 from __future__ import annotations
 

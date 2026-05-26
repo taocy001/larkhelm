@@ -1,9 +1,9 @@
-"""larkhelm · pure helpers extracted from ``_do_query`` (P1-1 PR1).
+"""larkhelm · helpers extracted from ``_do_query`` (P1-1 PR1).
 
-Each function is a deterministic input→output transform with **no** I/O:
-no Feishu API, no backend invocation, no chat lock, no shared mutable
-state. They are the atomic pieces ``_do_query`` (and the upcoming
-``QuerySession.run``) compose into a query pipeline.
+Most functions are deterministic input→output transforms (no I/O).
+Exception: ``inject_doc_and_memory`` touches the Feishu doc-read API
+and disk (memory load) — those are the side effects ``_do_query`` was
+performing inline, lifted into a named function for testability.
 
 Why this exists: ``_do_query`` was 938 lines of closures, the bulk of
 which were string-shaping or list-building steps tangled into the

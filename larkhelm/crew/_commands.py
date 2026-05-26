@@ -321,24 +321,29 @@ def _unregister_crew_thread(crew_id: str):
 #  Manager planning (/crew command)
 # ═══════════════════════════════════════════════════════════════
 
-# ═══════════════════════════════════════════════════════════════
-#  Automatic mode detection (Hermes orchestrator)
-# ═══════════════════════════════════════════════════════════════
 
-_HERMES_MODE_KEYWORDS = {
-    "hermes_race": ["紧急", "快速", "尽快", "临时", "修复", "bug", "比选", "对比", "竞争", "最快"],
-    "hermes_split": ["全栈", "前后端", "前端", "后端", "API", "页面", "UI", "界面", "网页", "React", "Vue"],
-    "hermes_review": ["核心", "关键", "安全", "支付", "认证", "审计", "严格审查", "金融", "交易", "密码"],
-}
+def _repair_plan_json(raw: str) -> dict | None:
+    """Parse the Manager's JSON plan with best-effort repair for common LLM JSON errors.
 
-
-def _detect_hermes_mode(requirement: str) -> str:
-    """Detect if the requirement matches a Hermes orchestrator mode. Returns mode name or None."""
-    req_lower = requirement.lower()
-    for mode, keywords in _HERMES_MODE_KEYWORDS.items():
-        if any(kw.lower() in req_lower for kw in keywords):
-            return mode
-    return None
+    LLMs (including Claude) occasionally emit trailing commas before ] or },
+    or produce other minor syntax violations that strict json.loads() rejects.
+    We try the strict parse first; if that fails we apply targeted repairs and
+    retry before giving up.
+    """
+    if len(raw) > 50_000:
+        _debug_log(f"[Crew] _repair_plan_json: input too large ({len(raw)} chars), skipping")
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    # Repair 1: trailing commas before ] or } — by far the most common LLM error.
+    repaired = re.sub(r",\s*([\]}])", r"\1", raw)
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError as e:
+        _debug_log(f"[Crew] Manager: JSON parse failed after repair: {e}")
+        return None
 
 
 _MANAGER_PROMPT_TPL = """\
@@ -692,10 +697,8 @@ def _crew_plan(chat_id: str, requirement: str, cwd: str,
                    + (f", stderr: {stderr_preview}" if stderr_preview else ""))
         return None
 
-    try:
-        plan_input = json.loads(m.group(1))
-    except json.JSONDecodeError as e:
-        _debug_log(f"[Crew] Manager: JSON parse failed: {e}")
+    plan_input = _repair_plan_json(m.group(1))
+    if plan_input is None:
         return None
 
     # Parse and validate

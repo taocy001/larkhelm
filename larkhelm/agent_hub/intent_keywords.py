@@ -217,8 +217,8 @@ _DOC_RULES: tuple[KeywordRule, ...] = (
 
 # ── REVIEWER rules (quick single-pass code review) ────────────────────
 # Distinct from CREW "代码检视/审查" (0.88) which triggers a full structured
-# multi-perspective review.  These lighter phrases route to ReviewAgent for a
-# quick single-turn code check with a reviewer-profile backend.
+# multi-perspective review.  These lighter phrases route to the reviewer skill
+# for a quick single-turn code check with a reviewer-profile backend.
 _REVIEWER_RULES: tuple[KeywordRule, ...] = (
     KeywordRule("帮我review", "reviewer", 0.85),
     KeywordRule("review一下", "reviewer", 0.82),
