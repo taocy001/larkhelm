@@ -101,6 +101,34 @@ def _format_age_hint(age_sec: int) -> str:
     return f"（缓存版本，{phrase}读取，如内容已变请提示刷新）"
 
 
+def _compute_doc_query_relevance(query: str, doc_title: str, doc_snippet: str) -> float:
+    """Return cosine similarity in [0.0, 1.0] between query and doc.
+
+    Fails open (returns 1.0) when:
+    - embedding backend is disabled / unavailable
+    - any exception occurs
+    This guarantees the gate never silently drops documents due to infra issues.
+    """
+    try:
+        if not bool(getattr(_cfg, "EMBEDDING_ENABLED", False)):
+            return 1.0
+        from larkhelm.memory_embedding import get_embedding_backend
+        backend = get_embedding_backend()
+        if backend is None:
+            return 1.0
+        q_vec = backend.encode(query[:512])
+        d_text = f"{doc_title} {doc_snippet[:512]}"
+        d_vec = backend.encode(d_text)
+        dot = sum(a * b for a, b in zip(q_vec, d_vec))
+        norm_q = sum(x * x for x in q_vec) ** 0.5
+        norm_d = sum(x * x for x in d_vec) ** 0.5
+        if norm_q < 1e-9 or norm_d < 1e-9:
+            return 1.0
+        return min(1.0, max(0.0, float(dot / (norm_q * norm_d))))
+    except Exception:
+        return 1.0  # fail-open
+
+
 def _inject_doc_context(text: str, chat_id: str) -> str:
     """
     Detect Feishu document URLs in text, read their content, and prepend it to
@@ -150,13 +178,39 @@ def _inject_doc_context(text: str, chat_id: str) -> str:
             header = f"[文档内容：《{label}》]"
             if age_hint:
                 header = f"{header}\n{age_hint}"
+
+            # P2b: doc relevance gate
+            _gate_enabled = bool(getattr(_cfg, "DOC_INJECT_RELEVANCE_GATE_ENABLED", False))
+            _threshold = float(getattr(_cfg, "DOC_INJECT_RELEVANCE_THRESHOLD", 0.3))
+            _injected_content = result.content
+            _gate_outcome = "injected"
+            if _gate_enabled:
+                _snippet = result.content[:512]
+                _sim = _compute_doc_query_relevance(text, label, _snippet)
+                if _sim < _threshold:
+                    # Very low relevance: inject title-only hint, skip body
+                    injections.append(
+                        f"{header}\n（相关度过低（{_sim:.2f}），已跳过全文注入）\n[/文档内容]"
+                    )
+                    try:
+                        from larkhelm.metrics import inc_injection_gate as _inc_doc_ig2
+                        _inc_doc_ig2("doc_inject", "skipped_by_relevance")
+                    except Exception:
+                        pass
+                    continue
+                elif _sim < 0.6:
+                    # Medium relevance: truncate to half budget
+                    _half = _cfg.DOC_INJECT_MAX_CHARS // 2
+                    _injected_content = result.content[:_half]
+                    _gate_outcome = "truncated_by_relevance"
+
             injections.append(
-                f"{header}\n{result.content}\n[/文档内容]"
+                f"{header}\n{_injected_content}\n[/文档内容]"
             )
             try:
                 from larkhelm.metrics import inc_injection_gate as _inc_doc_ig
-                _inc_doc_ig("doc_inject", "injected")
-                if len(result.content) > 10000:
+                _inc_doc_ig("doc_inject", _gate_outcome)
+                if len(_injected_content) > 10000:
                     _inc_doc_ig("doc_inject", "large_doc")
             except Exception:
                 pass

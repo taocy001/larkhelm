@@ -106,6 +106,8 @@ class _RuntimeConfig:
     MEMORY_LEGACY_CACHE_ENABLED:       bool = True
     DOC_INJECT_CACHE_ENABLED:          bool = True
     DOC_INJECT_CACHE_TTL_SEC:          int = 600
+    DOC_INJECT_RELEVANCE_GATE_ENABLED: bool = False
+    DOC_INJECT_RELEVANCE_THRESHOLD:    float = 0.3
     CLI_SKIP_RECENT_TURNS_WHEN_SID:    bool = True
     API_SKIP_RECENT_TURNS_WHEN_HISTORY: bool = True
     # Workspace-hint / stats-breakdown toggles (P3/P5)
@@ -329,6 +331,8 @@ RECENT_TURNS_CACHE_ENABLED: bool = True
 MEMORY_LEGACY_CACHE_ENABLED: bool = True
 DOC_INJECT_CACHE_ENABLED: bool = True
 DOC_INJECT_CACHE_TTL_SEC: int = 600
+DOC_INJECT_RELEVANCE_GATE_ENABLED: bool = False
+DOC_INJECT_RELEVANCE_THRESHOLD: float = 0.3
 CLI_SKIP_RECENT_TURNS_WHEN_SID: bool = True
 API_SKIP_RECENT_TURNS_WHEN_HISTORY: bool = True
 
@@ -661,6 +665,7 @@ def _init_app_config() -> None:
     global WORKSPACE_FINALIZE_PROMPT_AGE_SEC
     global RECENT_TURNS_CACHE_ENABLED, MEMORY_LEGACY_CACHE_ENABLED
     global DOC_INJECT_CACHE_ENABLED, DOC_INJECT_CACHE_TTL_SEC
+    global DOC_INJECT_RELEVANCE_GATE_ENABLED, DOC_INJECT_RELEVANCE_THRESHOLD
     global CLI_SKIP_RECENT_TURNS_WHEN_SID, API_SKIP_RECENT_TURNS_WHEN_HISTORY
     global FILE_ENABLED, MAX_FILE_SIZE_BYTES, FILE_TEXT_EXTENSIONS
     global FILE_PDF_ENABLED, FILE_PDF_LIB
@@ -1293,6 +1298,7 @@ def _init_app_config() -> None:
     config.setdefault("project_guide_path", "")
     config.setdefault("parent_inject_skip_when_api_history", False)
     config.setdefault("doc_inject_relevance_gate_enabled", False)
+    config.setdefault("doc_inject_relevance_threshold", 0.3)
 
     RECENT_TURNS_CACHE_ENABLED = bool(
         config.get("recent_turns_cache_enabled", True)
@@ -1309,6 +1315,15 @@ def _init_app_config() -> None:
         )
     except (TypeError, ValueError):
         DOC_INJECT_CACHE_TTL_SEC = 600
+    DOC_INJECT_RELEVANCE_GATE_ENABLED = bool(
+        config.get("doc_inject_relevance_gate_enabled", False)
+    )
+    try:
+        DOC_INJECT_RELEVANCE_THRESHOLD = max(
+            0.0, min(1.0, float(config.get("doc_inject_relevance_threshold", 0.3) or 0.3)),
+        )
+    except (TypeError, ValueError):
+        DOC_INJECT_RELEVANCE_THRESHOLD = 0.3
     CLI_SKIP_RECENT_TURNS_WHEN_SID = bool(
         config.get("cli_skip_recent_turns_when_sid", True)
     )
@@ -1519,6 +1534,8 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         MEMORY_LEGACY_CACHE_ENABLED=MEMORY_LEGACY_CACHE_ENABLED,
         DOC_INJECT_CACHE_ENABLED=DOC_INJECT_CACHE_ENABLED,
         DOC_INJECT_CACHE_TTL_SEC=DOC_INJECT_CACHE_TTL_SEC,
+        DOC_INJECT_RELEVANCE_GATE_ENABLED=DOC_INJECT_RELEVANCE_GATE_ENABLED,
+        DOC_INJECT_RELEVANCE_THRESHOLD=DOC_INJECT_RELEVANCE_THRESHOLD,
         CLI_SKIP_RECENT_TURNS_WHEN_SID=CLI_SKIP_RECENT_TURNS_WHEN_SID,
         API_SKIP_RECENT_TURNS_WHEN_HISTORY=API_SKIP_RECENT_TURNS_WHEN_HISTORY,
         WORKSPACE_HINT_KEYWORD_GATE=WORKSPACE_HINT_KEYWORD_GATE,
