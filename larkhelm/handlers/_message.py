@@ -95,6 +95,10 @@ _WORKSPACE_KEYWORD_RE = _re.compile(
     r"(workspace|计划|任务|设计|prd|design|tasks|review|qa|crew)",
     _re.IGNORECASE,
 )
+_CREW_STICKY_KW_RE = _re.compile(
+    r"(crew|/dev|/plan|agent|任务|流水线|pipeline|checkpoint)",
+    _re.IGNORECASE,
+)
 
 
 def _build_workspace_hint(chat_id: str, user_text: str) -> tuple[str, str]:
@@ -870,17 +874,31 @@ def handle_message(data: P2ImMessageReceiveV1):
             # consumes. Read-only callers (status, diagnose, parent-fetch
             # fallback in _query.py / _query_session.py) keep using
             # get_recent_crew_context to avoid double-counting one user turn.
+            _sticky_gate_on = bool(_cfg.config.get("crew_sticky_keyword_gate_enabled"))
+            _sticky_kw_match = (not _sticky_gate_on) or bool(_CREW_STICKY_KW_RE.search(text or ""))
             from larkhelm.crew import consume_recent_crew_context
             crew_ctx = consume_recent_crew_context(chat_id)
             if crew_ctx:
-                _debug_log(f"[MSG] injecting sticky crew context '{crew_ctx['title'][:20]}' → {chat_id[:12]}")
-                prompt = (
-                    f"[以下是刚完成的 Crew 任务「{crew_ctx['title']}」的交付结论，"
-                    f"请结合它来回答我的问题]\n\n"
-                    f"{crew_ctx['summary']}\n\n"
-                    f"---\n\n"
-                    f"{prompt}"
-                )
+                if _sticky_gate_on and not _sticky_kw_match:
+                    try:
+                        from larkhelm.metrics import inc_injection_gate as _inc_sticky_ig
+                        _inc_sticky_ig("crew_sticky", "skipped")
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        from larkhelm.metrics import inc_injection_gate as _inc_sticky_ig
+                        _inc_sticky_ig("crew_sticky", "injected")
+                    except Exception:
+                        pass
+                    _debug_log(f"[MSG] injecting sticky crew context '{crew_ctx['title'][:20]}' → {chat_id[:12]}")
+                    prompt = (
+                        f"[以下是刚完成的 Crew 任务「{crew_ctx['title']}」的交付结论，"
+                        f"请结合它来回答我的问题]\n\n"
+                        f"{crew_ctx['summary']}\n\n"
+                        f"---\n\n"
+                        f"{prompt}"
+                    )
         # else: parent_id set and no crew card found → _do_query will fetch parent text in background
 
         # Workspace context: P3 REQ-01 passive phrasing + REQ-02 optional

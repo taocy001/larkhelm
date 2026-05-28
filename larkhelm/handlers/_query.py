@@ -935,6 +935,8 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 _debug_log(f"[{trace_id}][DoQuery] _pop_pending_intent error: {_pi_err}")
                 _pending_intent = None
 
+            _MEMORY_SKIP_GLOBAL_INTENTS = {"dev", "crew", "shell"}
+
             try:
                 from larkhelm.memory import get_memory_context_v2, maybe_auto_update
                 memory_ctx, deduped_recent = get_memory_context_v2(
@@ -946,7 +948,55 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 )
             except Exception as _mem_err:
                 _debug_log(f"[{trace_id}][DoQuery] memory context error: {_mem_err}")
+                memory_ctx = ""
                 deduped_recent = recent_turns_list
+
+            try:
+                from larkhelm.metrics import inc_injection_gate as _inc_ig
+                _intent_type = getattr(_pending_intent, "agent_type", "") or ""
+                if (bool(_cfg.config.get("memory_intent_policy_enabled"))
+                        and _intent_type in _MEMORY_SKIP_GLOBAL_INTENTS
+                        and "[GLOBAL MEMORY]" in memory_ctx):
+                    import re as _re_ig
+                    memory_ctx = _re_ig.sub(
+                        r"\[GLOBAL MEMORY\].*?\[/GLOBAL MEMORY\]\n*",
+                        "",
+                        memory_ctx,
+                        flags=_re_ig.DOTALL,
+                    ).lstrip()
+                    _inc_ig("memory_global", "skipped")
+                else:
+                    _inc_ig("memory_global", "injected")
+            except Exception as _ig_err:
+                _debug_log(f"[{trace_id}][DoQuery] memory_intent_policy gate error: {_ig_err}")
+
+            try:
+                from larkhelm.metrics import inc_injection_gate as _inc_ig2
+                if bool(_cfg.config.get("project_guide_enabled")) and _cfg.config.get("project_guide_path"):
+                    from pathlib import Path as _GPath
+                    _is_cli_claude = getattr(_early_spec, "provider", "") == "claude_cli"
+                    if _is_cli_claude:
+                        _inc_ig2("project_guide", "skipped_cli")
+                    else:
+                        try:
+                            _guide_path = _GPath(_cfg.config["project_guide_path"]).expanduser()
+                            _guide_content = _guide_path.read_text(encoding="utf-8")
+                            if len(_guide_content) > 4000:
+                                _debug_log(
+                                    f"[DoQuery] project_guide exceeds 4000 chars "
+                                    f"({len(_guide_content)}), truncating"
+                                )
+                                _guide_content = _guide_content[:4000]
+                            memory_ctx = (
+                                f"[Project Guide]\n{_guide_content}\n[/Project Guide]\n\n"
+                                + memory_ctx
+                            )
+                            _inc_ig2("project_guide", "injected")
+                        except Exception as _pe:
+                            _debug_log(f"[DoQuery] project_guide read failed: {_pe}")
+                            _inc_ig2("project_guide", "error")
+            except Exception as _pg_err:
+                _debug_log(f"[{trace_id}][DoQuery] project_guide gate error: {_pg_err}")
 
             # ``recent_turns`` is kept separate from ``memory_ctx`` (rather than
             # concatenated as before) so the downstream ``_run_backend_single``

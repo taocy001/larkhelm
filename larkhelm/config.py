@@ -1283,6 +1283,15 @@ def _init_app_config() -> None:
     config.setdefault("workspace_hint_keyword_gate", False)
     config.setdefault("stats_agent_type_breakdown_enabled", True)
 
+    # P1 on-demand injection gates (all default false = inject as before).
+    # memory_intent_policy_enabled: skip global memory for dev/crew/shell intents.
+    # crew_sticky_keyword_gate_enabled: skip sticky crew context when no crew keywords.
+    # project_guide_enabled: inject a static project guide file for non-claude-cli backends.
+    config.setdefault("memory_intent_policy_enabled", False)
+    config.setdefault("crew_sticky_keyword_gate_enabled", False)
+    config.setdefault("project_guide_enabled", False)
+    config.setdefault("project_guide_path", "")
+
     RECENT_TURNS_CACHE_ENABLED = bool(
         config.get("recent_turns_cache_enabled", True)
     )
