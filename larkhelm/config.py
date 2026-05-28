@@ -110,6 +110,12 @@ class _RuntimeConfig:
     DOC_INJECT_RELEVANCE_THRESHOLD:    float = 0.3
     CLI_SKIP_RECENT_TURNS_WHEN_SID:    bool = True
     API_SKIP_RECENT_TURNS_WHEN_HISTORY: bool = True
+    # Injection gate flags (P1)
+    MEMORY_INTENT_POLICY_ENABLED:           bool = False
+    CREW_STICKY_KEYWORD_GATE_ENABLED:       bool = False
+    PROJECT_GUIDE_ENABLED:                  bool = False
+    PROJECT_GUIDE_PATH:                     str = ""
+    PARENT_INJECT_SKIP_WHEN_API_HISTORY:    bool = False
     # Workspace-hint / stats-breakdown toggles (P3/P5)
     WORKSPACE_HINT_KEYWORD_GATE:        bool = False
     STATS_AGENT_TYPE_BREAKDOWN_ENABLED: bool = True
@@ -335,6 +341,12 @@ DOC_INJECT_RELEVANCE_GATE_ENABLED: bool = False
 DOC_INJECT_RELEVANCE_THRESHOLD: float = 0.3
 CLI_SKIP_RECENT_TURNS_WHEN_SID: bool = True
 API_SKIP_RECENT_TURNS_WHEN_HISTORY: bool = True
+# Injection gate flags (P1)
+MEMORY_INTENT_POLICY_ENABLED: bool = False
+CREW_STICKY_KEYWORD_GATE_ENABLED: bool = False
+PROJECT_GUIDE_ENABLED: bool = False
+PROJECT_GUIDE_PATH: str = ""
+PARENT_INJECT_SKIP_WHEN_API_HISTORY: bool = False
 
 # ── P3 workspace-hint / P5 stats-breakdown knobs ──────────────────────────
 # WORKSPACE_HINT_KEYWORD_GATE (default False): when True, the workspace
@@ -667,6 +679,8 @@ def _init_app_config() -> None:
     global DOC_INJECT_CACHE_ENABLED, DOC_INJECT_CACHE_TTL_SEC
     global DOC_INJECT_RELEVANCE_GATE_ENABLED, DOC_INJECT_RELEVANCE_THRESHOLD
     global CLI_SKIP_RECENT_TURNS_WHEN_SID, API_SKIP_RECENT_TURNS_WHEN_HISTORY
+    global MEMORY_INTENT_POLICY_ENABLED, CREW_STICKY_KEYWORD_GATE_ENABLED
+    global PROJECT_GUIDE_ENABLED, PROJECT_GUIDE_PATH, PARENT_INJECT_SKIP_WHEN_API_HISTORY
     global FILE_ENABLED, MAX_FILE_SIZE_BYTES, FILE_TEXT_EXTENSIONS
     global FILE_PDF_ENABLED, FILE_PDF_LIB
 
@@ -1330,6 +1344,11 @@ def _init_app_config() -> None:
     API_SKIP_RECENT_TURNS_WHEN_HISTORY = bool(
         config.get("api_skip_recent_turns_when_history", True)
     )
+    MEMORY_INTENT_POLICY_ENABLED = bool(config.get("memory_intent_policy_enabled", False))
+    CREW_STICKY_KEYWORD_GATE_ENABLED = bool(config.get("crew_sticky_keyword_gate_enabled", False))
+    PROJECT_GUIDE_ENABLED = bool(config.get("project_guide_enabled", False))
+    PROJECT_GUIDE_PATH = str(config.get("project_guide_path", "") or "")
+    PARENT_INJECT_SKIP_WHEN_API_HISTORY = bool(config.get("parent_inject_skip_when_api_history", False))
 
     global WORKSPACE_HINT_KEYWORD_GATE, STATS_AGENT_TYPE_BREAKDOWN_ENABLED
     WORKSPACE_HINT_KEYWORD_GATE = bool(
@@ -1538,6 +1557,11 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         DOC_INJECT_RELEVANCE_THRESHOLD=DOC_INJECT_RELEVANCE_THRESHOLD,
         CLI_SKIP_RECENT_TURNS_WHEN_SID=CLI_SKIP_RECENT_TURNS_WHEN_SID,
         API_SKIP_RECENT_TURNS_WHEN_HISTORY=API_SKIP_RECENT_TURNS_WHEN_HISTORY,
+        MEMORY_INTENT_POLICY_ENABLED=MEMORY_INTENT_POLICY_ENABLED,
+        CREW_STICKY_KEYWORD_GATE_ENABLED=CREW_STICKY_KEYWORD_GATE_ENABLED,
+        PROJECT_GUIDE_ENABLED=PROJECT_GUIDE_ENABLED,
+        PROJECT_GUIDE_PATH=PROJECT_GUIDE_PATH,
+        PARENT_INJECT_SKIP_WHEN_API_HISTORY=PARENT_INJECT_SKIP_WHEN_API_HISTORY,
         WORKSPACE_HINT_KEYWORD_GATE=WORKSPACE_HINT_KEYWORD_GATE,
         STATS_AGENT_TYPE_BREAKDOWN_ENABLED=STATS_AGENT_TYPE_BREAKDOWN_ENABLED,
         FILE_ENABLED=FILE_ENABLED,

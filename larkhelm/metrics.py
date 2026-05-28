@@ -273,8 +273,10 @@ class LarkhelmMetricsRegistry:
         # P0 injection-gate telemetry: emitted on every gate decision so
         # operators can observe skip rates before enabling gates.
         # point ∈ {recent_turns_api, memory_intent_global, memory_intent_project,
-        #          memory_intent_session, crew_sticky, doc_relevance}
-        # outcome ∈ {injected, skipped_by_gate, skipped_by_state}
+        #          memory_intent_session, crew_sticky, doc_inject, project_guide}
+        # outcome ∈ {injected, skipped_by_gate, skipped_by_state,
+        #             skipped_by_relevance, truncated_by_relevance, large_doc,
+        #             skipped_cli, error}
         self.injection_gate_total = pc.Counter(
             "larkhelm_injection_gate_total",
             "Context injection gate skip decisions",
@@ -856,8 +858,10 @@ def inc_injection_gate(point: str, outcome: str) -> None:
     skip rates in flag=False mode before enabling gates.
 
     ``point`` ∈ {recent_turns_api, memory_intent_global, memory_intent_project,
-    memory_intent_session, crew_sticky, doc_relevance}.
-    ``outcome`` ∈ {injected, skipped_by_gate, skipped_by_state}. Never raises.
+    memory_intent_session, crew_sticky, doc_inject, project_guide}.
+    ``outcome`` ∈ {injected, skipped_by_gate, skipped_by_state,
+    skipped_by_relevance, truncated_by_relevance, large_doc, skipped_cli,
+    error}. Never raises.
     """
     reg = get_registry()
     if not reg.available or reg.injection_gate_total is None:
