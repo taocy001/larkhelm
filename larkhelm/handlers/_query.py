@@ -153,6 +153,13 @@ def _inject_doc_context(text: str, chat_id: str) -> str:
             injections.append(
                 f"{header}\n{result.content}\n[/文档内容]"
             )
+            try:
+                from larkhelm.metrics import inc_injection_gate as _inc_doc_ig
+                _inc_doc_ig("doc_inject", "injected")
+                if len(result.content) > 10000:
+                    _inc_doc_ig("doc_inject", "large_doc")
+            except Exception:
+                pass
         except DocPermissionError:
             injections.append(f"[文档 {url} 无读取权限，已跳过]")
         except DocError as _doc_e:
@@ -807,14 +814,49 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             # ── Parent message injection (network call — here not in event thread) ──
             if parent_id:
                 try:
-                    from larkhelm.lark_client import _fetch_parent_message_text
-                    parent_text = _fetch_parent_message_text(parent_id)
-                    if parent_text:
-                        message = (
-                            f"[用户回复了以下消息]\n\n{parent_text}\n\n---\n\n{message}"
+                    # P2b: when the target is an API backend (which already carries
+                    # conversation history structurally via load_history), the parent
+                    # turn is already present in the structured history — re-injecting
+                    # it as a text prefix is ~100–500 duplicate input tokens.
+                    # fail-open: any exception in the gate → inject anyway.
+                    _skip_parent = False
+                    try:
+                        _api_providers = {"anthropic_api", "google_api", "openai_compat_api"}
+                        if (
+                            bool(_cfg.config.get("parent_inject_skip_when_api_history", False))
+                            and _early_spec is not None
+                            and getattr(_early_spec, "provider", "") in _api_providers
+                        ):
+                            _skip_parent = True
+                            from larkhelm.metrics import inc_injection_gate as _inc_pig
+                            _inc_pig("parent_msg", "skipped_api")
+                            _debug_log(
+                                f"[{trace_id}][DoQuery] parent inject skipped "
+                                f"(API backend: {_early_spec.provider})"
+                            )
+                    except Exception as _gate_err:
+                        _debug_log(
+                            f"[{trace_id}][DoQuery] parent inject gate error "
+                            f"(fail-open): {_gate_err}"
                         )
-                        _debug_log(f"[{trace_id}][DoQuery] injected parent context ({len(parent_text)} chars)")
-                    else:
+
+                    _parent_injected = False
+                    if not _skip_parent:
+                        from larkhelm.lark_client import _fetch_parent_message_text
+                        parent_text = _fetch_parent_message_text(parent_id)
+                        if parent_text:
+                            try:
+                                from larkhelm.metrics import inc_injection_gate as _inc_pig2
+                                _inc_pig2("parent_msg", "injected")
+                            except Exception:
+                                pass
+                            message = (
+                                f"[用户回复了以下消息]\n\n{parent_text}\n\n---\n\n{message}"
+                            )
+                            _debug_log(f"[{trace_id}][DoQuery] injected parent context ({len(parent_text)} chars)")
+                            _parent_injected = True
+
+                    if not _parent_injected:
                         from larkhelm.crew import get_recent_crew_context
                         crew_ctx = get_recent_crew_context(chat_id)
                         if crew_ctx:

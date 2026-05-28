@@ -1291,6 +1291,8 @@ def _init_app_config() -> None:
     config.setdefault("crew_sticky_keyword_gate_enabled", False)
     config.setdefault("project_guide_enabled", False)
     config.setdefault("project_guide_path", "")
+    config.setdefault("parent_inject_skip_when_api_history", False)
+    config.setdefault("doc_inject_relevance_gate_enabled", False)
 
     RECENT_TURNS_CACHE_ENABLED = bool(
         config.get("recent_turns_cache_enabled", True)

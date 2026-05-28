@@ -46,6 +46,10 @@
   "project_guide_enabled":             false,
   "project_guide_path":                "",
 
+  "_comment_injection_gates_p2": "P2 injection gates. parent_inject_skip_when_api_history (default false): skip parent-message text fetch for API backends (anthropic_api / google_api / openai_compat_api) that already carry conversation history structurally — saves ~100-500 duplicate input tokens. Crew context fallback still runs regardless. doc_inject_relevance_gate_enabled (default false): observe-only placeholder; emits larkhelm_injection_gate_total{point=doc_inject,outcome=injected/large_doc} metrics without blocking injection.",
+  "parent_inject_skip_when_api_history": false,
+  "doc_inject_relevance_gate_enabled":   false,
+
   "_comment_memory_phase_b": "Phase B memory token-optimization (S49–S53). All flags default to true; flip individually to bisect a token regression without redeploying. memory_session_gc_enabled triggers a daemon that unlinks session_*.md older than memory_session_gc_max_age_days.",
   "memory_lazy_global":            true,
   "memory_project_conditional":    true,

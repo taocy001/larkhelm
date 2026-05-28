@@ -91,8 +91,12 @@ def _intent_router_active(chat_id: str) -> bool:
 # P3 REQ-02 / design.md §3.3: case-insensitive keyword set that gates the
 # workspace-hint segment when WORKSPACE_HINT_KEYWORD_GATE=True. Compiled at
 # import time (regex is fixed; satisfies NFR §4.1 "< 0.5 ms / message").
+# P2a: expanded with code-task keywords so the gate also fires for code
+# editing / fixing / refactoring prompts (avoids injecting workspace context
+# into casual chat while still covering all actionable work requests).
 _WORKSPACE_KEYWORD_RE = _re.compile(
-    r"(workspace|计划|任务|设计|prd|design|tasks|review|qa|crew)",
+    r"(workspace|计划|任务|设计|prd|design|tasks|review|qa|crew"
+    r"|code|edit|implement|fix|refactor|debug|写代码|改代码|修复|重构)",
     _re.IGNORECASE,
 )
 _CREW_STICKY_KW_RE = _re.compile(
