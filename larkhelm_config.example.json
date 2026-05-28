@@ -37,6 +37,9 @@
   "intent_feedback_path":   "",
   "intent_audit_path":      "",
 
+  "_comment_injection_gate": "P0 injection gate — api_skip_recent_turns_when_history (default true): skip the 100 KB recent-turns disk read when the target backend is an API backend (anthropic_api / google_api / openai_compat_api). These backends carry conversation history structurally via load_history() and already ignore recent_turns in _run_backend_single, so the pre-read is pure I/O waste. Set false to restore pre-gate behaviour.",
+  "api_skip_recent_turns_when_history": true,
+
   "_comment_memory_phase_b": "Phase B memory token-optimization (S49–S53). All flags default to true; flip individually to bisect a token regression without redeploying. memory_session_gc_enabled triggers a daemon that unlinks session_*.md older than memory_session_gc_max_age_days.",
   "memory_lazy_global":            true,
   "memory_project_conditional":    true,

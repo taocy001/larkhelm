@@ -131,6 +131,7 @@ class LarkhelmMetricsRegistry:
             self.sticky_context_evicted_total = None
             self.workspace_hint_total = None
             self.intent_feedback_total = None
+            self.injection_gate_total = None
             return
 
         # Use a private registry so the larkhelm metrics don't collide with
@@ -267,6 +268,17 @@ class LarkhelmMetricsRegistry:
             "larkhelm_intent_feedback_total",
             "intent_feedback.jsonl rows written by signal_type",
             ["signal_type"],
+            registry=self._registry,
+        )
+        # P0 injection-gate telemetry: emitted on every gate decision so
+        # operators can observe skip rates before enabling gates.
+        # point ∈ {recent_turns_api, memory_intent_global, memory_intent_project,
+        #          memory_intent_session, crew_sticky, doc_relevance}
+        # outcome ∈ {injected, skipped_by_gate, skipped_by_state}
+        self.injection_gate_total = pc.Counter(
+            "larkhelm_injection_gate_total",
+            "Context injection gate skip decisions",
+            ["point", "outcome"],
             registry=self._registry,
         )
         # P1-5a (review_summary §3 ROI table + W8/W9/W14): observability for
@@ -837,6 +849,25 @@ def inc_crew_validate_anthropic_loose(outcome: str) -> None:
         )
 
 
+def inc_injection_gate(point: str, outcome: str) -> None:
+    """Bump ``larkhelm_injection_gate_total{point, outcome}``.
+
+    Always emitted regardless of feature flag state so operators can observe
+    skip rates in flag=False mode before enabling gates.
+
+    ``point`` ∈ {recent_turns_api, memory_intent_global, memory_intent_project,
+    memory_intent_session, crew_sticky, doc_relevance}.
+    ``outcome`` ∈ {injected, skipped_by_gate, skipped_by_state}. Never raises.
+    """
+    reg = get_registry()
+    if not reg.available or reg.injection_gate_total is None:
+        return
+    try:
+        reg.injection_gate_total.labels(point=str(point), outcome=str(outcome)).inc()
+    except Exception as e:
+        safe_log(f"[Metrics] inc_injection_gate failed (point={point}, outcome={outcome}): {e}")
+
+
 def inc_workspace_hint(outcome: str) -> None:
     """Bump ``larkhelm_workspace_hint_total{outcome}``.
 
@@ -905,6 +936,7 @@ __all__ = [
     "inc_session_auto_reset",
     "inc_sticky_context_evicted",
     "inc_workspace_hint",
+    "inc_injection_gate",
     "inc_intent_feedback",
     "inc_crew_backend_swing",
     # Module-level Counter aliases (resolved lazily via __getattr__):

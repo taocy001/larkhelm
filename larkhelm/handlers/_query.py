@@ -880,6 +880,20 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                     except Exception:
                         pass
 
+                if not _skip_recent_turns and bool(getattr(_cfg, "API_SKIP_RECENT_TURNS_WHEN_HISTORY", True)):
+                    _api_providers = {"anthropic_api", "google_api", "openai_compat_api"}
+                    if _early_spec is not None and _early_spec.provider in _api_providers:
+                        _skip_recent_turns = True
+                        _debug_log(
+                            f"[Cache] {_early_spec.provider} skip recent_turns "
+                            f"pre-read (API backend) chat={chat_id[:8]}"
+                        )
+                        try:
+                            from larkhelm.metrics import inc_injection_gate
+                            inc_injection_gate("recent_turns_api", "skipped_by_state")
+                        except Exception:
+                            pass
+
                 if not _skip_recent_turns:
                     # Compute a dedup_prefix from the session memory's Work
                     # Context slot so summarised content doesn't double-inject

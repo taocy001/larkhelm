@@ -468,53 +468,9 @@ AgentSpec(
 
 ### Phase D · Phase 2 召回栈
 
-Phase 2 引入 **embedding + hybrid 召回**、**stale slice 软删除**、**审计 v2 schema**
-与 `/memory diagnose` 飞书命令；默认全关，灰度默认 0%（与 Phase 1 完全
-byte-compatible，AC-01）。`memory_retriever_enabled` + `memory_retriever_traffic`
-是 **Stage A**（Phase 1 / Phase 2 共享）；`embedding_enabled` + `embedding_traffic`
-是 **Stage B**（仅 Phase 2 引入）。两段独立 hash 分桶——同一 chat 必须同时命中
-Stage A 与 Stage B 才会真正走到 hybrid。
+> 详细设计见 [`.crew_workspace/phase_d_recall.md`](.crew_workspace/phase_d_recall.md)
 
-**Hybrid 调用顺序**：
-`KeywordRetriever(top_k × multiplier)` → cosine rerank → `α·cos_sim + (1-α)·BM25_norm`
-（默认 α=0.6）→ stale × `memory_stale_decay`（默认 0.5）→ top_k。
-
-**核心新模块**：
-- `larkhelm/memory_embedding.py` — `EmbeddingBackend` 三实现（Local ONNX / HTTP /
-  Stub）+ `EmbeddingCache(maxsize=2048)` + circuit breaker。**numpy / onnxruntime 是
-  optional**，缺装时 `get_embedding_backend()` 自动返回 `None`，retriever 安全退到
-  Keyword 路径。
-- `larkhelm/memory_lifecycle.py` — `mark_stale_slices()` / `inject_stale_marks()` /
-  `unstale_slice_id()`。每个 `.md` 配一个 0600 的 `.meta.json` sidecar，
-  保存 `stale_slice_ids` 列表与 `last_gc_at`。
-
-**飞书命令 / CLI**：
-- `/memory diagnose [N]` — 取该 chat 最近 24h 的 N 条召回审计，渲染 mode /
-  elapsed / 命中 slice 标题（**不展示 body**，避免泄漏）。N 默认 3，上限 10。
-- `/memory status` — 在原状态卡上新增 `Stale slice` 与 `上次 GC` 行。
-- `larkhelm memory audit-summary [--since 1h] [--chat-id X] [--mode hybrid] [--json]`
-  — 跨 rotation 聚合审计 JSONL，输出 mode 分布 / p95 / fail_open_rate / 每 agent
-  细分。运维健康面板首选。
-- `larkhelm memory unstale --slice-id <12-hex>` — 从所有 `.meta.json` sidecar 中
-  剔除某个 id（重新激活被降权的 slice）。
-
-**审计 v2 schema**（`schema_version="2"`）新增字段：`mode` / `declared_mode` /
-`hybrid_alpha` / `query_token_count` / `top_k_returned` / `stale_hit_count`。
-Phase 1 reader 兼容——多余字段 `json.loads` 忽略即可（已 pinned 于
-`tests/test_memory_audit_summary.py::test_legacy_fixture_still_parses`）。
-
-**stale 概念**：连续 `memory_stale_window_days`（默认 90 天）未在审计日志中
-被命中的 slice 标记为 stale；检索时 `relevance *= memory_stale_decay`（默认 0.5），
-reason 串后缀 `stale`。**不删 `.md` 文件**——`/memory unstale` 可单条恢复。
-boot 时 `bridge._start_memory_boot_warmup()` 启动一次 daemon 跑全量重计算 +
-embedding 模型预热；每次常规 `MemoryGC` tick 也会触发 audit JSONL rotate +
-新一轮 stale 标记（一日一次 + 32MiB 翻滚 + 30 天 unlink）。
-
-**当 embedding 失败时**（onnxruntime 缺失 / HTTP 5xx / circuit 打开）：
-`HybridRetriever.retrieve` 把已计算好的 KeywordRetriever pool 截到 top_k 返回；
-`_build_with_retriever` 顶层另有一层 `try/except`，捕获任何下游异常后 fail-open 到
-KeywordRetriever 并写 `audit.fail_open=True`。`_build_with_retriever` 自己异常时
-仍按 Phase 1 行为 fall back 到 `_build_legacy_v2`（外层 `build()` 的 try/except）。
+关键模块：`memory_embedding.py`（EmbeddingBackend + circuit breaker）、`memory_lifecycle.py`（stale slice + `.meta.json` sidecar）。默认全关（灰度 0%），与 Phase 1 完全 byte-compatible。Hybrid 路径：KeywordRetriever → cosine rerank → `α·BM25_norm`（α=0.6）→ stale decay → top_k。embedding 失败时 fail-open 到 Keyword 路径。
 
 ### Dev 模式 Git 快照（Auto Git Commit）
 
@@ -577,50 +533,11 @@ register(CommandSpec(
 
 ## 监控集成（Prometheus，P2 REQ-01）
 
-`health_endpoint_port > 0` 时，`larkhelm.health_server` 暴露三个端点：
-`/health`、`/ready`、`/metrics`。`/metrics` 默认走 prometheus-client
-渲染（需安装 `pip install -e ".[metrics]"`），缺装或 `metrics_text_legacy=true`
-时自动回退到 P1 手写文本路径（byte-compat）。
+> 完整指标列表（23 条）见 [`.crew_workspace/metrics_reference.md`](.crew_workspace/metrics_reference.md)
 
-核心指标列表（前缀 `larkhelm_`）：
+`health_endpoint_port > 0` 时，`larkhelm.health_server` 暴露 `/health` `/ready` `/metrics`。`/metrics` 默认走 prometheus-client（需 `pip install -e ".[metrics]"`），缺装或 `metrics_text_legacy=true` 时回退 P1 手写文本。
 
-| 名称 | 类型 | label | 含义 |
-|---|---|---|---|
-| `larkhelm_backend_healthy` | Gauge | `name` | 1=健康 / 0=失败 |
-| `larkhelm_active_queries` | Gauge | — | 当前 `_do_query` 并发数 |
-| `larkhelm_memory_rss_bytes` | Gauge | — | 进程 RSS（bytes） |
-| `larkhelm_cascade_active` | Gauge | — | 在飞 cascade extract 数 |
-| `larkhelm_cascade_extract_total` | Counter | `kind`,`outcome` | kind∈{project,global}, outcome∈{success,unchanged,rejected,cancelled,error} |
-| `larkhelm_cascade_dropped_total` | Counter | — | 因 sem 满或 cancel 被丢的 cascade |
-| `larkhelm_cascade_midflight_cancelled_total` | Counter | — | mid-LLM 取消的 cascade |
-| `larkhelm_query_duration_seconds` | Histogram | — | query 端到端延时（buckets: 0.5/1/2/5/10/30/60/120/300/600） |
-| `larkhelm_extract_buffer_flushes_total` | Counter | `trigger` | trigger∈{timer,capacity,manual,shutdown} |
-| `larkhelm_llm_router_circuit_state` | Gauge | `backend` | P3 REQ-04：memory_llm_router 断路器状态，0=closed / 1=half_open / 2=open |
-| `larkhelm_tokens_total` | Counter | `backend`,`kind` | 每次 `record_token_usage` 触发一次 4-bucket inc；kind ∈ {input, output, cache_read, cache_create}；backend 取调用方传入的 `model` 标识（CLI 是 `claude`/`gemini`/`kimi`/`deepseek`，API 流式是 `spec.model or spec.id`）|
-| `larkhelm_session_auto_reset_total` | Counter | `reason` | P0 缓存出血面收敛：`claude_session_guard.maybe_auto_reset_session` 触发一次自动 reset 时 +1；`reason` ∈ {`cache_tokens`, `turns`}（先 check cache_read 阈值，再 check turn 阈值）|
-| `larkhelm_sticky_context_evicted_total` | Counter | `reason` | P2 缓存出血面收敛：sticky crew context entry 被淘汰一次 +1；`reason` ∈ {`ttl`（超过 `recent_crew_sticky_ttl_sec`）, `max_injections`（达到 `recent_crew_sticky_max_injections` 次注入）}|
-| `larkhelm_workspace_hint_total` | Counter | `outcome` | P3 REQ-03：`handle_message` 每条消息进入工作区注入段时 +1（恰好一次）；`outcome` ∈ {`injected_passive`（注入被动文案）, `injected_active_legacy`（保留位，REQ-01 改文案后已不再发，留给未来回滚）, `skipped_by_gate`（`workspace_hint_keyword_gate=true` 且关键词未命中）, `skipped_empty`（`.crew_workspace/` 不存在或无 `.md`/`.json` 文件）}|
-| `larkhelm_doc_inject_cache_total` | Counter | `outcome` | P1 REQ-03 / P4 REQ-06：`_inject_doc_context` 每次走 doc cache 时 +1；`outcome` ∈ {`hit`（旧 `cached_doc_read` 调用路径）, `hit_with_age_hint`（新 `cached_doc_read_with_meta` 路径，age hint 已注入）, `miss`, `bypass`, `evict`, `invalidate`}；Grafana 总命中率应 query `outcome=~"hit\|hit_with_age_hint"`|
-| `larkhelm_intent_feedback_total` | Counter | `signal_type` | Phase D 跟进：每条 `intent_feedback.jsonl` 写入 +1；`signal_type` ∈ {`force_chat`（按钮）, `cancel_after_dispatch`（`/cancel` 落在 dispatch 后 ≤ `intent_feedback_cancel_window_sec` 秒内）, `agent_reswitch`（同 chat 在 120s 内切换 agent / backend）, `dispatch_failed`（agent 抛错回退 chat）, `l1_gray_zone`（L1 置信落在灰区）, `l2_dispatched`（非-chat L2 命中）}；`intent_feedback_extended_signals=false` 时只剩 `force_chat` 一种|
-| `larkhelm_intent_layer_total` | Counter | `layer`,`outcome` | P1-5a (review_summary §3 / W8/W9)：`resolve_intent` 每条消息按命中层 +1；`layer` ∈ {`explicit`, `l1`, `microlearn`, `l2`, `fallback`}, `outcome` ∈ {`hit`, `abstain`, `error`}。同一消息可能 bump 多次（L1 abstain → L2 hit），Grafana 查命中率用 `outcome="hit"` |
-| `larkhelm_intent_l2_fallback_total` | Counter | — | P1-5a (W22)：L2（embedding 或 LLM）无法解析，回落 `chat` 时 +1。和 `larkhelm_intent_layer_total{layer="fallback",outcome="hit"}` 同步 bump，用于一眼看到 L2→chat 失败率 |
-| `larkhelm_cascade_backoff_exhausted_total` | Counter | — | P1-5a (W14)：memory cascade ExponentialBackoff 用完最大重试次数仍失败时 +1。`memory._run_one_shot_with_backoff` 和 `memory_extract_buffer._invoke_cascade_with_backoff` 两个调用点都会 bump |
-| `larkhelm_crew_validate_layer2_total` | Counter | `outcome`,`mode` | SEC-CRIT-4：`crew/_runner.py:_validate_output_artifact` 走 layer-2 sentinel 启发式时 +1。`outcome` ∈ {`hit_drop_ratio`（raw≥阈值 且 drop_ratio>阈值）, `hit_paranoid`（raw≥paranoid 阈值）, `abstain`（raw>0 但未触发）}；`mode` ∈ {`enforced`（`crew_sentinel_layer2_enabled=true` 且 chat_id 落在 traffic 桶内 → 真拒绝）, `observe`（gray 未启用 → 仅 metric）}。`raw_hits=0` 时不 bump（避免噪声）|
-| `larkhelm_crew_validate_anthropic_loose_total` | Counter | `outcome` | SEC-v2-MED-1：`crew/_runner.py:_anthropic_loose_check` 结构正则命中即 +1。`outcome` ∈ {`hit_enforced`（gate `crew_sentinel_anthropic_loose_enabled=true` → 真拒绝）, `hit_observed`（gate `false` → 仅 metric，文件放行）}。abstain（regex miss）不 bump 避免每次 validate 都灌噪声。Grafana 看「Anthropic XML 误报回退/正报命中」就盯这个 counter |
-| `larkhelm_crew_backend_swing_total` | Counter | `agent_id` | SEC-v2-MED-2：`crew/_runner.py:_run_agent_wrapper` 把 backend 写入 agent 的 `excluded_backends_until` map 时，若该 backend **已存在**（可能 TTL 已过期）一条旧 entry → 视为「同一 backend 在本 crew 内被重复排除」+1。健康 crew 永不 emit；持续上涨 = 攻击者反复污染同一 backend 强制 retry 烧 token。`backend_id` 走日志面包屑不入 label，避免 cardinality 爆炸 |
-
-Prometheus scrape 配置示例：
-
-```yaml
-scrape_configs:
-  - job_name: larkhelm
-    static_configs:
-      - targets: ['127.0.0.1:9300']
-    scrape_interval: 15s
-```
-
-**⚠️ 安全提示**：`health_bind_addr` 默认 `127.0.0.1`；不要直接 bind `0.0.0.0`，
-经身份验证的反向代理（nginx/Caddy）才暴露给 scraper。
+新增指标时在 `metrics.py` 注册，同步更新 `.crew_workspace/metrics_reference.md`。`health_bind_addr` 默认 `127.0.0.1`，不要直接暴露 `0.0.0.0`。
 
 ## 状态模块导入指南
 
@@ -660,61 +577,9 @@ session memory，再级联抽取 project / global memory。它有**两条触发�
 
 ## lark-oapi SDK — Available API Namespaces
 
-SDK install path: `~/.local/lib/python3.13/site-packages/lark_oapi/`
+> Namespace 列表与用法示例见 [`.crew_workspace/lark_sdk_reference.md`](.crew_workspace/lark_sdk_reference.md)
 
-### Docs & Drive
-
-| Namespace | Version | Resources |
-|---|---|---|
-| `client.docx` | v1 | `document`, `document_block`, `document_block_children`, `document_block_descendant`, `chat_announcement` |
-| `client.drive` | v1, v2 | `file`, `file_comment`, `file_version`, `export_task`, `import_task`, `media`, `meta`, `permission_member`, `permission_public` |
-| `client.sheets` | v3 | `spreadsheet`, `spreadsheet_sheet`, `spreadsheet_sheet_filter`, `spreadsheet_sheet_filter_view` |
-| `client.wiki` | v1, v2 | `node` (v1) / `space`, `space_node`, `space_member`, `task` (v2) |
-| `client.docs` | v1 | `content` — fetch legacy doc content |
-| `client.document_ai` | v1 | Document intelligence / OCR |
-
-### Usage examples
-
-```python
-# Get document content
-resp = client.docx.v1.document.get(
-    GetDocumentRequest.builder().document_id("doc_token_xxx").build()
-)
-
-# Upload file to Drive
-resp = client.drive.v1.media.upload_all(
-    UploadAllMediaRequest.builder()
-    .request_body(
-        UploadAllMediaRequestBody.builder()
-        .file_name("report.pdf")
-        .parent_type("explorer")
-        .parent_node("folder_token_xxx")
-        .size(file_size)
-        .file(open("report.pdf", "rb"))
-        .build()
-    ).build()
-)
-
-# List Drive files
-resp = client.drive.v1.file.list(
-    ListFileRequest.builder().folder_token("folder_token_xxx").build()
-)
-
-# Get Wiki node
-resp = client.wiki.v2.space_node.get(
-    GetSpaceNodeRequest.builder()
-    .space_id("space_id_xxx")
-    .node_token("node_token_xxx")
-    .build()
-)
-
-# List spreadsheet sheets
-resp = client.sheets.v3.spreadsheet_sheet.query(
-    QuerySpreadsheetSheetRequest.builder()
-    .spreadsheet_token("sheet_token_xxx")
-    .build()
-)
-```
+SDK install path: `~/.local/lib/python3.13/site-packages/lark_oapi/`。主要命名空间：`client.docx.v1` / `client.drive.v1` / `client.sheets.v3` / `client.wiki.v2`。
 
 ## 异常处理规范
 

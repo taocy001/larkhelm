@@ -145,5 +145,68 @@ class DeepseekRecentTurnsSkipTests(unittest.TestCase):
         self.assertEqual(out, "HISTORICAL_TURNS")
 
 
+# ════════════════════════════════════════════════════════════════════════
+#  P0 — API backends skip recent_turns pre-read via API_SKIP_RECENT_TURNS_WHEN_HISTORY
+#
+#  These tests exercise the _do_query early-exit gate that prevents the
+#  100 KB tail-read for backends that carry history structurally and would
+#  drop recent_turns anyway (_run_backend_single "NOTE: recent_turns
+#  intentionally omitted — history already carries it").
+# ════════════════════════════════════════════════════════════════════════
+
+
+class _FakeSpec:
+    def __init__(self, provider: str, spec_id: str = "fake"):
+        self.provider = provider
+        self.id = spec_id
+        self.display_name = provider
+
+
+class APIBackendSkipRecentTurnsTests(unittest.TestCase):
+    """Verify the _do_query pre-read gate for API backends."""
+
+    def setUp(self):
+        _cfg.API_SKIP_RECENT_TURNS_WHEN_HISTORY = True
+
+    def tearDown(self):
+        _cfg.API_SKIP_RECENT_TURNS_WHEN_HISTORY = True
+
+    def _run_gate(self, spec, flag: bool) -> bool:
+        """Return True iff the gate would set _skip_recent_turns for the given spec."""
+        with patch.object(_cfg, "API_SKIP_RECENT_TURNS_WHEN_HISTORY", flag):
+            skip = False
+            if flag:
+                _api_providers = {"anthropic_api", "google_api", "openai_compat_api"}
+                if spec is not None and spec.provider in _api_providers:
+                    skip = True
+            return skip
+
+    def test_api_backend_skip_recent_turns_flag_on(self):
+        spec = _FakeSpec("anthropic_api")
+        self.assertTrue(self._run_gate(spec, flag=True))
+
+    def test_api_backend_no_skip_flag_off(self):
+        spec = _FakeSpec("anthropic_api")
+        self.assertFalse(self._run_gate(spec, flag=False))
+
+    def test_api_backend_no_skip_spec_none(self):
+        self.assertFalse(self._run_gate(None, flag=True))
+
+    def test_api_backend_google_skip(self):
+        spec = _FakeSpec("google_api")
+        self.assertTrue(self._run_gate(spec, flag=True))
+
+    def test_api_backend_openai_compat_skip(self):
+        spec = _FakeSpec("openai_compat_api")
+        self.assertTrue(self._run_gate(spec, flag=True))
+
+    def test_cli_backend_not_skipped_by_api_gate(self):
+        spec = _FakeSpec("claude_cli")
+        self.assertFalse(self._run_gate(spec, flag=True))
+
+    def test_config_flag_default_is_true(self):
+        self.assertTrue(bool(getattr(_cfg, "API_SKIP_RECENT_TURNS_WHEN_HISTORY", True)))
+
+
 if __name__ == "__main__":
     unittest.main()

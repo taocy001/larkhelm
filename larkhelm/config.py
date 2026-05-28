@@ -107,6 +107,7 @@ class _RuntimeConfig:
     DOC_INJECT_CACHE_ENABLED:          bool = True
     DOC_INJECT_CACHE_TTL_SEC:          int = 600
     CLI_SKIP_RECENT_TURNS_WHEN_SID:    bool = True
+    API_SKIP_RECENT_TURNS_WHEN_HISTORY: bool = True
     # Workspace-hint / stats-breakdown toggles (P3/P5)
     WORKSPACE_HINT_KEYWORD_GATE:        bool = False
     STATS_AGENT_TYPE_BREAKDOWN_ENABLED: bool = True
@@ -329,6 +330,7 @@ MEMORY_LEGACY_CACHE_ENABLED: bool = True
 DOC_INJECT_CACHE_ENABLED: bool = True
 DOC_INJECT_CACHE_TTL_SEC: int = 600
 CLI_SKIP_RECENT_TURNS_WHEN_SID: bool = True
+API_SKIP_RECENT_TURNS_WHEN_HISTORY: bool = True
 
 # ── P3 workspace-hint / P5 stats-breakdown knobs ──────────────────────────
 # WORKSPACE_HINT_KEYWORD_GATE (default False): when True, the workspace
@@ -659,7 +661,7 @@ def _init_app_config() -> None:
     global WORKSPACE_FINALIZE_PROMPT_AGE_SEC
     global RECENT_TURNS_CACHE_ENABLED, MEMORY_LEGACY_CACHE_ENABLED
     global DOC_INJECT_CACHE_ENABLED, DOC_INJECT_CACHE_TTL_SEC
-    global CLI_SKIP_RECENT_TURNS_WHEN_SID
+    global CLI_SKIP_RECENT_TURNS_WHEN_SID, API_SKIP_RECENT_TURNS_WHEN_HISTORY
     global FILE_ENABLED, MAX_FILE_SIZE_BYTES, FILE_TEXT_EXTENSIONS
     global FILE_PDF_ENABLED, FILE_PDF_LIB
 
@@ -1274,6 +1276,7 @@ def _init_app_config() -> None:
     config.setdefault("doc_inject_cache_enabled", True)
     config.setdefault("doc_inject_cache_ttl_sec", 600)
     config.setdefault("cli_skip_recent_turns_when_sid", True)
+    config.setdefault("api_skip_recent_turns_when_history", True)
     # P3 REQ-02 / P5 REQ-09. Defaults preserve P2 byte-compat for the gate
     # (false = inject as before) and the new "by type" rendering is opt-out
     # (true) so operators only flip false when card overflow triggers.
@@ -1297,6 +1300,9 @@ def _init_app_config() -> None:
         DOC_INJECT_CACHE_TTL_SEC = 600
     CLI_SKIP_RECENT_TURNS_WHEN_SID = bool(
         config.get("cli_skip_recent_turns_when_sid", True)
+    )
+    API_SKIP_RECENT_TURNS_WHEN_HISTORY = bool(
+        config.get("api_skip_recent_turns_when_history", True)
     )
 
     global WORKSPACE_HINT_KEYWORD_GATE, STATS_AGENT_TYPE_BREAKDOWN_ENABLED
@@ -1503,6 +1509,7 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         DOC_INJECT_CACHE_ENABLED=DOC_INJECT_CACHE_ENABLED,
         DOC_INJECT_CACHE_TTL_SEC=DOC_INJECT_CACHE_TTL_SEC,
         CLI_SKIP_RECENT_TURNS_WHEN_SID=CLI_SKIP_RECENT_TURNS_WHEN_SID,
+        API_SKIP_RECENT_TURNS_WHEN_HISTORY=API_SKIP_RECENT_TURNS_WHEN_HISTORY,
         WORKSPACE_HINT_KEYWORD_GATE=WORKSPACE_HINT_KEYWORD_GATE,
         STATS_AGENT_TYPE_BREAKDOWN_ENABLED=STATS_AGENT_TYPE_BREAKDOWN_ENABLED,
         FILE_ENABLED=FILE_ENABLED,
