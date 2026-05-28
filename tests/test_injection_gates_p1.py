@@ -41,6 +41,24 @@ def _make_intent(agent_type: str):
     return SimpleNamespace(agent_type=agent_type, sub_intent="", confidence=1.0, complexity="high")
 
 
+class MemorySkipGlobalIntentsConstantTests(unittest.TestCase):
+    """P1-3: _MEMORY_SKIP_GLOBAL_INTENTS must be a module-level constant."""
+
+    def test_is_module_level_attribute(self):
+        """Constant must be importable directly from the module (not just a local)."""
+        from larkhelm.handlers._query import _MEMORY_SKIP_GLOBAL_INTENTS
+        self.assertIsInstance(_MEMORY_SKIP_GLOBAL_INTENTS, frozenset)
+
+    def test_contains_expected_intents(self):
+        from larkhelm.handlers._query import _MEMORY_SKIP_GLOBAL_INTENTS
+        for intent in ("dev", "crew", "shell"):
+            self.assertIn(intent, _MEMORY_SKIP_GLOBAL_INTENTS)
+
+    def test_does_not_contain_chat(self):
+        from larkhelm.handlers._query import _MEMORY_SKIP_GLOBAL_INTENTS
+        self.assertNotIn("chat", _MEMORY_SKIP_GLOBAL_INTENTS)
+
+
 class MemoryIntentPolicyTests(unittest.TestCase):
 
     def setUp(self):
@@ -173,32 +191,76 @@ class CrewStickyBugRegressionTests(unittest.TestCase):
     def test_consume_called_even_when_gate_skips(self):
         """Bug 3: consume_recent_crew_context must be called even when keyword
         gate fires and skips injection so the injection counter advances and
-        recent_crew_sticky_max_injections eviction still works."""
-        from unittest.mock import MagicMock, patch
-        mock_crew_ctx = {"title": "test task", "summary": "did stuff"}
-        with patch("larkhelm.crew.consume_recent_crew_context",
-                   return_value=mock_crew_ctx) as mock_consume:
-            _cfg.config["crew_sticky_keyword_gate_enabled"] = True
-            try:
-                # Import here so _cfg is already initialised before the import
-                from larkhelm.handlers._message import _CREW_STICKY_KW_RE as _kw
-                gate_on = True
-                text = "what is the weather today"  # no crew keywords
-                kw_match = bool(_kw.search(text or ""))
-                self.assertFalse(kw_match, "sanity: test text must not match")
-                # Simulate the fixed code path: consume is called regardless
-                # We replicate the new gate logic from _message.py to document it
-                chat_id = "chat_test"
-                with patch("larkhelm.crew.consume_recent_crew_context",
-                           return_value=mock_crew_ctx) as mock_c:
-                    import larkhelm.crew as _crew_mod
-                    crew_ctx = _crew_mod.consume_recent_crew_context(chat_id)
-                    mock_c.assert_called_once_with(chat_id)
-                    # and gate skips injection (no prompt modification)
-                    inject = not (gate_on and not kw_match)
-                    self.assertFalse(inject)
-            finally:
-                _cfg.config["crew_sticky_keyword_gate_enabled"] = False
+        recent_crew_sticky_max_injections eviction still works.
+
+        Tests through _apply_crew_sticky_context (the extracted helper that
+        handle_message now delegates to), so this pin guards the real code path
+        rather than a manual simulation.
+        """
+        from unittest.mock import patch
+        from larkhelm.handlers._message import _apply_crew_sticky_context
+
+        mock_crew_ctx = {"title": "crew task", "summary": "did stuff"}
+        _cfg.config["crew_sticky_keyword_gate_enabled"] = True
+        try:
+            with patch("larkhelm.crew.consume_recent_crew_context",
+                       return_value=mock_crew_ctx) as mock_consume:
+                original_prompt = "what is the weather today"
+                result = _apply_crew_sticky_context(
+                    "chat_p1b_test", original_prompt, original_prompt
+                )
+                # consume was called (eviction counter advanced)
+                mock_consume.assert_called_once_with("chat_p1b_test")
+                # gate fired: prompt must NOT contain crew summary
+                self.assertNotIn("刚完成的 Crew 任务", result)
+                self.assertEqual(result, original_prompt)
+        finally:
+            _cfg.config["crew_sticky_keyword_gate_enabled"] = False
+
+    def test_inject_when_crew_keyword_present(self):
+        """gate=True + crew keyword in text → crew summary IS injected."""
+        from unittest.mock import patch
+        from larkhelm.handlers._message import _apply_crew_sticky_context
+
+        mock_crew_ctx = {"title": "my crew task", "summary": "result here"}
+        _cfg.config["crew_sticky_keyword_gate_enabled"] = True
+        try:
+            with patch("larkhelm.crew.consume_recent_crew_context",
+                       return_value=mock_crew_ctx):
+                result = _apply_crew_sticky_context(
+                    "chat_kw_test", "继续那个crew任务", "follow up question"
+                )
+                self.assertIn("刚完成的 Crew 任务", result)
+                self.assertIn("result here", result)
+        finally:
+            _cfg.config["crew_sticky_keyword_gate_enabled"] = False
+
+    def test_gate_off_always_injects(self):
+        """gate=False → crew summary always injected regardless of keywords."""
+        from unittest.mock import patch
+        from larkhelm.handlers._message import _apply_crew_sticky_context
+
+        mock_crew_ctx = {"title": "task", "summary": "summary text"}
+        _cfg.config["crew_sticky_keyword_gate_enabled"] = False
+        try:
+            with patch("larkhelm.crew.consume_recent_crew_context",
+                       return_value=mock_crew_ctx):
+                result = _apply_crew_sticky_context(
+                    "chat_off_test", "random unrelated message", "user query"
+                )
+                self.assertIn("刚完成的 Crew 任务", result)
+        finally:
+            _cfg.config["crew_sticky_keyword_gate_enabled"] = False
+
+    def test_no_ctx_returns_prompt_unchanged(self):
+        """No sticky context → prompt returned unmodified."""
+        from unittest.mock import patch
+        from larkhelm.handlers._message import _apply_crew_sticky_context
+
+        with patch("larkhelm.crew.consume_recent_crew_context", return_value=None):
+            original = "my prompt"
+            result = _apply_crew_sticky_context("chat_empty", "some text", original)
+            self.assertEqual(result, original)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

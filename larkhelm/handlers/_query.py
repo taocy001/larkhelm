@@ -44,6 +44,11 @@ from larkhelm.handlers._query_card_state import QueryCardState
 CARD_PUSH_INTERVAL = _cfg.CARD_PUSH_INTERVAL
 CURSOR_INTERVAL    = _cfg.CURSOR_INTERVAL
 
+# Intent types for which global memory (user style/format preferences) is
+# irrelevant.  Hoisted to module level so the set literal is not recreated
+# on every call — same pattern as _CREW_STICKY_KW_RE in _message.py.
+_MEMORY_SKIP_GLOBAL_INTENTS: frozenset = frozenset({"dev", "crew", "shell"})
+
 
 def _should_use_query_session_v2(chat_id: str) -> bool:
     """P3 REQ-02: decide if this chat sees the v2 query path.
@@ -881,13 +886,18 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                             and _early_spec is not None
                             and getattr(_early_spec, "provider", "") in _api_providers
                         ):
-                            _skip_parent = True
-                            from larkhelm.metrics import inc_injection_gate as _inc_pig
-                            _inc_pig("parent_msg", "skipped_api")
-                            _debug_log(
-                                f"[{trace_id}][DoQuery] parent inject skipped "
-                                f"(API backend: {_early_spec.provider})"
-                            )
+                            # Only skip when the API session already has history;
+                            # on the very first turn history is empty and the
+                            # parent message would not be present elsewhere.
+                            from larkhelm.api_session import load_history as _lh
+                            if _lh(_early_spec.provider, chat_id):
+                                _skip_parent = True
+                                from larkhelm.metrics import inc_injection_gate as _inc_pig
+                                _inc_pig("parent_msg", "skipped_api")
+                                _debug_log(
+                                    f"[{trace_id}][DoQuery] parent inject skipped "
+                                    f"(API backend with history: {_early_spec.provider})"
+                                )
                     except Exception as _gate_err:
                         _debug_log(
                             f"[{trace_id}][DoQuery] parent inject gate error "
@@ -976,13 +986,20 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                     except Exception:
                         pass
 
+                # API backends (anthropic_api / google_api / openai_compat_api)
+                # carry conversation history via load_history() / save_history(),
+                # so _run_backend_single unconditionally drops recent_turns for
+                # them — the 100 KB disk read is always wasted.  Skip it here.
+                # Flag named WHEN_HISTORY for config-file clarity; enforcement
+                # is provider-level (not per-session history probe) because the
+                # drop in _run_backend_single is also provider-level.
                 if not _skip_recent_turns and bool(getattr(_cfg, "API_SKIP_RECENT_TURNS_WHEN_HISTORY", True)):
                     _api_providers = {"anthropic_api", "google_api", "openai_compat_api"}
                     if _early_spec is not None and _early_spec.provider in _api_providers:
                         _skip_recent_turns = True
                         _debug_log(
-                            f"[Cache] {_early_spec.provider} skip recent_turns "
-                            f"pre-read (API backend) chat={chat_id[:8]}"
+                            f"[Cache] {_early_spec.provider} skip recent_turns pre-read "
+                            f"(API provider — history via load_history) chat={chat_id[:8]}"
                         )
                         try:
                             from larkhelm.metrics import inc_injection_gate
@@ -1030,8 +1047,6 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             except Exception as _pi_err:
                 _debug_log(f"[{trace_id}][DoQuery] _pop_pending_intent error: {_pi_err}")
                 _pending_intent = None
-
-            _MEMORY_SKIP_GLOBAL_INTENTS = {"dev", "crew", "shell"}
 
             try:
                 from larkhelm.memory import get_memory_context_v2, maybe_auto_update

@@ -105,6 +105,43 @@ _CREW_STICKY_KW_RE = _re.compile(
 )
 
 
+def _apply_crew_sticky_context(chat_id: str, text: str, prompt: str) -> str:
+    """Consume and optionally inject the most recent sticky crew summary.
+
+    ``consume_recent_crew_context`` is **always** called so the injection
+    counter advances and the TTL / max-injections eviction logic in
+    ``crew/_state.py`` fires correctly — regardless of whether the keyword
+    gate decides to skip the actual text injection.
+    """
+    gate_on = bool(_cfg.config.get("crew_sticky_keyword_gate_enabled"))
+    kw_match = (not gate_on) or bool(_CREW_STICKY_KW_RE.search(text or ""))
+    from larkhelm.crew import consume_recent_crew_context
+    crew_ctx = consume_recent_crew_context(chat_id)
+    if not crew_ctx:
+        return prompt
+    if gate_on and not kw_match:
+        try:
+            from larkhelm.metrics import inc_injection_gate as _inc
+            _inc("crew_sticky", "skipped")
+        except Exception:
+            pass
+        return prompt
+    try:
+        from larkhelm.metrics import inc_injection_gate as _inc
+        _inc("crew_sticky", "injected")
+    except Exception:
+        pass
+    from larkhelm.log import _debug_log as _dl
+    _dl(f"[MSG] injecting sticky crew context '{crew_ctx['title'][:20]}' → {chat_id[:12]}")
+    return (
+        f"[以下是刚完成的 Crew 任务「{crew_ctx['title']}」的交付结论，"
+        f"请结合它来回答我的问题]\n\n"
+        f"{crew_ctx['summary']}\n\n"
+        f"---\n\n"
+        f"{prompt}"
+    )
+
+
 def _build_workspace_hint(chat_id: str, user_text: str) -> tuple[str, str]:
     """Return ``(injection_prefix, outcome)`` for the workspace-hint segment.
 
@@ -872,37 +909,9 @@ def handle_message(data: P2ImMessageReceiveV1):
             parent_id = None  # already handled; no need to fetch parent in _do_query
         elif not parent_id:
             # No parent at all → try sticky crew context (local, no I/O).
-            # P2 (design.md §6.3 / D9): use the *mutating* consume_* entry
-            # point so the per-entry injection counter increments and the
-            # entry gets evicted after RECENT_CREW_STICKY_MAX_INJECTIONS
-            # consumes. Read-only callers (status, diagnose, parent-fetch
-            # fallback in _query.py / _query_session.py) keep using
-            # get_recent_crew_context to avoid double-counting one user turn.
-            _sticky_gate_on = bool(_cfg.config.get("crew_sticky_keyword_gate_enabled"))
-            _sticky_kw_match = (not _sticky_gate_on) or bool(_CREW_STICKY_KW_RE.search(text or ""))
-            from larkhelm.crew import consume_recent_crew_context
-            crew_ctx = consume_recent_crew_context(chat_id)
-            if crew_ctx:
-                if _sticky_gate_on and not _sticky_kw_match:
-                    try:
-                        from larkhelm.metrics import inc_injection_gate as _inc_sticky_ig
-                        _inc_sticky_ig("crew_sticky", "skipped")
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        from larkhelm.metrics import inc_injection_gate as _inc_sticky_ig
-                        _inc_sticky_ig("crew_sticky", "injected")
-                    except Exception:
-                        pass
-                    _debug_log(f"[MSG] injecting sticky crew context '{crew_ctx['title'][:20]}' → {chat_id[:12]}")
-                    prompt = (
-                        f"[以下是刚完成的 Crew 任务「{crew_ctx['title']}」的交付结论，"
-                        f"请结合它来回答我的问题]\n\n"
-                        f"{crew_ctx['summary']}\n\n"
-                        f"---\n\n"
-                        f"{prompt}"
-                    )
+            # Delegated to _apply_crew_sticky_context which always calls
+            # consume_recent_crew_context so the injection counter advances.
+            prompt = _apply_crew_sticky_context(chat_id, text, prompt)
         # else: parent_id set and no crew card found → _do_query will fetch parent text in background
 
         # Workspace context: P3 REQ-01 passive phrasing + REQ-02 optional

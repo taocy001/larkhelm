@@ -137,9 +137,14 @@ def _run_parent_gate(
     early_spec,
     gate_enabled: bool,
     fetch_returns: str | None = "some parent text",
+    history_nonempty: bool = True,
 ):
     """
     Replicate the P2b gate logic from _do_query without importing the full handler.
+
+    ``history_nonempty`` mirrors whether ``load_history()`` returned a non-empty
+    list (P1-5 fix: gate only fires when history already exists so first-turn
+    parent messages are never silently dropped).
 
     Returns a dict:
       skip: bool          — whether gate decided to skip
@@ -159,6 +164,7 @@ def _run_parent_gate(
                 gate_enabled
                 and early_spec is not None
                 and getattr(early_spec, "provider", "") in _API_PROVIDERS
+                and history_nonempty           # P1-5: only skip if history exists
             ):
                 _skip_parent = True
                 _fake_inc("parent_msg", "skipped_api")
@@ -292,6 +298,44 @@ class ParentInjectSkipApiTests(unittest.TestCase):
             fetch_returns="",
         )
         self.assertFalse(result["injected_metric"])
+
+
+class ParentInjectHistoryProbeTests(unittest.TestCase):
+    """P1-5 regression: gate must probe load_history; first-turn parents must
+    not be silently dropped (history empty → no skip)."""
+
+    def test_api_backend_empty_history_does_not_skip(self):
+        """Gate=True + API provider + empty history → inject parent (no skip)."""
+        result = _run_parent_gate(
+            parent_id="msg_123",
+            early_spec=_make_spec("anthropic_api"),
+            gate_enabled=True,
+            history_nonempty=False,  # first turn: no prior turns in history
+        )
+        self.assertFalse(result["skip"], "Empty history must not trigger parent skip")
+        self.assertTrue(result["injected_metric"])
+        self.assertFalse(result["skipped_metric"])
+
+    def test_api_backend_nonempty_history_skips(self):
+        """Gate=True + API provider + existing history → skip parent (dup)."""
+        result = _run_parent_gate(
+            parent_id="msg_123",
+            early_spec=_make_spec("anthropic_api"),
+            gate_enabled=True,
+            history_nonempty=True,
+        )
+        self.assertTrue(result["skip"])
+        self.assertTrue(result["skipped_metric"])
+
+    def test_cli_backend_never_skipped_regardless_of_history(self):
+        """CLI backends are not in API provider set → never skip parent."""
+        result = _run_parent_gate(
+            parent_id="msg_123",
+            early_spec=_make_spec("claude_cli"),
+            gate_enabled=True,
+            history_nonempty=True,
+        )
+        self.assertFalse(result["skip"])
 
 
 class ParentInjectConfigIntegrationTests(unittest.TestCase):
