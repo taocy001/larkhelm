@@ -106,8 +106,8 @@ def test_smart_compress_zero_budget_returns_empty():
 # ── is_enabled() ────────────────────────────────────────────────────────
 
 
-def test_is_enabled_default_false():
-    assert _msc.is_enabled() is False
+def test_is_enabled_default_true():
+    assert _msc.is_enabled() is True
 
 
 def test_is_enabled_honours_flag(monkeypatch):

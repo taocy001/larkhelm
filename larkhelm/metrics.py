@@ -132,6 +132,9 @@ class LarkhelmMetricsRegistry:
             self.workspace_hint_total = None
             self.intent_feedback_total = None
             self.injection_gate_total = None
+            self.cache_write_tokens_total = None
+            self.cache_read_tokens_total = None
+            self.cache_hit_ratio = None
             return
 
         # Use a private registry so the larkhelm metrics don't collide with
@@ -343,6 +346,24 @@ class LarkhelmMetricsRegistry:
             "larkhelm_crew_backend_swing_total",
             "Same backend re-excluded within a crew (swing/DoS signal)",
             ["agent_id"],
+            registry=self._registry,
+        )
+        self.cache_write_tokens_total = pc.Counter(
+            "larkhelm_cache_write_tokens_total",
+            "Anthropic cache_creation_input_tokens cumulative, bucketed by model",
+            ["model"],
+            registry=self._registry,
+        )
+        self.cache_read_tokens_total = pc.Counter(
+            "larkhelm_cache_read_tokens_total",
+            "Anthropic cache_read_input_tokens cumulative, bucketed by model",
+            ["model"],
+            registry=self._registry,
+        )
+        self.cache_hit_ratio = pc.Gauge(
+            "larkhelm_cache_hit_ratio",
+            "Real-time cache hit ratio cache_read/(cache_read+cache_write); 0 when denominator is zero",
+            ["model"],
             registry=self._registry,
         )
 
@@ -872,6 +893,52 @@ def inc_injection_gate(point: str, outcome: str) -> None:
         safe_log(f"[Metrics] inc_injection_gate failed (point={point}, outcome={outcome}): {e}")
 
 
+def inc_cache_write_tokens(model: str, count: int) -> None:
+    """Bump larkhelm_cache_write_tokens_total{model} by count.
+
+    model ∈ {claude, gemini, kimi, deepseek}. count must be > 0
+    (caller filters before calling). Never raises; no-op when
+    prometheus-client is absent.
+    """
+    reg = get_registry()
+    if not reg.available or reg.cache_write_tokens_total is None:
+        return
+    try:
+        reg.cache_write_tokens_total.labels(model=str(model)).inc(count)
+    except Exception as e:
+        safe_log(f"[Metrics] inc_cache_write_tokens failed (model={model}, count={count}): {e}")
+
+
+def inc_cache_read_tokens(model: str, count: int) -> None:
+    """Bump larkhelm_cache_read_tokens_total{model} by count.
+
+    Same contract as inc_cache_write_tokens. Never raises.
+    """
+    reg = get_registry()
+    if not reg.available or reg.cache_read_tokens_total is None:
+        return
+    try:
+        reg.cache_read_tokens_total.labels(model=str(model)).inc(count)
+    except Exception as e:
+        safe_log(f"[Metrics] inc_cache_read_tokens failed (model={model}, count={count}): {e}")
+
+
+def set_cache_hit_ratio(model: str, ratio: float) -> None:
+    """Set larkhelm_cache_hit_ratio{model} to ratio.
+
+    ratio ∈ [0.0, 1.0]. Caller computes: cache_read / (cache_read + cache_write),
+    or 0.0 when denominator is zero. Never raises; no-op when
+    prometheus-client is absent.
+    """
+    reg = get_registry()
+    if not reg.available or reg.cache_hit_ratio is None:
+        return
+    try:
+        reg.cache_hit_ratio.labels(model=str(model)).set(float(ratio))
+    except Exception as e:
+        safe_log(f"[Metrics] set_cache_hit_ratio failed (model={model}, ratio={ratio}): {e}")
+
+
 def inc_workspace_hint(outcome: str) -> None:
     """Bump ``larkhelm_workspace_hint_total{outcome}``.
 
@@ -943,6 +1010,9 @@ __all__ = [
     "inc_injection_gate",
     "inc_intent_feedback",
     "inc_crew_backend_swing",
+    "inc_cache_write_tokens",
+    "inc_cache_read_tokens",
+    "set_cache_hit_ratio",
     # Module-level Counter aliases (resolved lazily via __getattr__):
     "WORKSPACE_HINT_TOTAL",
     "SESSION_AUTO_RESET_TOTAL",

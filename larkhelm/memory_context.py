@@ -389,6 +389,8 @@ class MemoryContextBuilder:
         complexity: str = "medium",
         confidence: float = 0.0,
         sender_open_id: str | None = None,
+        # Week-2: optional backend hint for backend-aware context budget.
+        backend_spec=None,
     ):
         self.chat_id = chat_id
         self.cwd = cwd
@@ -402,6 +404,7 @@ class MemoryContextBuilder:
         self.complexity = complexity or "medium"
         self.confidence = float(confidence or 0.0)
         self.sender_open_id: str | None = sender_open_id or None
+        self.backend_spec = backend_spec
 
     # ── public entry points ────────────────────────────────────────────
 
@@ -553,7 +556,7 @@ class MemoryContextBuilder:
 
         t0 = _time.perf_counter()
         request = self._build_request()
-        policy = get_policy(self.agent_type)
+        policy = get_policy(self.agent_type, backend_spec=self.backend_spec)
         cfg = getattr(_cfg, "config", {}) or {}
 
         # Mode resolution: physical mode that will actually dispatch.

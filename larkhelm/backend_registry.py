@@ -45,6 +45,7 @@ class BackendSpec:
     cost_per_1k_input:  float = 0.0
     cost_per_1k_output: float = 0.0
     latency_tier:       str = "medium"   # "instant" | "fast" | "medium" | "slow"
+    context_window:     int = 0           # 0 = "not yet resolved" (filled by BackendRegistry.load)
 
     # ── Runtime health tracking (in-memory only, NOT persisted) ──────────────
     # Real-call traffic and periodic probes both feed these; the unified
@@ -200,7 +201,14 @@ class BackendRegistry:
                     cost_per_1k_input=cost_per_1k_input,
                     cost_per_1k_output=cost_per_1k_output,
                     latency_tier=latency_tier,
+                context_window=0,  # filled below
                 )
+                # Week-2: auto-resolve context window from token_budget defaults + config overrides.
+                try:
+                    from larkhelm.token_budget import resolve_context_window
+                    spec.context_window = resolve_context_window(spec)
+                except Exception:
+                    pass
                 self._specs[spec.id] = spec
 
     def health_check(self) -> None:

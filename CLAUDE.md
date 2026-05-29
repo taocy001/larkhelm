@@ -95,9 +95,12 @@ CLI --data-dir > LARKHELM_DATA_DIR env > /var/lib/larkhelm > ~/.local/share/lark
 | `claude_session_reset_cache_tokens` | 累计 `usage.cache_read` 阈值，默认 `5_000_000`（5M）；`reason="cache_tokens"` |
 | `claude_session_reset_turns` | 累计 `record_token_usage(model="claude")` 次数阈值，默认 `50`；`reason="turns"` |
 | `chat_agent_cheap_routing_enabled` | 默认 `true`。`ChatAgent.execute` 调 `resolve_backend_for_task(profile=chat, cost_ceiling=0.10)` 走 DeepSeek/Kimi 等 cheap backend；无健康候选时回落 `_get_chat_model` |
+| `backend_aware_budget_enabled` | 默认 `false`。按 backend context window tier 动态缩放记忆注入预算：Gemini/Kimi（≥256K）+20%，mid-tier（≥64K）不变，小窗口（<64K）−30%；联动字段：`context_window_<id>`（9 个，值 0 = 用内置默认，见 `token_budget.DEFAULT_CONTEXT_WINDOWS`）|
 | `cli_skip_recent_turns_when_sid` | 默认 `true`。`sid` 非空时跳过 recent_turns 注入（多省 ~500 input tokens / call）；flip `false` 强制每次注入 |
 | `memory_extract_buffer_window_sec` | 默认 `0` = 禁 buffer，每次 update 立即 cascade（P1 byte-compat）；>0 合并 |
-| `memory_session_smart_compress` | 默认 `false` = 尾截断；翻 `true` 走句子级评分 + top-K（确定性，无 LLM） |
+| `memory_session_smart_compress` | 默认 `true` = 句子级评分 + top-K（确定性，无 LLM）；flip `false` 退回尾截断 |
+| `embedding_enabled` | 默认 `true`。embedding 功能总开关；`false` 时强制 keyword 路径，不受 `embedding_traffic` 影响 |
+| `embedding_traffic` | 默认 `0.1`。embedding / hybrid 召回流量比例（0.0–1.0）；需同时开启 `embedding_enabled=true` 且 `embedding_backend!="none"` |
 | `memory_global_profile_slot_enabled` | **默认 `true`（P5-OPT6）** = 4 槽位（style/format/domain/expertise，≤200 chars 每槽）；局部编辑不会让整段 body 漂移、Anthropic prompt-cache prefix 命中率更稳。翻 `false` 退回整段文本 |
 | `memory_project_section_enabled` | **默认 `true`（P5-OPT6）** = 4 段（TechStack/Conventions/Architecture/Constraints）；翻 `false` 退回整段文本 |
 | `recent_turns_cache_enabled` | 默认 `true`，`_get_recent_turns` 走 LRU；flip `false` 直走 tail-read（bisect 用） |

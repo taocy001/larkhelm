@@ -247,8 +247,12 @@ class TestConcurrency(unittest.TestCase):
 
         lock = concurrency._get_chat_lock("stale_overtime_chat")
         lock.acquire()
-        # Backdate acquisition time to trigger the overtime condition (is_stale uses 2× threshold)
-        lock._acq_mono = time.monotonic() - hard_timeout * 2 - 1
+        # Backdate acquisition time to trigger the overtime condition.
+        # is_stale uses max(hard_timeout * 2, 300) as the threshold, so we must
+        # exceed that floor — not just hard_timeout * 2 — to handle test configs
+        # where hard_timeout is small (e.g. 10s from test_idle_timeout.py).
+        stale_threshold = max(hard_timeout * 2, 300)
+        lock._acq_mono = time.monotonic() - stale_threshold - 1
 
         new_lock = concurrency._get_chat_lock("stale_overtime_chat")
         self.assertIsNot(new_lock, lock, "Overtime lock should have been replaced")

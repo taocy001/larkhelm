@@ -122,9 +122,21 @@ POLICY_TABLE: dict[str, InjectionPolicy] = {
 }
 
 
-def get_policy(agent_type: str) -> InjectionPolicy:
-    """Lookup ``POLICY_TABLE``; unknown agent_type falls back to ``chat``."""
-    return POLICY_TABLE.get(agent_type, POLICY_TABLE["chat"])
+def get_policy(agent_type: str, backend_spec=None) -> InjectionPolicy:
+    """Lookup ``POLICY_TABLE``; unknown agent_type falls back to ``chat``.
+
+    Week-2: when *backend_spec* is provided and the operator has enabled
+    ``backend_aware_budget_enabled``, the policy's ``token_budget`` is
+    scaled to the backend's context-window size.
+    """
+    policy = POLICY_TABLE.get(agent_type, POLICY_TABLE["chat"])
+    if backend_spec is not None:
+        try:
+            from larkhelm.token_budget import apply_backend_aware_budget
+            policy = apply_backend_aware_budget(policy, backend_spec)
+        except Exception:
+            pass
+    return policy
 
 
 # ── Slice loading ──────────────────────────────────────────────────────────

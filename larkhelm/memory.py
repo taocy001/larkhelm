@@ -735,6 +735,7 @@ def get_memory_context_v2(
     has_doc_urls: bool = False,
     intent=None,
     sender_open_id: str | None = None,
+    backend_spec=None,
 ) -> tuple[str, list[str]]:
     """Build memory context AND return deduped recent turns in one pass.
 
@@ -748,13 +749,18 @@ def get_memory_context_v2(
     path (gated by ``memory_retriever_enabled``) can apply per-agent
     policy. When ``intent is None`` the call is byte-equivalent to the
     legacy v2 signature; this is duck-typed so third-party plugins can
-    pass any namespace object exposing the four fields."""
+    pass any namespace object exposing the four fields.
+
+    Week-2 — ``backend_spec``: when a :class:`BackendSpec` is supplied,
+    the builder may scale the memory-injection budget to the backend's
+    context-window size (gated by ``backend_aware_budget_enabled``)."""
     from larkhelm.memory_context import MemoryContextBuilder
 
     builder_kwargs: dict = dict(
         query=query, recent_turns=recent_turns,
         has_doc_urls=has_doc_urls,
         sender_open_id=sender_open_id,
+        backend_spec=backend_spec,
     )
     if intent is not None:
         builder_kwargs["agent_type"] = getattr(intent, "agent_type", "chat") or "chat"

@@ -131,6 +131,8 @@ class _RuntimeConfig:
     # GitHubAgent (agent_hub.builtin.github_agent)
     GITHUB_TOKEN:          str = ""
     GITHUB_REPO:           str = ""       # "owner/repo" default; inferred from git remote if empty
+    # Week-2
+    BACKEND_AWARE_BUDGET_ENABLED: bool = False
 
 # ── Runtime config (assigned by _init_runtime()) ────────────────────────
 CONFIG_PATH: Path
@@ -683,6 +685,7 @@ def _init_app_config() -> None:
     global PROJECT_GUIDE_ENABLED, PROJECT_GUIDE_PATH, PARENT_INJECT_SKIP_WHEN_API_HISTORY
     global FILE_ENABLED, MAX_FILE_SIZE_BYTES, FILE_TEXT_EXTENSIONS
     global FILE_PDF_ENABLED, FILE_PDF_LIB
+    global BACKEND_AWARE_BUDGET_ENABLED
 
     try:
         # SEC-H1: warn when config file is world-readable (contains APP_SECRET).
@@ -979,8 +982,8 @@ def _init_app_config() -> None:
     config.setdefault("embedding_model_path", "~/.larkhelm/models/bge-small-zh-v1.5.onnx")
     config.setdefault("embedding_dim", 512)
     config.setdefault("embedding_http_timeout_sec", 5.0)
-    config.setdefault("embedding_traffic", 0.0)             # Stage B gradual rollout, orthogonal to memory_retriever_traffic
-    config.setdefault("embedding_enabled", False)           # Stage B master switch
+    config.setdefault("embedding_traffic", 0.1)             # Stage B gradual rollout, orthogonal to memory_retriever_traffic
+    config.setdefault("embedding_enabled", True)            # Stage B master switch
     # MEM-C2: stale window must not exceed audit retention (30d) — audit records
     # older than retain_days are deleted, so slices can't be validated as "hit"
     # beyond that horizon and would be wrongly marked stale.
@@ -1072,7 +1075,7 @@ def _init_app_config() -> None:
     config.setdefault("metrics_text_legacy", False)
     config.setdefault("anthropic_extended_cache_enabled", True)
     config.setdefault("memory_extract_buffer_window_sec", 0)
-    config.setdefault("memory_session_smart_compress", False)
+    config.setdefault("memory_session_smart_compress", True)
     # P5-OPT6: 4 slots / 4 sections default on — local edits stay scoped to
     # the modified slot/section, so global/project memory body doesn't
     # rotate on every cascade and Anthropic prompt-cache prefix survives.
@@ -1407,6 +1410,24 @@ def _init_app_config() -> None:
     except (TypeError, ValueError):
         RECENT_CREW_STICKY_MAX_INJECTIONS = 5
 
+    # ── Week-2: Backend-aware Context Budget ───────────────────────────────
+    config.setdefault("backend_aware_budget_enabled", False)
+    # 9 per-model context-window overrides (tokens). 0 = "use default".
+    config.setdefault("context_window_claude", 0)
+    config.setdefault("context_window_gemini", 0)
+    config.setdefault("context_window_kimi", 0)
+    config.setdefault("context_window_kimi_code", 0)
+    config.setdefault("context_window_deepseek", 0)
+    config.setdefault("context_window_anthropic_api", 0)
+    config.setdefault("context_window_google_api", 0)
+    config.setdefault("context_window_openai_compat_api", 0)
+    config.setdefault("context_window_deepseek_api", 0)
+
+    global BACKEND_AWARE_BUDGET_ENABLED
+    BACKEND_AWARE_BUDGET_ENABLED = bool(
+        config.get("backend_aware_budget_enabled", False)
+    )
+
     # ── File handling configuration ────────────────────────────────────────
     config.setdefault("file_enabled", True)
     config.setdefault("max_file_size_bytes", 10 * 1024 * 1024)
@@ -1573,6 +1594,7 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         SEARCH_API_KEY=SEARCH_API_KEY,
         GITHUB_TOKEN=GITHUB_TOKEN,
         GITHUB_REPO=GITHUB_REPO,
+        BACKEND_AWARE_BUDGET_ENABLED=BACKEND_AWARE_BUDGET_ENABLED,
     )
 
 

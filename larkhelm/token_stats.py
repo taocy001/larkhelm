@@ -6,7 +6,7 @@ from datetime import datetime
 
 import larkhelm.config as _cfg
 from larkhelm.concurrency import _jsonl_lock
-from larkhelm.log import _debug_log
+from larkhelm.log import _debug_log, warn
 from larkhelm.secure_io import secure_open
 
 __all__ = [
@@ -52,6 +52,11 @@ _token_stats_lock = threading.Lock()
 _CREW_AGENT_TOKENS_MAX = 2000
 _crew_agent_tokens: OrderedDict[str, dict] = OrderedDict()
 _crew_agent_lock = threading.Lock()
+
+# Accumulated cache token totals per model — protected by _token_stats_lock.
+# Used to compute the cache_hit_ratio Gauge without re-scanning the LRU.
+# Key = model string; value = {"write": int, "read": int}.
+_cache_totals_by_model: dict[str, dict[str, int]] = {}
 
 
 def resolve_record_chat_id(chat_id: str, record_under: str | None = None) -> str:
@@ -246,6 +251,10 @@ def record_token_usage(chat_id: str, model: str, usage: dict) -> None:
         m["cache_create"]  += usage.get("cache_create", 0)
         m["cost_usd"]      += usage.get("cost_usd", 0.0)
         m["calls"]         += 1
+        _ct = _cache_totals_by_model.setdefault(model, {"write": 0, "read": 0})
+        _ct["write"] += max(0, int(usage.get("cache_create", 0) or 0))
+        _ct["read"]  += max(0, int(usage.get("cache_read", 0) or 0))
+        _snap_write, _snap_read = _ct["write"], _ct["read"]
 
     record = {
         "ts":            datetime.now().isoformat(timespec="seconds"),
@@ -279,6 +288,22 @@ def record_token_usage(chat_id: str, model: str, usage: dict) -> None:
         inc_tokens(model, usage)
     except Exception as e:
         _debug_log(f"[TokenStats] inc_tokens failed (model={model}): {e}")
+
+    try:
+        cache_create_val = max(0, int(usage.get("cache_create", 0) or 0))
+        cache_read_val   = max(0, int(usage.get("cache_read", 0) or 0))
+        from larkhelm.metrics import inc_cache_write_tokens, inc_cache_read_tokens, set_cache_hit_ratio
+        if cache_create_val > 0:
+            inc_cache_write_tokens(model, cache_create_val)
+        if cache_read_val > 0:
+            inc_cache_read_tokens(model, cache_read_val)
+        denom = _snap_write + _snap_read
+        ratio = _snap_read / denom if denom > 0 else 0.0
+        set_cache_hit_ratio(model, ratio)
+        if ratio < 0.70 and denom > 0:
+            warn(f"[TokenStats] cache_hit_ratio for {model} = {ratio:.2f} < 0.70")
+    except Exception as e:
+        _debug_log(f"[TokenStats] cache metric update failed (model={model}): {e}")
 
     # P0: Claude session auto-reset hook. Lazy import avoids a config →
     # token_stats → claude_session_guard → memory → … cycle during boot;

@@ -181,9 +181,10 @@ class AnthropicAdapter:
         messages = [h for h in history if h["role"] != "system"]
         messages.append({"role": "user", "content": message})
 
+        from larkhelm.token_budget import compute_api_max_tokens
         kwargs: dict = dict(
             model=spec.model or "claude-sonnet-4-6",
-            max_tokens=8192,
+            max_tokens=compute_api_max_tokens(spec),
             messages=messages,
         )
         if system_parts:
@@ -432,10 +433,12 @@ class OpenAICompatAdapter:
         if extra_system:
             messages.insert(0, {"role": "system", "content": extra_system})
         messages.append({"role": "user", "content": message})
+        from larkhelm.token_budget import compute_api_max_tokens
         return {
             "model":          spec.model or "gpt-4o",
             "messages":       messages,
             "stream":         True,
+            "max_tokens":     compute_api_max_tokens(spec),
             # stream_options=include_usage causes the last chunk to carry
             # usage stats (TOKEN-C1); most OpenAI-compatible backends support
             # this extension; unsupported ones silently ignore the field.

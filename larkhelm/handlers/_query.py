@@ -1056,6 +1056,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                     has_doc_urls=has_doc_urls,
                     intent=_pending_intent,
                     sender_open_id=sender_open_id,
+                    backend_spec=_early_spec,
                 )
             except Exception as _mem_err:
                 _debug_log(f"[{trace_id}][DoQuery] memory context error: {_mem_err}")

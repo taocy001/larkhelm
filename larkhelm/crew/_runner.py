@@ -800,6 +800,7 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
                 state.chat_id, cwd=str(cwd), query=full_prompt,
                 intent=_crew_intent,
                 sender_open_id=state.sender_open_id,
+                backend_spec=spec,
             )
         except Exception as e:
             _debug_log(f"[Crew] memory load failed: {e}")

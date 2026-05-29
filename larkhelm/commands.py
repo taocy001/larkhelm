@@ -660,6 +660,16 @@ def _fmt_token_block(label: str, data: dict) -> str:
         return f"**{label}** — 暂无数据"
     lines = [f"**{label}**"]
     for model, m in sorted(data.items()):
+        model_label = model
+        try:
+            if _cfg.config.get("backend_aware_budget_enabled"):
+                from larkhelm.backend_registry import BACKEND_REGISTRY
+                from larkhelm.token_budget import resolve_context_window
+                spec = BACKEND_REGISTRY.get(model)
+                cw = resolve_context_window(spec)
+                model_label = f"{model}（{cw // 1000}K ctx）"
+        except Exception:
+            pass
         inp   = m["input_tokens"]
         out   = m["output_tokens"]
         cr    = m["cache_read"]
@@ -698,7 +708,7 @@ def _fmt_token_block(label: str, data: dict) -> str:
         # detail row is intentionally retained — three audit regressions
         # (cache-arithmetic / overlap cases) pin that exact substring.
         lines.append(
-            f"› **{model}**  {calls} 次  合计 **{total:,}** tokens  费用 **{cost_str}**\n"
+            f"› **{model_label}**  {calls} 次  合计 **{total:,}** tokens  费用 **{cost_str}**\n"
             f"  缓存命中率 **{hit_pct}%**  写入比 **{create_pct}%**\n"
             f"  新输入 {inp:,}  输出 {out:,}\n"
             f"  缓存命中 {cr:,}（{hit_pct}%）  缓存写入 {cc:,}（{create_pct}%）"

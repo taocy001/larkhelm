@@ -68,7 +68,7 @@ class CompressScore:
 
 def is_enabled() -> bool:
     """Honour the operator gate; default False keeps P1 tail-truncate."""
-    return bool(getattr(_cfg, "MEMORY_SESSION_SMART_COMPRESS", False))
+    return bool(getattr(_cfg, "MEMORY_SESSION_SMART_COMPRESS", True))
 
 
 # ── Sentence extraction ────────────────────────────────────────────────
