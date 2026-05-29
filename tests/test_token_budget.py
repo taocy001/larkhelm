@@ -53,6 +53,24 @@ def test_resolve_none():
     assert resolve_context_window(None) == _MIN_CONTEXT_WINDOW
 
 
+def test_resolve_zero_config_falls_back_to_builtin(monkeypatch):
+    """config[context_window_claude]=0 must fall through to DEFAULT_CONTEXT_WINDOWS, not 32K floor.
+
+    This is the critical contract fixed in the Week-2 bug-fix commit:
+    config.py setdefaults all context_window_* to 0 meaning "use built-in default".
+    """
+    monkeypatch.setitem(_cfg.config, "context_window_claude", 0)
+    spec = _StubSpec(id="claude", provider="claude_cli", context_window=0)
+    assert resolve_context_window(spec) == DEFAULT_CONTEXT_WINDOWS["claude"]
+
+
+def test_resolve_positive_config_overrides_builtin(monkeypatch):
+    """Operator-set positive value overrides the built-in default."""
+    monkeypatch.setitem(_cfg.config, "context_window_claude", 300_000)
+    spec = _StubSpec(id="claude", provider="claude_cli", context_window=0)
+    assert resolve_context_window(spec) == 300_000
+
+
 # ── compute_memory_char_budget ───────────────────────────────────────────────
 
 def test_budget_disabled_flag_returns_base():
@@ -235,3 +253,67 @@ def test_fmt_token_block_failopen_on_registry_error(monkeypatch):
         assert "ctx）" not in body
     finally:
         monkeypatch.setitem(_cfg.config, "backend_aware_budget_enabled", False)
+
+
+# ── BackendSpec.context_window auto-population (R2 coverage) ─────────────────
+
+def test_backend_spec_context_window_auto_populated():
+    """BackendRegistry.load() must call resolve_context_window and store the result."""
+    from larkhelm.backend_registry import BackendRegistry
+    reg = BackendRegistry()
+    # Use "claude" so DEFAULT_CONTEXT_WINDOWS["claude"] is the expected fallback.
+    reg.load([{
+        "id": "claude",
+        "provider": "claude_cli",
+        "display_name": "Test Claude",
+        "cmd": "claude",
+        "model": "",
+    }])
+    spec = reg.get("claude")
+    assert spec is not None
+    assert spec.context_window > 0, "context_window must be resolved at load time"
+    assert spec.context_window == DEFAULT_CONTEXT_WINDOWS["claude"]
+
+
+# ── Adapter max_tokens wiring integration (R6 coverage) ──────────────────────
+
+def test_anthropic_adapter_uses_compute_api_max_tokens():
+    """AnthropicAdapter.prepare_request must set max_tokens from compute_api_max_tokens."""
+    from larkhelm.backend_api_streaming import AnthropicAdapter
+    from larkhelm.token_budget import compute_api_max_tokens
+
+    spec = _StubSpec(id="claude", provider="anthropic_api", context_window=200_000)
+    adapter = AnthropicAdapter.__new__(AnthropicAdapter)
+
+    kwargs = adapter.prepare_request(
+        spec=spec,
+        history=[],
+        message="hello",
+        extra_system="",
+    )
+    expected = compute_api_max_tokens(spec)
+    assert kwargs["max_tokens"] == expected, (
+        f"AnthropicAdapter max_tokens {kwargs['max_tokens']} != "
+        f"compute_api_max_tokens {expected}"
+    )
+
+
+def test_openai_compat_adapter_uses_compute_api_max_tokens():
+    """OpenAICompatAdapter.prepare_request must set max_tokens from compute_api_max_tokens."""
+    from larkhelm.backend_api_streaming import OpenAICompatAdapter
+    from larkhelm.token_budget import compute_api_max_tokens
+
+    spec = _StubSpec(id="deepseek_api", provider="openai_compat_api", context_window=64_000)
+    adapter = OpenAICompatAdapter.__new__(OpenAICompatAdapter)
+
+    payload = adapter.prepare_request(
+        spec=spec,
+        history=[],
+        message="hello",
+        extra_system="",
+    )
+    expected = compute_api_max_tokens(spec)
+    assert payload["max_tokens"] == expected, (
+        f"OpenAICompatAdapter max_tokens {payload['max_tokens']} != "
+        f"compute_api_max_tokens {expected}"
+    )

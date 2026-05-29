@@ -33,6 +33,15 @@ def _estimate_tokens(msg: dict) -> int:
     return 1
 
 
+def has_history(provider: str, chat_id: str) -> bool:
+    """Return True if a non-empty history file exists (stat-only, no JSON parse)."""
+    try:
+        f = _session_file(provider, chat_id)
+        return f.exists() and f.stat().st_size > 0
+    except Exception:
+        return False
+
+
 def load_history(provider: str, chat_id: str) -> list[dict]:
     """Load API session history. Returns [] on failure (silent fallback)."""
     try:

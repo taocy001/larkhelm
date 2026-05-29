@@ -16,6 +16,7 @@ Log prefix: ``[TokenBudget]``.
 """
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -53,9 +54,12 @@ _DEFAULT_SAFETY_FACTOR = 0.85
 # Tier boundaries are intuitive rather than precise; the goal is to avoid
 # choking small-window models while letting large-window ones breathe.
 # Ordered **descending** so the first match is the highest applicable tier.
+# Anything below the smallest boundary uses _SMALL_SCALE (−30 %).
+_SMALL_SCALE = 0.70
 _TIER_SCALES: list[tuple[int, float]] = [
     (256_000, 1.20),   # large  → +20 % over POLICY_TABLE default
     (64_000,  1.00),   # medium → keep default
+    (0,       _SMALL_SCALE),  # small  → −30 %
 ]
 
 # Floor for any memory budget (chars) — never drop below this.
@@ -73,20 +77,10 @@ _DEFAULT_AGENT_BUDGETS: dict[str, int] = {
     "doc":   800,
 }
 
-# API output caps per backend tier.
-# These are *upper* bounds; ``compute_api_max_tokens`` may choose a lower
-# value when the estimated input is large.
-_MAX_OUTPUT_CAPS: dict[str, int] = {
-    "claude":            8192,
-    "gemini":            8192,
-    "kimi":              8192,
-    "kimi-code":         8192,
-    "deepseek":          8192,
-    "anthropic_api":     8192,
-    "google_api":        8192,
-    "openai_compat_api": 8192,
-    "deepseek_api":      8192,
-}
+# All backends currently share the same output cap (8192 tokens).
+# Stored as a constant; if a future backend needs a different cap,
+# introduce a per-backend dict then.
+_DEFAULT_MAX_OUTPUT_CAP = 8192
 
 
 def _config() -> dict:
@@ -94,7 +88,7 @@ def _config() -> dict:
     try:
         import larkhelm.config as _cfg
         return getattr(_cfg, "config", {}) or {}
-    except Exception:
+    except (ImportError, AttributeError):
         return {}
 
 
@@ -107,8 +101,9 @@ def resolve_context_window(spec: "BackendSpec | None") -> int:
       3. Hard-coded default from :data:`DEFAULT_CONTEXT_WINDOWS`
       4. Fallback: ``_MIN_CONTEXT_WINDOW`` (32 000)
 
-    ``spec`` may be ``None`` (e.g. when the backend hasn't been selected
-    yet); in that case step 4 applies.
+    Value ``0`` in any override slot means "use built-in default" and is
+    treated as absent.  ``spec`` may be ``None`` (e.g. when the backend
+    hasn't been selected yet); in that case step 4 applies.
     """
     if spec is None:
         return _MIN_CONTEXT_WINDOW
@@ -178,9 +173,8 @@ def compute_memory_char_budget(
     window = resolve_context_window(spec)
     base = base_budget if base_budget is not None else _DEFAULT_AGENT_BUDGETS.get(agent_type, 1200)
 
-    # Find the first tier whose boundary is <= window.
-    # Default 0.70 for anything below the smallest boundary.
-    scale = 0.70
+    # Walk tiers descending; the last entry (boundary=0) always matches.
+    scale = _SMALL_SCALE
     for boundary, s in _TIER_SCALES:
         if window >= boundary:
             scale = s
@@ -203,7 +197,7 @@ def compute_api_max_tokens(
 
         safe_budget = context_window * safety_factor
         available   = safe_budget - input_tokens_est
-        cap         = max_output_cap or backend-specific cap
+        cap         = max_output_cap or _DEFAULT_MAX_OUTPUT_CAP (8192)
         result      = clamp(available, min_output, cap)
 
     Parameters
@@ -211,15 +205,17 @@ def compute_api_max_tokens(
     spec:
         The backend that will receive the request.
     input_tokens_est:
-        Conservative estimate of the prompt size in tokens (system
-        instructions + memory + history + user message).  The default
-        ``8000`` covers the typical three-tier memory injection (~4 500
-        chars ≈ 1 500 tokens) + a few turns of history.
+        Conservative estimate of the prompt size in tokens.  The default
+        ``8000`` is a worst-case budget covering system prompt, tool
+        definitions, three-tier memory injection (~1 500 tokens), and
+        several turns of conversation history.  For most requests the
+        actual input is smaller; the cap (``_DEFAULT_MAX_OUTPUT_CAP``)
+        is the binding constraint for large-context backends.
     min_output:
         Absolute floor; never go below this.
     max_output_cap:
-        Hard ceiling.  When ``None``, the per-backend cap from
-        :data:`_MAX_OUTPUT_CAPS` is used.
+        Hard ceiling.  When ``None``, ``_DEFAULT_MAX_OUTPUT_CAP`` (8192)
+        is used for all backends.
 
     Returns
     -------
@@ -227,15 +223,13 @@ def compute_api_max_tokens(
         The recommended ``max_tokens`` value.
     """
     if spec is None:
-        return max_output_cap if max_output_cap is not None else 8192
+        return max_output_cap if max_output_cap is not None else _DEFAULT_MAX_OUTPUT_CAP
 
     window = resolve_context_window(spec)
     safe_budget = int(window * _DEFAULT_SAFETY_FACTOR)
     available = safe_budget - max(0, input_tokens_est)
 
-    cap = max_output_cap
-    if cap is None:
-        cap = _MAX_OUTPUT_CAPS.get(spec.id) or _MAX_OUTPUT_CAPS.get(spec.provider) or 8192
+    cap = max_output_cap if max_output_cap is not None else _DEFAULT_MAX_OUTPUT_CAP
 
     return max(min_output, min(cap, available))
 
@@ -262,5 +256,4 @@ def apply_backend_aware_budget(
     if new_budget == policy.token_budget:
         return policy
 
-    import dataclasses as _dc
-    return _dc.replace(policy, token_budget=new_budget)
+    return dataclasses.replace(policy, token_budget=new_budget)

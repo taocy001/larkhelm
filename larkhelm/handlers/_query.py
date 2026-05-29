@@ -889,8 +889,8 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                             # Only skip when the API session already has history;
                             # on the very first turn history is empty and the
                             # parent message would not be present elsewhere.
-                            from larkhelm.api_session import load_history as _lh
-                            if _lh(_early_spec.provider, chat_id):
+                            from larkhelm.api_session import has_history as _hh
+                            if _hh(_early_spec.provider, chat_id):
                                 _skip_parent = True
                                 from larkhelm.metrics import inc_injection_gate as _inc_pig
                                 _inc_pig("parent_msg", "skipped_api")

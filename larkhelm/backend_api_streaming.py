@@ -27,6 +27,7 @@ from typing import Any, Callable, Iterator, Protocol
 
 from larkhelm.backend_registry import BackendSpec, BACKEND_REGISTRY
 from larkhelm.log import _debug_log, safe_log
+from larkhelm.token_budget import compute_api_max_tokens
 
 # Process-wide memory of whether the Anthropic ``extended-cache-ttl`` beta
 # header has been rejected by the API. Once set, subsequent calls in this
@@ -181,7 +182,6 @@ class AnthropicAdapter:
         messages = [h for h in history if h["role"] != "system"]
         messages.append({"role": "user", "content": message})
 
-        from larkhelm.token_budget import compute_api_max_tokens
         kwargs: dict = dict(
             model=spec.model or "claude-sonnet-4-6",
             max_tokens=compute_api_max_tokens(spec),
@@ -433,7 +433,6 @@ class OpenAICompatAdapter:
         if extra_system:
             messages.insert(0, {"role": "system", "content": extra_system})
         messages.append({"role": "user", "content": message})
-        from larkhelm.token_budget import compute_api_max_tokens
         return {
             "model":          spec.model or "gpt-4o",
             "messages":       messages,

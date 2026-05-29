@@ -207,8 +207,9 @@ class BackendRegistry:
                 try:
                     from larkhelm.token_budget import resolve_context_window
                     spec.context_window = resolve_context_window(spec)
-                except Exception:
-                    pass
+                except Exception as _cw_err:
+                    from larkhelm.log import _debug_log as _lazy_dl
+                    _lazy_dl(f"[BackendRegistry] context_window resolve failed for {spec.id}: {_cw_err}")
                 self._specs[spec.id] = spec
 
     def health_check(self) -> None:

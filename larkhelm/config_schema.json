@@ -156,7 +156,7 @@
     "context_window_claude":          { "type": "integer", "minimum": 0 },
     "context_window_gemini":          { "type": "integer", "minimum": 0 },
     "context_window_kimi":            { "type": "integer", "minimum": 0 },
-    "context_window_kimi_code":       { "type": "integer", "minimum": 0 },
+    "context_window_kimi-code":       { "type": "integer", "minimum": 0 },
     "context_window_deepseek":        { "type": "integer", "minimum": 0 },
     "context_window_anthropic_api":   { "type": "integer", "minimum": 0 },
     "context_window_google_api":      { "type": "integer", "minimum": 0 },

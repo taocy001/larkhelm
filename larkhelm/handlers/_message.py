@@ -131,12 +131,13 @@ def _apply_crew_sticky_context(chat_id: str, text: str, prompt: str) -> str:
         _inc("crew_sticky", "injected")
     except Exception:
         pass
-    from larkhelm.log import _debug_log as _dl
-    _dl(f"[MSG] injecting sticky crew context '{crew_ctx['title'][:20]}' → {chat_id[:12]}")
+    _debug_log(f"[MSG] injecting sticky crew context '{crew_ctx['title'][:20]}' → {chat_id[:12]}")
+    _title = crew_ctx['title'][:100]
+    _summary = crew_ctx['summary'][:3000]
     return (
-        f"[以下是刚完成的 Crew 任务「{crew_ctx['title']}」的交付结论，"
+        f"[以下是刚完成的 Crew 任务「{_title}」的交付结论，"
         f"请结合它来回答我的问题]\n\n"
-        f"{crew_ctx['summary']}\n\n"
+        f"{_summary}\n\n"
         f"---\n\n"
         f"{prompt}"
     )

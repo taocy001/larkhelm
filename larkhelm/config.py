@@ -1416,7 +1416,7 @@ def _init_app_config() -> None:
     config.setdefault("context_window_claude", 0)
     config.setdefault("context_window_gemini", 0)
     config.setdefault("context_window_kimi", 0)
-    config.setdefault("context_window_kimi_code", 0)
+    config.setdefault("context_window_kimi-code", 0)
     config.setdefault("context_window_deepseek", 0)
     config.setdefault("context_window_anthropic_api", 0)
     config.setdefault("context_window_google_api", 0)
