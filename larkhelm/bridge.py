@@ -463,6 +463,31 @@ def _start_memory_boot_warmup() -> None:
         except Exception as e:
             _debug_log(f"[MemoryRetriever] embedding warmup failed: {e}")
 
+        # Phase 2 — pre-fill memory layer LRU with recently-modified .md files
+        try:
+            import time as _time
+            from larkhelm.memory import MEMORY_HOME_DIR
+            from larkhelm._context_cache import cached_memory_layer
+            cutoff = _time.time() - 86400
+            for path in MEMORY_HOME_DIR.glob("*.md"):
+                try:
+                    if path.stat().st_mtime < cutoff:
+                        continue
+                    name = path.name
+                    if name.startswith("global_"):
+                        layer = "global"
+                    elif name.startswith("project_"):
+                        layer = "project"
+                    elif name.startswith("session_"):
+                        layer = "session"
+                    else:
+                        continue
+                    cached_memory_layer(layer, path, loader=lambda p=path: p.read_text("utf-8"))
+                except Exception as inner:
+                    _debug_log(f"[BootWarmup] Phase 2 LRU fill failed for {path.name}: {inner}")
+        except Exception as e:
+            _debug_log(f"[BootWarmup] Phase 2 LRU warmup failed: {e}")
+
     threading.Thread(target=_loop, daemon=True, name="boot-warmup").start()
 
 

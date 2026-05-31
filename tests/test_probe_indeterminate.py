@@ -21,7 +21,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 _TMP = tempfile.mkdtemp(prefix="larkhelm_probe_indet_")
 atexit.register(shutil.rmtree, _TMP, ignore_errors=True)
@@ -49,11 +49,19 @@ class ProbeTimeoutReturnsIndeterminateTests(unittest.TestCase):
         )
 
     def test_gemini_timeout_returns_none(self):
+        # _probe_gemini uses Popen + select (not subprocess.run), so we need a
+        # different approach: patch Popen to return a mock proc that never emits
+        # output, and set PROBE_TIMEOUT=0 so the select-loop deadline expires
+        # immediately. proc.poll() returns None (still "running"), so result
+        # stays PROBE_INDETERMINATE_TIMEOUT = (None, "subprocess timeout").
         spec = BackendSpec(
             id="gemini", provider="gemini_cli", display_name="Gemini",
             role="orchestrator", tags=["tools"], command="gemini",
         )
-        with self._patch_subprocess_timeout():
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None  # process still running after deadline
+        with patch.object(model_probe.subprocess, "Popen", return_value=mock_proc), \
+             patch.object(model_probe, "PROBE_TIMEOUT", 0):
             ok, err = model_probe._probe_gemini(spec)
         self.assertIsNone(ok,
                           f"timeout must be INDETERMINATE (None), not True/False. got {(ok, err)!r}")

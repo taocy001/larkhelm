@@ -27,7 +27,10 @@ from __future__ import annotations
 import dataclasses
 import threading
 from pathlib import Path
-from typing import Iterator
+from typing import TYPE_CHECKING, Iterator
+
+if TYPE_CHECKING:
+    from larkhelm.crew_types import CrewPlan
 
 from larkhelm.agent_hub.pipeline_types import PipelineDef
 

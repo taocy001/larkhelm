@@ -111,10 +111,19 @@ class _RuntimeConfig:
     CLI_SKIP_RECENT_TURNS_WHEN_SID:    bool = True
     API_SKIP_RECENT_TURNS_WHEN_HISTORY: bool = True
     # Injection gate flags (P1)
-    MEMORY_INTENT_POLICY_ENABLED:           bool = False
+    MEMORY_INTENT_POLICY_ENABLED:           bool = True
+    SESSION_GUARD_MIN_TURNS_BEFORE_RESET:   int = 5
+    SESSION_GUARD_CHECKPOINT_TURNS:         int = 5
+    ANTHROPIC_LAYERED_CACHE_TRAFFIC:        float = 0.0
+    CACHE_HIT_RATE_ALERT_THRESHOLD:         float = 0.5
     CREW_STICKY_KEYWORD_GATE_ENABLED:       bool = False
     PROJECT_GUIDE_ENABLED:                  bool = False
     PROJECT_GUIDE_PATH:                     str = ""
+    PROJECT_GUIDE_AUTO_DISCOVER:            bool = False
+    DOC_INJECT_CACHE_TTL_SEC_CLAUDE:        int = 600
+    DOC_INJECT_CACHE_TTL_SEC_GEMINI:        int = 300
+    DOC_INJECT_CACHE_TTL_SEC_KIMI:          int = 120
+    DOC_INJECT_CACHE_TTL_SEC_DEEPSEEK:      int = 180
     PARENT_INJECT_SKIP_WHEN_API_HISTORY:    bool = False
     # Workspace-hint / stats-breakdown toggles (P3/P5)
     WORKSPACE_HINT_KEYWORD_GATE:        bool = False
@@ -344,10 +353,19 @@ DOC_INJECT_RELEVANCE_THRESHOLD: float = 0.3
 CLI_SKIP_RECENT_TURNS_WHEN_SID: bool = True
 API_SKIP_RECENT_TURNS_WHEN_HISTORY: bool = True
 # Injection gate flags (P1)
-MEMORY_INTENT_POLICY_ENABLED: bool = False
+MEMORY_INTENT_POLICY_ENABLED: bool = True
+SESSION_GUARD_MIN_TURNS_BEFORE_RESET: int = 5
+SESSION_GUARD_CHECKPOINT_TURNS: int = 5
+ANTHROPIC_LAYERED_CACHE_TRAFFIC: float = 0.0
+CACHE_HIT_RATE_ALERT_THRESHOLD: float = 0.5
 CREW_STICKY_KEYWORD_GATE_ENABLED: bool = False
 PROJECT_GUIDE_ENABLED: bool = False
 PROJECT_GUIDE_PATH: str = ""
+PROJECT_GUIDE_AUTO_DISCOVER: bool = False
+DOC_INJECT_CACHE_TTL_SEC_CLAUDE: int = 600
+DOC_INJECT_CACHE_TTL_SEC_GEMINI: int = 300
+DOC_INJECT_CACHE_TTL_SEC_KIMI: int = 120
+DOC_INJECT_CACHE_TTL_SEC_DEEPSEEK: int = 180
 PARENT_INJECT_SKIP_WHEN_API_HISTORY: bool = False
 
 # ── P3 workspace-hint / P5 stats-breakdown knobs ──────────────────────────
@@ -363,6 +381,17 @@ STATS_AGENT_TYPE_BREAKDOWN_ENABLED: bool = True
 # ── P0/P1/P2 cache-bleed knobs (.crew_workspace/design.md §3.3) ───────────
 # P0: Claude session auto-reset
 CLAUDE_SESSION_AUTO_RESET_ENABLED: bool = True
+# Week-3: universal session guard + anchor sidecar
+SESSION_GUARD_ENABLED: bool = True
+SESSION_GUARD_CHECKPOINT_BEFORE_RESET: bool = True
+SESSION_GUARD_POLICIES: dict = {
+    "claude":   {"max_cache_read_tokens": 5_000_000, "max_turns": 50},
+    "gemini":   {"max_cache_read_tokens": 4_000_000, "max_turns": 40},
+    "deepseek": {"max_cache_read_tokens": 2_000_000, "max_turns": 30},
+    "kimi":     {"max_cache_read_tokens": 0,          "max_turns": 60},
+}
+ANTHROPIC_EXTENDED_CACHE_RETRY_SEC: int = 1800
+ANTHROPIC_LAYERED_CACHE_CONTROL: bool = False
 CLAUDE_SESSION_RESET_CACHE_TOKENS: int = 5_000_000
 CLAUDE_SESSION_RESET_TURNS: int = 50
 # P1: ChatAgent cheap routing
@@ -682,7 +711,9 @@ def _init_app_config() -> None:
     global DOC_INJECT_RELEVANCE_GATE_ENABLED, DOC_INJECT_RELEVANCE_THRESHOLD
     global CLI_SKIP_RECENT_TURNS_WHEN_SID, API_SKIP_RECENT_TURNS_WHEN_HISTORY
     global MEMORY_INTENT_POLICY_ENABLED, CREW_STICKY_KEYWORD_GATE_ENABLED
-    global PROJECT_GUIDE_ENABLED, PROJECT_GUIDE_PATH, PARENT_INJECT_SKIP_WHEN_API_HISTORY
+    global PROJECT_GUIDE_ENABLED, PROJECT_GUIDE_PATH, PROJECT_GUIDE_AUTO_DISCOVER, PARENT_INJECT_SKIP_WHEN_API_HISTORY
+    global DOC_INJECT_CACHE_TTL_SEC_CLAUDE, DOC_INJECT_CACHE_TTL_SEC_GEMINI
+    global DOC_INJECT_CACHE_TTL_SEC_KIMI, DOC_INJECT_CACHE_TTL_SEC_DEEPSEEK
     global FILE_ENABLED, MAX_FILE_SIZE_BYTES, FILE_TEXT_EXTENSIONS
     global FILE_PDF_ENABLED, FILE_PDF_LIB
     global BACKEND_AWARE_BUDGET_ENABLED
@@ -1309,10 +1340,15 @@ def _init_app_config() -> None:
     # memory_intent_policy_enabled: skip global memory for dev/crew/shell intents.
     # crew_sticky_keyword_gate_enabled: skip sticky crew context when no crew keywords.
     # project_guide_enabled: inject a static project guide file for non-claude-cli backends.
-    config.setdefault("memory_intent_policy_enabled", False)
+    config.setdefault("memory_intent_policy_enabled", True)
     config.setdefault("crew_sticky_keyword_gate_enabled", False)
     config.setdefault("project_guide_enabled", False)
     config.setdefault("project_guide_path", "")
+    config.setdefault("project_guide_auto_discover", False)
+    config.setdefault("doc_inject_cache_ttl_sec_claude", 600)
+    config.setdefault("doc_inject_cache_ttl_sec_gemini", 300)
+    config.setdefault("doc_inject_cache_ttl_sec_kimi", 120)
+    config.setdefault("doc_inject_cache_ttl_sec_deepseek", 180)
     config.setdefault("parent_inject_skip_when_api_history", False)
     config.setdefault("doc_inject_relevance_gate_enabled", False)
     config.setdefault("doc_inject_relevance_threshold", 0.3)
@@ -1347,10 +1383,15 @@ def _init_app_config() -> None:
     API_SKIP_RECENT_TURNS_WHEN_HISTORY = bool(
         config.get("api_skip_recent_turns_when_history", True)
     )
-    MEMORY_INTENT_POLICY_ENABLED = bool(config.get("memory_intent_policy_enabled", False))
+    MEMORY_INTENT_POLICY_ENABLED = bool(config.get("memory_intent_policy_enabled", True))
     CREW_STICKY_KEYWORD_GATE_ENABLED = bool(config.get("crew_sticky_keyword_gate_enabled", False))
     PROJECT_GUIDE_ENABLED = bool(config.get("project_guide_enabled", False))
     PROJECT_GUIDE_PATH = str(config.get("project_guide_path", "") or "")
+    PROJECT_GUIDE_AUTO_DISCOVER = bool(config.get("project_guide_auto_discover", False))
+    DOC_INJECT_CACHE_TTL_SEC_CLAUDE   = max(1, int(config.get("doc_inject_cache_ttl_sec_claude", 600) or 600))
+    DOC_INJECT_CACHE_TTL_SEC_GEMINI   = max(1, int(config.get("doc_inject_cache_ttl_sec_gemini", 300) or 300))
+    DOC_INJECT_CACHE_TTL_SEC_KIMI     = max(1, int(config.get("doc_inject_cache_ttl_sec_kimi", 120) or 120))
+    DOC_INJECT_CACHE_TTL_SEC_DEEPSEEK = max(1, int(config.get("doc_inject_cache_ttl_sec_deepseek", 180) or 180))
     PARENT_INJECT_SKIP_WHEN_API_HISTORY = bool(config.get("parent_inject_skip_when_api_history", False))
 
     global WORKSPACE_HINT_KEYWORD_GATE, STATS_AGENT_TYPE_BREAKDOWN_ENABLED
@@ -1366,7 +1407,20 @@ def _init_app_config() -> None:
     # explicit P0/P1/P2 design intent. Operators flip individual flags in
     # config.json to bisect a regression without redeploying.
     config.setdefault("claude_session_auto_reset_enabled", True)
+    config.setdefault("session_guard_enabled", True)
+    config.setdefault("session_guard_checkpoint_before_reset", True)
+    config.setdefault("session_guard_min_turns_before_reset", 5)
+    config.setdefault("session_guard_checkpoint_turns", 5)
     config.setdefault("claude_session_reset_cache_tokens", 5_000_000)
+    config.setdefault("session_guard_policies", {
+        "claude":   {"max_cache_read_tokens": 5_000_000, "max_turns": 50},
+        "gemini":   {"max_cache_read_tokens": 4_000_000, "max_turns": 40},
+        "deepseek": {"max_cache_read_tokens": 2_000_000, "max_turns": 30},
+        "kimi":     {"max_cache_read_tokens": 0,          "max_turns": 60},
+    })
+    config.setdefault("anthropic_extended_cache_retry_sec", 1800)
+    config.setdefault("anthropic_layered_cache_control_enabled", False)
+    config.setdefault("anthropic_layered_cache_traffic", 0.0)
     config.setdefault("claude_session_reset_turns", 50)
     config.setdefault("chat_agent_cheap_routing_enabled", True)
     config.setdefault("recent_crew_sticky_ttl_sec", 1800)
@@ -1375,6 +1429,10 @@ def _init_app_config() -> None:
     global CLAUDE_SESSION_AUTO_RESET_ENABLED, CLAUDE_SESSION_RESET_CACHE_TOKENS
     global CLAUDE_SESSION_RESET_TURNS, CHAT_AGENT_CHEAP_ROUTING_ENABLED
     global RECENT_CREW_STICKY_TTL_SEC, RECENT_CREW_STICKY_MAX_INJECTIONS
+    global SESSION_GUARD_ENABLED, SESSION_GUARD_CHECKPOINT_BEFORE_RESET
+    global SESSION_GUARD_POLICIES, ANTHROPIC_EXTENDED_CACHE_RETRY_SEC
+    global ANTHROPIC_LAYERED_CACHE_CONTROL, ANTHROPIC_LAYERED_CACHE_TRAFFIC
+    global SESSION_GUARD_MIN_TURNS_BEFORE_RESET, SESSION_GUARD_CHECKPOINT_TURNS
 
     CLAUDE_SESSION_AUTO_RESET_ENABLED = bool(
         config.get("claude_session_auto_reset_enabled", True)
@@ -1392,6 +1450,48 @@ def _init_app_config() -> None:
         )
     except (TypeError, ValueError):
         CLAUDE_SESSION_RESET_TURNS = 50
+    SESSION_GUARD_ENABLED = bool(config.get("session_guard_enabled", True))
+    ANTHROPIC_LAYERED_CACHE_CONTROL = bool(
+        config.get("anthropic_layered_cache_control_enabled", False)
+    )
+    try:
+        ANTHROPIC_LAYERED_CACHE_TRAFFIC = max(
+            0.0, min(1.0, float(config.get("anthropic_layered_cache_traffic", 0.0) or 0.0))
+        )
+    except (TypeError, ValueError):
+        ANTHROPIC_LAYERED_CACHE_TRAFFIC = 0.0
+    try:
+        SESSION_GUARD_MIN_TURNS_BEFORE_RESET = max(
+            1, int(config.get("session_guard_min_turns_before_reset", 5) or 5)
+        )
+    except (TypeError, ValueError):
+        SESSION_GUARD_MIN_TURNS_BEFORE_RESET = 5
+    try:
+        SESSION_GUARD_CHECKPOINT_TURNS = max(
+            1, int(config.get("session_guard_checkpoint_turns", 5) or 5)
+        )
+    except (TypeError, ValueError):
+        SESSION_GUARD_CHECKPOINT_TURNS = 5
+    SESSION_GUARD_CHECKPOINT_BEFORE_RESET = bool(
+        config.get("session_guard_checkpoint_before_reset", True)
+    )
+    _raw_policies = config.get("session_guard_policies") or {}
+    if isinstance(_raw_policies, dict) and _raw_policies:
+        SESSION_GUARD_POLICIES = _raw_policies
+    else:
+        SESSION_GUARD_POLICIES = {
+            "claude":   {"max_cache_read_tokens": 5_000_000, "max_turns": 50},
+            "gemini":   {"max_cache_read_tokens": 4_000_000, "max_turns": 40},
+            "deepseek": {"max_cache_read_tokens": 2_000_000, "max_turns": 30},
+            "kimi":     {"max_cache_read_tokens": 0,          "max_turns": 60},
+        }
+    try:
+        ANTHROPIC_EXTENDED_CACHE_RETRY_SEC = max(
+            60, int(config.get("anthropic_extended_cache_retry_sec", 1800) or 1800),
+        )
+    except (TypeError, ValueError):
+        ANTHROPIC_EXTENDED_CACHE_RETRY_SEC = 1800
+
     CHAT_AGENT_CHEAP_ROUTING_ENABLED = bool(
         config.get("chat_agent_cheap_routing_enabled", True)
     )
@@ -1427,6 +1527,16 @@ def _init_app_config() -> None:
     BACKEND_AWARE_BUDGET_ENABLED = bool(
         config.get("backend_aware_budget_enabled", False)
     )
+
+    # ── Cache hit rate alert threshold (REQ-05) ────────────────────────────
+    config.setdefault("cache_hit_rate_alert_threshold", 0.5)
+    global CACHE_HIT_RATE_ALERT_THRESHOLD
+    try:
+        CACHE_HIT_RATE_ALERT_THRESHOLD = max(
+            0.0, min(1.0, float(config.get("cache_hit_rate_alert_threshold", 0.5) or 0.5))
+        )
+    except (TypeError, ValueError):
+        CACHE_HIT_RATE_ALERT_THRESHOLD = 0.5
 
     # ── File handling configuration ────────────────────────────────────────
     config.setdefault("file_enabled", True)
@@ -1579,9 +1689,18 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         CLI_SKIP_RECENT_TURNS_WHEN_SID=CLI_SKIP_RECENT_TURNS_WHEN_SID,
         API_SKIP_RECENT_TURNS_WHEN_HISTORY=API_SKIP_RECENT_TURNS_WHEN_HISTORY,
         MEMORY_INTENT_POLICY_ENABLED=MEMORY_INTENT_POLICY_ENABLED,
+        SESSION_GUARD_MIN_TURNS_BEFORE_RESET=SESSION_GUARD_MIN_TURNS_BEFORE_RESET,
+        SESSION_GUARD_CHECKPOINT_TURNS=SESSION_GUARD_CHECKPOINT_TURNS,
+        ANTHROPIC_LAYERED_CACHE_TRAFFIC=ANTHROPIC_LAYERED_CACHE_TRAFFIC,
+        CACHE_HIT_RATE_ALERT_THRESHOLD=CACHE_HIT_RATE_ALERT_THRESHOLD,
         CREW_STICKY_KEYWORD_GATE_ENABLED=CREW_STICKY_KEYWORD_GATE_ENABLED,
         PROJECT_GUIDE_ENABLED=PROJECT_GUIDE_ENABLED,
         PROJECT_GUIDE_PATH=PROJECT_GUIDE_PATH,
+        PROJECT_GUIDE_AUTO_DISCOVER=PROJECT_GUIDE_AUTO_DISCOVER,
+        DOC_INJECT_CACHE_TTL_SEC_CLAUDE=DOC_INJECT_CACHE_TTL_SEC_CLAUDE,
+        DOC_INJECT_CACHE_TTL_SEC_GEMINI=DOC_INJECT_CACHE_TTL_SEC_GEMINI,
+        DOC_INJECT_CACHE_TTL_SEC_KIMI=DOC_INJECT_CACHE_TTL_SEC_KIMI,
+        DOC_INJECT_CACHE_TTL_SEC_DEEPSEEK=DOC_INJECT_CACHE_TTL_SEC_DEEPSEEK,
         PARENT_INJECT_SKIP_WHEN_API_HISTORY=PARENT_INJECT_SKIP_WHEN_API_HISTORY,
         WORKSPACE_HINT_KEYWORD_GATE=WORKSPACE_HINT_KEYWORD_GATE,
         STATS_AGENT_TYPE_BREAKDOWN_ENABLED=STATS_AGENT_TYPE_BREAKDOWN_ENABLED,

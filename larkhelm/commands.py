@@ -27,6 +27,8 @@ from larkhelm.token_stats import (
     get_token_stats, get_token_stats_persistent,
     summarize_crew_agent_tokens_for_chat,
     summarize_crew_agent_tokens_by_type,
+    estimate_cache_savings,
+    get_cache_savings_summary,
 )
 from larkhelm.claude_session_guard import (
     get_session_counters, clear_session_counters,
@@ -310,6 +312,11 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
         except Exception as e:
             _debug_log(f"[reset] clear_history failed: {e}")
             _api_clear_failed = True
+        try:
+            from larkhelm import session_guard as _sg
+            _sg.clear_session_counters(chat_id, "gemini")
+        except Exception as _e:
+            _debug_log(f"[reset] clear gemini session counters failed: {_e}")
         log_entry(chat_id, "reset", "reset:gemini", model="system")
         if _api_clear_failed:
             send_card_reply(chat_id, msg_id, "⚠️ 部分重置",
@@ -327,6 +334,11 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
         except Exception as e:
             _debug_log(f"[reset] clear_history failed: {e}")
             _api_clear_failed = True
+        try:
+            from larkhelm import session_guard as _sg
+            _sg.clear_session_counters(chat_id, "kimi")
+        except Exception as _e:
+            _debug_log(f"[reset] clear kimi session counters failed: {_e}")
         log_entry(chat_id, "reset", "reset:kimi", model="system")
         if _api_clear_failed:
             send_card_reply(chat_id, msg_id, "⚠️ 部分重置",
@@ -338,7 +350,11 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
                             color="green")
     elif which == "deepseek":
         _clear_sid(chat_id, "deepseek")
-        clear_session_counters(chat_id)
+        try:
+            from larkhelm import session_guard as _sg
+            _sg.clear_session_counters(chat_id, "deepseek")
+        except Exception as _e:
+            _debug_log(f"[reset] clear deepseek session counters failed: {_e}")
         log_entry(chat_id, "reset", "reset:deepseek", model="system")
         send_card_reply(chat_id, msg_id, "♻️ 已重置",
                         "DeepSeek 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
@@ -822,6 +838,85 @@ def _cmd_stats_intent(chat_id: str, msg_id: str = None, date: str | None = None)
                     "\n".join(lines), color="turquoise")
 
 
+def _cmd_stats_cache(chat_id: str, msg_id: str = None):
+    """Render prompt-cache savings summary and per-backend session counters."""
+    lines: list[str] = []
+    try:
+        savings = get_cache_savings_summary()
+        if savings:
+            lines.append("**累计 Cache 节省（估算）：**")
+            for model, usd in sorted(savings.items()):
+                lines.append(f"- `{model}`：${usd:.4f}")
+        else:
+            lines.append("_暂无 cache 节省数据（本次进程尚无 cache_read 记录）_")
+    except Exception as e:
+        _debug_log(f"[stats] cache savings failed: {e}")
+        lines.append(f"_cache savings 读取失败：{e}_")
+
+    lines.append("")
+    lines.append("**各 Backend 会话计数器：**")
+    try:
+        from larkhelm import session_guard as _sg
+        for _backend in ("claude", "gemini", "kimi", "deepseek"):
+            _bsc = _sg.get_session_counters(chat_id, _backend)
+            _sc_cache = int(_bsc.get("cache_read", 0) or 0)
+            _sc_turns = int(_bsc.get("turns", 0) or 0)
+            _t_cache = int(_bsc.get("threshold_cache_read", 0) or 0)
+            _t_turns = int(_bsc.get("threshold_turns", 0) or 0)
+            if _t_cache == 0 and _t_turns == 0 and _sc_cache == 0 and _sc_turns == 0:
+                continue
+            _pct_c = min(100, int(_sc_cache * 100 / max(1, _t_cache))) if _t_cache else 0
+            _pct_t = min(100, int(_sc_turns * 100 / max(1, _t_turns))) if _t_turns else 0
+            _pct = max(_pct_c, _pct_t)
+            lines.append(
+                f"- `{_backend}`：{_sc_turns} 轮 / {_sc_cache:,} tokens cache_read"
+                + (f"（距阈值 {_pct}%）" if _pct else "")
+            )
+    except Exception as e:
+        _debug_log(f"[stats] cache counters failed: {e}")
+        lines.append(f"_会话计数器读取失败：{e}_")
+
+    # Cache hit rate block
+    try:
+        from larkhelm.token_stats import get_cache_hit_rate_summary
+        _hit_summary = get_cache_hit_rate_summary()
+        if _hit_summary:
+            lines.append("")
+            lines.append("**命中率（process-local）：**")
+            for _m, _d in sorted(_hit_summary.items()):
+                _r = int(_d.get("read", 0) or 0)
+                _i = int(_d.get("input", 0) or 0)
+                if _r <= 0:
+                    continue
+                _hr = int(_r * 100 / (_r + _i)) if (_r + _i) > 0 else 0
+                lines.append(
+                    f"- `{_m}`：命中率 {_hr}%（本进程累计 {_r:,} tokens cache_read）"
+                )
+    except Exception as _he:
+        _debug_log(f"[stats] cache hit rate failed: {_he}")
+
+    # Prefix stability block
+    try:
+        from larkhelm.metrics import get_registry as _get_reg
+        _preg = _get_reg()
+        if _preg.available and getattr(_preg, "prefix_stability_low_total", None) is not None:
+            _families = _preg.prefix_stability_low_total.collect()
+            _by_backend: dict[str, int] = {}
+            for _family in _families:
+                for _sample in _family.samples:
+                    _b = (_sample.labels or {}).get("backend", "unknown")
+                    _by_backend[_b] = _by_backend.get(_b, 0) + int(_sample.value or 0)
+            if _by_backend:
+                lines.append("")
+                lines.append("**Prefix 稳定性：**")
+                for _b, _n in sorted(_by_backend.items()):
+                    lines.append(f"- `{_b}`：变更 {_n} 次")
+    except Exception as _pse:
+        _debug_log(f"[stats] prefix stability failed: {_pse}")
+
+    send_card_reply(chat_id, msg_id, "💾 Cache 统计", "\n".join(lines), color="turquoise")
+
+
 def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
     """Display today / this-month / all-time token stats plus conversation activity for the current chat."""
     # Round-3 review P0 (R3-2): route `/stats intent [YYYY-MM-DD]` so the
@@ -839,6 +934,9 @@ def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
         # sub_args is the optional `YYYY-MM-DD` date; empty → today.
         date = sub_args or None
         _cmd_stats_intent(chat_id, msg_id, date=date)
+        return
+    if sub == "cache":
+        _cmd_stats_cache(chat_id, msg_id)
         return
     now   = datetime.now()
     today = now.strftime("%Y-%m-%d")
@@ -931,19 +1029,43 @@ def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
     stats_month = get_token_stats_persistent(chat_id, date_prefix=month)
     stats_all   = get_token_stats_persistent(chat_id, date_prefix=None)
 
+    def _savings_line(stats: dict) -> str | None:
+        total_savings = sum(
+            estimate_cache_savings(model, m) for model, m in stats.items()
+        )
+        total_cache_read = sum(
+            int(m.get("cache_read", 0) or 0) for m in stats.values()
+        )
+        total_input = sum(
+            int(m.get("input_tokens", 0) or 0) + int(m.get("cache_read", 0) or 0)
+            for m in stats.values()
+        )
+        if total_cache_read == 0 or total_savings <= 0:
+            return None
+        hit_pct = int(total_cache_read * 100 / total_input) if total_input > 0 else 0
+        return f"缓存节省 **${total_savings:.4f}**（命中 {hit_pct}%）"
+
     # In-memory stats for this process run (fallback if all.jsonl is empty)
     stats_mem   = get_token_stats(chat_id)
+
+    _today_block = _fmt_token_block(f"📅 今日（{today}）", stats_today)
+    _month_block = _fmt_token_block(f"🗓 本月（{month}）", stats_month)
+    _all_block = _fmt_token_block("📦 累计（全部）", stats_all)
+
+    def _append_savings(block: str, stats: dict) -> str:
+        sl = _savings_line(stats)
+        return (block + "\n" + sl) if sl else block
 
     parts = [
         f"**统计日期：** {today}",
         f"今日对话：**{user_count}** 次　错误：**{error_count}** 次　"
         f"平均耗时：**{_fmt_elapsed(avg) if avg else '—'}**",
         "---",
-        _fmt_token_block(f"📅 今日（{today}）", stats_today),
+        _append_savings(_today_block, stats_today),
         "---",
-        _fmt_token_block(f"🗓 本月（{month}）", stats_month),
+        _append_savings(_month_block, stats_month),
         "---",
-        _fmt_token_block("📦 累计（全部）", stats_all),
+        _append_savings(_all_block, stats_all),
     ]
 
     # P0 (design.md §6.5 AC-03): show Claude session counters and how far
@@ -964,6 +1086,26 @@ def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
                 f"**当前 session：{sc_turns} 轮 / {sc_cache:,} tokens "
                 f"cache_read（距离阈值 {pct}%）**"
             )
+        # REQ-02: show counters for other backends when thresholds are configured
+        try:
+            from larkhelm import session_guard as _sg
+            for _backend in ("gemini", "deepseek", "kimi"):
+                _bsc = _sg.get_session_counters(chat_id, _backend)
+                _t_cache = int(_bsc.get("threshold_cache_read", 0) or 0)
+                _t_turns = int(_bsc.get("threshold_turns", 0) or 0)
+                if _t_cache == 0 and _t_turns == 0:
+                    continue
+                _sc_cache = int(_bsc.get("cache_read", 0) or 0)
+                _sc_turns = int(_bsc.get("turns", 0) or 0)
+                _pct_c = min(100, int(_sc_cache * 100 / max(1, _t_cache))) if _t_cache else 0
+                _pct_t = min(100, int(_sc_turns * 100 / max(1, _t_turns))) if _t_turns else 0
+                _pct = max(_pct_c, _pct_t)
+                parts.append(
+                    f"**{_backend} session：{_sc_turns} 轮 / {_sc_cache:,} tokens "
+                    f"cache_read（距离阈值 {_pct}%）**"
+                )
+        except Exception as _be:
+            _debug_log(f"[stats] backend session counters render failed: {_be}")
     except Exception as e:
         _debug_log(f"[stats] session counters render failed: {e}")
 
@@ -1763,6 +1905,75 @@ def _cmd_memory_diagnose(chat_id: str, args: str = "", msg_id: str = None) -> No
     send_card_reply(chat_id, msg_id, "🔍 记忆诊断", body, color="blue")
 
 
+def _cmd_memory_set_project_guide(chat_id: str, args: str, msg_id=None) -> None:
+    """/memory set project_guide <auto|off|path <path>> — hot-update project guide config."""
+    sub = (args or "").strip()
+    if sub == "auto":
+        _cfg.config["project_guide_enabled"] = True
+        _cfg.config["project_guide_auto_discover"] = True
+        _cfg.config["project_guide_path"] = ""
+        _cfg.PROJECT_GUIDE_ENABLED = True
+        _cfg.PROJECT_GUIDE_AUTO_DISCOVER = True
+        _cfg.PROJECT_GUIDE_PATH = ""
+        send_card_reply(
+            chat_id, msg_id, "✅ Project Guide",
+            "已开启自动发现模式（从 cwd 查找 CLAUDE.md / .larkhelm_project.md）",
+            color="green",
+        )
+        return
+    if sub == "off":
+        _cfg.config["project_guide_enabled"] = False
+        _cfg.config["project_guide_auto_discover"] = False
+        _cfg.config["project_guide_path"] = ""
+        _cfg.PROJECT_GUIDE_ENABLED = False
+        _cfg.PROJECT_GUIDE_AUTO_DISCOVER = False
+        _cfg.PROJECT_GUIDE_PATH = ""
+        send_card_reply(
+            chat_id, msg_id, "✅ Project Guide",
+            "已关闭 Project Guide 注入",
+            color="green",
+        )
+        return
+    if sub.startswith("path "):
+        path_str = sub[5:].strip()
+        try:
+            p = Path(path_str).expanduser().resolve()
+        except Exception as _pe:
+            send_card_reply(chat_id, msg_id, "⚠️ 路径错误", f"无法解析路径：{path_str}", color="orange")
+            return
+        if not p.exists():
+            send_card_reply(chat_id, msg_id, "⚠️ 路径不存在", f"`{p}` 不存在", color="orange")
+            return
+        try:
+            data_dir = _cfg.DATA_DIR
+            if str(p).startswith(str(data_dir)):
+                send_card_reply(
+                    chat_id, msg_id, "⚠️ 路径限制",
+                    "Project Guide 路径不能位于 DATA_DIR 内", color="orange",
+                )
+                return
+        except Exception:
+            pass
+        _cfg.config["project_guide_enabled"] = True
+        _cfg.config["project_guide_auto_discover"] = False
+        _cfg.config["project_guide_path"] = str(p)
+        _cfg.PROJECT_GUIDE_ENABLED = True
+        _cfg.PROJECT_GUIDE_AUTO_DISCOVER = False
+        _cfg.PROJECT_GUIDE_PATH = str(p)
+        send_card_reply(
+            chat_id, msg_id, "✅ Project Guide",
+            f"已设置路径：`{p}`", color="green",
+        )
+        return
+    send_card_reply(
+        chat_id, msg_id, "⚠️ 用法",
+        "`/memory set project_guide auto` — 自动发现模式\n"
+        "`/memory set project_guide off` — 关闭\n"
+        "`/memory set project_guide path <路径>` — 指定文件",
+        color="orange",
+    )
+
+
 def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open_id: str = ""):
     """/memory — show/set/clear/update/gc/export/import/status the three-tier memory system.
 
@@ -2056,6 +2267,12 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open
         save_global_memory(text, chat_id=chat_id, sender_open_id=sender_open_id)
         send_card_reply(chat_id, msg_id, "✅ 全局记忆已更新",
                         f"```\n{text[:200]}\n```", color="green")
+        return
+
+    # ── /memory set project_guide ... ───────────────────────────────────────
+    if sub.startswith("set project_guide"):
+        _pg_args = sub[len("set project_guide"):].strip()
+        _cmd_memory_set_project_guide(chat_id, _pg_args, msg_id)
         return
 
     # ── /memory set project <text> ───────────────────────────────────────────

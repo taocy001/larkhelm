@@ -29,6 +29,9 @@ __all__ = [
     "_get_claude_session_counters",
     "_increment_claude_session_counters",
     "_clear_claude_session_counters",
+    "_get_backend_session_counters",
+    "_increment_backend_session_counters",
+    "_clear_backend_session_counters",
     "_pop_chat_field",
     "_flush_save",
 ]
@@ -112,7 +115,7 @@ def _set_chat_field(chat_id: str, key: str, value: object) -> None:
     _schedule_save()
 
 
-def _pop_chat_field(chat_id: str, key: str, default=None) -> object:
+def _pop_chat_field(chat_id: str, key: str, default: object = None) -> object:
     """Atomically read and remove a field from the chat state.
 
     Combining the read and delete under one lock acquisition prevents the
@@ -242,6 +245,57 @@ def _clear_claude_session_counters(chat_id: str) -> None:
         state = _chat_state_store.setdefault(chat_id, {})
         state["claude_session_cache_read"] = 0
         state["claude_session_turns"] = 0
+    _schedule_save()
+
+
+# ═══════════════════════════════════════════════════
+#  Generic backend session counters (Week-3)
+# ═══════════════════════════════════════════════════
+# Uses key format "{backend}_session_cache_read" / "{backend}_session_turns".
+# When backend="claude" these are identical to the claude-specific keys above,
+# so byte-compat with existing state files is preserved (NFR-2).
+
+def _get_backend_session_counters(chat_id: str, backend: str) -> tuple[int, int]:
+    """Return (cache_read_total, turn_total); defaults to (0, 0)."""
+    cache_key = f"{backend}_session_cache_read"
+    turns_key = f"{backend}_session_turns"
+    with _state_lock:
+        state = _chat_state_store.get(chat_id) or {}
+        cache_read = int(state.get(cache_key, 0) or 0)
+        turns = int(state.get(turns_key, 0) or 0)
+    return cache_read, turns
+
+
+def _increment_backend_session_counters(
+    chat_id: str,
+    backend: str,
+    cache_read_delta: int,
+) -> tuple[int, int]:
+    """Atomic +cache_read_delta and +1 turn. Returns new totals."""
+    try:
+        delta = max(0, int(cache_read_delta or 0))
+    except (TypeError, ValueError):
+        delta = 0
+    cache_key = f"{backend}_session_cache_read"
+    turns_key = f"{backend}_session_turns"
+    with _state_lock:
+        state = _chat_state_store.setdefault(chat_id, {})
+        new_cache = int(state.get(cache_key, 0) or 0) + delta
+        new_turns = int(state.get(turns_key, 0) or 0) + 1
+        state[cache_key] = new_cache
+        state[turns_key] = new_turns
+    _schedule_save()
+    return new_cache, new_turns
+
+
+def _clear_backend_session_counters(chat_id: str, backend: str) -> None:
+    """Zero both session counters for the specified backend. Idempotent."""
+    cache_key = f"{backend}_session_cache_read"
+    turns_key = f"{backend}_session_turns"
+    with _state_lock:
+        state = _chat_state_store.setdefault(chat_id, {})
+        state[cache_key] = 0
+        state[turns_key] = 0
     _schedule_save()
 
 

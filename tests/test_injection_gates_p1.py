@@ -197,7 +197,6 @@ class CrewStickyBugRegressionTests(unittest.TestCase):
         handle_message now delegates to), so this pin guards the real code path
         rather than a manual simulation.
         """
-        from unittest.mock import patch
         from larkhelm.handlers._message import _apply_crew_sticky_context
 
         mock_crew_ctx = {"title": "crew task", "summary": "did stuff"}
@@ -219,7 +218,6 @@ class CrewStickyBugRegressionTests(unittest.TestCase):
 
     def test_inject_when_crew_keyword_present(self):
         """gate=True + crew keyword in text → crew summary IS injected."""
-        from unittest.mock import patch
         from larkhelm.handlers._message import _apply_crew_sticky_context
 
         mock_crew_ctx = {"title": "my crew task", "summary": "result here"}
@@ -237,7 +235,6 @@ class CrewStickyBugRegressionTests(unittest.TestCase):
 
     def test_gate_off_always_injects(self):
         """gate=False → crew summary always injected regardless of keywords."""
-        from unittest.mock import patch
         from larkhelm.handlers._message import _apply_crew_sticky_context
 
         mock_crew_ctx = {"title": "task", "summary": "summary text"}
@@ -254,7 +251,6 @@ class CrewStickyBugRegressionTests(unittest.TestCase):
 
     def test_no_ctx_returns_prompt_unchanged(self):
         """No sticky context → prompt returned unmodified."""
-        from unittest.mock import patch
         from larkhelm.handlers._message import _apply_crew_sticky_context
 
         with patch("larkhelm.crew.consume_recent_crew_context", return_value=None):

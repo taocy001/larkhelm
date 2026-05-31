@@ -280,5 +280,59 @@ class MemoryContextBuilderTests(unittest.TestCase):
         self.assertNotIn("GLOBAL_X", out)
 
 
+# ---------------------------------------------------------------------------
+# AC-06: build_for_prompt_cache returns (stable, volatile) split
+# ---------------------------------------------------------------------------
+
+class TestBuildForPromptCache(unittest.TestCase):
+
+    def test_build_for_prompt_cache_return_type(self):
+        """AC-06: build_for_prompt_cache always returns (str, str)."""
+        with patch.object(mem, "load_global_memory", return_value=None), \
+             patch.object(mem, "load_project_memory", return_value=None), \
+             patch.object(mem, "load_memory", return_value=None):
+            result = mc.MemoryContextBuilder("chat1", "/x").build_for_prompt_cache()
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+        stable, volatile = result
+        self.assertIsInstance(stable, str)
+        self.assertIsInstance(volatile, str)
+
+    def test_build_for_prompt_cache_stable_volatile(self):
+        """AC-06: global+project go to stable block; session goes to volatile block."""
+        with patch.object(mc.MemoryContextBuilder, "_layer_global", return_value="GLOBAL_DATA"), \
+             patch.object(mc.MemoryContextBuilder, "_layer_project", return_value="PROJECT_DATA"), \
+             patch.object(mc.MemoryContextBuilder, "_layer_session", return_value="SESSION_DATA"), \
+             patch.object(mc.MemoryContextBuilder, "_should_include_global", return_value=True), \
+             patch.object(mc.MemoryContextBuilder, "_should_include_project", return_value=True):
+            stable, volatile = mc.MemoryContextBuilder(
+                "chat1", "/x",
+                query="工作任务",
+                force_project=True,
+            ).build_for_prompt_cache()
+
+        self.assertIn("GLOBAL_DATA", stable)
+        self.assertIn("PROJECT_DATA", stable)
+        self.assertNotIn("SESSION_DATA", stable)
+
+        self.assertIn("SESSION_DATA", volatile)
+        self.assertNotIn("GLOBAL_DATA", volatile)
+        self.assertNotIn("PROJECT_DATA", volatile)
+
+    def test_build_for_prompt_cache_empty_session(self):
+        """AC-06: When session memory is empty, volatile is empty string."""
+        with patch.object(mc.MemoryContextBuilder, "_layer_global", return_value="GLOBAL_DATA"), \
+             patch.object(mc.MemoryContextBuilder, "_layer_session", return_value=""), \
+             patch.object(mc.MemoryContextBuilder, "_should_include_global", return_value=True):
+            stable, volatile = mc.MemoryContextBuilder(
+                "chat1", "/x",
+                query="工作任务",
+                force_global=True,
+            ).build_for_prompt_cache()
+
+        self.assertIn("GLOBAL_DATA", stable)
+        self.assertEqual(volatile, "")
+
+
 if __name__ == "__main__":
     unittest.main()

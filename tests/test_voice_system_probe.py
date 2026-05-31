@@ -64,22 +64,27 @@ def test_cpu_flags_avx2_present(monkeypatch):
 
 def test_cpu_flags_no_avx_qemu_default(monkeypatch):
     """QEMU 默认 qemu64 模型只给 SSE4，没有 AVX/AVX2/FMA — 本机就是这种。"""
-    monkeypatch.setattr(
-        "builtins.open",
-        lambda p, *a, **kw: io.StringIO(
-            _fake_cpuinfo("fpu sse sse2 sse4_1 sse4_2 popcnt aes")
-        ),
-    )
-    flags = sp.probe_cpu_flags()
+    # Prevent the Apple Silicon early-return path (arm64/Darwin → all-True).
+    # platform is imported locally inside probe_cpu_flags; patch at stdlib level.
+    with patch("platform.machine", return_value="x86_64"), \
+         patch("platform.system", return_value="Linux"), \
+         patch("builtins.open",
+               lambda p, *a, **kw: io.StringIO(
+                   _fake_cpuinfo("fpu sse sse2 sse4_1 sse4_2 popcnt aes")
+               )):
+        flags = sp.probe_cpu_flags()
     assert flags == {"avx2": False, "avx": False, "sse4": True, "fma": False}
 
 
 def test_cpu_flags_no_proc(monkeypatch):
     """Non-Linux / unreadable proc → all False (conservative fallback)."""
+    # Prevent the Apple Silicon early-return path (arm64/Darwin → all-True).
     def _raise(*a, **kw):
         raise FileNotFoundError("/proc/cpuinfo")
-    monkeypatch.setattr("builtins.open", _raise)
-    flags = sp.probe_cpu_flags()
+    with patch("platform.machine", return_value="x86_64"), \
+         patch("platform.system", return_value="Linux"), \
+         patch("builtins.open", _raise):
+        flags = sp.probe_cpu_flags()
     assert flags == {"avx2": False, "avx": False, "sse4": False, "fma": False}
 
 

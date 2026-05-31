@@ -991,6 +991,65 @@ def _is_useful_summary(text: str | None) -> bool:
     return True
 
 
+_CHECKPOINT_PROMPT = (
+    "Summarize the following conversation in ≤300 characters. "
+    "Focus on the most important current task, key decisions, and next actions. "
+    "Be concise — this will be used as a session anchor when the session resets.\n\n"
+    "{logs}"
+)
+
+
+def generate_session_checkpoint(chat_id: str, turns: int = 5) -> str:
+    """Generate a ≤300 char session summary via cheap LLM for anchor sidecar.
+
+    Reads the last `turns*2` user/assistant log entries and calls
+    _run_one_shot(prefer_cheap=True). Returns "" on empty history,
+    LLM error, or any other exception. Never raises.
+    """
+    try:
+        records = _read_logs_tail(chat_id)
+        conv = [
+            r for r in records
+            if r.get("role") in ("user", "assistant")
+        ]
+        recent = conv[-(turns * 2):]
+        if not recent:
+            return ""
+        lines = []
+        for r in recent:
+            role = r.get("role", "")
+            content = r.get("content") or r.get("text") or ""
+            if content:
+                lines.append(f"{role}: {content[:400]}")
+        logs = "\n".join(lines)
+        if not logs.strip():
+            return ""
+        prompt = _CHECKPOINT_PROMPT.format(logs=logs)
+        result = _run_one_shot(prompt, f"{chat_id}__checkpoint", prefer_cheap=True)
+        return (result or "").strip()[:300]
+    except Exception as e:
+        _debug_log(f"[Memory] generate_session_checkpoint failed for {chat_id[:8]}: {e}")
+        return ""
+
+
+def load_session_anchor(chat_id: str) -> str:
+    """Read the anchor sidecar summary for chat_id.
+
+    Returns the "summary" field from {SESSION_DIR}/{chat_id}.anchor.json,
+    or "" if the file does not exist or is malformed. Never raises.
+    """
+    try:
+        import json as _json
+        anchor_path = _cfg.SESSION_DIR / f"{chat_id}.anchor.json"
+        if not anchor_path.exists():
+            return ""
+        data = _json.loads(anchor_path.read_text(encoding="utf-8"))
+        return str(data.get("summary") or "")
+    except Exception as e:
+        _debug_log(f"[Memory] load_session_anchor failed for {chat_id[:8]}: {e}")
+        return ""
+
+
 def generate_memory(chat_id: str, recent_logs: str,
                     existing_memory: str | None = None,
                     cancel_ev: "threading.Event | None" = None) -> str:

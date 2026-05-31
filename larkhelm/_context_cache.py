@@ -258,21 +258,28 @@ class TTLCache(Generic[K, V]):
             self._hits += 1
             return payload
 
-    def get_with_age(self, key: K) -> Optional[tuple[V, int]]:
+    def get_with_age(self, key: K, ttl_override: "float | None" = None) -> Optional[tuple[V, int]]:
         """Return ``(value, age_sec)`` on hit, ``None`` on miss / expiry.
 
         ``age_sec`` is ``int(monotonic_now - fetched_at)``, clamped at 0.
+        ``ttl_override``: when not None and > 0, use this TTL for the expiry
+        check instead of ``self._ttl`` (does not affect stored data).
         Shares the same lock + expiry semantics as :meth:`get` so
         callers don't see a different staleness window.
         """
         now = time.monotonic()
+        effective_ttl = (
+            float(ttl_override)
+            if (ttl_override is not None and ttl_override > 0)
+            else self._ttl
+        )
         with self._lock:
             entry = self._data.get(key)
             if entry is None:
                 self._misses += 1
                 return None
             fetched_at, payload = entry
-            if now - fetched_at > self._ttl:
+            if now - fetched_at > effective_ttl:
                 self._data.pop(key, None)
                 self._misses += 1
                 return None
@@ -376,6 +383,24 @@ def _doc_ttl_sec() -> float:
         return v if v > 0 else _DOC_DEFAULT_TTL
     except Exception:
         return _DOC_DEFAULT_TTL
+
+
+def _doc_ttl_sec_for_backend(backend: str) -> float:
+    """Resolve per-backend doc inject TTL. Falls back to _doc_ttl_sec() when no override found.
+
+    Reads ``_cfg.DOC_INJECT_CACHE_TTL_SEC_<BACKEND>`` (e.g. DOC_INJECT_CACHE_TTL_SEC_KIMI).
+    """
+    try:
+        import larkhelm.config as _cfg
+        key = f"DOC_INJECT_CACHE_TTL_SEC_{(backend or '').upper()}"
+        v = getattr(_cfg, key, None)
+        if v is not None:
+            f = float(v)
+            if f > 0:
+                return f
+    except Exception:
+        pass
+    return _doc_ttl_sec()
 
 
 def _config_flag(name: str, default: bool = True) -> bool:
@@ -581,6 +606,7 @@ def cached_doc_read_with_meta(
     max_chars: int,
     *,
     loader: Callable[[], Any],
+    backend: str = "",
 ) -> DocReadResult:
     """TTL-cached wrapper for ``FeishuDocClient.read``, returning provenance.
 
@@ -618,7 +644,7 @@ def cached_doc_read_with_meta(
         max_chars=int(max_chars),
     )
 
-    aged = _doc_cache.get_with_age(key)
+    aged = _doc_cache.get_with_age(key, ttl_override=_doc_ttl_sec_for_backend(backend))
     if aged is not None:
         entry, age_sec = aged
         _inc_outcome("doc_inject", "hit_with_age_hint")
@@ -658,5 +684,6 @@ __all__ = [
     "DocReadResult",
     "cached_recent_turns", "cached_memory_layer", "cached_doc_read",
     "cached_doc_read_with_meta",
+    "_doc_ttl_sec_for_backend",
     "reset_for_tests",
 ]

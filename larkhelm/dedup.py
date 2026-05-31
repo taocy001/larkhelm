@@ -13,6 +13,7 @@ import json
 import threading
 import time
 from collections import OrderedDict
+from pathlib import Path
 
 __all__ = ["DEDUP_CAP", "_is_duplicate"]
 
@@ -29,7 +30,7 @@ _save_timer: threading.Timer | None = None
 _save_timer_lock = threading.Lock()
 
 
-def _dedup_path():
+def _dedup_path() -> Path | None:
     try:
         import larkhelm.config as _cfg
         return _cfg.DATA_DIR / ".feishu_dedup.json"

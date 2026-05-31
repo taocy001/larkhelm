@@ -135,6 +135,10 @@ class LarkhelmMetricsRegistry:
             self.cache_write_tokens_total = None
             self.cache_read_tokens_total = None
             self.cache_hit_ratio = None
+            self.cache_savings_total = None
+            self.session_checkpoint_total = None
+            self.prefix_stability_low_total = None
+            self.prompt_cache_hit_rate = None
             return
 
         # Use a private registry so the larkhelm metrics don't collide with
@@ -364,6 +368,31 @@ class LarkhelmMetricsRegistry:
             "larkhelm_cache_hit_ratio",
             "Real-time cache hit ratio cache_read/(cache_read+cache_write); 0 when denominator is zero",
             ["model"],
+            registry=self._registry,
+        )
+        self.cache_savings_total = pc.Counter(
+            "larkhelm_cache_savings_total",
+            "Estimated USD saved by prompt cache hits, bucketed by backend",
+            ["backend"],
+            registry=self._registry,
+        )
+        self.session_checkpoint_total = pc.Counter(
+            "larkhelm_session_checkpoint_total",
+            "Session auto-reset checkpoints by backend and reason",
+            ["backend", "reason"],
+            registry=self._registry,
+        )
+        self.prefix_stability_low_total = pc.Counter(
+            "larkhelm_prefix_stability_low_total",
+            "Stable prefix hash changes detected (Anthropic layered cache instability)",
+            ["backend"],
+            registry=self._registry,
+        )
+        self.prompt_cache_hit_rate = pc.Histogram(
+            "larkhelm_prompt_cache_hit_rate",
+            "Per-query prompt cache hit rate (cache_read / (cache_read + input_tokens))",
+            ["backend"],
+            buckets=[0, 0.25, 0.5, 0.75, 0.9, 0.95, 1.0],
             registry=self._registry,
         )
 
@@ -939,6 +968,67 @@ def set_cache_hit_ratio(model: str, ratio: float) -> None:
         safe_log(f"[Metrics] set_cache_hit_ratio failed (model={model}, ratio={ratio}): {e}")
 
 
+def inc_cache_savings(backend: str, amount_usd: float) -> None:
+    """Bump larkhelm_cache_savings_total{backend} by amount_usd.
+
+    backend ∈ {"claude", "gemini", "deepseek", "kimi"}.
+    amount_usd may be a small positive float (e.g. 0.00027).
+    Never raises; no-op when prometheus-client is absent.
+    """
+    reg = get_registry()
+    if not reg.available or getattr(reg, "cache_savings_total", None) is None:
+        return
+    try:
+        reg.cache_savings_total.labels(backend=str(backend)).inc(float(amount_usd))
+    except Exception as e:
+        safe_log(f"[Metrics] inc_cache_savings failed (backend={backend}, amount_usd={amount_usd}): {e}")
+
+
+def inc_session_checkpoint(backend: str, reason: str) -> None:
+    """Bump larkhelm_session_checkpoint_total{backend, reason}.
+
+    reason ∈ {"cache_tokens", "turns"}.
+    Never raises; no-op when prometheus-client is absent.
+    """
+    reg = get_registry()
+    if not reg.available or getattr(reg, "session_checkpoint_total", None) is None:
+        return
+    try:
+        reg.session_checkpoint_total.labels(backend=str(backend), reason=str(reason)).inc()
+    except Exception as e:
+        safe_log(f"[Metrics] inc_session_checkpoint failed (backend={backend}, reason={reason}): {e}")
+
+
+def inc_prefix_stability_low(backend: str) -> None:
+    """Bump larkhelm_prefix_stability_low_total{backend} by 1.
+
+    backend — the spec.id of the Anthropic backend (e.g. "anthropic_claude_3_7").
+    Never raises; no-op when prometheus-client is absent.
+    """
+    reg = get_registry()
+    if not reg.available or getattr(reg, "prefix_stability_low_total", None) is None:
+        return
+    try:
+        reg.prefix_stability_low_total.labels(backend=str(backend)).inc()
+    except Exception as e:
+        safe_log(f"[Metrics] inc_prefix_stability_low failed (backend={backend}): {e}")
+
+
+def observe_cache_hit_rate(backend: str, ratio: float) -> None:
+    """Observe larkhelm_prompt_cache_hit_rate{backend} with ratio.
+
+    ratio ∈ [0.0, 1.0]. Caller computes: cache_read / (cache_read + input_tokens + 1e-9).
+    Never raises; no-op when prometheus-client is absent.
+    """
+    reg = get_registry()
+    if not reg.available or getattr(reg, "prompt_cache_hit_rate", None) is None:
+        return
+    try:
+        reg.prompt_cache_hit_rate.labels(backend=str(backend)).observe(float(ratio))
+    except Exception as e:
+        safe_log(f"[Metrics] observe_cache_hit_rate failed (backend={backend}, ratio={ratio}): {e}")
+
+
 def inc_workspace_hint(outcome: str) -> None:
     """Bump ``larkhelm_workspace_hint_total{outcome}``.
 
@@ -973,6 +1063,8 @@ _REGISTRY_ALIASES = {
     "STICKY_CONTEXT_EVICTED_TOTAL":  "sticky_context_evicted_total",
     "TOKENS_TOTAL":                  "tokens_total",
     "DOC_INJECT_CACHE_TOTAL":        "doc_inject_cache_total",
+    "CACHE_SAVINGS_TOTAL":           "cache_savings_total",
+    "SESSION_CHECKPOINT_TOTAL":      "session_checkpoint_total",
 }
 
 
@@ -1013,6 +1105,10 @@ __all__ = [
     "inc_cache_write_tokens",
     "inc_cache_read_tokens",
     "set_cache_hit_ratio",
+    "inc_cache_savings",
+    "inc_session_checkpoint",
+    "inc_prefix_stability_low",
+    "observe_cache_hit_rate",
     # Module-level Counter aliases (resolved lazily via __getattr__):
     "WORKSPACE_HINT_TOTAL",
     "SESSION_AUTO_RESET_TOTAL",

@@ -464,11 +464,11 @@ def test_anthropic_adapter_with_injected_module():
 
 @pytest.fixture
 def _reset_extended_cache_state():
-    """Reset the module-level _extended_cache_disabled before/after."""
-    prev = _stream._extended_cache_disabled
-    _stream._extended_cache_disabled = False
+    """Reset the module-level _extended_cache_disabled_until before/after."""
+    prev = _stream._extended_cache_disabled_until
+    _stream._extended_cache_disabled_until = 0.0
     yield
-    _stream._extended_cache_disabled = prev
+    _stream._extended_cache_disabled_until = prev
 
 
 def test_extended_cache_inject_header_and_ttl(monkeypatch, _reset_extended_cache_state):
@@ -587,8 +587,10 @@ def test_extended_cache_fallback_on_400(monkeypatch, _reset_extended_cache_state
     assert "extra_headers" not in second_kwargs
     assert "ttl" not in second_kwargs["system"][0]["cache_control"]
 
-    # Module-level flag has flipped — future requests will downgrade up-front.
-    assert _stream._extended_cache_disabled is True
+    # Module-level TTL flag has been set — future requests will downgrade up-front.
+    assert _stream._is_extended_cache_disabled(), (
+        "_extended_cache_disabled_until should be in the future after a 400 rejection"
+    )
 
     # Sanity: a fresh prepare_request with the flag set must produce 5min ttl.
     follow = ad.prepare_request(_spec(), [], "again", extra_system="ctx")
@@ -660,3 +662,153 @@ def test_strip_extended_cache_does_not_mutate_input():
     assert "extra_headers" not in stripped
     assert stripped["system"][0]["cache_control"] == {"type": "ephemeral"}
     assert stripped["model"] == "claude-sonnet-4-6"
+
+
+# ── Layered cache control (Week-4 REQ-05/06) ────────────────────────────────
+
+
+def test_anthropic_adapter_layered_two_blocks(monkeypatch):
+    """AC-07: When ANTHROPIC_LAYERED_CACHE_CONTROL=True prepare_request emits
+    two system blocks — stable (with cache_control) and volatile (no cache_control)."""
+    import larkhelm.config as _cfg
+    monkeypatch.setattr(_cfg, "ANTHROPIC_LAYERED_CACHE_CONTROL", True, raising=False)
+    monkeypatch.setattr(_cfg, "ANTHROPIC_EXTENDED_CACHE_ENABLED", False, raising=False)
+
+    mod = types.SimpleNamespace(Anthropic=lambda **kw: None)
+    ad = _stream.AnthropicAdapter(anthropic_module=mod)
+
+    extra_system = (
+        "global and project memory here\n"
+        "[SESSION MEMORY]\nsession context\n[/SESSION MEMORY]"
+    )
+    request = ad.prepare_request(_spec(), [], "hi", extra_system=extra_system)
+
+    system = request.get("system", [])
+    assert len(system) == 2, f"Expected 2 system blocks, got {len(system)}: {system}"
+
+    stable_block = system[0]
+    volatile_block = system[1]
+
+    assert "cache_control" in stable_block, "stable block must have cache_control"
+    assert "global and project memory here" in stable_block["text"]
+    assert "cache_control" not in volatile_block, "volatile block must NOT have cache_control"
+    assert "[SESSION MEMORY]" in volatile_block["text"]
+
+
+def test_anthropic_adapter_default_single_block(monkeypatch):
+    """AC-08: When ANTHROPIC_LAYERED_CACHE_CONTROL=False (default) prepare_request
+    emits a single system block (byte-identical to pre-Week-4 behaviour)."""
+    import larkhelm.config as _cfg
+    monkeypatch.setattr(_cfg, "ANTHROPIC_LAYERED_CACHE_CONTROL", False, raising=False)
+    monkeypatch.setattr(_cfg, "ANTHROPIC_EXTENDED_CACHE_ENABLED", False, raising=False)
+
+    mod = types.SimpleNamespace(Anthropic=lambda **kw: None)
+    ad = _stream.AnthropicAdapter(anthropic_module=mod)
+
+    extra_system = (
+        "global and project memory here\n"
+        "[SESSION MEMORY]\nsession context\n[/SESSION MEMORY]"
+    )
+    request = ad.prepare_request(_spec(), [], "hi", extra_system=extra_system)
+
+    system = request.get("system", [])
+    assert len(system) == 1, f"Expected 1 system block (legacy), got {len(system)}: {system}"
+    assert "cache_control" in system[0]
+
+
+def test_anthropic_adapter_layered_empty_stable_fallback(monkeypatch):
+    """DEF-01 regression: ANTHROPIC_LAYERED_CACHE_CONTROL=True + no global/project
+    memory (stable_text is empty) must NOT produce a text='' block — Anthropic API
+    rejects empty text blocks with invalid_request_error.
+    Instead falls back to single block carrying the volatile content."""
+    import larkhelm.config as _cfg
+    monkeypatch.setattr(_cfg, "ANTHROPIC_LAYERED_CACHE_CONTROL", True, raising=False)
+    monkeypatch.setattr(_cfg, "ANTHROPIC_EXTENDED_CACHE_ENABLED", False, raising=False)
+
+    mod = types.SimpleNamespace(Anthropic=lambda **kw: None)
+    ad = _stream.AnthropicAdapter(anthropic_module=mod)
+
+    # Only session memory present — stable section will be empty after split
+    extra_system = "[SESSION MEMORY]\nsome session content\n[/SESSION MEMORY]"
+    request = ad.prepare_request(_spec(), [], "hi", extra_system=extra_system)
+
+    system = request.get("system", [])
+    # Must not produce an empty text block
+    for block in system:
+        assert block.get("text"), f"Empty text block in system: {block}"
+    # Single-block fallback: the volatile content should be present
+    assert len(system) == 1, (
+        f"Expected 1 system block (fallback), got {len(system)}: {system}"
+    )
+    assert "some session content" in system[0]["text"]
+    assert "cache_control" in system[0]
+
+
+def test_anthropic_adapter_layered_only_stable_no_volatile(monkeypatch):
+    """Layered path with stable content but no SESSION MEMORY section:
+    should produce one block (no empty volatile block appended)."""
+    import larkhelm.config as _cfg
+    monkeypatch.setattr(_cfg, "ANTHROPIC_LAYERED_CACHE_CONTROL", True, raising=False)
+    monkeypatch.setattr(_cfg, "ANTHROPIC_EXTENDED_CACHE_ENABLED", False, raising=False)
+
+    mod = types.SimpleNamespace(Anthropic=lambda **kw: None)
+    ad = _stream.AnthropicAdapter(anthropic_module=mod)
+
+    extra_system = "global memory only, no session memory block"
+    request = ad.prepare_request(_spec(), [], "hi", extra_system=extra_system)
+
+    system = request.get("system", [])
+    assert len(system) == 1, (
+        f"Expected 1 block (no volatile section), got {len(system)}: {system}"
+    )
+    assert system[0].get("text"), "block text must not be empty"
+    assert "cache_control" in system[0]
+
+
+# ── AC-05 / AC-06: anthropic_layered_cache_traffic gate ──────────────────
+
+
+def test_anthropic_adapter_traffic_zero_no_layered(monkeypatch):
+    """AC-05: ANTHROPIC_LAYERED_CACHE_CONTROL=False + traffic=0.0 → single block (not layered)."""
+    import larkhelm.config as _cfg
+    monkeypatch.setattr(_cfg, "ANTHROPIC_LAYERED_CACHE_CONTROL", False, raising=False)
+    monkeypatch.setattr(_cfg, "ANTHROPIC_LAYERED_CACHE_TRAFFIC", 0.0, raising=False)
+    monkeypatch.setattr(_cfg, "ANTHROPIC_EXTENDED_CACHE_ENABLED", False, raising=False)
+
+    mod = types.SimpleNamespace(Anthropic=lambda **kw: None)
+    ad = _stream.AnthropicAdapter(anthropic_module=mod)
+
+    extra_system = (
+        "global memory\n"
+        "[SESSION MEMORY]\nsession content\n[/SESSION MEMORY]"
+    )
+    request = ad.prepare_request(_spec(), [], "hi", extra_system=extra_system)
+
+    system = request.get("system", [])
+    assert len(system) == 1, (
+        f"AC-05: traffic=0.0 must produce 1 block (not layered), got {len(system)}: {system}"
+    )
+
+
+def test_anthropic_adapter_bool_override_forces_layered(monkeypatch):
+    """AC-06: ANTHROPIC_LAYERED_CACHE_CONTROL=True overrides traffic to 100%."""
+    import larkhelm.config as _cfg
+    monkeypatch.setattr(_cfg, "ANTHROPIC_LAYERED_CACHE_CONTROL", True, raising=False)
+    monkeypatch.setattr(_cfg, "ANTHROPIC_LAYERED_CACHE_TRAFFIC", 0.0, raising=False)
+    monkeypatch.setattr(_cfg, "ANTHROPIC_EXTENDED_CACHE_ENABLED", False, raising=False)
+
+    mod = types.SimpleNamespace(Anthropic=lambda **kw: None)
+    ad = _stream.AnthropicAdapter(anthropic_module=mod)
+
+    extra_system = (
+        "global memory\n"
+        "[SESSION MEMORY]\nsession content\n[/SESSION MEMORY]"
+    )
+    request = ad.prepare_request(_spec(), [], "hi", extra_system=extra_system)
+
+    system = request.get("system", [])
+    assert len(system) == 2, (
+        f"AC-06: bool override=True must produce 2 blocks (layered), got {len(system)}: {system}"
+    )
+    assert "cache_control" in system[0], "stable block must have cache_control"
+    assert "cache_control" not in system[1], "volatile block must NOT have cache_control"

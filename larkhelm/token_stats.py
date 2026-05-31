@@ -3,6 +3,7 @@ import json
 import threading
 from collections import OrderedDict
 from datetime import datetime
+from pathlib import Path
 
 import larkhelm.config as _cfg
 from larkhelm.concurrency import _jsonl_lock
@@ -16,7 +17,85 @@ __all__ = [
     "record_crew_agent_tokens", "get_crew_agent_tokens", "evict_crew_agent_tokens",
     "summarize_crew_agent_tokens_for_chat",
     "summarize_crew_agent_tokens_by_type",
+    "estimate_cache_savings",
+    "get_cache_savings_summary",
+    "get_cache_hit_rate_summary",
 ]
+
+# Per-million cache_read tokens: (input_price - cache_read_price) per model.
+# Models not listed return 0.0 (no known cache pricing or not applicable).
+_CACHE_SAVINGS_PER_M: dict[str, float] = {
+    "claude":   2.70,   # Sonnet 4.x: $3.00/M input − $0.30/M cache_read
+    "gemini":   1.125,  # Pro 1.5: $1.25/M input − $0.125/M cache_read
+    "deepseek": 0.20,   # V3: $0.27/M − $0.07/M cache_hit (approximate)
+    "kimi":     0.0,    # no public cache pricing
+}
+
+
+def estimate_cache_savings(model: str, usage: dict) -> float:
+    """Estimate USD saved by prompt cache for one query.
+
+    Uses per-model (input_price - cache_read_price) per-million-tokens rate.
+    Returns 0.0 for unknown models or if cache_read == 0. Never raises.
+    """
+    try:
+        rate = _CACHE_SAVINGS_PER_M.get(str(model), 0.0)
+        if not rate:
+            return 0.0
+        cache_read = max(0, int((usage or {}).get("cache_read", 0) or 0))
+        if not cache_read:
+            return 0.0
+        return cache_read * rate / 1_000_000
+    except Exception:
+        return 0.0
+
+
+def get_cache_savings_summary() -> dict[str, float]:
+    """Return per-model estimated cache savings (USD) accumulated since process start.
+
+    Computed from _cache_totals_by_model["read"] × _CACHE_SAVINGS_PER_M.
+    Returns {} for models with no cache reads or no pricing data.
+    Thread-safe (acquires _token_stats_lock). Never raises.
+    """
+    try:
+        with _token_stats_lock:
+            snapshot = {m: dict(v) for m, v in _cache_totals_by_model.items()}
+        result: dict[str, float] = {}
+        for model, totals in snapshot.items():
+            rate = _CACHE_SAVINGS_PER_M.get(str(model), 0.0)
+            if not rate:
+                continue
+            read_tokens = max(0, int(totals.get("read", 0) or 0))
+            if not read_tokens:
+                continue
+            result[model] = read_tokens * rate / 1_000_000
+        return result
+    except Exception:
+        return {}
+
+def get_cache_hit_rate_summary() -> dict[str, dict]:
+    """Return per-model cache read and input token totals accumulated since process start.
+
+    Used by _cmd_stats_cache to compute hit_rate = read / (read + input).
+    Returns {} for models with no cache reads. Thread-safe (acquires _token_stats_lock).
+    Never raises.
+    """
+    try:
+        with _token_stats_lock:
+            snapshot = {m: dict(v) for m, v in _cache_totals_by_model.items()}
+        result: dict[str, dict] = {}
+        for model, totals in snapshot.items():
+            read_tokens = max(0, int(totals.get("read", 0) or 0))
+            if not read_tokens:
+                continue
+            result[model] = {
+                "read": read_tokens,
+                "input": max(0, int(totals.get("input", 0) or 0)),
+            }
+        return result
+    except Exception:
+        return {}
+
 
 # P5 REQ-08 / design.md §3.2: static agent_id → bucket name table.
 # Covers the 6 `/dev` pipeline IDs plus the 5 Phase 5 agent_hub types.
@@ -251,9 +330,10 @@ def record_token_usage(chat_id: str, model: str, usage: dict) -> None:
         m["cache_create"]  += usage.get("cache_create", 0)
         m["cost_usd"]      += usage.get("cost_usd", 0.0)
         m["calls"]         += 1
-        _ct = _cache_totals_by_model.setdefault(model, {"write": 0, "read": 0})
+        _ct = _cache_totals_by_model.setdefault(model, {"write": 0, "read": 0, "input": 0})
         _ct["write"] += max(0, int(usage.get("cache_create", 0) or 0))
         _ct["read"]  += max(0, int(usage.get("cache_read", 0) or 0))
+        _ct["input"] += max(0, int(usage.get("input_tokens", 0) or 0))
         _snap_write, _snap_read = _ct["write"], _ct["read"]
 
     record = {
@@ -292,11 +372,22 @@ def record_token_usage(chat_id: str, model: str, usage: dict) -> None:
     try:
         cache_create_val = max(0, int(usage.get("cache_create", 0) or 0))
         cache_read_val   = max(0, int(usage.get("cache_read", 0) or 0))
-        from larkhelm.metrics import inc_cache_write_tokens, inc_cache_read_tokens, set_cache_hit_ratio
+        from larkhelm.metrics import inc_cache_write_tokens, inc_cache_read_tokens, set_cache_hit_ratio, observe_cache_hit_rate
         if cache_create_val > 0:
             inc_cache_write_tokens(model, cache_create_val)
         if cache_read_val > 0:
             inc_cache_read_tokens(model, cache_read_val)
+            _input_tokens = max(0, int(usage.get("input_tokens", 0) or 0))
+            _hit_rate = cache_read_val / (cache_read_val + _input_tokens + 1e-9)
+            observe_cache_hit_rate(model, _hit_rate)
+            try:
+                _alert_threshold = float(getattr(_cfg, "CACHE_HIT_RATE_ALERT_THRESHOLD", 0.5))
+                if cache_read_val > 0 and _hit_rate < _alert_threshold:
+                    _debug_log(
+                        f"[TokenStats] low cache hit rate for {model}: {_hit_rate:.0%}"
+                    )
+            except Exception:
+                pass
         denom = _snap_write + _snap_read
         ratio = _snap_read / denom if denom > 0 else 0.0
         set_cache_hit_ratio(model, ratio)
@@ -305,17 +396,24 @@ def record_token_usage(chat_id: str, model: str, usage: dict) -> None:
     except Exception as e:
         _debug_log(f"[TokenStats] cache metric update failed (model={model}): {e}")
 
-    # P0: Claude session auto-reset hook. Lazy import avoids a config →
-    # token_stats → claude_session_guard → memory → … cycle during boot;
-    # guard module itself swallows exceptions, but we wrap defensively so
-    # any import-time error here can't break record_token_usage.
+    # Session guard hook (all backends). Lazy import avoids circular import
+    # during boot; guard module itself swallows exceptions, but we wrap
+    # defensively so any import-time error can't break record_token_usage.
     try:
-        from larkhelm.claude_session_guard import maybe_auto_reset_session
-        maybe_auto_reset_session(chat_id, model, usage)
+        from larkhelm.session_guard import maybe_auto_reset
+        maybe_auto_reset(chat_id, model, usage)
     except Exception as e:
         _debug_log(
-            f"[TokenStats] maybe_auto_reset_session failed (model={model}): {e}"
+            f"[TokenStats] maybe_auto_reset failed (model={model}): {e}"
         )
+
+    try:
+        savings = estimate_cache_savings(model, usage)
+        if savings > 0:
+            from larkhelm.metrics import inc_cache_savings
+            inc_cache_savings(model, savings)
+    except Exception as e:
+        _debug_log(f"[TokenStats] inc_cache_savings failed (model={model}): {e}")
 
 
 def get_token_stats(chat_id: str | None = None) -> dict:
@@ -356,7 +454,7 @@ def get_token_stats_persistent(chat_id: str, date_prefix: str | None = None) -> 
         backup = _cfg.LOG_DIR / "all.jsonl.1"
     totals: dict[str, dict] = {}
 
-    def _scan(path) -> None:
+    def _scan(path: Path) -> None:
         try:
             with path.open(encoding="utf-8") as f:
                 for line in f:

@@ -22,7 +22,9 @@ name. The template + adapter classes are internal but importable for tests.
 from __future__ import annotations
 
 import os
+import random as _random
 import threading
+import time
 from typing import Any, Callable, Iterator, Protocol
 
 from larkhelm.backend_registry import BackendSpec, BACKEND_REGISTRY
@@ -34,8 +36,13 @@ from larkhelm.token_budget import compute_api_max_tokens
 # process skip the 1h TTL request shape entirely so we don't pay a wasted
 # handshake on every query. Restart clears the flag, allowing recovery once
 # Anthropic enables the beta on the account.
-_extended_cache_disabled: bool = False
+_extended_cache_disabled_until: float = 0.0
 _extended_cache_lock = threading.Lock()
+
+
+def _is_extended_cache_disabled() -> bool:
+    """Return True iff the extended-cache TTL ban is still active."""
+    return _extended_cache_disabled_until > 0 and time.time() < _extended_cache_disabled_until
 
 
 def _is_extended_cache_rejection(exc: Exception) -> bool:
@@ -199,23 +206,55 @@ class AnthropicAdapter:
             system_text = "\n\n".join(system_parts)
             cache_control: dict = {"type": "ephemeral"}
             use_extended = False
+            use_layered = False
             try:
                 from larkhelm import config as _cfg
                 use_extended = bool(
                     getattr(_cfg, "ANTHROPIC_EXTENDED_CACHE_ENABLED", True)
-                ) and not _extended_cache_disabled
+                ) and not _is_extended_cache_disabled()
+                _override = bool(getattr(_cfg, "ANTHROPIC_LAYERED_CACHE_CONTROL", False))
+                _traffic = float(getattr(_cfg, "ANTHROPIC_LAYERED_CACHE_TRAFFIC", 0.0))
+                use_layered = _override or (_traffic > 0.0 and _random.random() < _traffic)
             except Exception:
                 use_extended = False
+                use_layered = False
             if use_extended:
                 cache_control = {"type": "ephemeral", "ttl": "1h"}
                 kwargs["extra_headers"] = {
                     "anthropic-beta": "extended-cache-ttl-2025-04-11",
                 }
-            kwargs["system"] = [{
-                "type":          "text",
-                "text":          system_text,
-                "cache_control": cache_control,
-            }]
+            if use_layered:
+                stable_text, volatile_text = _split_stable_volatile(system_text)
+                if stable_text:
+                    # Normal layered path: stable block gets cache_control, volatile
+                    # block (if non-empty) has no cache_control so it never pins.
+                    system_blocks: list[dict] = [{
+                        "type":          "text",
+                        "text":          stable_text,
+                        "cache_control": cache_control,
+                    }]
+                    if volatile_text:
+                        system_blocks.append({
+                            "type": "text",
+                            "text": volatile_text,
+                        })
+                    kwargs["system"] = system_blocks
+                else:
+                    # DEF-01 guard: stable is empty (e.g. new chat with no global /
+                    # project memory yet).  Anthropic rejects text="" blocks, so fall
+                    # back to the single-block path using whatever text we have.
+                    effective = volatile_text or system_text
+                    kwargs["system"] = [{
+                        "type":          "text",
+                        "text":          effective,
+                        "cache_control": cache_control,
+                    }]
+            else:
+                kwargs["system"] = [{
+                    "type":          "text",
+                    "text":          system_text,
+                    "cache_control": cache_control,
+                }]
         return kwargs
 
     def _is_extended_cache_request(self, request: dict) -> bool:
@@ -254,7 +293,7 @@ class AnthropicAdapter:
         return new_req
 
     def iter_text_chunks(self, client: Any, request: dict) -> Iterator[str]:
-        global _extended_cache_disabled
+        global _extended_cache_disabled_until
         self._usage_raw = None
         # Anthropic SDK's ``client.messages.stream(**request)`` only constructs
         # a ``MessageStreamManager``; the HTTP request fires in
@@ -271,7 +310,12 @@ class AnthropicAdapter:
                     f"falling back to 5min ephemeral: {e}"
                 )
                 with _extended_cache_lock:
-                    _extended_cache_disabled = True
+                    try:
+                        from larkhelm import config as _cfg_local
+                        _ttl = float(getattr(_cfg_local, "ANTHROPIC_EXTENDED_CACHE_RETRY_SEC", 1800) or 1800)
+                    except Exception:
+                        _ttl = 1800.0
+                    _extended_cache_disabled_until = time.time() + _ttl
                 request = self._strip_extended_cache(request)
                 stream_cm = client.messages.stream(**request)
                 stream = stream_cm.__enter__()
@@ -515,6 +559,19 @@ def _run_streaming_api(
         f"[{adapter.provider_label}] {spec.id} "
         f"model={request.get('model', spec.model)} chat={chat_id}"
     )
+    # REQ-07: stable prefix tracking for Anthropic layered cache mode.
+    try:
+        from larkhelm import config as _cfg_lc
+        if (isinstance(adapter, AnthropicAdapter)
+                and bool(getattr(_cfg_lc, "ANTHROPIC_LAYERED_CACHE_CONTROL", False))):
+            system_blocks = request.get("system") or []
+            if system_blocks and isinstance(system_blocks[0], dict):
+                stable_text = system_blocks[0].get("text", "")
+                if stable_text:
+                    from larkhelm.prefix_stability import StablePrefixTracker
+                    StablePrefixTracker.track(chat_id, stable_text, backend=spec.id)
+    except Exception:
+        pass
 
     result_text = ""
     try:
@@ -575,6 +632,34 @@ def _run_streaming_api(
     return result_text.strip(), updated_history
 
 
+_SESSION_MEMORY_OPEN = "[SESSION MEMORY]"
+_SESSION_MEMORY_CLOSE = "[/SESSION MEMORY]"
+
+
+def _split_stable_volatile(extra_system: str) -> tuple[str, str]:
+    """Parse extra_system string into (stable, volatile) by SESSION MEMORY tag boundary.
+
+    stable   = text outside [SESSION MEMORY]...[/SESSION MEMORY]
+    volatile = the [SESSION MEMORY]...[/SESSION MEMORY] block (including tags)
+
+    If no [SESSION MEMORY] tag found: returns (extra_system, "").
+    Pure function — no side effects. O(n) in len(extra_system).
+    """
+    open_idx = extra_system.find(_SESSION_MEMORY_OPEN)
+    if open_idx == -1:
+        return extra_system, ""
+    close_idx = extra_system.find(_SESSION_MEMORY_CLOSE, open_idx)
+    if close_idx == -1:
+        return extra_system, ""
+    close_end = close_idx + len(_SESSION_MEMORY_CLOSE)
+    before = extra_system[:open_idx].rstrip()
+    after = extra_system[close_end:].lstrip()
+    volatile = extra_system[open_idx:close_end]
+    stable_parts = [p for p in (before, after) if p]
+    stable = "\n\n".join(stable_parts)
+    return stable, volatile
+
+
 __all__ = [
     "StreamingAPIAdapter",
     "AnthropicAdapter",
@@ -583,4 +668,5 @@ __all__ = [
     "_record_outcome",
     "_run_streaming_api",
     "_is_extended_cache_rejection",
+    "_split_stable_volatile",
 ]

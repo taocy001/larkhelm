@@ -40,16 +40,24 @@
   "_comment_injection_gate": "P0 injection gate — api_skip_recent_turns_when_history (default true): skip the 100 KB recent-turns disk read when the target backend is an API backend (anthropic_api / google_api / openai_compat_api). These backends carry conversation history structurally via load_history() and already ignore recent_turns in _run_backend_single, so the pre-read is pure I/O waste. Set false to restore pre-gate behaviour.",
   "api_skip_recent_turns_when_history": true,
 
-  "_comment_injection_gates_p1": "P1 on-demand injection gates (all false = inject as before). memory_intent_policy_enabled: when true, global memory ([GLOBAL MEMORY]...[/GLOBAL MEMORY]) is stripped from extra_system when the resolved intent is dev/crew/shell — saves 200–800 tokens for code/task queries that don't need user style/format preferences. crew_sticky_keyword_gate_enabled: when true, sticky crew context injection is skipped unless the user message contains crew-related keywords (crew, /dev, /plan, agent, 任务, 流水线, pipeline, checkpoint) — avoids injecting 1–4 KB of crew summary into casual chat turns; note that consume_recent_crew_context is still called so the injection counter advances correctly. project_guide_enabled + project_guide_path: when enabled, the file at project_guide_path (≤4000 chars, truncated beyond) is prepended to extra_system for non-claude-cli backends (Gemini/Kimi/DeepSeek) so they learn project conventions; claude_cli backends skip since they read CLAUDE.md themselves. All gates emit larkhelm_injection_gate_total{point, outcome} regardless of prometheus-client availability.",
-  "memory_intent_policy_enabled":      false,
+  "_comment_injection_gates_p1": "P1 on-demand injection gates. **memory_intent_policy_enabled** (now recommended true): when true, global memory is stripped from extra_system when the resolved intent is dev/crew/shell — saves 200–800 tokens for code/task queries. **project_guide_enabled** (now recommended true): when enabled with project_guide_path set, the file at project_guide_path (≤4000 chars, truncated beyond) is prepended for non-claude-cli backends; with project_guide_auto_discover=true and no path set, auto-discovers CLAUDE.md or .larkhelm_project.md from cwd instead. crew_sticky_keyword_gate_enabled: when true, sticky crew context injection is skipped unless the user message contains crew-related keywords. All gates emit larkhelm_injection_gate_total{point, outcome} regardless of prometheus-client availability.",
+  "memory_intent_policy_enabled":      true,
   "crew_sticky_keyword_gate_enabled":  false,
-  "project_guide_enabled":             false,
+  "project_guide_enabled":             true,
   "project_guide_path":                "",
+  "_comment_project_guide_auto_discover": "Auto-discover project guide from cwd: tries CLAUDE.md then .larkhelm_project.md. Only active when project_guide_enabled=true and project_guide_path is empty.",
+  "project_guide_auto_discover":       false,
 
   "_comment_injection_gates_p2": "P2/P3 injection gates. parent_inject_skip_when_api_history (default false): skip parent-message text fetch for API backends (anthropic_api / google_api / openai_compat_api) that already carry conversation history structurally — saves ~100-500 duplicate input tokens. Crew context fallback still runs regardless. doc_inject_relevance_gate_enabled (default false): when true, uses embedding cosine similarity to gate doc injection — sim < doc_inject_relevance_threshold (0.3) skips body and injects title-only hint; 0.3 ≤ sim < 0.6 truncates to max_chars // 2; sim ≥ 0.6 injects full content. Fails open (sim=1.0) when embedding is unavailable. New metric outcomes: skipped_by_relevance, truncated_by_relevance.",
   "parent_inject_skip_when_api_history": false,
   "doc_inject_relevance_gate_enabled":   false,
   "doc_inject_relevance_threshold":      0.3,
+
+  "_comment_doc_inject_backend_ttl": "Per-backend doc inject cache TTL (seconds). When set, overrides the global doc_inject_cache_ttl_sec for that specific backend on cache lookups. Shorter TTL for Kimi/DeepSeek reduces stale content risk; longer for Claude matches its 1h extended cache benefit.",
+  "doc_inject_cache_ttl_sec_claude":    600,
+  "doc_inject_cache_ttl_sec_gemini":    300,
+  "doc_inject_cache_ttl_sec_kimi":      120,
+  "doc_inject_cache_ttl_sec_deepseek":  180,
 
   "_comment_memory_phase_b": "Phase B memory token-optimization (S49–S53). All flags default to true; flip individually to bisect a token regression without redeploying. memory_session_gc_enabled triggers a daemon that unlinks session_*.md older than memory_session_gc_max_age_days.",
   "memory_lazy_global":            true,
@@ -92,6 +100,26 @@
   "memory_session_smart_compress":    true,
   "memory_global_profile_slot_enabled": true,
   "memory_project_section_enabled":   true,
+
+  "_comment_week3": "Week-3 optimisations: session guard for all backends + cache-savings metrics + TTL-based extended cache retry. session_guard_enabled=true activates auto-reset for all CLI backends (claude/gemini/deepseek/kimi) when their per-chat counters cross the thresholds in session_guard_policies; set false to disable entirely (claudeSessionAutoReset still governs the old claude-only path). session_guard_checkpoint_before_reset=true (default) generates a ≤300-char LLM summary of recent turns and writes it to DATA_DIR/.feishu_sessions/{chat_id}.anchor.json before the reset so the next session can prepend it as a [Session Anchor: …] context hint. session_guard_policies lets you customise per-backend thresholds: max_cache_read_tokens (cumulative cache-read tokens across turns) and max_turns (number of record_token_usage calls). anthropic_extended_cache_retry_sec controls how long the process waits before retrying the Anthropic extended-cache beta after a 400 rejection (default 1800 = 30 min); set 0 to disable TTL gating and fall back to pre-Week-3 permanent-disable behaviour.",
+  "session_guard_enabled":              true,
+  "session_guard_checkpoint_before_reset": true,
+  "session_guard_policies": {
+    "claude":   {"max_cache_read_tokens": 5000000, "max_turns": 50},
+    "gemini":   {"max_cache_read_tokens": 4000000, "max_turns": 40},
+    "deepseek": {"max_cache_read_tokens": 2000000, "max_turns": 30},
+    "kimi":     {"max_cache_read_tokens": 0,        "max_turns": 60}
+  },
+  "anthropic_extended_cache_retry_sec": 1800,
+
+  "_comment_week4": "Week-4: Cross-Backend Session Guard + Anthropic Layered Cache Control. anthropic_layered_cache_control_enabled=false (default) keeps byte-identical behaviour. Set true to split system prompt into stable (global+project memory) and volatile (session memory) cache_control blocks, improving Anthropic prompt-cache prefix hit rate when session memory changes between turns.",
+  "anthropic_layered_cache_control_enabled": false,
+  "anthropic_layered_cache_traffic": 0.0,
+
+  "_comment_week6": "Week-6: Ops graduation + Cache system finish. (REQ-02) session_guard_min_turns_before_reset=5 prevents auto-reset on very new sessions (turns < threshold → guard skips); set 0 or 1 to disable protection. (REQ-03) anthropic_layered_cache_traffic=0.0 controls probabilistic layered-cache rollout: 0.0=off, 1.0=all traffic; anthropic_layered_cache_control_enabled=true overrides to 100%. (REQ-04) session_guard_checkpoint_turns=5 controls how many recent turns generate_session_checkpoint reads before reset; floor=1. (REQ-05) cache_hit_rate_alert_threshold=0.5 emits a debug log when per-query cache hit rate falls below this fraction (only when cache_read>0); set 0.0 to silence.",
+  "session_guard_min_turns_before_reset": 5,
+  "session_guard_checkpoint_turns": 5,
+  "cache_hit_rate_alert_threshold": 0.5,
 
   "_comment_backend_aware_budget": "Week-2: Backend-aware memory context budget. backend_aware_budget_enabled=false (default) keeps all backends on the POLICY_TABLE baseline budget — no behaviour change. Set true to scale memory injection budget by context-window tier: ≥256K (Gemini/Kimi) +20%, ≥64K (mid-tier) unchanged, <64K (small-window) −30%. context_window_<id>=0 means use built-in DEFAULT_CONTEXT_WINDOWS value; set a positive integer (tokens) to override. Changes take effect on the next query — no restart needed.",
   "backend_aware_budget_enabled":    false,

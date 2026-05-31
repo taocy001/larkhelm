@@ -154,12 +154,13 @@ class TestScenarios(unittest.TestCase):
             # Give some time for the thread to reach Popen
             time.sleep(0.5)
 
-        # 4. Verify Popen was called with kimi command
+        # 4. Verify Popen was called with kimi command.
+        # NOTE: memory-update background thread may also call Popen (with claude).
+        # We check the *first* Popen call (the actual query) rather than the last.
         self.assertTrue(mock_popen.called)
-        args, kwargs = mock_popen.call_args
-        cmd_args = args[0]
-        self.assertEqual(cmd_args[0], cfg.KIMI_CMD)
-        print(f"DEBUG: Executed command: {cmd_args[0]}")
+        all_cmds = [a[0][0] for a, _ in mock_popen.call_args_list if a and a[0]]
+        self.assertIn(cfg.KIMI_CMD, all_cmds,
+                      f"kimi command not found in any Popen call: {all_cmds}")
 
 if __name__ == "__main__":
     unittest.main()

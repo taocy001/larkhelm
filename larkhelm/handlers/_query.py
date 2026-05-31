@@ -134,7 +134,7 @@ def _compute_doc_query_relevance(query: str, doc_title: str, doc_snippet: str) -
         return 1.0  # fail-open
 
 
-def _inject_doc_context(text: str, chat_id: str) -> str:
+def _inject_doc_context(text: str, chat_id: str, backend: str = "") -> str:
     """
     Detect Feishu document URLs in text, read their content, and prepend it to
     the prompt. At most DOC_INJECT_MAX_DOCS documents are injected, each capped
@@ -173,6 +173,7 @@ def _inject_doc_context(text: str, chat_id: str) -> str:
                     loader=lambda r=ref: doc_client.read(
                         r, max_chars=_cfg.DOC_INJECT_MAX_CHARS
                     ),
+                    backend=backend,
                 )
                 result = result_meta.payload
                 if result_meta.from_cache and result_meta.age_sec is not None:
@@ -539,6 +540,53 @@ def _post_query_memory_hook(chat_id: str, trace_id: str) -> None:
         maybe_auto_update(chat_id)
     except Exception as _mc_err:
         _debug_log(f"[{trace_id}][DoQuery] post-query memory error: {_mc_err}")
+
+
+def _apply_project_guide_gate(
+    cwd: str, memory_ctx: str, is_cli_claude: bool = False
+) -> "tuple[str, str]":
+    """Apply the project-guide injection gate.
+
+    Returns ``(updated_memory_ctx, metric_outcome)`` where outcome ∈
+    {skipped_cli, injected, auto_discovered, not_found_auto, error, skipped}.
+    Never raises.
+    """
+    if is_cli_claude:
+        return memory_ctx, "skipped_cli"
+    project_guide_path = _cfg.config.get("project_guide_path") or ""
+    if project_guide_path:
+        try:
+            from pathlib import Path as _GPath
+            _guide_path = _GPath(project_guide_path).expanduser()
+            _guide_content = _guide_path.read_text(encoding="utf-8")
+            if len(_guide_content) > 4000:
+                _guide_content = _guide_content[:4000] + "…"
+            memory_ctx = (
+                f"[Project Guide]\n{_guide_content}\n[/Project Guide]\n\n"
+                + memory_ctx
+            )
+            return memory_ctx, "injected"
+        except Exception:
+            return memory_ctx, "error"
+    project_guide_auto_discover = bool(_cfg.config.get("project_guide_auto_discover"))
+    if project_guide_auto_discover and cwd:
+        from pathlib import Path as _GPath
+        for _fname in ("CLAUDE.md", ".larkhelm_project.md"):
+            _candidate = _GPath(cwd) / _fname
+            try:
+                if _candidate.exists():
+                    _guide_content = _candidate.read_text(encoding="utf-8")
+                    if len(_guide_content) > 4000:
+                        _guide_content = _guide_content[:4000] + "…"
+                    memory_ctx = (
+                        f"[Project Guide]\n{_guide_content}\n[/Project Guide]\n\n"
+                        + memory_ctx
+                    )
+                    return memory_ctx, "auto_discovered"
+            except Exception:
+                pass
+        return memory_ctx, "not_found_auto"
+    return memory_ctx, "skipped"
 
 
 def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
@@ -951,7 +999,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             has_doc_urls = bool(_extract_feishu_urls(message))
             if _cfg.DOC_AUTO_INJECT:
                 try:
-                    message = _inject_doc_context(message, chat_id)
+                    message = _inject_doc_context(message, chat_id, backend=model)
                 except Exception as _doc_err:
                     _debug_log(f"[{trace_id}][DoQuery] doc inject error: {_doc_err}")
 
@@ -1084,29 +1132,12 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
 
             try:
                 from larkhelm.metrics import inc_injection_gate as _inc_ig2
-                if bool(_cfg.config.get("project_guide_enabled")) and _cfg.config.get("project_guide_path"):
-                    from pathlib import Path as _GPath
+                if bool(_cfg.config.get("project_guide_enabled")):
                     _is_cli_claude = getattr(_early_spec, "provider", "") == "claude_cli"
-                    if _is_cli_claude:
-                        _inc_ig2("project_guide", "skipped_cli")
-                    else:
-                        try:
-                            _guide_path = _GPath(_cfg.config["project_guide_path"]).expanduser()
-                            _guide_content = _guide_path.read_text(encoding="utf-8")
-                            if len(_guide_content) > 4000:
-                                _debug_log(
-                                    f"[DoQuery] project_guide exceeds 4000 chars "
-                                    f"({len(_guide_content)}), truncating"
-                                )
-                                _guide_content = _guide_content[:4000]
-                            memory_ctx = (
-                                f"[Project Guide]\n{_guide_content}\n[/Project Guide]\n\n"
-                                + memory_ctx
-                            )
-                            _inc_ig2("project_guide", "injected")
-                        except Exception as _pe:
-                            _debug_log(f"[DoQuery] project_guide read failed: {_pe}")
-                            _inc_ig2("project_guide", "error")
+                    memory_ctx, _pg_outcome = _apply_project_guide_gate(
+                        cwd, memory_ctx, _is_cli_claude
+                    )
+                    _inc_ig2("project_guide", _pg_outcome)
             except Exception as _pg_err:
                 _debug_log(f"[{trace_id}][DoQuery] project_guide gate error: {_pg_err}")
 

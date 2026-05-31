@@ -161,8 +161,11 @@ class TestConcurrency(unittest.TestCase):
         self.assertEqual(result[0], "second")
 
     def test_wait_for_idle_no_locks_held(self):
-        # Should return True immediately when there are no active queries
-        self.assertTrue(concurrency.wait_for_idle(timeout=2.0))
+        # Should return True immediately when there are no active queries.
+        # Isolate from locks created by other tests in the same suite run.
+        from collections import OrderedDict
+        with patch.object(concurrency, "_chat_locks", OrderedDict()):
+            self.assertTrue(concurrency.wait_for_idle(timeout=2.0))
 
     def test_wait_for_idle_timeout(self):
         lock = concurrency._get_chat_lock("busy_chat")

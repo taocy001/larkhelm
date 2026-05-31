@@ -674,6 +674,39 @@ class MemoryContextBuilder:
             chunks.append(f"[SESSION MEMORY]\n{s}\n[/SESSION MEMORY]")
         return "\n\n".join(chunks) if chunks else ""
 
+    def build_for_prompt_cache(self) -> tuple[str, str]:
+        """Split memory context into (stable, volatile) for layered Anthropic caching.
+
+        stable  = global + project memory layers (tagged) — changes only when LLM updates memory
+        volatile = session memory layer (tagged) — changes every ~10 turns
+
+        Returns (stable, volatile). Either element may be empty string.
+        Reuses _layer_global() / _layer_project() / _layer_session() LRU cache paths.
+        Never triggers LLM calls or new I/O beyond what build() already does.
+        """
+        stable_parts: list[str] = []
+        volatile_parts: list[str] = []
+
+        if self._should_include_global():
+            g = self._layer_global()
+            if g:
+                stable_parts.append(f"[GLOBAL MEMORY]\n{g}\n[/GLOBAL MEMORY]")
+
+        if self._should_include_project():
+            p = self._layer_project()
+            if p:
+                stable_parts.append(
+                    f"[PROJECT MEMORY — {self.cwd}]\n{p}\n[/PROJECT MEMORY]"
+                )
+
+        s = self._layer_session()
+        if s:
+            volatile_parts.append(f"[SESSION MEMORY]\n{s}\n[/SESSION MEMORY]")
+
+        stable = "\n\n".join(stable_parts)
+        volatile = "\n\n".join(volatile_parts)
+        return stable, volatile
+
     def deduped_recent_turns(self, session_body: str | None = None) -> list[str]:
         if session_body is None:
             try:
@@ -854,11 +887,17 @@ class MemoryContextBuilder:
 
     def _layer_session_uncached(self) -> str | None:
         try:
-            from larkhelm.memory import load_memory
+            from larkhelm.memory import load_memory, load_session_anchor
             raw = load_memory(self.chat_id)
         except Exception as e:
             _debug_log(f"[Memory] _layer_session failed: {e}")
             return None
+        try:
+            anchor = load_session_anchor(self.chat_id)
+            if anchor:
+                raw = f"[Session Anchor: {anchor}]\n\n{raw or ''}"
+        except Exception as e:
+            _debug_log(f"[Memory] load_session_anchor failed: {e}")
         if not raw:
             return None
         if not _config_flag("memory_session_layered", True):

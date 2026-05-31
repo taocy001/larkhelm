@@ -42,6 +42,8 @@ def fresh_chat(tmp_path, monkeypatch):
     monkeypatch.setattr(_cfg, "CLAUDE_SESSION_AUTO_RESET_ENABLED", True, raising=False)
     monkeypatch.setattr(_cfg, "CLAUDE_SESSION_RESET_CACHE_TOKENS", 5_000_000, raising=False)
     monkeypatch.setattr(_cfg, "CLAUDE_SESSION_RESET_TURNS", 50, raising=False)
+    # Disable min-turns guard so individual threshold tests aren't blocked
+    monkeypatch.setattr(_cfg, "SESSION_GUARD_MIN_TURNS_BEFORE_RESET", 1, raising=False)
     # Stub out memory.record_milestone so tests don't trigger maybe_auto_update.
     import larkhelm.memory as _memory
     monkeypatch.setattr(_memory, "record_milestone", lambda *a, **kw: None,
@@ -153,10 +155,13 @@ def test_get_session_counters_fields(fresh_chat):
 # ── AC-04: disabled gate → no_op ──────────────────────────────────────────
 
 def test_disabled_no_op(fresh_chat, monkeypatch):
-    """When CLAUDE_SESSION_AUTO_RESET_ENABLED=False, no reset ever fires."""
+    """When SESSION_GUARD_ENABLED=False, no reset ever fires via record_token_usage."""
     chat_id = fresh_chat
     monkeypatch.setattr(_cfg, "CLAUDE_SESSION_AUTO_RESET_ENABLED", False,
                         raising=False)
+    # Week-4: record_token_usage now routes through session_guard which checks
+    # SESSION_GUARD_ENABLED, so we must disable that flag too.
+    monkeypatch.setattr(_cfg, "SESSION_GUARD_ENABLED", False, raising=False)
     sid = _seed_sid(chat_id)
     for _ in range(200):
         ts.record_token_usage(chat_id, "claude", {
