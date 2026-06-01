@@ -29,6 +29,23 @@ from typing import Callable, Iterator, Literal
 DispatchResult = Literal["handled", "unhandled"]
 
 
+def _is_arg_sep(ch: str) -> bool:
+    """True iff ``ch`` separates a slash-command token from its arguments.
+
+    Historically the dispatcher required a single ASCII space — which silently
+    broke ``/plan`` (and every other ``match_kind="prefix"`` command) whenever
+    a Feishu mobile user pasted a newline, tab, or full-width space (U+3000)
+    after the token. The user-facing symptom: ``/plan\\n<task>`` falls through
+    to the model dispatch path and gets answered by Claude's built-in /plan
+    instead of larkhelm's pipeline.
+
+    We accept any Unicode whitespace character. ``str.isspace`` is True for
+    ``' '``, ``'\\t'``, ``'\\n'``, ``'\\r'``, ``'\\v'``, ``'\\f'`` and
+    ``'\\u3000'`` (full-width space) among others — exactly the set we want.
+    """
+    return bool(ch) and ch.isspace()
+
+
 # ── Data ────────────────────────────────────────────────────────────────
 
 
@@ -108,7 +125,15 @@ class CommandSpec:
         for n in self._names():
             if tl == n:
                 return True
-            if self.match_kind == "prefix" and tl.startswith(n + " "):
+            # Prefix match: ``tl`` must begin with the command token followed
+            # by ANY Unicode whitespace (space, tab, newline, full-width
+            # space). See ``_is_arg_sep`` for why we don't restrict to ASCII
+            # space — Feishu mobile pastes routinely contain ``\n`` and
+            # ``　`` between the slash command and its argument.
+            if (self.match_kind == "prefix"
+                    and len(tl) > len(n)
+                    and tl.startswith(n)
+                    and _is_arg_sep(tl[len(n)])):
                 return True
         return False
 
@@ -122,15 +147,21 @@ class CommandSpec:
         """
         tl = text.lower().lstrip()
         # Try sub_matches first (longest-first to avoid /reset eating /reset claude).
+        # Separator check mirrors ``matches`` — any Unicode whitespace counts,
+        # so ``/cmd\n<args>`` and ``/cmd　<args>`` parse the same as ``/cmd <args>``.
         for sub in sorted(self.sub_matches, key=len, reverse=True):
             if tl == sub:
                 return ""
-            if tl.startswith(sub + " "):
+            if (len(tl) > len(sub)
+                    and tl.startswith(sub)
+                    and _is_arg_sep(tl[len(sub)])):
                 return text.lstrip()[len(sub):].strip()
         for n in sorted(self._names(), key=len, reverse=True):
             if tl == n:
                 return ""
-            if tl.startswith(n + " "):
+            if (len(tl) > len(n)
+                    and tl.startswith(n)
+                    and _is_arg_sep(tl[len(n)])):
                 return text.lstrip()[len(n):].strip()
         return ""
 

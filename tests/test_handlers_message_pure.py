@@ -140,3 +140,28 @@ def test_route_non_command_returns_inactive():
 def test_route_empty_text():
     d = route_to_command("", {"/help"})
     assert not d.is_command
+
+
+def test_route_prefix_accepts_newline_separator():
+    """Regression: Feishu mobile pastes often produce ``/plan\\n<task>``;
+    the router must treat the newline as a command/arg separator (same as
+    ``command_registry.CommandSpec.matches`` does)."""
+    d = route_to_command("/plan\n实现深色模式", {"/plan"})
+    assert d.is_command and d.handler_name == "/plan"
+    assert d.args == "实现深色模式"
+
+
+def test_route_prefix_accepts_fullwidth_space_and_tab():
+    for sep in ("\t", "　", "  ", "\n\n", "\r\n"):
+        d = route_to_command(f"/plan{sep}task", {"/plan"})
+        assert d.is_command and d.handler_name == "/plan", (
+            f"router must accept separator {sep!r}"
+        )
+        assert d.args == "task"
+
+
+def test_route_prefix_rejects_continuation_token():
+    """``/planet`` must NOT match ``/plan`` — the relaxed separator check
+    must still require a whitespace boundary."""
+    d = route_to_command("/planet earth", {"/plan"})
+    assert not d.is_command

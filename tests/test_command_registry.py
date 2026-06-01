@@ -45,6 +45,22 @@ class CommandSpecTests(unittest.TestCase):
         self.assertTrue(spec.matches("/run echo hi"))
         self.assertFalse(spec.matches("/running"))
 
+    def test_prefix_match_accepts_any_whitespace(self):
+        """Regression: ``/plan\\n<task>`` (and tab / full-width space) used to
+        fall through to model dispatch because matching required a single
+        ASCII space after the command token. Any Unicode whitespace counts
+        now — newline, tab, and U+3000 (full-width space) all separate the
+        command from its arguments. This is the user-visible fix for
+        "larkhelm 的 /plan 总是跑到 Claude 自己的 /plan"."""
+        spec = CommandSpec(name="/plan", handler=lambda c: None, match_kind="prefix")
+        for sep in (" ", "\n", "\t", "　", "\r\n", "  ", "\t\n"):
+            self.assertTrue(spec.matches(f"/plan{sep}做点事"),
+                            f"prefix match must accept separator {sep!r}")
+        # Must NOT match when the next char is a non-whitespace continuation —
+        # the original ``/planet`` guard is still required.
+        self.assertFalse(spec.matches("/planet"))
+        self.assertFalse(spec.matches("/plana"))
+
     def test_sub_matches_override(self):
         spec = CommandSpec(
             name="/reset",
@@ -76,6 +92,56 @@ class CommandSpecTests(unittest.TestCase):
             sub_matches=("/reset claude",),
         )
         self.assertEqual(spec.extract_args("/reset claude"), "")
+
+    def test_extract_args_accepts_any_whitespace_separator(self):
+        """Regression mirror of ``test_prefix_match_accepts_any_whitespace`` —
+        once the matcher accepts ``/plan\\n<task>``, the arg extractor must
+        also strip the command token correctly. Without this fix the handler
+        would see ``raw_args=""`` (matcher rejected) or the wrong slice."""
+        spec = CommandSpec(name="/plan", handler=lambda c: None, match_kind="prefix")
+        for sep in (" ", "\n", "\t", "　", "  ", "\n\n", "\t  ", "\r\n"):
+            self.assertEqual(
+                spec.extract_args(f"/plan{sep}做点事"), "做点事",
+                f"extract_args must strip separator {sep!r}",
+            )
+        # Leading whitespace on the whole message is normalised away too.
+        self.assertEqual(spec.extract_args("  /plan\n做点事"), "做点事")
+
+    def test_sub_match_extract_args_accepts_newline(self):
+        """The ``sub_matches`` loop in ``extract_args`` also relaxed its
+        separator. Verify ``/reset claude\\nextra`` strips down to ``extra``
+        — the sub-match must consume the full ``/reset claude`` token even
+        when followed by a newline rather than a space."""
+        spec = CommandSpec(
+            name="/reset",
+            handler=lambda c: None,
+            match_kind="prefix",
+            sub_matches=("/reset claude",),
+        )
+        self.assertEqual(spec.extract_args("/reset claude\nextra"), "extra")
+        self.assertEqual(spec.extract_args("/reset claude\textra"), "extra")
+
+    def test_alias_prefix_match_with_newline(self):
+        """Aliases share the ``_names`` loop in both ``matches`` and
+        ``extract_args``; without an alias-specific test the relaxed
+        separator coverage is incomplete. Pin: ``/m\\nfoo`` routes via
+        the ``/m`` alias of ``/model`` exactly like ``/m foo``."""
+        spec = CommandSpec(
+            name="/model", aliases=("/m",),
+            handler=lambda c: None, match_kind="prefix",
+        )
+        self.assertTrue(spec.matches("/m\nfoo"))
+        self.assertEqual(spec.extract_args("/m\nfoo"), "foo")
+
+    def test_prefix_match_rejects_zero_width_space(self):
+        """Pin behavior: U+200B (ZWSP) is NOT ``.isspace()``. If someone
+        later argues we should accept it as a separator, that needs to be
+        an explicit decision — not a silent broadening. Today, ``/plan``
+        followed by ZWSP must NOT match (the matcher's separator rule is
+        Unicode whitespace, period)."""
+        spec = CommandSpec(name="/plan", handler=lambda c: None, match_kind="prefix")
+        self.assertFalse(spec.matches("/plan​foo"))
+        self.assertFalse(spec.matches("/plan﻿foo"))  # BOM, also not isspace
 
 
 # ── CommandRegistry.dispatch ───────────────────────────────────────
@@ -114,6 +180,30 @@ class DispatchTests(unittest.TestCase):
         self.reg.dispatch(_ctx("/run echo hi"))
         self.assertEqual(captured["args"], "echo hi")
 
+    def test_prefix_dispatch_with_newline_separator(self):
+        """End-to-end regression: the registry must route ``/plan\\n<task>``
+        to the registered handler (not return ``unhandled``)."""
+        captured: dict = {}
+        self.reg.register(CommandSpec(
+            name="/plan",
+            match_kind="prefix",
+            handler=lambda c: captured.setdefault("args", c.raw_args),
+        ))
+        result = self.reg.dispatch(_ctx("/plan\n实现深色模式"))
+        self.assertEqual(result, "handled")
+        self.assertEqual(captured["args"], "实现深色模式")
+
+    def test_prefix_dispatch_with_fullwidth_space(self):
+        captured: dict = {}
+        self.reg.register(CommandSpec(
+            name="/plan",
+            match_kind="prefix",
+            handler=lambda c: captured.setdefault("args", c.raw_args),
+        ))
+        result = self.reg.dispatch(_ctx("/plan　实现深色模式"))
+        self.assertEqual(result, "handled")
+        self.assertEqual(captured["args"], "实现深色模式")
+
     def test_empty_args_usage_card_short_circuits(self):
         called: list[str] = []
         self.reg.register(CommandSpec(
@@ -131,6 +221,28 @@ class DispatchTests(unittest.TestCase):
         send.assert_called_once()
         # The handler MUST be skipped when usage_card fires.
         # (No "ran" entry above asserts that.)
+
+    def test_usage_card_short_circuits_with_trailing_whitespace_only(self):
+        """``_ctx`` builds ``tl`` via ``text.lower().strip()``, so ``/run\\n``
+        and ``/run   `` reduce to ``tl == "/run"`` and the usage_card branch
+        must still fire (not call the handler). This pins the registry's
+        ``ctx.tl == spec.name.lower()`` short-circuit against the relaxed
+        separator change — a regression here would silently invoke handlers
+        with empty args instead of showing the usage hint."""
+        called: list[str] = []
+        self.reg.register(CommandSpec(
+            name="/run",
+            match_kind="prefix",
+            usage_card="`/run <command>`",
+            handler=lambda c: called.append("ran"),
+        ))
+        for text in ("/run\n", "/run   ", "/run\t", "/run　"):
+            with patch("larkhelm.handlers._message.send_card_reply") as send:
+                result = self.reg.dispatch(_ctx(text))
+            self.assertEqual(result, "handled", f"text={text!r}")
+            send.assert_called_once()
+        self.assertEqual(called, [],
+                         "handler must never fire when usage_card short-circuits")
 
     def test_sub_match_dispatched(self):
         captured: dict = {}

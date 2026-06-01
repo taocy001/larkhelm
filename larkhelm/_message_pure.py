@@ -149,8 +149,14 @@ def route_to_command(text: str, command_names: Iterable[str]) -> RouteDecision:
 
     Matching rules:
       * exact (``tl == name``): ``args=""``;
-      * prefix (``tl.startswith(name + " ")``): ``args`` = trailing remainder
-        with the single separating space stripped.
+      * prefix (``tl`` starts with ``name`` + any Unicode whitespace):
+        ``args`` = trailing remainder, leading/trailing whitespace stripped.
+
+    The separator between command and arguments may be any whitespace
+    character — ASCII space, tab, newline, or full-width space (U+3000).
+    This mirrors ``command_registry.CommandSpec.matches`` so Feishu mobile
+    pastes that contain ``\\n`` or ``　`` route the same as a typed
+    ``/cmd args``.
 
     The ``command_names`` set is supplied by the caller (typically derived
     from ``larkhelm.command_registry.COMMAND_REGISTRY``) so this helper has
@@ -169,9 +175,14 @@ def route_to_command(text: str, command_names: Iterable[str]) -> RouteDecision:
     for name in names:
         if tl == name:
             return RouteDecision(handler_name=name, args="", is_command=True)
-        if tl.startswith(name + " "):
+        if (len(tl) > len(name)
+                and tl.startswith(name)
+                and tl[len(name)].isspace()):
             # Strip the matched command token (preserving the original case
-            # of the args by slicing on the raw text, not ``tl``).
+            # of the args by slicing on the raw text, not ``tl``). ``body``
+            # has already had trailing whitespace removed by ``text.strip()``
+            # above, so ``lstrip()`` here suffices for any whitespace
+            # separator — ASCII space, ``\n``, ``\t`` or ``　``.
             args = body[len(name):].lstrip()
             return RouteDecision(handler_name=name, args=args, is_command=True)
     return RouteDecision(handler_name="", args="", is_command=False)
