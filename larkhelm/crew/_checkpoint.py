@@ -17,7 +17,7 @@ from larkhelm.crew_types import AgentSpec, AgentState, AgentStatus, CrewPlan, Cr
 _CHECKPOINT_FILE = ".crew_workspace/crew_checkpoint.json"
 
 
-def _save_checkpoint(state: CrewState, completed_wave_ids: list[str]):
+def _save_checkpoint(state: CrewState, completed_wave_ids: list[str], phase: str = ""):
     """Persist checkpoint after each wave completes, recording finished agent results and current progress."""
     from larkhelm.chat_state import _get_cwd
     cwd = _get_cwd(state.chat_id)
@@ -37,6 +37,8 @@ def _save_checkpoint(state: CrewState, completed_wave_ids: list[str]):
     # before this race can fire, but future scheduler changes might
     # insert a save in between.)
     agents_snap: dict = {}
+    phase_outputs: dict = {}
+    _exit_status_map = {"completed": "PASS", "failed": "FAIL", "skipped": "SKIP", "cancelled": "SKIP"}
     with state.lock:
         for ag_id, ag in state.agents.items():
             if ag.status in (AgentStatus.DONE, AgentStatus.FAILED,
@@ -48,24 +50,31 @@ def _save_checkpoint(state: CrewState, completed_wave_ids: list[str]):
                     "retry_count": ag.retry_count,
                     "round_label": ag.round_label,
                 }
+                phase_outputs[ag_id] = {
+                    "summary":     ag.result[:400],
+                    "output_file": ag.spec.output_file,
+                    "exit_status": _exit_status_map.get(ag.status.value, "UNKNOWN"),
+                }
 
     checkpoint = {
-        "version":    1,
+        "schema_version": 2,
         "crew_id":    state.crew_id,
         "chat_id":    state.chat_id,
         "card_mid":   state.card_mid,
         "start_time": state.start_time,
-        "phase":      state.phase,
+        "phase":      phase if phase else state.phase,
         "kind":       state.kind,
         "git_head_before": state.git_head_before,
         "phase_commits":   state.phase_commits,
         "plan": {
-            "title":           state.plan.title,
-            "synthesis_prompt": state.plan.synthesis_prompt,
-            "agents":          [_ser_spec(s) for s in state.plan.agents],
+            "title":              state.plan.title,
+            "synthesis_prompt":   state.plan.synthesis_prompt,
+            "max_qa_retry_rounds": state.plan.max_qa_retry_rounds,
+            "agents":             [_ser_spec(s) for s in state.plan.agents],
         },
-        "agents":           agents_snap,
+        "agents":             agents_snap,
         "completed_wave_ids": completed_wave_ids,
+        "phase_outputs":      phase_outputs,
     }
     try:
         import os as _os
@@ -88,6 +97,30 @@ def _clear_checkpoint(chat_id: str):
         _debug_log(f"[Checkpoint] delete failed: {e}")
 
 
+def _migrate_v1_to_v2(data: dict) -> dict:
+    """Upgrade checkpoint from schema_version 1 to 2 in-place.
+
+    Mutations:
+    - data["schema_version"] = 2
+    - each agent spec in data["plan"]["agents"]: add fallback_agent_id="" if absent
+    - each agent snapshot in data["agents"]: map status "done" to "completed"
+
+    Returns the mutated dict. Never raises (fail-soft).
+    """
+    try:
+        data.pop("version", None)
+        data["schema_version"] = 2
+        for spec in data.get("plan", {}).get("agents", []):
+            spec.setdefault("fallback_agent_id", "")
+        data.setdefault("phase_outputs", {})
+        for snap in data.get("agents", {}).values():
+            if snap.get("status") == "done":
+                snap["status"] = "completed"
+    except Exception as e:
+        _debug_log(f"[Checkpoint] migrate v1→v2 failed: {e}")
+    return data
+
+
 def _load_checkpoint(chat_id: str) -> "dict":
     """Read the checkpoint file and return a dict, or None if unavailable."""
     from larkhelm.chat_state import _get_cwd
@@ -97,9 +130,14 @@ def _load_checkpoint(chat_id: str) -> "dict":
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        if data.get("version") != 1:
-            return None
-        return data
+        schema_v = data.get("schema_version")
+        version_v = data.get("version")
+        if schema_v == 2:
+            return data
+        if version_v == 1:
+            return _migrate_v1_to_v2(data)
+        # Unknown format
+        return None
     except Exception as e:
         _debug_log(f"[Checkpoint] read failed: {e}")
         return None
@@ -119,6 +157,7 @@ def _rebuild_state_from_checkpoint(data: dict) -> "CrewState":
             # tell the schema is older.
             if "task_profile" not in s:
                 legacy_specs_seen += 1
+            s.setdefault("fallback_agent_id", "")
             specs.append(AgentSpec(**s))
         if legacy_specs_seen:
             _debug_log(
@@ -130,6 +169,7 @@ def _rebuild_state_from_checkpoint(data: dict) -> "CrewState":
             title=plan_data["title"],
             agents=specs,
             synthesis_prompt=plan_data.get("synthesis_prompt", ""),
+            max_qa_retry_rounds=plan_data.get("max_qa_retry_rounds", 2),
         )
 
         agents_snap = data.get("agents", {})
@@ -162,6 +202,7 @@ def _rebuild_state_from_checkpoint(data: dict) -> "CrewState":
             is_resuming=True,
             git_head_before=data.get("git_head_before", ""),
             phase_commits=data.get("phase_commits", {}),
+            phase_outputs=data.get("phase_outputs", {}),
         )
         return state
     except Exception as e:
@@ -203,8 +244,12 @@ def resume_interrupted_crews():
         except Exception as e:
             _debug_log(f"[Checkpoint] failed to read {cp_path}: {e}")
             continue
-        if data.get("version") != 1:
+        schema_v = data.get("schema_version")
+        version_v = data.get("version")
+        if schema_v != 2 and version_v != 1:
             continue
+        if version_v == 1 and schema_v is None:
+            data = _migrate_v1_to_v2(data)
         phase = data.get("phase", "")
         # P2-3a (W4/W6): "timeout" is the new terminal state for breakpoint
         # auto-cancel; treated as terminal here so existing checkpoints with
@@ -248,7 +293,7 @@ def resume_interrupted_crews():
             crew_id = state.crew_id
             _register_crew_thread(crew_id, threading.current_thread())
             try:
-                total_timeout = _cfg.RESPONSE_TIMEOUT * 12
+                total_timeout = _cfg.HARD_TIMEOUT
                 # Rebuild wave_queue, skipping already-completed agents
                 _execute_from(state, total_timeout, completed_ids)
                 # Synthesis
@@ -278,5 +323,11 @@ def resume_interrupted_crews():
                     _active_crew.pop(state.chat_id, None)
                     _active_crew_states.pop(state.chat_id, None)
 
+        # REQ-10: write placeholder BEFORE spawning the thread so concurrent
+        # /crew commands see this slot as occupied from the start.
+        crew_id_val = data.get("crew_id", "")
+        with _active_crew_lock:
+            _active_crew[chat_id] = crew_id_val
+
         threading.Thread(target=_resume, daemon=True,
-                         name=f"crew-resume-{data.get('crew_id','')[:6]}").start()
+                         name=f"crew-resume-{crew_id_val[:6]}").start()

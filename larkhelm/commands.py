@@ -197,14 +197,25 @@ def _run_shell(chat_id: str, cmd: str) -> tuple[str, str, int]:
                 if not any(s in k.upper() for s in _SENSITIVE_ENV_PREFIXES)}
     # P3-a (W17): timeout is configurable via `shell_timeout_sec`; defaults to 30s.
     timeout_s = int(getattr(_cfg, "SHELL_TIMEOUT", 30) or 30)
+    import signal as _signal
     try:
-        r = subprocess.run(
-            args, shell=False, capture_output=True, text=True,
-            timeout=timeout_s, cwd=cwd, env=safe_env
+        proc = subprocess.Popen(
+            args, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, cwd=cwd, env=safe_env, start_new_session=True,
         )
-        return r.stdout, r.stderr, r.returncode
-    except subprocess.TimeoutExpired:
-        return "", f"命令超时（>{timeout_s}s）", -1
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_s)
+            return stdout, stderr, proc.returncode
+        except subprocess.TimeoutExpired:
+            try:
+                _os.killpg(_os.getpgid(proc.pid), _signal.SIGKILL)
+            except Exception:
+                pass
+            try:
+                proc.wait()
+            except Exception:
+                pass
+            return "", f"命令超时（>{timeout_s}s）", -1
     except Exception as e:
         return "", str(e), -1
 
@@ -373,6 +384,7 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
 
 
 def _cmd_status(chat_id: str, msg_id: str = None):
+    from larkhelm._version import __version__
     cwd = _get_cwd(chat_id)
 
     if _cfg.SKIP_PERMISSIONS:
@@ -396,7 +408,8 @@ def _cmd_status(chat_id: str, msg_id: str = None):
                 "synthesizing": "综合中", "breakpoint": "等待确认",
                 "done": "已完成", "cancelled": "已取消",
             }.get(crew_state.phase, crew_state.phase)
-            n_done  = sum(1 for a in crew_state.agents.values() if a.status.value == "done")
+            from larkhelm.crew_types import AgentStatus as _AgentStatus
+            n_done  = sum(1 for a in crew_state.agents.values() if a.status == _AgentStatus.DONE)
             n_total = len(crew_state.agents)
             crew_info = f"**Crew 进行中** {crew_id[:8]}…　{_phase_label}　{n_done}/{n_total} 完成"
         elif crew_id:
@@ -523,6 +536,7 @@ def _cmd_status(chat_id: str, msg_id: str = None):
         f"**目录** {cwd}"
         + (f"　　**会话名** {_get_chat_state(chat_id).get('name', '').replace('**','').replace('`','')}"
            if _get_chat_state(chat_id).get('name') else ""),
+        f"**版本** {__version__}",
         "",
         f"**权限模式** {perm_status}",
         *([ crew_info ] if crew_info else []),
@@ -1242,8 +1256,10 @@ def _cmd_cd(chat_id: str, path: str, msg_id: str = None):
             send_card_reply(chat_id, msg_id, "❌ 目录不存在", f"`{p}`", color="red")
             return
         if not _check_cwd_root(p):
+            _root = _cfg.config.get("cwd_root", "")
             send_card_reply(chat_id, msg_id, "❌ 超出允许范围",
-                            f"配置的 `cwd_root` 限制了可访问路径", color="red")
+                            f"配置的 `cwd_root` 限制了可访问路径：`{_root}`\n\n"
+                            f"请切换到 `{_root}` 内的子目录，例如 `/cd {_root}`", color="red")
             return
         _set_chat_field(chat_id, "cwd", str(p))
         send_card_reply(chat_id, msg_id, "📁 目录已切换", f"`{p}`", color="green")
@@ -1259,8 +1275,10 @@ def _cmd_ls(chat_id: str, path: str = "", msg_id: str = None):
     cwd = _get_cwd(chat_id)
     target = (Path(cwd) / path if path else Path(cwd)).resolve()
     if not _check_cwd_root(target):
+        _root = _cfg.config.get("cwd_root", "")
         send_card_reply(chat_id, msg_id, "❌ 超出允许范围",
-                        f"配置的 `cwd_root` 限制了可访问路径", color="red")
+                        f"配置的 `cwd_root` 限制了可访问路径：`{_root}`\n\n"
+                        f"请在 `{_root}` 内操作", color="red")
         return
     try:
         entries = sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))

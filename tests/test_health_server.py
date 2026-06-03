@@ -141,3 +141,67 @@ def test_stop_health_server_idempotent():
     # No raise, even when nothing is running.
     health_server.stop_health_server()
     health_server.stop_health_server()
+
+
+# ── Week4-P1 M-HEALTH-SERVER: liveness / readiness split ────────────────────
+
+
+def test_health_liveness_ignores_ws(monkeypatch):
+    """/health (liveness) returns 200 even when WebSocket is disconnected."""
+    monkeypatch.setattr(health_server, "_get_ws_connected", lambda: False)
+    monkeypatch.setattr(health_server, "_get_memory_ok", lambda: True)
+    monkeypatch.setattr(health_server, "_crash_flag", False)
+    snap = health_server.current_snapshot()
+    assert snap.is_live() is True, "is_live() must be True when only ws is down"
+
+
+def test_health_503_on_crash_flag(monkeypatch):
+    """set_crash_flag() causes is_live() → False → /health 503."""
+    monkeypatch.setattr(health_server, "_crash_flag", False)
+    monkeypatch.setattr(health_server, "_get_memory_ok", lambda: True)
+    health_server.set_crash_flag()
+    try:
+        snap = health_server.current_snapshot()
+        assert snap.is_live() is False, "crash_flag should make is_live() False"
+        assert snap.crash_flag is True
+    finally:
+        # Reset so other tests are not affected
+        monkeypatch.setattr(health_server, "_crash_flag", False)
+
+
+def test_health_503_on_memory_oom(monkeypatch):
+    """Memory over limit causes is_live() → False."""
+    monkeypatch.setattr(health_server, "_get_rss_bytes", lambda: 9 * 1024 * 1024 * 1024)
+    monkeypatch.setattr(health_server, "_crash_flag", False)
+    snap = health_server.current_snapshot()
+    assert snap.memory_ok is False
+    assert snap.is_live() is False
+
+
+def test_ready_503_when_ws_disconnected(monkeypatch):
+    """is_ready() → False when WebSocket is not connected."""
+    monkeypatch.setattr(health_server, "_get_ws_connected", lambda: False)
+    snap = health_server.current_snapshot()
+    assert snap.is_ready() is False
+
+
+def test_ready_503_when_lark_api_stale(monkeypatch):
+    """is_ready() → False when _lark_api_last_ok_ts == 0 (never succeeded)."""
+    import larkhelm.lark_client as _lc
+    monkeypatch.setattr(_lc, "_lark_api_last_ok_ts", 0.0)
+    monkeypatch.setattr(health_server, "_get_ws_connected", lambda: True)
+    snap = health_server.current_snapshot()
+    assert snap.lark_api_ok is False
+    assert snap.is_ready() is False
+
+
+def test_ready_200_when_ws_and_api_ok(monkeypatch):
+    """is_ready() → True when both ws is connected and Lark API is fresh."""
+    import time
+    import larkhelm.lark_client as _lc
+    monkeypatch.setattr(_lc, "_lark_api_last_ok_ts", time.time())
+    monkeypatch.setattr(health_server, "_get_ws_connected", lambda: True)
+    snap = health_server.current_snapshot()
+    assert snap.lark_api_ok is True
+    assert snap.ws_connected is True
+    assert snap.is_ready() is True

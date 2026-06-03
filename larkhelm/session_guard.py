@@ -85,7 +85,14 @@ def _perform_reset(
     chat_id: str, backend: str, reason: str,
     cache_read: int, turns: int,
 ) -> None:
-    """Best-effort reset: optional checkpoint → clear sid + counters → milestone + metrics."""
+    """Best-effort reset: maybe_auto_update → optional checkpoint → clear sid + counters → milestone + metrics + card."""
+    # REQ-19a: settle context into memory before wiping the session
+    try:
+        from larkhelm.memory import maybe_auto_update
+        maybe_auto_update(chat_id, force=True)
+    except Exception as e:
+        _debug_log(f"[SessionGuard] maybe_auto_update pre-reset failed for {chat_id[:8]}: {e}")
+
     summary = ""
     if _checkpoint_enabled():
         try:
@@ -140,6 +147,19 @@ def _perform_reset(
         inc_session_checkpoint(backend, reason)
     except Exception as e:
         _debug_log(f"[SessionGuard] metrics bump failed for {chat_id[:8]}: {e}")
+
+    # REQ-19b: notify user that the session was auto-reset
+    try:
+        from larkhelm.lark_client import send_card
+        send_card(
+            chat_id,
+            "♻️ 会话已自动重置",
+            f"**{backend}** 会话已自动重置（原因：{reason}）。\n\n"
+            "对话历史已保存至记忆，您可以继续提问。",
+            color="blue",
+        )
+    except Exception as e:
+        _debug_log(f"[SessionGuard] send_card notification failed for {chat_id[:8]}: {e}")
 
     _debug_log(
         f"[SessionGuard] auto-reset chat={chat_id[:8]} backend={backend} "

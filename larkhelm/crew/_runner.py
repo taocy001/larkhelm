@@ -40,6 +40,51 @@ def _detect_fail_marker(spec: AgentSpec, result: str) -> bool:
     return spec.fail_marker in last_line
 
 
+def _parse_qa_verdict(result: str) -> dict:
+    """Parse QA_VERDICT protocol line from QA agent output.
+
+    Searches the last 20 non-empty lines of result for a line starting with "QA_VERDICT:".
+    Expected format: "QA_VERDICT: PASS|FAIL FAILED=N BLOCKED=N SKIP=N"
+
+    Returns:
+        {"verdict": "PASS"|"FAIL"|"UNKNOWN",
+         "failed_count": int, "blocked_count": int, "skip_count": int}
+    Never raises; returns {"verdict": "UNKNOWN", ...} on any parse error.
+    """
+    _default = {"verdict": "UNKNOWN", "failed_count": 0, "blocked_count": 0, "skip_count": 0}
+    try:
+        import re as _re
+        lines = [ln for ln in result.split("\n") if ln.strip()][-20:]
+        for line in reversed(lines):
+            stripped = line.strip()
+            if not stripped.startswith("QA_VERDICT:"):
+                continue
+            rest = stripped[len("QA_VERDICT:"):].strip()
+            parts = rest.split()
+            if not parts:
+                return _default
+            verdict = parts[0].upper()
+            if verdict not in ("PASS", "FAIL"):
+                return _default
+            counts = {"failed_count": 0, "blocked_count": 0, "skip_count": 0}
+            for p in parts[1:]:
+                m = _re.match(r"FAILED=(\d+)", p)
+                if m:
+                    counts["failed_count"] = int(m.group(1))
+                    continue
+                m = _re.match(r"BLOCKED=(\d+)", p)
+                if m:
+                    counts["blocked_count"] = int(m.group(1))
+                    continue
+                m = _re.match(r"SKIP=(\d+)", p)
+                if m:
+                    counts["skip_count"] = int(m.group(1))
+            return {"verdict": verdict, **counts}
+    except Exception:
+        pass
+    return _default
+
+
 # Tool-call protocol tokens that some backends emit as plain text when the
 # larkhelm runner does not translate them into ``tool_use`` events. Observed
 # 2026-05-22 from a DeepSeek-flavoured planner backend writing
@@ -743,12 +788,25 @@ def _run_agent(state: CrewState, agent_id: str) -> str:
                              f" first to review completed changes and avoid duplicate work")
             elif _cur_head:
                 _git_info = f"\n- No code changes detected (HEAD: {_cur_head})"
+        # Build phase_outputs summary lines for resume context
+        _po_lines: list[str] = []
+        if state.phase_outputs:
+            _spec_by_id = {s.id: s for s in state.plan.agents}
+            for _po_id, _po_data in state.phase_outputs.items():
+                _po_spec = _spec_by_id.get(_po_id)
+                _po_role = _po_spec.role if _po_spec else _po_id
+                _po_file = (_po_data.get("output_file") or "")
+                _po_sum  = (_po_data.get("summary") or "")[:200]
+                _po_arrow = f" → {_po_file}" if _po_file else ""
+                _po_lines.append(f"[{_po_role}{_po_arrow}]: {_po_sum}")
+
         _resume_prefix = (
             "⚠️ **Resuming task (previous execution was interrupted, continuing from checkpoint)**\n\n"
             "Resume notes:\n"
             "- `.crew_workspace/` contains the planning files from the last run; **use these as the baseline**, do not re-plan"
             + (_git_info or "")
             + ("\n- Existing planning files: " + ", ".join(_plan_files) if _plan_files else "")
+            + ("\n\n前序 Agent 摘要：\n" + "\n".join("- " + ln for ln in _po_lines) if _po_lines else "")
             + "\n- Continue directly from the incomplete parts; skip already completed content\n\n---\n\n"
         )
         full_prompt = _resume_prefix + full_prompt
@@ -1147,16 +1205,95 @@ def _log_oom_diagnostics(agent_id: str) -> None:
         _debug_log(f"[Crew] {agent_id} OOM diagnostic snapshot failed: {e}")
 
 
+def _preflight_env_check(spec: "AgentSpec", cfg: dict) -> "tuple[bool, str]":
+    """Check agent runtime environment against spec requirements.
+
+    Returns (True, "") if the agent can run normally.
+    Returns (False, reason) if the agent should be set to SKIPPED.
+
+    Checks (short-circuit):
+      1. spec.require_arch non-empty → check sys.platform + platform.machine()
+         format: "os/arch", e.g. "linux/amd64"
+         linux/amd64 → sys.platform=="linux" and platform.machine()=="x86_64"
+      2. spec.require_docker_image non-empty → subprocess.run(
+             ["docker", "image", "inspect", spec.require_docker_image],
+             shell=False, timeout=5, capture_output=True
+         ), returncode != 0 → fail
+
+    Security: docker inspect command strictly uses list form (shell=False);
+    spec fields are never interpolated into a shell string.
+    """
+    import platform
+    import sys as _sys
+
+    if getattr(spec, "require_arch", ""):
+        parts = spec.require_arch.split("/", 1)
+        req_os = parts[0].lower() if len(parts) >= 1 else ""
+        req_arch = parts[1].lower() if len(parts) >= 2 else ""
+        cur_platform = _sys.platform.lower()
+        cur_machine = platform.machine().lower()
+        # Normalize arch: x86_64 == amd64
+        machine_aliases = {"x86_64": "amd64", "aarch64": "arm64", "aarch64_be": "arm64"}
+        cur_arch_norm = machine_aliases.get(cur_machine, cur_machine)
+        req_arch_norm = machine_aliases.get(req_arch, req_arch)
+
+        os_ok = True
+        if req_os == "linux":
+            os_ok = cur_platform == "linux"
+        elif req_os == "darwin":
+            os_ok = cur_platform == "darwin"
+        elif req_os:
+            os_ok = cur_platform.startswith(req_os)
+
+        arch_ok = (not req_arch_norm) or (cur_arch_norm == req_arch_norm)
+
+        if not (os_ok and arch_ok):
+            reason = (f"需要 {spec.require_arch}，"
+                      f"当前 {_sys.platform}/{platform.machine()}")
+            return False, reason
+
+    if getattr(spec, "require_docker_image", ""):
+        try:
+            proc = subprocess.run(
+                ["docker", "image", "inspect", spec.require_docker_image],
+                shell=False, timeout=5, capture_output=True,
+            )
+            if proc.returncode != 0:
+                return False, f"docker image not found: {spec.require_docker_image}"
+        except Exception as e:
+            return False, f"docker inspect failed: {e}"
+
+    return True, ""
+
+
 def _run_agent_wrapper(state: CrewState, agent_id: str) -> None:
     """Agent execution shell: catches exceptions, updates state, detects exit markers.
     Process-level failures (subprocess crashes, etc.) are retried at most once.
     """
     from larkhelm.chat_state import _get_cwd
     from larkhelm.crew._state import _git_auto_commit
+    from larkhelm.metrics import inc_crew_preflight
 
     last_exc: Exception = None
     backend_select_failure: bool = False  # set when NoBackendAvailableError surfaces
     validate_failure: bool = False        # set when _validate_output_artifact fires twice
+
+    # Preflight environment check — early exit before the 2-attempt retry loop.
+    import larkhelm.config as _cfg_module
+    _spec = state.agents[agent_id].spec
+    _ok, _reason = _preflight_env_check(_spec, getattr(_cfg_module, "config", {}))
+    if not _ok:
+        state.agents[agent_id].status = AgentStatus.SKIPPED
+        state.agents[agent_id].skip_reason = _reason
+        _check_type = "docker" if getattr(_spec, "require_docker_image", "") else "arch"
+        _outcome = "fail_docker" if _check_type == "docker" else "fail_arch"
+        inc_crew_preflight(_outcome, _check_type)
+        _debug_log(f"[Crew] {agent_id} preflight SKIPPED: {_reason}")
+        return
+    _pass_check_type = ("arch" if getattr(_spec, "require_arch", "")
+                        else "docker" if getattr(_spec, "require_docker_image", "")
+                        else "arch")
+    inc_crew_preflight("pass", _pass_check_type)
 
     for proc_attempt in range(2):   # attempt 0 = first try, attempt 1 = retry
         try:
@@ -1468,6 +1605,19 @@ def _wait_for_breakpoint(state: CrewState, agent_id: str) -> bool:
 
     if timed_out and not confirmed:
         _debug_log(f"[Crew] breakpoint timeout after {bp_timeout}s, auto-cancelling")
+        # REQ-11: persist checkpoint BEFORE cancelling so a restart can resume
+        # from the last completed wave, not from the beginning.
+        try:
+            from larkhelm.crew._checkpoint import _save_checkpoint
+            with state.lock:
+                completed_ids = [
+                    spec.id for spec in state.plan.agents
+                    if state.agents[spec.id].status in
+                    (AgentStatus.DONE, AgentStatus.FAILED)
+                ]
+            _save_checkpoint(state, completed_ids, phase="timeout")
+        except Exception as _cp_err:
+            _debug_log(f"[Crew] breakpoint timeout checkpoint failed: {_cp_err}")
         state.cancel_ev.set()
         emit_breakpoint_timeout(state)
         return False
@@ -1478,6 +1628,45 @@ def _wait_for_breakpoint(state: CrewState, agent_id: str) -> bool:
 # ═══════════════════════════════════════════════════════════════
 #  Scheduler
 # ═══════════════════════════════════════════════════════════════
+
+def _toposort_agents(agents: list[AgentSpec]) -> list[AgentSpec]:
+    """DFS topological sort with cycle detection.
+
+    Returns agents ordered so that all dependencies precede dependents.
+    Raises ValueError("cycle detected: A → B → A") if any cycle exists.
+    Time complexity: O(V+E).
+    """
+    id_to_spec = {s.id: s for s in agents}
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color: dict[str, int] = {}
+    stack: list[str] = []
+    result: list[AgentSpec] = []
+
+    def _visit(node_id: str) -> None:
+        if color.get(node_id) == BLACK:
+            return
+        if color.get(node_id) == GRAY:
+            idx = stack.index(node_id)
+            cycle = stack[idx:] + [node_id]
+            raise ValueError("cycle detected: " + " → ".join(cycle))
+        color[node_id] = GRAY
+        stack.append(node_id)
+        spec = id_to_spec.get(node_id)
+        if spec:
+            for dep_id in (spec.depends_on or []):
+                if dep_id in id_to_spec:
+                    _visit(dep_id)
+        stack.pop()
+        color[node_id] = BLACK
+        if spec:
+            result.append(spec)
+
+    for spec in agents:
+        if color.get(spec.id, WHITE) == WHITE:
+            _visit(spec.id)
+
+    return result
+
 
 def _execute(state: CrewState, total_timeout: int):
     """Execute all agents in topological waves, supporting retry fallback when QA/Reviewer fails."""
@@ -1491,11 +1680,17 @@ def _execute(state: CrewState, total_timeout: int):
     cancel_ev    = state.cancel_ev
     deadline     = time.time() + total_timeout
 
+    # Validate DAG before running: DFS cycle detection raises ValueError on cycles.
+    _toposort_agents(state.plan.agents)
+
     # Create per-project Feishu folder before running any agents
     _ensure_crew_folder(state)
 
     wave_queue   = deque(_topo_waves(state.plan.agents))
+    # Agents that were run early as fallbacks; skip if seen again in later waves.
+    fb_ran_ids: set[str] = set()
     retry_counts: dict[str, int] = {spec.id: 0 for spec in state.plan.agents}
+    qa_retry_rounds: int = 0  # total QA-fail → fixer cycles; capped by plan.max_qa_retry_rounds
 
     # Workspace path resolved once and passed into ``_get_failed_dep`` for
     # the partial-delivery rule (see scheduler docstring). When an upstream
@@ -1531,9 +1726,11 @@ def _execute(state: CrewState, total_timeout: int):
                 if failed_dep:
                     _debug_log(f"[Crew] {spec.id} skipped because upstream {failed_dep} failed")
                     ag = state.agents[spec.id]
-                    ag.status   = AgentStatus.FAILED
+                    ag.status   = AgentStatus.SKIPPED
                     ag.error    = f"upstream {failed_dep} failed"
                     ag.end_time = time.time()
+                elif spec.id in fb_ran_ids:
+                    pass  # already ran as fallback; do not re-queue
                 elif spec.trigger_only and state.agents[spec.id].retry_count == 0:
                     # Skip on first wave: mark as DONE (trigger pending), do not actually execute
                     ag = state.agents[spec.id]
@@ -1581,6 +1778,32 @@ def _execute(state: CrewState, total_timeout: int):
 
         for spec in retry_specs:
             ag = state.agents[spec.id]
+
+            # QA-specific: parse structured verdict, enforce plan-level retry cap
+            _qa_verdict_prefix = ""
+            if spec.id == "qa":
+                _qv = _parse_qa_verdict(ag.result)
+                _qv_str = _qv.get("verdict", "UNKNOWN")
+                _qv_fc  = _qv.get("failed_count", 0)
+                _qv_bc  = _qv.get("blocked_count", 0)
+                _qv_sc  = _qv.get("skip_count", 0)
+                _qa_verdict_prefix = (
+                    f"QA Verdict: {_qv_str} — FAILED={_qv_fc} "
+                    f"BLOCKED={_qv_bc} SKIP={_qv_sc}\n"
+                )
+                qa_retry_rounds += 1
+                if qa_retry_rounds > state.plan.max_qa_retry_rounds:
+                    _debug_log(
+                        f"[Crew] qa exceeded plan max_qa_retry_rounds "
+                        f"({state.plan.max_qa_retry_rounds}), forcing FAILED"
+                    )
+                    with state.lock:
+                        ag.needs_retry = False
+                        ag.status = AgentStatus.FAILED
+                        ag.error  = "超过计划重试上限"
+                    wave_queue.clear()
+                    break
+
             if retry_counts[spec.id] >= spec.max_retries:
                 _debug_log(f"[Crew] {spec.id} reached max retries ({spec.max_retries}), giving up")
                 with state.lock:
@@ -1589,6 +1812,22 @@ def _execute(state: CrewState, total_timeout: int):
                     # Gatekeeper final rejection: clear remaining queue and go straight to synthesis
                     _debug_log(f"[Crew] gatekeeper {spec.id} final rejection, skipping remaining tasks")
                     wave_queue.clear()
+                # Fallback agent: when retries exhausted and fallback_agent_id is configured,
+                # run the fallback synchronously instead of hard-failing.
+                _fb_id = getattr(spec, "fallback_agent_id", "") or ""
+                if _fb_id and _fb_id in state.agents:
+                    _debug_log(f"[Crew] {spec.id} retries exhausted, switching to fallback {_fb_id}")
+                    with state.lock:
+                        _fb = state.agents[_fb_id]
+                        if _fb.status != AgentStatus.RUNNING:
+                            _fb.status     = AgentStatus.PENDING
+                            _fb.result     = ""
+                            _fb.error      = ""
+                            _fb.start_time = None
+                            _fb.end_time   = None
+                    _run_agent_wrapper(state, _fb_id)
+                    fb_ran_ids.add(_fb_id)
+                    continue  # fallback handled; skip hard_fail_on_exhaust
                 if spec.hard_fail_on_exhaust:
                     raise HardFailError(f"{spec.role}（{spec.id}）最终失败，已重试 {spec.max_retries} 次")
                 continue
@@ -1615,12 +1854,13 @@ def _execute(state: CrewState, total_timeout: int):
             if ag.spec.output_file:
                 _fb_path = Path(_cwd_fb) / ".crew_workspace" / ag.spec.output_file
                 feedback = (
-                    f"Failure report: {_fb_path}\n"
-                    f"Use the Read tool to read this file for details, then fix each issue."
+                    _qa_verdict_prefix
+                    + f"Failure report: {_fb_path}\n"
+                    + f"Use the Read tool to read this file for details, then fix each issue."
                 )
             else:
                 # Take the beginning (bug list is typically first) rather than the end (usually just TESTS_FAILED etc.)
-                feedback = ag.result[:2000] if ag.result else ag.error[:1000]
+                feedback = _qa_verdict_prefix + (ag.result[:2000] if ag.result else ag.error[:1000])
 
             # Reset this agent + agents in retry_target
             targets = list(spec.retry_target) + [spec.id]
@@ -1837,7 +2077,7 @@ def _execute_from(state: CrewState, total_timeout: int, skip_ids: set):
                 failed_dep = _get_failed_dep(state, spec, _crew_ws_path)
                 if failed_dep:
                     ag = state.agents[spec.id]
-                    ag.status = AgentStatus.FAILED
+                    ag.status = AgentStatus.SKIPPED
                     ag.error  = f"upstream {failed_dep} failed"
                     ag.end_time = time.time()
                 elif spec.trigger_only and state.agents[spec.id].retry_count == 0:

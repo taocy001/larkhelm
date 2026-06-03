@@ -327,7 +327,7 @@ class TTLCache(Generic[K, V]):
 
 _RECENT_TURNS_MAX = 64
 _MEMORY_LAYER_MAX = 128
-_DOC_DEFAULT_TTL = 60.0
+_DOC_DEFAULT_TTL = 600.0
 
 _recent_turns_cache: LRUCache[RecentTurnsKey, str] = LRUCache(
     "recent_turns", _RECENT_TURNS_MAX

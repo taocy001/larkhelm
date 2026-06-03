@@ -31,6 +31,8 @@ from larkhelm.crew._commands import (
     _read_workspace_meta,
     _write_workspace_meta,
     _handle_stale_workspace,
+    _make_batch_id,
+    _find_resumable_batch,
 )
 
 
@@ -223,6 +225,92 @@ class ConfigDefaultTests(unittest.TestCase):
         """Config default per B3 spec: 3600s (1h)."""
         self.assertEqual(getattr(_cfg, "WORKSPACE_FINALIZE_PROMPT_AGE_SEC",
                                  None), 3600.0)
+
+
+class BatchIdTests(unittest.TestCase):
+
+    def test_make_batch_id_format(self):
+        """_make_batch_id returns '{crew_id[:4]}_{int(ts)}'."""
+        result = _make_batch_id("a32dfeed1234", 1748770000.9)
+        self.assertEqual(result, "a32d_1748770000")
+
+    def test_make_batch_id_pure(self):
+        """Same inputs always produce the same result."""
+        r1 = _make_batch_id("abcd1234", 1000.0)
+        r2 = _make_batch_id("abcd1234", 1000.0)
+        self.assertEqual(r1, r2)
+
+    def test_make_batch_id_truncates_crew_id(self):
+        """Only first 4 chars of crew_id are used."""
+        r = _make_batch_id("xyz9longerthanfour", 500.0)
+        self.assertTrue(r.startswith("xyz9_"))
+
+
+class WriteWorkspaceMetaBatchFieldsTests(unittest.TestCase):
+
+    def test_write_workspace_meta_batch_fields(self):
+        """Written meta includes batch_id, batch_dir, plan_id."""
+        ws = _fresh_ws()
+        _write_workspace_meta(
+            ws, task_hash="t1", completed=False,
+            chat_id="oc_x", plan_id="plan_42",
+            batch_id="ab12_1000", batch_dir=".crew_workspace/batch_ab12_1000",
+        )
+        m = _read_workspace_meta(ws)
+        self.assertEqual(m["batch_id"], "ab12_1000")
+        self.assertEqual(m["batch_dir"], ".crew_workspace/batch_ab12_1000")
+        self.assertEqual(m["plan_id"], "plan_42")
+
+    def test_write_workspace_meta_backward_compat(self):
+        """Not passing batch_id writes '' without crashing."""
+        ws = _fresh_ws()
+        _write_workspace_meta(ws, task_hash="t2", completed=False)
+        m = _read_workspace_meta(ws)
+        self.assertEqual(m["batch_id"], "")
+        self.assertEqual(m["batch_dir"], "")
+
+
+class FindResumableBatchTests(unittest.TestCase):
+
+    def _cwd_with_batch(self, task_hash: str, chat_id: str,
+                        completed: bool = False) -> "tuple[str, Path]":
+        """Create a temp cwd with one batch_* subdir and return (cwd_str, batch_path)."""
+        td = Path(tempfile.mkdtemp(prefix="larkhelm_frb_"))
+        base = td / ".crew_workspace"
+        base.mkdir()
+        batch_path = base / "batch_ab12_1000"
+        _write_workspace_meta(
+            batch_path, task_hash=task_hash, completed=completed,
+            chat_id=chat_id, batch_id="ab12_1000",
+            batch_dir=".crew_workspace/batch_ab12_1000",
+        )
+        return str(td), batch_path
+
+    def test_find_resumable_batch_returns_new_when_no_batch(self):
+        """Empty .crew_workspace → returns fresh batch path and empty meta."""
+        td = Path(tempfile.mkdtemp(prefix="larkhelm_frb_empty_"))
+        (td / ".crew_workspace").mkdir()
+        path, meta = _find_resumable_batch(str(td), "somehash", "oc_chat")
+        self.assertEqual(meta, {})
+        self.assertTrue(path.name.startswith("batch_"))
+        # The returned path is a new (not yet created) batch dir
+        self.assertFalse(path.exists())
+
+    def test_find_resumable_batch_resumes_incomplete(self):
+        """Same task_hash + not completed → returns existing batch."""
+        cwd, batch_path = self._cwd_with_batch("hash_abc", "oc_chat1", completed=False)
+        path, meta = _find_resumable_batch(cwd, "hash_abc", "oc_chat1")
+        self.assertEqual(path, batch_path)
+        self.assertEqual(meta["task_hash"], "hash_abc")
+        self.assertFalse(meta["completed"])
+
+    def test_find_resumable_batch_skips_completed(self):
+        """completed=True batch is ignored → returns fresh batch path."""
+        cwd, batch_path = self._cwd_with_batch("hash_abc", "oc_chat1", completed=True)
+        path, meta = _find_resumable_batch(cwd, "hash_abc", "oc_chat1")
+        self.assertEqual(meta, {})
+        # new batch path must differ from the completed one
+        self.assertNotEqual(path, batch_path)
 
 
 if __name__ == "__main__":

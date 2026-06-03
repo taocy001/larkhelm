@@ -8,15 +8,16 @@
 # names. Extra args can be passed via ARGS:
 #   make test ARGS="tests/test_metrics.py -k prometheus"
 
-.PHONY: test lint type all ci help
+.PHONY: test lint type all ci help config-sync
 
 help:
 	@echo "larkhelm Make targets:"
-	@echo "  make test   — pytest full suite (forwards \$$ARGS)"
-	@echo "  make lint   — ruff bug-detector subset"
-	@echo "  make type   — mypy strict subset"
-	@echo "  make all    — test + lint + type"
-	@echo "  make ci     — alias of make all (used by .github/workflows)"
+	@echo "  make test          — pytest full suite (forwards \$$ARGS)"
+	@echo "  make lint          — ruff bug-detector subset"
+	@echo "  make type          — mypy strict subset"
+	@echo "  make all           — test + lint + type + config-sync"
+	@echo "  make ci            — alias of make all (used by .github/workflows)"
+	@echo "  make config-sync   — verify config.py setdefault keys match example.json"
 
 test:
 	@./scripts/check.sh test $(ARGS)
@@ -27,6 +28,9 @@ lint:
 type:
 	@./scripts/check.sh type $(ARGS)
 
-all: test lint type
+all: test lint type config-sync
 
 ci: all
+
+config-sync:
+	@python3 scripts/check_config_sync.py

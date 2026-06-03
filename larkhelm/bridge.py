@@ -40,6 +40,7 @@ from larkhelm.chat_state import (
     _get_chat_state, _set_chat_field,
 )
 from larkhelm.concurrency import _cron_lock, set_shutting_down, is_shutting_down, wait_for_idle
+from larkhelm.dedup import _save_to_disk as _dedup_flush
 from larkhelm.failure_report import emit as _emit_failure_report
 from larkhelm.perm import _start_perm_server
 from larkhelm.handlers import handle_message, handle_card_action, handle_reaction_created
@@ -59,6 +60,10 @@ _signal_handlers_installed: bool = False
 # Guard that ensures _run_shutdown_sequence() executes at most once, even if
 # SIGTERM is delivered multiple times before ws_client.start() returns.
 _shutdown_sequence_executed: bool = False
+
+# Alert daemon throttle state: metric_name → unix timestamp of last alert sent.
+_alert_throttle: dict[str, float] = {}
+_ALERT_THROTTLE_SEC: int = 300  # 5-minute dedup window per metric
 
 
 # ── PID lock ──────────────────────────────────────────────────────────────
@@ -187,6 +192,11 @@ def _run_shutdown_sequence() -> dict:
         result["buffer_flushed"] = True
     except Exception as e:
         _debug_log(f"[ExtractBuffer] shutdown flush failed (continuing): {e}")
+
+    try:
+        _dedup_flush()
+    except Exception as e:
+        _debug_log(f"[Dedup] shutdown flush failed (continuing): {e}")
 
     try:
         from larkhelm.crew import cancel_all_crews
@@ -491,6 +501,86 @@ def _start_memory_boot_warmup() -> None:
     threading.Thread(target=_loop, daemon=True, name="boot-warmup").start()
 
 
+def _maybe_send_alert(metric_name: str, message: str, cfg) -> None:
+    """Send an orange alert card if not throttled within _ALERT_THROTTLE_SEC."""
+    now = time.time()
+    last = _alert_throttle.get(metric_name, 0.0)
+    if now - last < _ALERT_THROTTLE_SEC:
+        return
+    _alert_throttle[metric_name] = now
+    try:
+        import larkhelm.config as _acfg
+        admin_chat_id = getattr(_acfg, "ADMIN_CHAT_ID", "") or ""
+        if not admin_chat_id:
+            admin_chat_id = getattr(_acfg, "DEFAULT_OWNER_OPEN_ID", "") or ""
+        if not admin_chat_id:
+            return
+        _lc.send_card(admin_chat_id, "🔔 指标告警", message, color="orange")
+    except Exception as _e:
+        _debug_log(f"[MetricsAlert] send_card failed: {_e}")
+
+
+def _run_alert_loop(cfg) -> None:
+    """Polling loop that checks metric thresholds and sends throttled alerts."""
+    import larkhelm.config as _acfg
+    while not is_shutting_down():
+        interval = getattr(_acfg, "METRICS_ALERT_INTERVAL_SEC", 60)
+        try:
+            time.sleep(max(1, interval))
+        except Exception:
+            time.sleep(60)
+        if is_shutting_down():
+            break
+        try:
+            from larkhelm.metrics import get_registry
+            reg = get_registry()
+            if not reg.available:
+                continue
+            aq_threshold = getattr(_acfg, "METRICS_ALERT_ACTIVE_QUERIES_THRESHOLD", 20)
+            rss_threshold = getattr(_acfg, "METRICS_ALERT_RSS_BYTES_THRESHOLD", 2 * 1024 * 1024 * 1024)
+            if reg.active_queries is not None:
+                try:
+                    aq_val = reg.active_queries._value.get()
+                    if aq_val >= aq_threshold:
+                        _maybe_send_alert(
+                            "active_queries",
+                            f"⚠️ 活跃查询数过多：{int(aq_val)} >= {aq_threshold}",
+                            _acfg,
+                        )
+                except Exception:
+                    pass
+            if reg.memory_rss_bytes is not None:
+                try:
+                    rss_val = reg.memory_rss_bytes._value.get()
+                    if rss_val >= rss_threshold:
+                        rss_mb = int(rss_val) // (1024 * 1024)
+                        thr_mb = rss_threshold // (1024 * 1024)
+                        _maybe_send_alert(
+                            "memory_rss_bytes",
+                            f"⚠️ 内存占用过高：{rss_mb} MB >= {thr_mb} MB",
+                            _acfg,
+                        )
+                except Exception:
+                    pass
+        except Exception as _e:
+            _debug_log(f"[MetricsAlert] threshold check failed: {_e}")
+
+
+def _start_metrics_alert_daemon(cfg) -> None:
+    """Start alert polling daemon thread. Best-effort, never re-raises."""
+    try:
+        import larkhelm.config as _acfg
+        if not getattr(_acfg, "METRICS_ALERT_ENABLED", True):
+            return
+        t = threading.Thread(
+            target=_run_alert_loop, args=(cfg,),
+            daemon=True, name="metrics-alert-daemon",
+        )
+        t.start()
+    except Exception as _e:
+        _debug_log(f"[MetricsAlert] start failed: {_e}")
+
+
 def _start_background_threads(cfg) -> None:
     """Start every background daemon the bridge depends on.
 
@@ -533,6 +623,8 @@ def _start_background_threads(cfg) -> None:
         resume_interrupted_plans()
     except Exception as _e:
         _debug_log(f"[Startup] resume_interrupted_plans failed: {_e}")
+
+    _start_metrics_alert_daemon(cfg)
 
 
 # ── Post-init notification ────────────────────────────────────────────────

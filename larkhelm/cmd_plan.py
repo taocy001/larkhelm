@@ -31,6 +31,8 @@ from functools import lru_cache
 from larkhelm.log import _debug_log, log_entry
 from larkhelm.card_builder import _fmt_elapsed, _make_card
 from larkhelm.plan_retry import PlanRetryEngine
+import shlex as _shlex
+import subprocess as _sub
 
 
 # NIT-2 (P3 review): ``PlanRetryEngine`` is stateless — just a strategy
@@ -226,6 +228,30 @@ _STEP_KEYWORDS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "review": (("检视", "审查"),         ("review",)),
     "test":   (("测试", "验证", "回归"), ("test",)),
 }
+
+def _read_prd_criteria_gate_summary(ws: "Path") -> dict:
+    """Read ws/prd_criteria.json and group criteria IDs by gate_type.
+
+    Returns {"code": [AC-ids], "runtime": [...], "release": [...]}.
+    Missing gate_type defaults to "code". Fail-soft: returns {} on any error.
+    """
+    import json as _json
+    try:
+        criteria_path = ws / "prd_criteria.json"
+        if not criteria_path.exists():
+            return {}
+        data = _json.loads(criteria_path.read_text(encoding="utf-8"))
+        result: dict[str, list[str]] = {}
+        for entry in data.get("criteria", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            ac_id = entry.get("id", "")
+            gate = entry.get("gate_type", "code") or "code"
+            result.setdefault(gate, []).append(ac_id)
+        return result
+    except Exception:
+        return {}
+
 
 _STEP_TYPE_PRIORITY: tuple[str, ...] = ("dev", "fix", "review", "test")
 
@@ -654,10 +680,86 @@ def _run_dev_step(state: MultiPlanState, step: PlanStep, crew_id: str) -> bool:
         return False
 
 
+def _preflight_check(cfg: dict, chat_id: str) -> "tuple[bool, list[str]]":
+    """Probe language runtimes before /plan execution.
+
+    Scans cwd for manifest files to detect required runtimes:
+      pyproject.toml / requirements.txt -> ["python3", "--version"]
+      package.json                      -> ["node", "--version"]
+      go.mod                            -> ["go", "version"]
+      Cargo.toml                        -> ["rustc", "--version"]
+
+    Also runs cfg.get("plan_pre_check_cmd") if non-empty:
+      parsed via shlex.split (shell=False), timeout=30s.
+
+    Each runtime probe: timeout=3s. At most 5 probes. Max total 15s.
+    Security: shell=False throughout; custom cmd output truncated to 200 chars.
+
+    Returns:
+      (True, [])          — all probes passed
+      (False, blockers)   — at least one probe failed; blockers is non-empty
+    """
+    from larkhelm.chat_state import _get_cwd
+    cwd = _get_cwd(chat_id)
+    cwd_path = Path(cwd) if cwd else Path.cwd()
+    blockers: list[str] = []
+
+    _MANIFEST_MAP = [
+        ("pyproject.toml",   ["python3", "--version"], "Python"),
+        ("requirements.txt", ["python3", "--version"], "Python"),
+        ("package.json",     ["node",    "--version"], "Node.js"),
+        ("go.mod",           ["go",      "version"],   "Go"),
+        ("Cargo.toml",       ["rustc",   "--version"], "Rust"),
+    ]
+    probes: list[tuple[str, list[str]]] = []
+    seen_cmds: set[str] = set()
+    for manifest, cmd, label in _MANIFEST_MAP:
+        if (cwd_path / manifest).exists():
+            if cmd[0] not in seen_cmds:
+                seen_cmds.add(cmd[0])
+                probes.append((label, cmd))
+                if len(probes) >= 5:
+                    break
+
+    for label, cmd in probes:
+        try:
+            proc = _sub.run(cmd, shell=False, timeout=3, capture_output=True)
+            if proc.returncode != 0:
+                stderr = (proc.stderr or b"").decode(errors="replace")[:100]
+                blockers.append(
+                    f"{label}: `{' '.join(cmd)}` returned rc={proc.returncode}"
+                    + (f": {stderr.strip()}" if stderr.strip() else "")
+                )
+        except FileNotFoundError:
+            blockers.append(f"{label}: `{cmd[0]}` not found in PATH")
+        except Exception as e:
+            blockers.append(f"{label}: probe failed: {str(e)[:100]}")
+
+    custom_cmd = cfg.get("plan_pre_check_cmd", "") or ""
+    if custom_cmd:
+        try:
+            parts = _shlex.split(custom_cmd)
+            proc = _sub.run(parts, shell=False, timeout=30, capture_output=True,
+                            cwd=str(cwd_path))
+            if proc.returncode != 0:
+                out = (
+                    (proc.stdout or b"").decode(errors="replace") +
+                    (proc.stderr or b"").decode(errors="replace")
+                )[:200]
+                blockers.append(
+                    f"plan_pre_check_cmd failed (rc={proc.returncode}): {out.strip()}"
+                )
+        except Exception as e:
+            blockers.append(f"plan_pre_check_cmd error: {str(e)[:100]}")
+
+    _debug_log(f"[Plan] preflight: probes={len(probes)}, blockers={len(blockers)}")
+    return (len(blockers) == 0, blockers)
+
+
 def _run_single_agent_step(state: MultiPlanState, step: PlanStep) -> bool:
     """Run a single-agent mini-crew (review / fix / test)."""
     import larkhelm.config as _cfg
-    from larkhelm.crew_types import CrewState, AgentState, CrewPlan, AgentSpec
+    from larkhelm.crew_types import CrewState, AgentState, CrewPlan, AgentSpec, AgentStatus
     from larkhelm.crew._runner import _run_crew
     from larkhelm.chat_state import _get_cwd
     from larkhelm.lark_client import _send_card_raw, _pin_task_card
@@ -740,7 +842,7 @@ def _run_single_agent_step(state: MultiPlanState, step: PlanStep) -> bool:
         ag = crew_state.agents.get(spec.id)
         return (not state.cancel_ev.is_set()
                 and ag is not None
-                and ag.status.value == "done")
+                and ag.status == AgentStatus.DONE)
     except Exception as e:
         step.error = str(e)[:200]
         _debug_log(f"[Plan] {step.type} step {step.idx} error: {e}")
@@ -1140,6 +1242,21 @@ def cmd_plan(chat_id: str, args_str: str, user_msg_id: str = None, *,
                   "- `--confirm` 每步完成后暂停等待确认（默认自动连续执行）\n\n"
                   "也支持自然语言：`开发登录` / `修复问题` 等",
                   color="orange")
+        return
+
+    # Preflight check: probe language runtimes before running any plan steps.
+    _pf_ok, _pf_blockers = _preflight_check(
+        getattr(__import__("larkhelm.config", fromlist=["config"]), "config", {}),
+        chat_id,
+    )
+    if not _pf_ok:
+        _blocker_body = "\n".join(f"- {b}" for b in _pf_blockers)
+        send_card(
+            chat_id,
+            "⚠️ Plan · 环境预检失败",
+            f"以下环境依赖缺失或不可用，请修复后重新运行 `/plan`：\n\n{_blocker_body}",
+            color="orange",
+        )
         return
 
     # Feishu doc URL handling

@@ -111,11 +111,12 @@ def run(config_path: str | None, data_dir: str | None) -> None:
     # ── Tool: doc_create ─────────────────────────────────────────────────────
 
     @mcp.tool()
-    def doc_create(title: str, content: str) -> str:
+    def doc_create(title: str, content: str, save_to_workspace: bool = False) -> str:
         """
         Create a new Feishu document with the given title and Markdown content.
 
         Returns the URL of the newly created document.
+        When save_to_workspace=True, appends the URL to .crew_workspace/external_artifacts.json.
         """
         _ensure_client()
         try:
@@ -126,7 +127,15 @@ def run(config_path: str | None, data_dir: str | None) -> None:
             doc_ref = client.create_doc(title, owner_open_id=owner_open_id)
             if content.strip():
                 client.append(doc_ref, content)
-            return f"https://feishu.cn/docx/{doc_ref.token}"
+            doc_url = f"https://feishu.cn/docx/{doc_ref.token}"
+            if save_to_workspace:
+                try:
+                    from larkhelm.doc_handlers import _save_artifact_to_workspace
+                    cwd = _get_per_chat_cwd(chat_id, _cfg.DATA_DIR) or _cfg.DEFAULT_CWD
+                    _save_artifact_to_workspace(doc_url, title, cwd)
+                except Exception:
+                    pass
+            return doc_url
         except Exception as e:
             return f"Error creating document: {e}"
 
@@ -148,5 +157,27 @@ def run(config_path: str | None, data_dir: str | None) -> None:
             return f"Appended {len(content)} characters to {url}"
         except Exception as e:
             return f"Error appending to {url}: {e}"
+
+    # ── Tool: workspace_snapshot ─────────────────────────────────────────────
+
+    @mcp.tool()
+    def workspace_snapshot(workspace_dir: str = "") -> dict:
+        """
+        Return a structured snapshot of the current crew workspace.
+
+        Reads workspace_meta.json and file_changes.json from the workspace
+        directory. If workspace_dir is empty, defaults to cwd/.crew_workspace.
+        Returns a dict with batch_id, task_hash, completed, plan_title,
+        agent_results, file_changes, created_at, snapshot_at.
+        On error returns {"error": "<message>"}.
+        """
+        from larkhelm.workspace_finalize import generate_workspace_snapshot
+        if workspace_dir:
+            ws = Path(workspace_dir)
+        else:
+            chat_id = os.environ.get("FEISHU_CHAT_ID", "")
+            cwd = _get_per_chat_cwd(chat_id, _cfg.DATA_DIR) or _cfg.DEFAULT_CWD
+            ws = Path(cwd) / ".crew_workspace"
+        return generate_workspace_snapshot(ws)
 
     mcp.run("stdio")

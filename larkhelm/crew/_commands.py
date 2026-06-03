@@ -37,6 +37,54 @@ def _task_hash(requirement: str) -> str:
     return hashlib.md5(requirement.encode()).hexdigest()[:16]
 
 
+def _make_batch_id(crew_id: str, ts: float) -> str:
+    """Return a stable, human-readable batch identifier: '<crew_id[:4]>_<int(ts)>'."""
+    return f"{crew_id[:4]}_{int(ts)}"
+
+
+def _workspace_dir(cwd: str, batch_id: str) -> Path:
+    """Return the per-batch workspace directory path (not yet created)."""
+    return Path(cwd) / ".crew_workspace" / f"batch_{batch_id}"
+
+
+def _find_resumable_batch(cwd: str, task_hash: str, chat_id: str) -> "tuple[Path, dict]":
+    """Scan batch_* subdirs under .crew_workspace for a resumable (same hash, incomplete) batch.
+
+    Returns ``(batch_path, meta)`` where:
+    - On match: existing batch path + its workspace_meta dict
+    - No match: a fresh batch path + empty dict (directory not yet created)
+    """
+    base = Path(cwd) / ".crew_workspace"
+    if base.exists():
+        candidates = sorted(
+            (p for p in base.iterdir() if p.is_dir() and p.name.startswith("batch_")),
+            key=lambda p: (p.stat().st_mtime if p.exists() else 0.0),
+            reverse=True,
+        )
+        for candidate in candidates:
+            meta = _read_workspace_meta(candidate)
+            if not meta:
+                continue
+            if meta.get("completed"):
+                continue
+            if meta.get("task_hash") != task_hash:
+                continue
+            old_chat = meta.get("chat_id") or ""
+            if old_chat and old_chat != chat_id:
+                continue
+            meta_path = candidate / "workspace_meta.json"
+            try:
+                age_sec = time.time() - meta_path.stat().st_mtime
+                if age_sec > _WORKSPACE_STALE_TTL:
+                    continue
+            except OSError:
+                continue
+            return candidate, meta
+
+    fresh_id = _make_batch_id(task_hash[:4] + "0000", time.time())
+    return base / f"batch_{fresh_id}", {}
+
+
 # ═══════════════════════════════════════════════════════════════
 #  /dev context injection (chat history + memory)
 # ═══════════════════════════════════════════════════════════════
@@ -144,6 +192,8 @@ def _write_workspace_meta(
     finalized_at: float = 0.0,
     chat_id: str = "",
     plan_id: str = "",
+    batch_id: str = "",
+    batch_dir: str = "",
 ) -> None:
     """Write the extended workspace_meta.json schema (B3).
 
@@ -151,8 +201,9 @@ def _write_workspace_meta(
     (``_write_workspace_meta(ws_path, task_hash, completed=False)``) keep
     working byte-identically: the JSON for those calls degrades to
     ``{"task_hash":..., "completed":..., "commit_sha":"", "finalized_at":0.0,
-    "chat_id":"", "plan_id":""}``. New consumers should pass at least
-    ``chat_id`` so future stale-detection can disambiguate per-chat.
+    "chat_id":"", "plan_id":"", "batch_id":"", "batch_dir":""}``.
+    New consumers should pass at least ``chat_id`` so future stale-detection
+    can disambiguate per-chat.
     """
     ws_path.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -162,6 +213,8 @@ def _write_workspace_meta(
         "finalized_at": float(finalized_at or 0.0),
         "chat_id":      chat_id or "",
         "plan_id":      plan_id or "",
+        "batch_id":     batch_id or "",
+        "batch_dir":    batch_dir or "",
     }
     (ws_path / "workspace_meta.json").write_text(json.dumps(payload))
 
@@ -1017,7 +1070,8 @@ def _run_generic_crew_inner_impl(chat_id: str, requirement: str,
 
 def _run_dev_crew(chat_id: str, requirement: str, user_msg_id: str,
                   no_confirm: bool = False, force_replan: bool = False,
-                  task_key: str | None = None, *, sender_open_id: str = ""):
+                  task_key: str | None = None, *, sender_open_id: str = "",
+                  plan_id: str = ""):
     """Fixed software engineering pipeline.
     task_key: the original (unexpanded) requirement string used for stale-detection hash.
     Defaults to requirement itself when not set (e.g. called from /plan).
@@ -1027,7 +1081,7 @@ def _run_dev_crew(chat_id: str, requirement: str, user_msg_id: str,
     try:
         _run_dev_crew_inner(chat_id, requirement, user_msg_id, no_confirm, crew_id,
                             force_replan=force_replan, task_key=task_key,
-                            sender_open_id=sender_open_id)
+                            sender_open_id=sender_open_id, plan_id=plan_id)
     finally:
         _unregister_crew_thread(crew_id)
         try:
@@ -1041,7 +1095,8 @@ def _run_dev_crew_inner(chat_id: str, requirement: str, user_msg_id: str,
                         no_confirm: bool, crew_id: str, force_replan: bool = False,
                         task_key: str | None = None,
                         suppress_done_signal: bool = False,
-                        suppress_finalize: bool = False, *, sender_open_id: str = ""):
+                        suppress_finalize: bool = False, *, sender_open_id: str = "",
+                        plan_id: str = ""):
     """Phase C wrapper for _run_dev_crew_inner; routes uncaught exceptions to
     ``emit_terminal_failure`` so the user sees a ⚠️ card instead of a silent
     background-thread death."""
@@ -1053,6 +1108,7 @@ def _run_dev_crew_inner(chat_id: str, requirement: str, user_msg_id: str,
             suppress_done_signal=suppress_done_signal,
             suppress_finalize=suppress_finalize,
             sender_open_id=sender_open_id,
+            plan_id=plan_id,
         )
     except Exception as e:
         _debug_log(f"[Crew] _run_dev_crew_inner uncaught: {e}")
@@ -1065,7 +1121,8 @@ def _run_dev_crew_inner_impl(chat_id: str, requirement: str, user_msg_id: str,
                               no_confirm: bool, crew_id: str, force_replan: bool = False,
                               task_key: str | None = None,
                               suppress_done_signal: bool = False,
-                              suppress_finalize: bool = False, *, sender_open_id: str = ""):
+                              suppress_finalize: bool = False, *, sender_open_id: str = "",
+                              plan_id: str = ""):
     """Actual implementation of _run_dev_crew (crew_id already generated by the outer call).
     task_key: original (unexpanded) requirement used for workspace stale-detection.
     suppress_finalize: True when invoked as a /plan [dev] step — /plan emits its
@@ -1109,11 +1166,14 @@ def _run_dev_crew_inner_impl(chat_id: str, requirement: str, user_msg_id: str,
     clear_recent_crew_context(chat_id)
 
     try:
-        ws_path   = Path(cwd) / ".crew_workspace"
         # Use task_key (original, unexpanded requirement) for stale-detection so that the hash
         # is stable even when a Feishu doc URL gets its content inlined into `requirement`.
         task_hash = _task_hash(task_key if task_key is not None else requirement)
-        meta      = _read_workspace_meta(ws_path)
+        ws_path, meta = _find_resumable_batch(cwd, task_hash, chat_id)
+        ws_base   = Path(cwd) / ".crew_workspace"
+        batch_id  = (ws_path.name[len("batch_"):]
+                     if ws_path.name.startswith("batch_") else
+                     _make_batch_id(crew_id, time.time()))
 
         # Clear workspace when:
         #   1. task_hash differs (different task entirely), OR
@@ -1151,7 +1211,7 @@ def _run_dev_crew_inner_impl(chat_id: str, requirement: str, user_msg_id: str,
         ):
             if is_stale_age:
                 _debug_log(f"[Dev] clearing stale workspace (age > {_WORKSPACE_STALE_TTL}s)")
-            _clear_workspace(ws_path)
+            _clear_workspace(ws_base)
             meta = {}
             if stale_notice:
                 try:
@@ -1162,7 +1222,7 @@ def _run_dev_crew_inner_impl(chat_id: str, requirement: str, user_msg_id: str,
                     _debug_log(f"[Dev] stale notice card failed: {_e}")
 
         # force_replan=True (--no-confirm) always runs full pipeline.
-        has_design    = (ws_path / "design.md").exists() and (ws_path / "tasks.json").exists()
+        has_design    = (ws_base / "design.md").exists() and (ws_base / "tasks.json").exists()
         skip_planning = bool(meta) and has_design and not force_replan
 
         if not meta:
@@ -1171,6 +1231,9 @@ def _run_dev_crew_inner_impl(chat_id: str, requirement: str, user_msg_id: str,
                 task_hash=task_hash,
                 completed=False,
                 chat_id=chat_id,
+                plan_id=plan_id,
+                batch_id=batch_id,
+                batch_dir=str(ws_path.relative_to(Path(cwd))),
             )
 
         # Build augmented requirement that includes recent chat turns + global/project

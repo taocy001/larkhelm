@@ -249,7 +249,7 @@ class QuerySession:
         if self.card_state is None:
             return None
 
-        from larkhelm.handlers._query import CARD_PUSH_INTERVAL, CURSOR_INTERVAL
+        from larkhelm.handlers._query_constants import CARD_PUSH_INTERVAL, CURSOR_INTERVAL
 
         def _push_if_needed(force: bool, include_cancel: bool) -> None:
             if self.cancel_ev is None or self.cancel_ev.is_set() or self.stop_hb.is_set():

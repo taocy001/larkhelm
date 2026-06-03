@@ -47,7 +47,7 @@ class NoBackendAvailableError(Exception):
 class AgentStatus(Enum):
     PENDING   = "pending"
     RUNNING   = "running"
-    DONE      = "done"
+    COMPLETED = "completed"   # canonical value (was DONE="done" pre-v2)
     FAILED    = "failed"
     CANCELLED = "cancelled"
     # SKIPPED: agent was intentionally not run. Used by the
@@ -57,6 +57,13 @@ class AgentStatus(Enum):
     # declared output_file. Distinguishes "we chose not to run this" from
     # CANCELLED (user-initiated) and FAILED (ran but errored).
     SKIPPED   = "skipped"
+    DONE      = "completed"   # alias of COMPLETED for backward compat
+
+    @classmethod
+    def _missing_(cls, value):
+        if value == "done":   # map old checkpoint strings to COMPLETED
+            return cls.COMPLETED
+        return None
 
 
 class CrewPhase(Enum):
@@ -99,6 +106,8 @@ class AgentSpec:
     retry_system:         str   = ""     # replacement system prompt on retry (engineer fixer mode)
     retry_prompt:         str   = ""     # replacement prompt on retry
     output_file:          str   = ""     # agent's primary output file (relative to cwd/.crew_workspace/)
+    require_arch:         str   = ""     # if non-empty, preflight checks sys.platform+arch, format: "os/arch"
+    require_docker_image: str   = ""     # if non-empty, preflight probes docker image inspect
     # ── Phase C ────────────────────────────────────────────────────────────
     # Resolver hint for ``crew/_backend_resolver.resolve_backend``:
     #   "" (default) → fall back to the legacy ``model``-string dispatch path
@@ -108,6 +117,7 @@ class AgentSpec:
     # checkpoints / third-party plugins keep working because the field
     # defaults to "" — see design.md §3.5.
     task_profile:         str   = ""
+    fallback_agent_id:    str   = ""   # agent to run when max_retries exhausted
 
 
 @dataclasses.dataclass
@@ -151,6 +161,7 @@ class AgentState:
     # once their cool-down lapses (``crew_backend_exclusion_cooldown_sec``,
     # default 60s). Set the cooldown to 0 to restore pre-fix behaviour.
     excluded_backends_until: dict[str, float] = dataclasses.field(default_factory=dict)
+    skip_reason: str = ""  # preflight skip reason; rendered in card when status=SKIPPED and non-empty
 
 
 @dataclasses.dataclass
@@ -158,6 +169,7 @@ class CrewPlan:
     title:             str
     agents:            list[AgentSpec]
     synthesis_prompt:  str = ""   # synthesis phase prompt template
+    max_qa_retry_rounds: int = 2  # QA-fail → fixer loop cap across the whole crew run
 
 
 @dataclasses.dataclass
@@ -182,4 +194,5 @@ class CrewState:
     feishu_folder_url:   str            = ""      # human-readable URL for the project folder
     output_file_urls:    dict           = dataclasses.field(default_factory=dict)  # output_file → feishu_doc_url
     sender_open_id:      str            = ""      # open_id of the user who triggered this crew task
+    phase_outputs:       dict           = dataclasses.field(default_factory=dict)  # agent_id → {summary, output_file, exit_status}
     # phase_commits: {agent_id → git_commit_hash} (populated in auto_commit mode)

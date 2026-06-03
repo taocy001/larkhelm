@@ -128,6 +128,9 @@ class _RuntimeConfig:
     # Workspace-hint / stats-breakdown toggles (P3/P5)
     WORKSPACE_HINT_KEYWORD_GATE:        bool = False
     STATS_AGENT_TYPE_BREAKDOWN_ENABLED: bool = True
+    # Feishu doc permission defaults (M-DOC-PERM)
+    FEISHU_DOC_DEFAULT_VIS:             str = ""
+    FEISHU_DOC_COLLABORATORS:           "list[str]" = dataclasses.field(default_factory=list)
     # File processing (M4.1)
     FILE_ENABLED:          bool = True
     MAX_FILE_SIZE_BYTES:   int = 10 * 1024 * 1024
@@ -329,6 +332,11 @@ PLAN_RETRY_STRATEGY: str = "off"             # "now" | "manual" | "off"
 PLUGIN_REPORT_CARD_ENABLED: bool = False
 FAILURE_REPORT_CARD_ENABLED: bool = False
 ADMIN_CHAT_ID: str = ""
+METRICS_ALERT_ENABLED: bool = True
+METRICS_ALERT_INTERVAL_SEC: int = 60
+METRICS_ALERT_ACTIVE_QUERIES_THRESHOLD: int = 20
+METRICS_ALERT_ERROR_RATE_THRESHOLD: float = 0.1
+METRICS_ALERT_RSS_BYTES_THRESHOLD: int = 2 * 1024 * 1024 * 1024
 MEMORY_GC_INTERVAL_HOURS: float = 6.0
 CREW_CHECKPOINT_TTL_DAYS: float = 7.0
 DEV_STAGE_TIMEOUTS: "dict[str, int]" = {}
@@ -336,6 +344,10 @@ DEV_STAGE_TIMEOUTS: "dict[str, int]" = {}
 # chat surfaces a "stale workspace was discarded" notice card. Set to 0 to
 # silence the notice entirely (still clears the workspace). Floor 0.
 WORKSPACE_FINALIZE_PROMPT_AGE_SEC: float = 3600.0
+
+# ── Feishu doc permission defaults (M-DOC-PERM) ───────────────────────────
+FEISHU_DOC_DEFAULT_VIS:   str       = ""
+FEISHU_DOC_COLLABORATORS: "list[str]" = []
 
 # ── Context-injection cache flags (REQ-01..04) ────────────────────────────
 # All default to safe values: REQ-01..03 caches default ON because the
@@ -375,7 +387,7 @@ PARENT_INJECT_SKIP_WHEN_API_HISTORY: bool = False
 # STATS_AGENT_TYPE_BREAKDOWN_ENABLED (default True): when True, /stats
 # renders crew agents bucketed by agent_type; when False, falls back to
 # the P2 single-line summary for cards approaching MAX_CARD_LEN. REQ-09.
-WORKSPACE_HINT_KEYWORD_GATE: bool = False
+WORKSPACE_HINT_KEYWORD_GATE: bool = True
 STATS_AGENT_TYPE_BREAKDOWN_ENABLED: bool = True
 
 # ── P0/P1/P2 cache-bleed knobs (.crew_workspace/design.md §3.3) ───────────
@@ -717,6 +729,7 @@ def _init_app_config() -> None:
     global FILE_ENABLED, MAX_FILE_SIZE_BYTES, FILE_TEXT_EXTENSIONS
     global FILE_PDF_ENABLED, FILE_PDF_LIB
     global BACKEND_AWARE_BUDGET_ENABLED
+    global FEISHU_DOC_DEFAULT_VIS, FEISHU_DOC_COLLABORATORS
 
     try:
         # SEC-H1: warn when config file is world-readable (contains APP_SECRET).
@@ -727,12 +740,19 @@ def _init_app_config() -> None:
                     f"[Config] config file {CONFIG_PATH} has permissions {oct(_mode)}, "
                     "recommend chmod 600 to protect APP_SECRET"
                 )
-                print(f"⚠️  安全警告: {_perm_msg}")
+                print(
+                    f"❌ 配置文件权限 {oct(_mode)} 不安全，请执行: "
+                    f"chmod 600 {CONFIG_PATH}",
+                    file=sys.stderr,
+                )
                 try:
                     from larkhelm.log import warn as _log_warn
                     _log_warn(_perm_msg)
                 except Exception:
                     pass
+                # In test mode (LARKHELM_TEST_MODE=1), warn only; in production, exit.
+                if not os.environ.get("LARKHELM_TEST_MODE"):
+                    sys.exit(1)
         except OSError:
             pass
         config = json.loads(CONFIG_PATH.read_text())
@@ -744,6 +764,8 @@ def _init_app_config() -> None:
     except Exception as e:
         print(f"❌ 配置加载失败: {e}")
         sys.exit(1)
+
+    _apply_env_overrides(config)
 
     CLAUDE_CMD       = config.get("claude_command", "claude") or "claude"
     GEMINI_CMD       = config.get("gemini_command", "gemini") or "gemini"
@@ -772,7 +794,13 @@ def _init_app_config() -> None:
             file=sys.stderr,
         )
         DEFAULT_MODEL = "claude"
-    SKIP_PERMISSIONS = bool(config.get("skip_permissions", True))
+    SKIP_PERMISSIONS = bool(config.get("skip_permissions", False))
+    if SKIP_PERMISSIONS:
+        print(
+            "⚠️  [Config] skip_permissions=true: Claude 工具调用权限审批已禁用，"
+            "请确认这是预期行为（生产环境建议设为 false）",
+            file=sys.stderr,
+        )
     RESPONSE_TIMEOUT = int(config.get("response_timeout", 300))   # soft timeout: release lock but don't kill process
     HARD_TIMEOUT     = int(config.get("hard_timeout", 21600))      # hard timeout: force kill (default 6 hours)
     # P3-a (W17): /run shell timeout — was hardcoded 30s; floor at 1s.
@@ -1161,6 +1189,7 @@ def _init_app_config() -> None:
     config.setdefault("llm_router_circuit_cooldown_sec", 30.0)
     config.setdefault("cascade_backoff_max_attempts", 3)
     config.setdefault("plan_retry_strategy", "off")
+    config.setdefault("plan_pre_check_cmd", "")
     config.setdefault("plugin_report_card_enabled", False)
     config.setdefault("failure_report_card_enabled", False)
     config.setdefault("admin_chat_id", "")
@@ -1209,6 +1238,10 @@ def _init_app_config() -> None:
     # pre-fix byte-compatible behaviour (every cross-round retry
     # clears every exclusion).
     config.setdefault("crew_backend_exclusion_cooldown_sec", 60.0)
+    # M-DOC-PERM: default visibility for newly created docs; "" means use API default.
+    config.setdefault("feishu_doc_default_vis", "")
+    # M-DOC-PERM: list of open_ids to add as collaborators after doc creation.
+    config.setdefault("feishu_doc_collaborators", [])
     # B3: stale-workspace notice window. Discarding a different-task
     # workspace_meta within this many seconds (same chat) surfaces an
     # orange notice card. Set 0 to silence.
@@ -1330,10 +1363,9 @@ def _init_app_config() -> None:
     config.setdefault("doc_inject_cache_ttl_sec", 600)
     config.setdefault("cli_skip_recent_turns_when_sid", True)
     config.setdefault("api_skip_recent_turns_when_history", True)
-    # P3 REQ-02 / P5 REQ-09. Defaults preserve P2 byte-compat for the gate
-    # (false = inject as before) and the new "by type" rendering is opt-out
-    # (true) so operators only flip false when card overflow triggers.
-    config.setdefault("workspace_hint_keyword_gate", False)
+    # P3 REQ-02 / P5 REQ-09. REQ-18: default is now True (keyword gate on by
+    # default); operators flip to false to restore unconditional injection.
+    config.setdefault("workspace_hint_keyword_gate", True)
     config.setdefault("stats_agent_type_breakdown_enabled", True)
 
     # P1 on-demand injection gates (all default false = inject as before).
@@ -1396,7 +1428,7 @@ def _init_app_config() -> None:
 
     global WORKSPACE_HINT_KEYWORD_GATE, STATS_AGENT_TYPE_BREAKDOWN_ENABLED
     WORKSPACE_HINT_KEYWORD_GATE = bool(
-        config.get("workspace_hint_keyword_gate", False)
+        config.get("workspace_hint_keyword_gate", True)
     )
     STATS_AGENT_TYPE_BREAKDOWN_ENABLED = bool(
         config.get("stats_agent_type_breakdown_enabled", True)
@@ -1581,6 +1613,78 @@ def _init_app_config() -> None:
                 _clean_timeouts[_k.strip()] = _iv
     DEV_STAGE_TIMEOUTS = _clean_timeouts
 
+    # ── Metrics alert daemon knobs (M-METRICS) ─────────────────────────────
+    config.setdefault("metrics_alert_enabled", True)
+    config.setdefault("metrics_alert_interval_sec", 60)
+    config.setdefault("metrics_alert_active_queries_threshold", 20)
+    config.setdefault("metrics_alert_error_rate_threshold", 0.1)
+    config.setdefault("metrics_alert_rss_bytes_threshold", 2 * 1024 * 1024 * 1024)
+
+    global METRICS_ALERT_ENABLED, METRICS_ALERT_INTERVAL_SEC
+    global METRICS_ALERT_ACTIVE_QUERIES_THRESHOLD, METRICS_ALERT_ERROR_RATE_THRESHOLD
+    global METRICS_ALERT_RSS_BYTES_THRESHOLD
+    METRICS_ALERT_ENABLED = bool(config.get("metrics_alert_enabled", True))
+    try:
+        METRICS_ALERT_INTERVAL_SEC = max(1, int(config.get("metrics_alert_interval_sec", 60) or 60))
+    except (TypeError, ValueError):
+        METRICS_ALERT_INTERVAL_SEC = 60
+    try:
+        METRICS_ALERT_ACTIVE_QUERIES_THRESHOLD = max(
+            1, int(config.get("metrics_alert_active_queries_threshold", 20) or 20)
+        )
+    except (TypeError, ValueError):
+        METRICS_ALERT_ACTIVE_QUERIES_THRESHOLD = 20
+    try:
+        METRICS_ALERT_ERROR_RATE_THRESHOLD = max(
+            0.0, min(1.0, float(config.get("metrics_alert_error_rate_threshold", 0.1) or 0.1))
+        )
+    except (TypeError, ValueError):
+        METRICS_ALERT_ERROR_RATE_THRESHOLD = 0.1
+    try:
+        METRICS_ALERT_RSS_BYTES_THRESHOLD = max(
+            0, int(config.get("metrics_alert_rss_bytes_threshold", 2 * 1024 * 1024 * 1024)
+                   or 2 * 1024 * 1024 * 1024)
+        )
+    except (TypeError, ValueError):
+        METRICS_ALERT_RSS_BYTES_THRESHOLD = 2 * 1024 * 1024 * 1024
+
+    # M-DOC-PERM: doc permission defaults
+    FEISHU_DOC_DEFAULT_VIS = str(config.get("feishu_doc_default_vis", "") or "")
+    _raw_collaborators = config.get("feishu_doc_collaborators", [])
+    if isinstance(_raw_collaborators, list):
+        FEISHU_DOC_COLLABORATORS = [str(x) for x in _raw_collaborators if x]
+    else:
+        FEISHU_DOC_COLLABORATORS = []
+
+
+def _apply_env_overrides(cfg: dict) -> None:
+    """Apply LARKHELM_* env-var overrides to *cfg* in-place.
+
+    Each ``LARKHELM_<KEY>`` env-var value is parsed with ``json.loads()``.
+    Type mismatches (parsed type != existing type) are warned and skipped.
+    Values are never logged to avoid leaking credentials.
+    """
+    from larkhelm.log import warn
+    prefix = "LARKHELM_"
+    for env_key, raw_val in os.environ.items():
+        if not env_key.startswith(prefix):
+            continue
+        cfg_key = env_key[len(prefix):].lower()
+        try:
+            parsed = json.loads(raw_val)
+        except (json.JSONDecodeError, ValueError):
+            warn(f"[Config] env override {env_key}: invalid JSON, skipping")
+            continue
+        if cfg_key in cfg:
+            existing = cfg[cfg_key]
+            if existing is not None and not isinstance(parsed, type(existing)):
+                warn(
+                    f"[Config] env override {env_key}: type mismatch "
+                    f"(expected {type(existing).__name__}, got {type(parsed).__name__}), skipping"
+                )
+                continue
+        cfg[cfg_key] = parsed
+
 
 def _init_backends() -> None:
     """P1-2: Phase 3 of bootstrap — BackendRegistry + health checks / probes."""
@@ -1624,6 +1728,71 @@ def _init_plugins() -> None:
         lazy_debug_log(f"[Config] memory_gc start failed: {e}")
 
 
+def validate_config(config: dict) -> list[str]:
+    """Pure function: validate config dict, return list of '[ConfigError] field: reason' strings.
+    Empty list means all checks passed. Never raises; no side effects."""
+    errors: list[str] = []
+    if not (config.get("APP_ID") or "").strip():
+        errors.append("[ConfigError] APP_ID: must not be empty")
+    if not (config.get("APP_SECRET") or "").strip():
+        errors.append("[ConfigError] APP_SECRET: must not be empty")
+    try:
+        rt = int(config.get("response_timeout", 300))
+        if rt <= 0:
+            errors.append(f"[ConfigError] response_timeout: must be positive (got {rt})")
+    except (TypeError, ValueError):
+        errors.append("[ConfigError] response_timeout: must be an integer")
+    try:
+        ht = int(config.get("hard_timeout", 21600))
+        rt = int(config.get("response_timeout", 300))
+        if ht <= rt:
+            errors.append(
+                f"[ConfigError] hard_timeout: must be greater than response_timeout "
+                f"(got hard_timeout={ht}, response_timeout={rt})"
+            )
+    except (TypeError, ValueError):
+        errors.append("[ConfigError] hard_timeout: must be an integer")
+    try:
+        mcl = int(config.get("max_card_len", 3000))
+        if not (100 <= mcl <= 30000):
+            errors.append(f"[ConfigError] max_card_len: must be in [100, 30000] (got {mcl})")
+    except (TypeError, ValueError):
+        errors.append("[ConfigError] max_card_len: must be an integer")
+    raw_mp = config.get("max_ai_procs")
+    if raw_mp is not None and not (isinstance(raw_mp, str) and raw_mp.lower() == "auto"):
+        try:
+            mp = int(raw_mp)
+            if mp <= 0:
+                errors.append(f"[ConfigError] max_ai_procs: must be positive integer or 'auto' (got {mp})")
+        except (TypeError, ValueError):
+            errors.append(f"[ConfigError] max_ai_procs: must be positive integer or 'auto' (got {raw_mp!r})")
+    try:
+        st = int(config.get("shell_timeout_sec", 30))
+        if st < 1:
+            errors.append(f"[ConfigError] shell_timeout_sec: must be >= 1 (got {st})")
+    except (TypeError, ValueError):
+        errors.append("[ConfigError] shell_timeout_sec: must be an integer")
+    try:
+        et = float(config.get("embedding_traffic", 0.1))
+        if not (0.0 <= et <= 1.0):
+            errors.append(f"[ConfigError] embedding_traffic: must be in [0.0, 1.0] (got {et})")
+    except (TypeError, ValueError):
+        errors.append("[ConfigError] embedding_traffic: must be a float")
+    try:
+        irt = float(config.get("intent_router_traffic", 0.1))
+        if not (0.0 <= irt <= 1.0):
+            errors.append(f"[ConfigError] intent_router_traffic: must be in [0.0, 1.0] (got {irt})")
+    except (TypeError, ValueError):
+        errors.append("[ConfigError] intent_router_traffic: must be a float")
+    try:
+        qst = float(config.get("query_session_v2_traffic", 0.0))
+        if not (0.0 <= qst <= 1.0):
+            errors.append(f"[ConfigError] query_session_v2_traffic: must be in [0.0, 1.0] (got {qst})")
+    except (TypeError, ValueError):
+        errors.append("[ConfigError] query_session_v2_traffic: must be a float")
+    return errors
+
+
 def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     """Initialise paths and configuration (P1-2 facade).
 
@@ -1635,6 +1804,11 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
     """
     _init_paths(config_path, data_dir)
     _init_app_config()
+    _errors = validate_config(config)
+    if _errors:
+        for _err in _errors:
+            print(_err, file=sys.stderr)
+        sys.exit(1)
     _init_backends()
     _init_plugins()
 

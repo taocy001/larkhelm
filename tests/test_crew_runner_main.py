@@ -160,5 +160,5 @@ def test_execute_handles_empty_runnable_wave(
     mock_run_agent(fake)
     _execute(state, total_timeout=60)
     assert state.agents["a"].status == AgentStatus.FAILED
-    # b should have been skipped / marked failed for upstream reason
-    assert state.agents["b"].status == AgentStatus.FAILED
+    # b should be SKIPPED (upstream dep failed — intentionally not run)
+    assert state.agents["b"].status == AgentStatus.SKIPPED

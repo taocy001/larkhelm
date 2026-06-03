@@ -137,9 +137,11 @@ def _build_card(state: CrewState) -> str:
                 t_str = f" ({_fmt_elapsed(time.time() - a.start_time)}…)"
             _backend = _backend_label(spec, a)
             _backend_str = f" [{_backend}]" if _backend else ""
-            agent_lines.append(
-                f"{icon} **{spec.id}** {spec.role}{_backend_str}{dep}{t_str}"
-            )
+            _line = f"{icon} **{spec.id}** {spec.role}{_backend_str}{dep}{t_str}"
+            if (a and a.status == AgentStatus.SKIPPED
+                    and getattr(a, "skip_reason", "")):
+                _line += f" · {a.skip_reason[:60]}"
+            agent_lines.append(_line)
 
         elements.append({
             "tag": "collapsible_panel",
@@ -200,6 +202,9 @@ def _build_card(state: CrewState) -> str:
                 block.append(f"❌ 失败：{a.error[:200]}")
             elif a.status == AgentStatus.CANCELLED:
                 block.append("🛑 已取消")
+            elif a.status == AgentStatus.SKIPPED:
+                _skip_txt = getattr(a, "skip_reason", "") or "已跳过"
+                block.append(f"⏭ 已跳过：{_skip_txt[:60]}")
             elif a.status == AgentStatus.RUNNING:
                 block.append((a.result[:200] if a.result else "运行中...") + " ▌")
             else:
@@ -250,7 +255,11 @@ def _build_card(state: CrewState) -> str:
                 t_str = f" ({_fmt_elapsed(time.time() - a.start_time)}…)"
             _backend = _backend_label(spec, a)
             _backend_str = f" [{_backend}]" if _backend else ""
-            status_lines.append(f"{icon} **{spec.id}** {spec.role}{_backend_str}{dep}{t_str}")
+            _sline = f"{icon} **{spec.id}** {spec.role}{_backend_str}{dep}{t_str}"
+            if (a and a.status == AgentStatus.SKIPPED
+                    and getattr(a, "skip_reason", "")):
+                _sline += f" · {a.skip_reason[:60]}"
+            status_lines.append(_sline)
         if status_lines:
             body_parts.append("\n".join(status_lines))
 

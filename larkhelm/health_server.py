@@ -40,6 +40,10 @@ class HealthSnapshot:
     cascade_active: int = 0
     cascade_dropped_total: int = 0
     cascade_midflight_cancelled_total: int = 0
+    memory_ok:                bool  = True
+    crash_flag:               bool  = False
+    lark_api_ok:              bool  = False
+    lark_api_last_ok_age_sec: float = float("inf")
 
     def is_healthy(self) -> bool:
         return (
@@ -47,6 +51,14 @@ class HealthSnapshot:
             and self.backend_healthy_count >= 1
             and self.init_complete
         )
+
+    def is_live(self) -> bool:
+        """Liveness: memory OK and no crash flag. Never touches network."""
+        return self.memory_ok and not self.crash_flag
+
+    def is_ready(self) -> bool:
+        """Readiness: WebSocket connected and recent Lark API success."""
+        return self.ws_connected and self.lark_api_ok
 
 
 # ── Active-query counter ────────────────────────────────────────────────
@@ -66,6 +78,46 @@ def _get_active_queries() -> int:
         return int(get_diagnostics().get("active_queries", 0))
     except Exception:
         return 0
+
+
+def set_crash_flag() -> None:
+    """Mark the process as crashed; /health returns 503 until restart.
+
+    One-way: cannot be unset. Thread-safe (module-level bool write is atomic on CPython).
+    """
+    global _crash_flag
+    _crash_flag = True
+
+
+def _get_memory_ok() -> bool:
+    """Return True iff RSS < health_memory_limit_bytes (default 4 GiB).
+
+    Never raises; returns True on any failure (fail-open for liveness).
+    """
+    try:
+        import larkhelm.config as _cfg
+        limit = int(getattr(_cfg, "HEALTH_MEMORY_LIMIT_BYTES", _HEALTH_MEMORY_LIMIT_DEFAULT))
+        rss = _get_rss_bytes()
+        return rss < limit
+    except Exception:
+        return True
+
+
+def _get_lark_api_ok() -> bool:
+    """Return True iff _lark_api_last_ok_ts != 0 AND age < health_lark_api_stale_sec (default 300s).
+
+    Reads lark_client._lark_api_last_ok_ts at call time. Never raises; returns False on any error.
+    """
+    try:
+        import larkhelm.lark_client as _lc
+        import larkhelm.config as _cfg
+        ts = float(getattr(_lc, "_lark_api_last_ok_ts", 0.0))
+        if ts == 0.0:
+            return False
+        stale_sec = float(getattr(_cfg, "HEALTH_LARK_API_STALE_SEC", 300.0))
+        return (time.time() - ts) < stale_sec
+    except Exception:
+        return False
 
 
 # ── Snapshot collector ──────────────────────────────────────────────────
@@ -132,6 +184,13 @@ def current_snapshot() -> HealthSnapshot:
     backend_status = _get_backend_statuses()
     healthy = sum(1 for _, h in backend_status if h)
     casc_active, casc_dropped, casc_mid = _get_cascade_counts()
+    _lark_ok = _get_lark_api_ok()
+    try:
+        import larkhelm.lark_client as _lc
+        _ts = float(getattr(_lc, "_lark_api_last_ok_ts", 0.0))
+        _age = (time.time() - _ts) if _ts != 0.0 else float("inf")
+    except Exception:
+        _age = float("inf")
     return HealthSnapshot(
         ws_connected=_get_ws_connected(),
         backend_healthy_count=healthy,
@@ -143,6 +202,10 @@ def current_snapshot() -> HealthSnapshot:
         cascade_active=casc_active,
         cascade_dropped_total=casc_dropped,
         cascade_midflight_cancelled_total=casc_mid,
+        memory_ok=_get_memory_ok(),
+        crash_flag=_crash_flag,
+        lark_api_ok=_lark_ok,
+        lark_api_last_ok_age_sec=_age,
     )
 
 
@@ -176,14 +239,16 @@ class HealthRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_health(self) -> None:
         snap = current_snapshot()
-        status = 200 if snap.is_healthy() else 503
-        body = "ok\n" if snap.is_healthy() else "unhealthy\n"
+        alive = snap.is_live()
+        status = 200 if alive else 503
+        body = "ok\n" if alive else "unhealthy\n"
         self._write_text(status, body)
 
     def _handle_ready(self) -> None:
         snap = current_snapshot()
-        status = 200 if snap.is_healthy() else 503
-        body = "ready\n" if snap.is_healthy() else "not ready\n"
+        ready = snap.is_ready()
+        status = 200 if ready else 503
+        body = "ready\n" if ready else "not ready\n"
         self._write_text(status, body)
 
     def _handle_metrics(self) -> None:
@@ -255,6 +320,9 @@ class HealthRequestHandler(BaseHTTPRequestHandler):
 
 
 # ── Module-level server lifecycle ───────────────────────────────────────
+
+_crash_flag: bool = False
+_HEALTH_MEMORY_LIMIT_DEFAULT: int = 4 * 1024 * 1024 * 1024  # 4 GiB
 
 _server: Optional[ThreadingHTTPServer] = None
 _server_thread: Optional[threading.Thread] = None
@@ -341,4 +409,5 @@ __all__ = [
     "stop_health_server",
     "current_snapshot",
     "is_running",
+    "set_crash_flag",
 ]

@@ -23,12 +23,14 @@ from lark_oapi.api.im.v1.model.reply_message_request import ReplyMessageRequest
 from lark_oapi.api.im.v1.model.reply_message_request_body import (ReplyMessageRequestBody, ReplyMessageRequestBodyBuilder)
 from lark_oapi.api.docx.v1 import (CreateDocumentRequest, CreateDocumentRequestBody)
 import larkhelm.config as _cfg
+import time as _time_mod
 from larkhelm.card_builder import _make_card, _split_md
-from larkhelm.log import _debug_log, warn
+from larkhelm.log import _debug_log, warn, error
 
 # ── Global client (assigned by main()) ─────────────────────────────
 client: lark.Client = None  # type: ignore[assignment]  # assigned by main() before use
 BOT_OPEN_ID: str = ""  # This bot's open_id, fetched at startup, used to filter group @mentions
+_lark_api_last_ok_ts: float = 0.0  # Unix timestamp of the most recent successful Feishu API call; 0.0 = never
 
 
 # ── Table column-width estimation (shared by docx + Feishu card paths) ───
@@ -146,13 +148,40 @@ def _send_text_raw(chat_id: str, text: str) -> str:
         return None
 
 
+def _lark_api_call_with_retry(fn, *args, max_retries: int = 3, base_delay: float = 1.0,
+                              method_name: str = "", **kwargs):
+    """Call fn(*args, **kwargs) with exponential back-off on HTTP 429.
+
+    delay = min(base_delay * 2^attempt, 30.0), up to max_retries retries.
+    Non-429 4xx/5xx: return resp immediately without retry.
+    fn exceptions: propagate unchanged.
+    """
+    from larkhelm.metrics import inc_lark_api_retry
+    resp = fn(*args, **kwargs)
+    retried = 0
+    while hasattr(resp, "code") and resp.code == 429 and retried < max_retries:
+        delay = min(base_delay * (2 ** retried), 30.0)
+        warn(f"[LarkClient] HTTP 429，第{retried + 1}次重试，delay={delay:.1f}s ({method_name})")
+        _time_mod.sleep(delay)
+        resp = fn(*args, **kwargs)
+        retried += 1
+    if hasattr(resp, "code") and resp.code == 429:
+        error(f"[LarkClient] 卡片发送重试耗尽: {method_name}")
+        inc_lark_api_retry(method_name, "exhausted")
+    elif retried > 0:
+        inc_lark_api_retry(method_name, "success_after_retry")
+    return resp
+
+
 def _send_card_raw(chat_id: str, card_json: str, _fallback_text: str = None) -> str:
     """Send a message using a pre-built card JSON; returns the message_id.
     _fallback_text: plain text to send as fallback if card delivery fails (None = no fallback).
     """
     if client is None: return None
     try:
-        resp = client.im.v1.message.create(
+        _t0 = _time_mod.monotonic()
+        resp = _lark_api_call_with_retry(
+            client.im.v1.message.create,
             CreateMessageRequestBuilder()
             .receive_id_type("chat_id")
             .request_body(
@@ -161,14 +190,23 @@ def _send_card_raw(chat_id: str, card_json: str, _fallback_text: str = None) -> 
                 .msg_type("interactive")
                 .content(card_json)
                 .build()
-            ).build()
+            ).build(),
+            method_name="send_card",
         )
+        _elapsed = _time_mod.monotonic() - _t0
         if not resp.success():
             _debug_log(f"[SendCard] 失败 code={resp.code}: {resp.msg}")
             if _fallback_text:
                 _debug_log(f"[SendCard] 降级发送文本")
                 return _send_text_raw(chat_id, _fallback_text)
             return None
+        global _lark_api_last_ok_ts
+        _lark_api_last_ok_ts = _time_mod.time()
+        try:
+            from larkhelm.metrics import observe_lark_api_duration
+            observe_lark_api_duration(_elapsed)
+        except Exception:
+            pass
         return resp.data.message_id
     except Exception as e:
         _debug_log(f"[SendCard] 异常: {e}")
@@ -183,18 +221,29 @@ def _patch_card_raw(message_id: str, card_json: str) -> bool:
         return False
     if client is None: return False
     try:
-        resp = client.im.v1.message.patch(
+        _t0 = _time_mod.monotonic()
+        resp = _lark_api_call_with_retry(
+            client.im.v1.message.patch,
             PatchMessageRequestBuilder()
             .message_id(message_id)
             .request_body(
                 PatchMessageRequestBodyBuilder()
                 .content(card_json)
                 .build()
-            ).build()
+            ).build(),
+            method_name="patch_card",
         )
+        _elapsed = _time_mod.monotonic() - _t0
         if not resp.success():
             _debug_log(f"[PatchCard] 失败 code={resp.code}: {resp.msg}")
             return False
+        global _lark_api_last_ok_ts
+        _lark_api_last_ok_ts = _time_mod.time()
+        try:
+            from larkhelm.metrics import observe_lark_api_duration
+            observe_lark_api_duration(_elapsed)
+        except Exception:
+            pass
         return True
     except Exception as e:
         _debug_log(f"[PatchCard] 异常: {e}")
@@ -216,7 +265,7 @@ def _reply_card_raw(message_id: str, card_json: str, in_thread: bool = True) -> 
                .message_id(message_id)
                .request_body(body)
                .build())
-        resp = client.im.v1.message.reply(req)
+        resp = _lark_api_call_with_retry(client.im.v1.message.reply, req, method_name="reply_card")
         if not resp.success():
             _debug_log(f"[ReplyCard] 失败 code={resp.code}: {resp.msg}")
             return None
@@ -1542,6 +1591,35 @@ class FeishuDocClient:
             _debug_log(f"[lark_client] user-token check failed (ignored): {e}")
             return False
 
+    def add_doc_collaborators(
+        self,
+        doc_token: str,
+        open_ids: "list[str]",
+        perm: str = "view",
+        doc_type: str = "docx",
+    ) -> None:
+        """Add each open_id as a collaborator on *doc_token*.
+
+        Calls ``POST /drive/v1/permissions/{token}/members`` once per open_id.
+        Individual failures are warned and skipped; never raises.
+        """
+        for oid in open_ids:
+            if not oid:
+                continue
+            try:
+                self._call_api(
+                    "POST",
+                    f"/open-apis/drive/v1/permissions/{doc_token}/members"
+                    f"?type={doc_type}",
+                    {
+                        "member_type": "openid",
+                        "member_id": oid,
+                        "perm": perm,
+                    },
+                )
+            except Exception as e:
+                warn(f"[LarkClient] add_doc_collaborators {oid} failed: {e}")
+
     def create_doc(self, title: str, folder_token: str = "",
                    owner_open_id: str = "") -> "DocRef":
         """Create a blank docx document in the specified Drive folder (or root if empty).
@@ -1602,6 +1680,9 @@ class FeishuDocClient:
                 self.transfer_doc_owner(doc_id, owner_open_id)
             except Exception as e:
                 _debug_log(f"[lark_client] owner transfer failed: {e}")
+        _collaborators = getattr(_cfg, "FEISHU_DOC_COLLABORATORS", []) or []
+        if _collaborators:
+            self.add_doc_collaborators(doc_id, _collaborators)
         return DocRef(doc_type="docx", token=doc_id, raw_url="", title=title)
 
     def create_wiki_node(
@@ -1670,6 +1751,9 @@ class FeishuDocClient:
                 self.transfer_doc_owner(obj_token, owner_open_id)
             except Exception as e:
                 _debug_log(f"[lark_client] owner transfer failed: {e}")
+        _collaborators = getattr(_cfg, "FEISHU_DOC_COLLABORATORS", []) or []
+        if _collaborators:
+            self.add_doc_collaborators(obj_token, _collaborators)
         return DocRef(
             doc_type="docx",
             token=obj_token,

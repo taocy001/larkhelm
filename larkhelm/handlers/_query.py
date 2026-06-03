@@ -36,13 +36,13 @@ from larkhelm.ai_runner import query_claude, query_gemini, query_kimi, query_dee
 from larkhelm.chat_state import _get_cwd, _load_sid, _get_turn_count, _increment_turn_count
 from larkhelm.handlers._query_card_state import QueryCardState
 
-# ── Card UX parameters (from config) ────────────────────────────────
-# TOOL_HISTORY_CAP / STALL_THRESHOLD / CURSOR_FRAMES moved into
-# ``_query_card_state.py`` along with the state machine that consumes
-# them. The two intervals below stay here because ``_heartbeat_loop``
-# (still in _do_query, not extracted) is the only consumer.
-CARD_PUSH_INTERVAL = _cfg.CARD_PUSH_INTERVAL
-CURSOR_INTERVAL    = _cfg.CURSOR_INTERVAL
+# ── Card UX parameters ──────────────────────────────────────────────
+# Constants imported from _query_constants to break the circular
+# dependency with _query_session.py (REQ-23).
+from larkhelm.handlers._query_constants import (
+    CARD_PUSH_INTERVAL, CURSOR_INTERVAL,
+    STALL_THRESHOLD, CURSOR_FRAMES, TOOL_HISTORY_CAP,
+)
 
 # Intent types for which global memory (user style/format preferences) is
 # irrelevant.  Hoisted to module level so the set literal is not recreated

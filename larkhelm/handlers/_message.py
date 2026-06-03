@@ -16,7 +16,7 @@ import uuid
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1, P2ImMessageReactionCreatedV1
 
 import larkhelm.config as _cfg
-from larkhelm.log import _debug_log, log_entry
+from larkhelm.log import _debug_log, log_entry, redact_error
 from larkhelm.dedup import _is_duplicate
 # P2 REQ-03: pure-fn helpers (no Feishu SDK dependency, unit-testable).
 # Imported but only used at one branch below — handle_message is too
@@ -63,7 +63,7 @@ def _thread_error_card(chat_id: str, label: str, exc: Exception) -> None:
     try:
         send_card(
             chat_id, "❌ 任务失败",
-            f"{label} 任务失败：{str(exc)[:200]}",
+            f"{label} 任务失败：{redact_error(str(exc)[:200])}",
             color="red",
         )
     except Exception as _send_err:
@@ -237,6 +237,12 @@ def handle_message(data: P2ImMessageReceiveV1):
         chat_id = message.chat_id
         if not chat_id:
             return
+
+        try:
+            from larkhelm.metrics import inc_webhook_received
+            inc_webhook_received(getattr(message, "message_type", "unknown"))
+        except Exception:
+            pass
 
         # Track the sender's open_id so doc creation can add them as collaborator
         sender_open_id = ""
@@ -968,3 +974,8 @@ def handle_message(data: P2ImMessageReceiveV1):
 
     except Exception as e:
         _debug_log(f"[HandleMsg] exception: {e}\n{traceback.format_exc()}")
+        try:
+            from larkhelm.metrics import inc_message_errors
+            inc_message_errors("handle_message_error")
+        except Exception:
+            pass

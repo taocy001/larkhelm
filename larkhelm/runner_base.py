@@ -732,7 +732,9 @@ class BaseProcessRunner(abc.ABC):
                 except subprocess.TimeoutExpired:
                     try:
                         self._proc.kill()
-                        self._proc.wait()
+                        self._proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        pass
                     except Exception:
                         pass
             if sem_held:

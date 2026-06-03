@@ -10,6 +10,7 @@ than 24h are beyond Feishu's retry window and safe to discard.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from collections import OrderedDict
@@ -79,7 +80,9 @@ def _save_to_disk() -> None:
                 "msg_ids": dict(_seen_msg_ids),
             }
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(data, ensure_ascii=False))
+        tmp = Path(str(p) + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False))
+        os.replace(tmp, p)
     except Exception:
         pass
 

@@ -138,7 +138,14 @@ class LarkhelmMetricsRegistry:
             self.cache_savings_total = None
             self.session_checkpoint_total = None
             self.prefix_stability_low_total = None
+            self.crew_preflight_total = None
+            self.lark_api_retry_total = None
+            self.plan_ac_total = None
             self.prompt_cache_hit_rate = None
+            self.webhook_received_total = None
+            self.lark_api_duration_seconds = None
+            self.message_errors_total = None
+            self.lark_api_ok = None
             return
 
         # Use a private registry so the larkhelm metrics don't collide with
@@ -395,6 +402,47 @@ class LarkhelmMetricsRegistry:
             buckets=[0, 0.25, 0.5, 0.75, 0.9, 0.95, 1.0],
             registry=self._registry,
         )
+        self.crew_preflight_total = pc.Counter(
+            "larkhelm_crew_preflight_total",
+            "Crew agent preflight env check outcomes",
+            ["outcome", "check_type"],
+            registry=self._registry,
+        )
+        self.lark_api_retry_total = pc.Counter(
+            "larkhelm_lark_api_retry_total",
+            "Feishu API call retry outcomes",
+            ["method", "outcome"],
+            registry=self._registry,
+        )
+        self.plan_ac_total = pc.Counter(
+            "larkhelm_plan_ac_total",
+            "Plan acceptance criteria outcomes by gate_type",
+            ["gate_type", "outcome"],
+            registry=self._registry,
+        )
+        self.lark_api_ok = pc.Gauge(
+            "larkhelm_lark_api_ok",
+            "1 if a recent Feishu API call succeeded (age < health_lark_api_stale_sec), else 0",
+            registry=self._registry,
+        )
+        self.webhook_received_total = pc.Counter(
+            "larkhelm_webhook_received_total",
+            "Feishu webhook events received by message type",
+            ["event_type"],
+            registry=self._registry,
+        )
+        self.lark_api_duration_seconds = pc.Histogram(
+            "larkhelm_lark_api_duration_seconds",
+            "Feishu API call duration in seconds",
+            buckets=(0.05, 0.1, 0.5, 1, 5),
+            registry=self._registry,
+        )
+        self.message_errors_total = pc.Counter(
+            "larkhelm_message_errors_total",
+            "Message processing errors by error type",
+            ["error_type"],
+            registry=self._registry,
+        )
 
     @property
     def available(self) -> bool:
@@ -567,6 +615,8 @@ def update_health_gauges(snapshot: "HealthSnapshot") -> None:
                 reg.cascade_midflight_cancelled_total,
                 snapshot.cascade_midflight_cancelled_total,
             )
+        if getattr(reg, "lark_api_ok", None) is not None:
+            reg.lark_api_ok.set(1 if snapshot.lark_api_ok else 0)
     except Exception as e:
         # Never raise on render path — a metrics bug must not 503 /metrics —
         # but log so silent gauge stalls don't go undiagnosed.
@@ -1029,6 +1079,47 @@ def observe_cache_hit_rate(backend: str, ratio: float) -> None:
         safe_log(f"[Metrics] observe_cache_hit_rate failed (backend={backend}, ratio={ratio}): {e}")
 
 
+def inc_crew_preflight(outcome: str, check_type: str) -> None:
+    """Bump larkhelm_crew_preflight_total{outcome, check_type}. 永不抛出。
+    outcome: pass / fail_arch / fail_docker
+    check_type: arch / docker
+    """
+    reg = get_registry()
+    if not reg.available or getattr(reg, "crew_preflight_total", None) is None:
+        return
+    try:
+        reg.crew_preflight_total.labels(outcome=str(outcome), check_type=str(check_type)).inc()
+    except Exception as e:
+        safe_log(f"[Metrics] inc_crew_preflight failed (outcome={outcome}, check_type={check_type}): {e}")
+
+
+def inc_lark_api_retry(method: str, outcome: str) -> None:
+    """Bump larkhelm_lark_api_retry_total{method, outcome}. 永不抛出。
+    outcome: success_after_retry / exhausted
+    """
+    reg = get_registry()
+    if not reg.available or getattr(reg, "lark_api_retry_total", None) is None:
+        return
+    try:
+        reg.lark_api_retry_total.labels(method=str(method), outcome=str(outcome)).inc()
+    except Exception as e:
+        safe_log(f"[Metrics] inc_lark_api_retry failed (method={method}, outcome={outcome}): {e}")
+
+
+def inc_plan_ac(gate_type: str, outcome: str) -> None:
+    """Bump larkhelm_plan_ac_total{gate_type, outcome}. 永不抛出。
+    gate_type: code / runtime / release
+    outcome: passed / skipped / env_blocked / failed
+    """
+    reg = get_registry()
+    if not reg.available or getattr(reg, "plan_ac_total", None) is None:
+        return
+    try:
+        reg.plan_ac_total.labels(gate_type=str(gate_type), outcome=str(outcome)).inc()
+    except Exception as e:
+        safe_log(f"[Metrics] inc_plan_ac failed (gate_type={gate_type}, outcome={outcome}): {e}")
+
+
 def inc_workspace_hint(outcome: str) -> None:
     """Bump ``larkhelm_workspace_hint_total{outcome}``.
 
@@ -1057,6 +1148,39 @@ def inc_workspace_hint(outcome: str) -> None:
 # missing the registry's attribute is ``None`` and the constant resolves to
 # ``None`` (verify command exits 0 with ``print(None)`` — same byte-compat
 # semantics as the existing ``inc_*`` helpers' no-op contract).
+def inc_webhook_received(event_type: str) -> None:
+    """Bump larkhelm_webhook_received_total{event_type}. Never raises."""
+    reg = get_registry()
+    if not reg.available or getattr(reg, "webhook_received_total", None) is None:
+        return
+    try:
+        reg.webhook_received_total.labels(event_type=str(event_type)).inc()
+    except Exception as e:
+        safe_log(f"[Metrics] inc_webhook_received failed (event_type={event_type}): {e}")
+
+
+def observe_lark_api_duration(seconds: float) -> None:
+    """Observe larkhelm_lark_api_duration_seconds with latency in seconds. Never raises."""
+    reg = get_registry()
+    if not reg.available or getattr(reg, "lark_api_duration_seconds", None) is None:
+        return
+    try:
+        reg.lark_api_duration_seconds.observe(float(seconds))
+    except Exception as e:
+        safe_log(f"[Metrics] observe_lark_api_duration failed (seconds={seconds!r}): {e}")
+
+
+def inc_message_errors(error_type: str) -> None:
+    """Bump larkhelm_message_errors_total{error_type}. Never raises."""
+    reg = get_registry()
+    if not reg.available or getattr(reg, "message_errors_total", None) is None:
+        return
+    try:
+        reg.message_errors_total.labels(error_type=str(error_type)).inc()
+    except Exception as e:
+        safe_log(f"[Metrics] inc_message_errors failed (error_type={error_type}): {e}")
+
+
 _REGISTRY_ALIASES = {
     "WORKSPACE_HINT_TOTAL":          "workspace_hint_total",
     "SESSION_AUTO_RESET_TOTAL":      "session_auto_reset_total",
@@ -1065,6 +1189,9 @@ _REGISTRY_ALIASES = {
     "DOC_INJECT_CACHE_TOTAL":        "doc_inject_cache_total",
     "CACHE_SAVINGS_TOTAL":           "cache_savings_total",
     "SESSION_CHECKPOINT_TOTAL":      "session_checkpoint_total",
+    "WEBHOOK_RECEIVED_TOTAL":        "webhook_received_total",
+    "LARK_API_DURATION_SECONDS":     "lark_api_duration_seconds",
+    "MESSAGE_ERRORS_TOTAL":          "message_errors_total",
 }
 
 
@@ -1108,11 +1235,20 @@ __all__ = [
     "inc_cache_savings",
     "inc_session_checkpoint",
     "inc_prefix_stability_low",
+    "inc_crew_preflight",
+    "inc_lark_api_retry",
+    "inc_plan_ac",
     "observe_cache_hit_rate",
+    "inc_webhook_received",
+    "observe_lark_api_duration",
+    "inc_message_errors",
     # Module-level Counter aliases (resolved lazily via __getattr__):
     "WORKSPACE_HINT_TOTAL",
     "SESSION_AUTO_RESET_TOTAL",
     "STICKY_CONTEXT_EVICTED_TOTAL",
     "TOKENS_TOTAL",
     "DOC_INJECT_CACHE_TOTAL",
+    "WEBHOOK_RECEIVED_TOTAL",
+    "LARK_API_DURATION_SECONDS",
+    "MESSAGE_ERRORS_TOTAL",
 ]

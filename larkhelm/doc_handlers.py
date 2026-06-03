@@ -7,6 +7,7 @@ import threading
 
 import larkhelm.config as _cfg
 from larkhelm.chat_state import set_pending_doc_write, pop_pending_doc_write
+from larkhelm.secure_io import secure_atomic_write
 from larkhelm.lark_client import send_card, send_permission_guide
 from larkhelm.log import _debug_log
 
@@ -279,6 +280,33 @@ def _cmd_doc_ls(chat_id: str, url: str):
     send_card(chat_id, "📂 文件夹内容", "\n".join(lines), color="blue")
 
 
+def _save_artifact_to_workspace(url: str, title: str, cwd: str) -> None:
+    """Append a created doc artifact to .crew_workspace/external_artifacts.json (fail-soft)."""
+    import json as _json
+    import time as _time
+    from pathlib import Path as _Path
+    if not cwd:
+        return
+    ws = _Path(cwd) / ".crew_workspace"
+    if not ws.is_dir():
+        return
+    artifacts_path = ws / "external_artifacts.json"
+    try:
+        if artifacts_path.exists():
+            data = _json.loads(artifacts_path.read_text(encoding="utf-8"))
+        else:
+            data = {"artifacts": []}
+        data.setdefault("artifacts", [])
+        data["artifacts"].append({
+            "url": url,
+            "title": title,
+            "created_at": _time.strftime("%Y-%m-%dT%H:%M:%S+08:00"),
+        })
+        secure_atomic_write(artifacts_path, _json.dumps(data, ensure_ascii=False, indent=2))
+    except Exception as e:
+        _debug_log(f"[DocHandlers] _save_artifact_to_workspace failed: {e}")
+
+
 def _cmd_doc_create(chat_id: str, rest: str):
     """/doc create <title> [folder_or_wiki_url]"""
     from larkhelm.lark_client import (
@@ -333,6 +361,7 @@ def _cmd_doc_create(chat_id: str, rest: str):
     from larkhelm.chat_state import _get_chat_state
     sender_open_id = _get_chat_state(chat_id).get("sender_open_id", "")
 
+    _cwd = _get_chat_state(chat_id).get("cwd", "") or _cfg.DEFAULT_CWD
     try:
         if wiki_space_id:
             doc_ref    = doc_client.create_wiki_node(wiki_space_id, title, wiki_parent_token,
@@ -344,6 +373,7 @@ def _cmd_doc_create(chat_id: str, rest: str):
                       f"**文档 ID：** `{doc_ref.token}`\n"
                       f"**链接：** {wiki_url}",
                       color="green")
+            _save_artifact_to_workspace(wiki_url, title, _cwd)
         else:
             doc_ref = doc_client.create_doc(title, folder_token, owner_open_id=sender_open_id)
             doc_url = f"https://feishu.cn/docx/{doc_ref.token}"
@@ -352,6 +382,7 @@ def _cmd_doc_create(chat_id: str, rest: str):
                       f"**文档 ID：** `{doc_ref.token}`\n"
                       f"**链接：** {doc_url}",
                       color="green")
+            _save_artifact_to_workspace(doc_url, title, _cwd)
     except DocPermissionError as e:
         send_permission_guide(chat_id, "create_folder", code=e.code)
     except DocNotFoundError:

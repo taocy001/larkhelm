@@ -40,6 +40,12 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
     (re.compile(r"(?i)(api[_-]?key\s*[=:]\s*)[^\s,;'\")]+"), r"\1***"),
     (re.compile(r"(?i)(Authorization\s*:\s*Bearer\s+)\S+"), r"\1***"),
     (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"), "sk-***"),
+    # REQ-08: APP_SECRET/app_secret key-value pairs
+    (re.compile(r"(?i)(APP_SECRET|app_secret)\s*[=\"']+\s*\S{8,}"), r"\1=***"),
+    # REQ-08: DeepSeek ds- tokens
+    (re.compile(r"\bds-[a-zA-Z0-9]{32,}\b"), "ds-***"),
+    # REQ-08: high-entropy hex strings (40+ chars)
+    (re.compile(r"\b[0-9a-f]{40,}\b"), "***hex***"),
 )
 
 

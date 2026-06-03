@@ -61,7 +61,7 @@ _HEADING_RE = re.compile(
 
 def is_enabled() -> bool:
     """Read the operator gate; defaults to False so P1 behaviour holds."""
-    return bool(getattr(_cfg, "MEMORY_PROJECT_SECTION_ENABLED", False))
+    return bool(getattr(_cfg, "MEMORY_PROJECT_SECTION_ENABLED", True))
 
 
 def parse_body(body: str) -> dict[str, str]:

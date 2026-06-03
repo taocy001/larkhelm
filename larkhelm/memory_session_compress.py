@@ -186,7 +186,7 @@ def _select_top_k(scored: list[CompressScore], budget: int) -> list[CompressScor
     if budget <= 0:
         return []
     indexed = list(enumerate(scored))
-    indexed.sort(key=lambda pair: (-pair[1].score, pair[0]))
+    indexed.sort(key=lambda pair: (-pair[1].score, -pair[0]))
 
     kept_idx: list[int] = []
     used = 0
