@@ -7,29 +7,34 @@
   <string>com.larkhelm</string>
   <key>ProgramArguments</key>
   <array>
-    <string>PIPX_BIN_PLACEHOLDER/larkhelm</string>
+    <string>__LARKHELM_BIN__</string>
     <string>start</string>
     <string>--config</string>
-    <string>CONFIG_PLACEHOLDER</string>
+    <string>__CONFIG__</string>
     <string>--data-dir</string>
-    <string>DATA_DIR_PLACEHOLDER</string>
+    <string>__DATA_DIR__</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PYTHONUNBUFFERED</key>
     <string>1</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
     <key>PATH</key>
-    <string>PATH_PLACEHOLDER</string>
+    <string>__PATH__</string>
   </dict>
+  <!-- RunAtLoad + KeepAlive: auto-start on login and restart on crash -->
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <!-- ThrottleInterval: minimum seconds between restarts (prevents tight loops) -->
   <key>ThrottleInterval</key>
-  <integer>5</integer>
+  <integer>30</integer>
+  <!-- All output (stdout + stderr) goes to a single log file for easy tailing -->
   <key>StandardOutPath</key>
-  <string>LOG_DIR_PLACEHOLDER/stdout.log</string>
+  <string>__LOG_DIR__/larkhelm.log</string>
   <key>StandardErrorPath</key>
-  <string>LOG_DIR_PLACEHOLDER/stderr.log</string>
+  <string>__LOG_DIR__/larkhelm.log</string>
 </dict>
 </plist>

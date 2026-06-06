@@ -1,6 +1,11 @@
-LOG_DIR_PLACEHOLDER/debug.log {
+# LarkHelm log rotation
+# Install: sudo cp larkhelm.logrotate /etc/logrotate.d/larkhelm
+# (install.sh does this automatically)
+
+__LOG_DIR__/larkhelm.log {
     daily
     rotate 14
+    maxsize 256M
     compress
     delaycompress
     copytruncate
@@ -8,7 +13,7 @@ LOG_DIR_PLACEHOLDER/debug.log {
     notifempty
 }
 
-LOG_DIR_PLACEHOLDER/all.jsonl {
+__LOG_DIR__/all.jsonl {
     size 32M
     rotate 7
     compress

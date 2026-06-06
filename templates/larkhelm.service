@@ -1,21 +1,31 @@
 [Unit]
-Description=LarkHelm (Claude/Gemini)
-After=network.target
+Description=LarkHelm AI Bridge (Claude/Gemini/Kimi)
+After=network-online.target
+Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple
-ExecStart=PIPX_BIN_PLACEHOLDER/larkhelm start --config CONFIG_PLACEHOLDER --data-dir DATA_DIR_PLACEHOLDER
+__USER_LINE__
+WorkingDirectory=__WORKDIR__
+ExecStart=__LARKHELM_BIN__ start --config __CONFIG__ --data-dir __DATA_DIR__
 Restart=on-failure
-RestartSec=5
-StandardOutput=append:LOG_DIR_PLACEHOLDER/larkhelm.log
-StandardError=append:LOG_DIR_PLACEHOLDER/larkhelm.log
+RestartSec=30
 Environment=PYTHONUNBUFFERED=1
+__HOME_LINE__
+__PATH_LINE__
+StandardOutput=append:__LOG_DIR__/larkhelm.log
+StandardError=append:__LOG_DIR__/larkhelm.log
 MemoryMax=4G
 MemoryHigh=3G
 CPUQuota=200%
 TimeoutStopSec=30
 KillMode=mixed
 KillSignal=SIGTERM
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths=__DATA_DIR__ __LOG_DIR__
 
 [Install]
-WantedBy=default.target
+WantedBy=__WANTEDBY__
