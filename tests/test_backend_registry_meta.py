@@ -174,8 +174,8 @@ multiple lines.  """,
 multiple lines.  """)
 
 
-class TestRankForTask(unittest.TestCase):
-    """AC-06 / AC-07: capability/cost/latency_tier defaults + rank_for_task scoring."""
+class TestBackendSpecFields(unittest.TestCase):
+    """AC-06 / AC-07: capability/cost/latency_tier defaults on BackendSpec."""
 
     def test_new_fields_defaults(self):
         spec = BackendSpec(id="t", provider="p", display_name="t", role="worker", tags=[])
@@ -218,101 +218,6 @@ class TestRankForTask(unittest.TestCase):
         spec = registry.get_by_tag(["cheap"])
         self.assertIsNotNone(spec)
         self.assertEqual(spec.id, "cheap-id")
-
-    def test_rank_for_task_scoring(self):
-        from larkhelm.agent_hub.intent_types import TaskProfile
-
-        registry = BackendRegistry()
-        registry.load([
-            {"id": "cheap-fast", "provider": "gemini_cli", "display_name": "Cheap",
-             "role": "worker", "tags": ["cheap", "fast"],
-             "capability_scores": {"code": 0.3, "instant": 0.9},
-             "latency_tier": "fast",
-             "cost_per_1k_input": 0.05, "cost_per_1k_output": 0.20},
-            {"id": "claude-worker", "provider": "claude_cli", "display_name": "Claude",
-             "role": "worker", "tags": ["tools"],
-             "capability_scores": {"code": 0.95, "reasoning": 0.9},
-             "latency_tier": "slow",
-             "cost_per_1k_input": 3.0, "cost_per_1k_output": 15.0},
-        ])
-
-        complex_profile = TaskProfile(
-            complexity="complex",
-            required_capabilities={"code": 1.0, "reasoning": 0.7},
-            latency_pref="medium",
-        )
-        ranked = registry.rank_for_task(complex_profile)
-        self.assertGreater(len(ranked), 0)
-        self.assertEqual(ranked[0].id, "claude-worker")
-
-        simple_profile = TaskProfile(
-            complexity="simple",
-            required_capabilities={"instant": 1.0},
-            latency_pref="fast",
-        )
-        ranked = registry.rank_for_task(simple_profile)
-        self.assertEqual(ranked[0].id, "cheap-fast")
-
-    def test_cost_ceiling_filters_expensive_and_keeps_cheap(self):
-        """cost_ceiling is USD-per-call, computed from per-1k rates.
-
-        With assumed 1000 in / 500 out tokens, expected per-call cost:
-          - cheap-fast: 0.05*1.0 + 0.20*0.5 = 0.15 USD
-          - claude-worker: 3.0*1.0 + 15.0*0.5 = 10.5 USD
-        A ceiling of 1.0 must keep cheap-fast and drop claude-worker.
-        """
-        from larkhelm.agent_hub.intent_types import TaskProfile
-        registry = BackendRegistry()
-        registry.load([
-            {"id": "cheap-fast", "provider": "gemini_cli", "display_name": "C",
-             "role": "worker", "tags": ["cheap"],
-             "cost_per_1k_input": 0.05, "cost_per_1k_output": 0.20},
-            {"id": "claude-worker", "provider": "claude_cli", "display_name": "W",
-             "role": "worker", "tags": ["tools"],
-             "cost_per_1k_input": 3.0, "cost_per_1k_output": 15.0},
-        ])
-        profile = TaskProfile(cost_ceiling=1.0)
-        ranked = registry.rank_for_task(profile)
-        self.assertIn("cheap-fast", {s.id for s in ranked})
-        self.assertNotIn("claude-worker", {s.id for s in ranked})
-
-    def test_cost_ceiling_no_zero_cost_bypass(self):
-        """Backends with explicit cost data are filtered, even if one is free.
-
-        Regression for review §3.2: previously, any backend with both
-        cost_per_1k_input and cost_per_1k_output equal to 0 was unconditionally
-        kept (bypass). After the fix, a zero-cost spec passes the math
-        naturally (per-call estimate = 0), and a non-zero expensive spec is
-        still filtered out by the ceiling.
-        """
-        from larkhelm.agent_hub.intent_types import TaskProfile
-        registry = BackendRegistry()
-        registry.load([
-            {"id": "free-local", "provider": "p", "display_name": "Free",
-             "role": "worker", "tags": [],
-             "cost_per_1k_input": 0.0, "cost_per_1k_output": 0.0},
-            {"id": "expensive", "provider": "p", "display_name": "Exp",
-             "role": "worker", "tags": [],
-             "cost_per_1k_input": 100.0, "cost_per_1k_output": 100.0},
-        ])
-        profile = TaskProfile(cost_ceiling=0.5)
-        ids = {s.id for s in registry.rank_for_task(profile)}
-        self.assertEqual(ids, {"free-local"})
-
-    def test_rank_for_task_legacy_fallback_to_tags(self):
-        """When no spec has capability_scores, fall back to tag intersection."""
-        from larkhelm.agent_hub.intent_types import TaskProfile
-
-        registry = BackendRegistry()
-        registry.load([
-            {"id": "a", "provider": "p", "display_name": "A", "role": "worker",
-             "tags": ["cheap"]},
-            {"id": "b", "provider": "p", "display_name": "B", "role": "worker",
-             "tags": ["tools", "cheap"]},
-        ])
-        profile = TaskProfile(required_capabilities={"cheap": 1.0})
-        ranked = registry.rank_for_task(profile)
-        self.assertEqual({s.id for s in ranked}, {"a", "b"})
 
 
 if __name__ == '__main__':

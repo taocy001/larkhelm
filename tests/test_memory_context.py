@@ -215,15 +215,15 @@ class MemoryContextBuilderTests(unittest.TestCase):
         from larkhelm import _context_cache as _cc
         _cc.reset_for_tests()
 
-    def test_default_args_equivalent_to_legacy(self):
-        """``MemoryContextBuilder(chat, cwd).build()`` with no other args
-        must produce the same string as the legacy ``get_memory_context``."""
+    def test_default_args_includes_all_layers(self):
+        """``get_memory_context`` includes all three memory layers."""
         with patch.object(mem, "load_global_memory", return_value="GLOBAL_X"), \
              patch.object(mem, "load_project_memory", return_value="PROJECT_Y"), \
              patch.object(mem, "load_memory", return_value="SESSION_Z"):
-            new_out = mc.MemoryContextBuilder("chat1", "/x").build()
-            legacy_out = mem.get_memory_context("chat1", "/x")
-        self.assertEqual(new_out, legacy_out)
+            out = mem.get_memory_context("chat1", "/x")
+        self.assertIn("GLOBAL_X", out)
+        self.assertIn("PROJECT_Y", out)
+        self.assertIn("SESSION_Z", out)
 
     def test_global_excluded_when_query_lacks_keywords(self):
         with patch.object(mem, "load_global_memory", return_value="GLOBAL_X"), \

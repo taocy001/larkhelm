@@ -153,11 +153,11 @@ class TestRouter(unittest.TestCase):
         spec = resolve_backend("chat1", "use a tool", has_doc_urls=True)
         self.assertIn("tools", spec.tags)
 
-    def test_resolve_cheap(self):
-        with patch("larkhelm.router.BACKEND_REGISTRY", self.registry), \
-             patch.object(_cfg_module, "config", {"enable_cheap_routing": True}):
+    def test_resolve_no_cheap_routing(self):
+        # Cheap routing removed — short messages go to orchestrator like any other query
+        with patch("larkhelm.router.BACKEND_REGISTRY", self.registry):
             spec = resolve_backend("chat1", "short msg", has_images=False, has_doc_urls=False)
-            self.assertEqual(spec.id, "cheap1")
+            self.assertEqual(spec.role, "orchestrator")
 
     def test_resolve_orchestrator_default(self):
         spec = resolve_backend("chat1", "long message " * 20)

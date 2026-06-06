@@ -717,13 +717,51 @@ def save_memory(chat_id: str, content: str, *, raise_on_error: bool = False) -> 
 def get_memory_context(chat_id: str, cwd: str | None = None) -> str:
     """Build the combined memory context string for injection as extra_system.
 
-    Phase B (S49–S52) forwards to ``MemoryContextBuilder``. Default arguments
-    (no ``query``, no ``recent_turns``) hit the fail-open paths in
-    ``should_include_*`` so behaviour is byte-equivalent to the legacy
-    implementation: every layer is included (subject to budget trim).
+    Read the three memory files and concatenate them with section tags.
     """
-    from larkhelm.memory_context import MemoryContextBuilder
-    return MemoryContextBuilder(chat_id, cwd).build()
+    return _build_memory_context(chat_id, cwd)
+
+
+def _build_memory_context(
+    chat_id: str,
+    cwd: str | None = None,
+    *,
+    sender_open_id: str | None = None,
+    include_global: bool = True,
+) -> str:
+    """Read the three persistent memory files and return concatenated text."""
+    parts: list[str] = []
+
+    if include_global:
+        try:
+            body = load_global_memory(chat_id, sender_open_id=sender_open_id)
+            if body and body.strip():
+                parts.append(
+                    f"[GLOBAL MEMORY]\n{body.strip()[:GLOBAL_MAX_CHARS]}\n[/GLOBAL MEMORY]"
+                )
+        except Exception:
+            pass
+
+    try:
+        if cwd:
+            body = load_project_memory(cwd)
+            if body and body.strip():
+                parts.append(
+                    f"[PROJECT MEMORY — {cwd}]\n{body.strip()[:PROJECT_MAX_CHARS]}\n[/PROJECT MEMORY]"
+                )
+    except Exception:
+        pass
+
+    try:
+        body = load_memory(chat_id)
+        if body and body.strip():
+            parts.append(
+                f"[SESSION MEMORY]\n{body.strip()[:SESSION_MAX_CHARS]}\n[/SESSION MEMORY]"
+            )
+    except Exception:
+        pass
+
+    return "\n\n".join(parts)
 
 
 def get_memory_context_v2(
@@ -737,56 +775,24 @@ def get_memory_context_v2(
     sender_open_id: str | None = None,
     backend_spec=None,
 ) -> tuple[str, list[str]]:
-    """Build memory context AND return deduped recent turns in one pass.
+    """Build memory context from the three persistent layers.
 
-    Returns ``(composed_memory, deduped_recent_turns)``. ``recent_turns`` is
-    deduped against the *raw* session body (so dedup remains correct even
-    when the session view is sliced down by ``memory_session_layered``).
-
-    Phase D — ``intent``: when an :class:`IntentResult`-shaped object is
-    supplied, its ``agent_type`` / ``sub_intent`` / ``complexity`` /
-    ``confidence`` fields are forwarded to the builder so the retriever
-    path (gated by ``memory_retriever_enabled``) can apply per-agent
-    policy. When ``intent is None`` the call is byte-equivalent to the
-    legacy v2 signature; this is duck-typed so third-party plugins can
-    pass any namespace object exposing the four fields.
-
-    Week-2 — ``backend_spec``: when a :class:`BackendSpec` is supplied,
-    the builder may scale the memory-injection budget to the backend's
-    context-window size (gated by ``backend_aware_budget_enabled``)."""
-    from larkhelm.memory_context import MemoryContextBuilder
-
-    builder_kwargs: dict = dict(
-        query=query, recent_turns=recent_turns,
-        has_doc_urls=has_doc_urls,
-        sender_open_id=sender_open_id,
-        backend_spec=backend_spec,
+    Returns ``(memory_ctx, recent_turns)`` where memory_ctx is the
+    concatenated global+project+session memory and recent_turns is
+    passed through unchanged (the caller decides whether to inject it).
+    """
+    memory_ctx = _build_memory_context(
+        chat_id, cwd, sender_open_id=sender_open_id
     )
-    if intent is not None:
-        builder_kwargs["agent_type"] = getattr(intent, "agent_type", "chat") or "chat"
-        builder_kwargs["sub_intent"] = getattr(intent, "sub_intent", "") or ""
-        builder_kwargs["complexity"] = getattr(intent, "complexity", "medium") or "medium"
-        try:
-            builder_kwargs["confidence"] = float(getattr(intent, "confidence", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            builder_kwargs["confidence"] = 0.0
-
-    builder = MemoryContextBuilder(chat_id, cwd, **builder_kwargs)
-    composed = builder.build()
-    session_raw = load_memory(chat_id) or ""
-    deduped = builder.deduped_recent_turns(session_raw)
-    return composed, deduped
+    return memory_ctx, list(recent_turns or [])
 
 
 def get_project_memory_context(chat_id: str, cwd: str | None = None) -> str:
     """Build project + session memory context (no global layer).
 
-    Used by crew agents for task-scoped context. Phase B forwards to
-    ``MemoryContextBuilder.build_for_crew`` so per-layer changes (eg.
-    project memory frontmatter) are applied uniformly.
+    Used by crew agents for task-scoped context.
     """
-    from larkhelm.memory_context import MemoryContextBuilder
-    return MemoryContextBuilder(chat_id, cwd, force_project=True).build_for_crew()
+    return _build_memory_context(chat_id, cwd, include_global=False)
 
 
 def inject_memory(chat_id: str, message: str, cwd: str | None = None) -> str:

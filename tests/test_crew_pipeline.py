@@ -38,9 +38,8 @@ def test_every_agent_has_task_profile(init_test_config):
 
 def test_task_profile_values_are_known(init_test_config):
     from larkhelm.crew._pipeline import _make_dev_pipeline
-    from larkhelm.crew._backend_resolver import TASK_PROFILES
     plan = _make_dev_pipeline("test req", "/tmp/cwd", no_confirm=True)
-    valid = set(TASK_PROFILES)
+    valid = {"planner", "engineer", "qa", "reviewer", "chat"}
     for spec in plan.agents:
         assert spec.task_profile in valid, (
             f"agent {spec.id!r} has unknown task_profile={spec.task_profile!r}"

@@ -173,13 +173,10 @@ def test_resolve_backend_path2_rejects_non_tool_backend_when_output_file(
     )
 
 
-def test_resolve_backend_path2_allows_non_tool_backend_when_no_output_file(
+def test_resolve_backend_uses_active_orchestrator_for_all_agents(
     init_test_config, fake_agent_spec, monkeypatch,
 ):
-    """Negative pin: an agent WITHOUT ``output_file`` (e.g. inline-only
-    chat helper) is fine on a non-tool backend. The gate only fires for
-    artifact-producing agents.
-    """
+    """All agents (including those without output_file) use the active orchestrator."""
     from larkhelm.crew._backend_resolver import resolve_backend
     from larkhelm.backend_registry import BackendRegistry, BackendSpec
     import larkhelm.backend_registry as _br_mod
@@ -200,10 +197,12 @@ def test_resolve_backend_path2_allows_non_tool_backend_when_no_output_file(
     spec = fake_agent_spec(
         id="chat_only", role="闲聊",
         model="deepseek", task_profile="",
-        output_file="",   # no artifact contract
+        output_file="",
     )
     resolved = resolve_backend(spec)
-    assert resolved.id == "deepseek"
+    assert resolved.id == "claude", (
+        f"active orchestrator must be used for all agents; got {resolved.id!r}"
+    )
 
 
 def test_resolve_backend_honours_exclude_backend_ids(

@@ -73,20 +73,6 @@ def _thread_error_card(chat_id: str, label: str, exc: Exception) -> None:
             pass
 
 
-def _intent_router_active(chat_id: str) -> bool:
-    """Return True iff the phase-5 intent router should run for this chat.
-
-    Delegates to the shared ``_gating.hash_traffic_active`` helper so that
-    ``intent_router_traffic`` and ``memory_retriever_traffic`` bucket the
-    same chat_id identically (AC-05 / NFR-DEPLOY-1). The helper short-
-    circuits on flag=False without importing agent_hub so AC-10 still
-    holds.
-    """
-    from larkhelm._gating import hash_traffic_active
-    return hash_traffic_active(
-        chat_id, "intent_router_enabled", "intent_router_traffic",
-    )
-
 
 # P3 REQ-02 / design.md §3.3: case-insensitive keyword set that gates the
 # workspace-hint segment when WORKSPACE_HINT_KEYWORD_GATE=True. Compiled at
@@ -480,42 +466,7 @@ def handle_message(data: P2ImMessageReceiveV1):
             except Exception:
                 pass
 
-            # Route through AgentDispatcher when intent router is active so
-            # FileAgent benefits from ACL, audit, and reswitch hooks.
-            _dispatched_via_agent = False
-            if _intent_router_active(chat_id):
-                try:
-                    from larkhelm.agent_hub import AgentContext, AgentDispatcher
-                    from larkhelm.agent_hub.intent_types import IntentResult
-                    _file_intent = IntentResult(
-                        agent_type="file",
-                        sub_intent="file_analysis",
-                        confidence=1.0,
-                        is_explicit_command=False,
-                        layer="override",
-                    )
-                    _file_ctx = AgentContext(
-                        chat_id=chat_id,
-                        user_msg_id=message.message_id,
-                        text=_file_text,
-                        images=None,
-                        parent_id=getattr(message, "parent_id", None),
-                        cancel_ev=_get_cancel_event(chat_id),
-                        cwd=_get_cwd(chat_id),
-                        files=_file_result.files,
-                    )
-                    threading.Thread(
-                        target=AgentDispatcher().dispatch,
-                        args=(_file_intent, _file_ctx),
-                        daemon=True,
-                        name=f"file-agent-{chat_id[:8]}",
-                    ).start()
-                    _dispatched_via_agent = True
-                except Exception as _fae:
-                    _debug_log(f"[FileAgent] AgentDispatcher route failed, falling back: {_fae}")
-
-            if not _dispatched_via_agent:
-                threading.Thread(
+            threading.Thread(
                     target=_do_query,
                     kwargs={
                         "chat_id": chat_id,
@@ -765,62 +716,6 @@ def handle_message(data: P2ImMessageReceiveV1):
             _cmd_btw(chat_id, text, message.message_id, sender_open_id=sender_open_id)
             return
 
-        # ── Phase 5: intent router (gated by flag + traffic %) ──
-        # Explicit slash commands above already returned early; only "free-form"
-        # text reaches this point. Keep all imports lazy so flag=false (or unset)
-        # means agent_hub is never imported (AC-10).
-        if not text.startswith("/") and _intent_router_active(chat_id):
-            try:
-                from larkhelm.agent_hub import (
-                    AgentContext, AgentDispatcher, resolve_intent,
-                )
-            except Exception as _ex:
-                _debug_log(f"[IntentRouter] import failed: {_ex}")
-            else:
-                try:
-                    has_doc_urls = ("feishu.cn/docx/" in text or "feishu.cn/wiki/" in text or "feishu.cn/sheets/" in text)
-                    intent = resolve_intent(
-                        text, _msg_images or None, has_doc_urls, chat_id,
-                    )
-                except Exception as _ex:
-                    _debug_log(f"[IntentRouter] resolve_intent failed: {_ex}")
-                    intent = None
-                # Phase D: stash the resolved IntentResult on this chat so
-                # the chat-agent fall-through (which exits this block without
-                # calling AgentDispatcher) can pick it up inside _do_query and
-                # forward to get_memory_context_v2(intent=...).
-                # Restrict to agent_type == "chat" so dev/crew/plan/doc
-                # intents (which go straight to AgentDispatcher and never
-                # reach _do_query) don't leak into the *next* chat turn —
-                # crew/dev paths synthesize their own IntentResult anyway.
-                if intent is not None and intent.agent_type == "chat":
-                    try:
-                        from larkhelm.chat_state import _set_pending_intent
-                        _set_pending_intent(chat_id, intent)
-                    except Exception as _ex:
-                        _debug_log(f"[IntentRouter] _set_pending_intent failed: {_ex}")
-                if intent is not None and intent.agent_type != "chat":
-                    # Mirror the legacy path's _reset_cancel: a stale chat-level
-                    # cancel from the previous /cancel must be cleared, otherwise
-                    # cmd_dev / cmd_crew / _do_query inside the dispatched Agent
-                    # see is_set()=True and abort immediately. PlanAgent self-resets,
-                    # the other three do not.
-                    _reset_cancel(chat_id)
-                    cancel_ev = _get_cancel_event(chat_id)
-                    cwd       = _get_cwd(chat_id)
-                    parent_id = getattr(message, "parent_id", None)
-                    ctx = AgentContext(
-                        chat_id=chat_id, user_msg_id=message.message_id,
-                        text=text, images=_msg_images or None,
-                        parent_id=parent_id, cancel_ev=cancel_ev, cwd=cwd,
-                    )
-                    threading.Thread(
-                        target=AgentDispatcher().dispatch,
-                        args=(intent, ctx), daemon=True,
-                        name=f"agent-{intent.agent_type}-{chat_id[:8]}",
-                    ).start()
-                    return
-
         # ── Model dispatch ──
         target_model = _get_chat_model(chat_id)
         prompt = text
@@ -841,36 +736,6 @@ def handle_message(data: P2ImMessageReceiveV1):
             target_model = "deepseek"
             prompt = text.split(" ", 1)[1].strip()
             force_backend_id = "deepseek"
-
-        # Phase D follow-up: backend-override slash commands (/c /g /k /d)
-        # bypass AgentDispatcher entirely, so the reswitch hook inside
-        # the dispatcher can never see them. Detect here: if a prior
-        # non-chat agent dispatch sits inside the reswitch window, the
-        # user manually picking a backend means "should've been chat all
-        # along". The plain backend prefix doesn't tell us a NEW agent
-        # type, so we record corrected="chat" (the only legitimate
-        # answer for backend-forcing slash commands).
-        if force_backend_id is not None:
-            try:
-                from larkhelm.agent_hub.intent_feedback import (
-                    consume_dispatch as _consume_disp,
-                    record_signal as _rec_signal,
-                )
-                _hit = _consume_disp(chat_id, max_age_sec=120.0)
-                if _hit is not None:
-                    _prior, _prior_text, _age = _hit
-                    if _prior.agent_type != "chat":
-                        _rec_signal(
-                            "agent_reswitch", _prior, chat_id,
-                            corrected="chat", text=_prior_text,
-                            metadata={
-                                "elapsed_sec": round(_age, 2),
-                                "new_agent": "chat",
-                                "via": f"backend_override:{force_backend_id}",
-                            },
-                        )
-            except Exception as _re:
-                _debug_log(f"[IntentFeedback] reswitch (backend override) failed: {_re}")
 
         # Vision routing: gemini CLI and DeepSeek HTTP don't support image input;
         # force a vision-capable model.

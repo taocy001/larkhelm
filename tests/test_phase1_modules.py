@@ -291,9 +291,6 @@ class TestResolveBackend(unittest.TestCase):
     def _patch_state(self, state: dict):
         return patch("larkhelm.router._get_chat_state", return_value=state)
 
-    def _patch_cheap(self, enabled: bool):
-        return patch("larkhelm.router._cfg.config", {"enable_cheap_routing": enabled})
-
     def test_rule1_images_route_to_vision(self):
         """has_images → get_by_tag(["vision"])"""
         from larkhelm.router import resolve_backend
@@ -302,7 +299,7 @@ class TestResolveBackend(unittest.TestCase):
             {"id": "vision", "provider": "claude_cli", "role": "orchestrator",
              "tags": ["vision", "tools"], "command": "claude"},
         ])
-        with self._patch_registry(reg), self._patch_state({}), self._patch_cheap(False):
+        with self._patch_registry(reg), self._patch_state({}):
             result = resolve_backend("chat1", "hello", has_images=True)
         self.assertEqual(result.id, "vision")
 
@@ -314,38 +311,9 @@ class TestResolveBackend(unittest.TestCase):
             {"id": "tools_backend", "provider": "claude_cli", "role": "orchestrator",
              "tags": ["tools"], "command": "claude"},
         ])
-        with self._patch_registry(reg), self._patch_state({}), self._patch_cheap(False):
+        with self._patch_registry(reg), self._patch_state({}):
             result = resolve_backend("chat1", "hello", has_doc_urls=True)
         self.assertEqual(result.id, "tools_backend")
-
-    def test_rule3_cheap_routing_short_message(self):
-        """enable_cheap + short message → get_by_tag(["cheap", "fast"])"""
-        from larkhelm.router import resolve_backend
-        reg = BackendRegistry()
-        reg.load([
-            {"id": "orchestrator", "provider": "claude_cli", "role": "orchestrator",
-             "tags": ["tools"], "command": "claude"},
-            {"id": "cheap", "provider": "gemini_cli", "role": "cheap",
-             "tags": ["cheap", "fast"], "command": "gemini"},
-        ])
-        with self._patch_registry(reg), self._patch_state({}), self._patch_cheap(True):
-            result = resolve_backend("chat1", "hi", has_images=False, has_doc_urls=False)
-        self.assertEqual(result.id, "cheap")
-
-    def test_rule3_cheap_not_triggered_for_long_message(self):
-        """enable_cheap enabled but long message → skip cheap route"""
-        from larkhelm.router import resolve_backend, _SHORT_MSG_THRESHOLD
-        reg = BackendRegistry()
-        reg.load([
-            {"id": "orchestrator", "provider": "claude_cli", "role": "orchestrator",
-             "tags": ["tools"], "command": "claude"},
-            {"id": "cheap", "provider": "gemini_cli", "role": "cheap",
-             "tags": ["cheap", "fast"], "command": "gemini"},
-        ])
-        long_msg = "x" * (_SHORT_MSG_THRESHOLD + 1)
-        with self._patch_registry(reg), self._patch_state({}), self._patch_cheap(True):
-            result = resolve_backend("chat1", long_msg)
-        self.assertEqual(result.id, "orchestrator")
 
     def test_rule4_user_preference(self):
         """chat_state backend_id → that backend (if healthy+enabled)"""
@@ -357,7 +325,7 @@ class TestResolveBackend(unittest.TestCase):
             {"id": "preferred", "provider": "gemini_cli", "role": "worker",
              "tags": [], "command": "gemini"},
         ])
-        with self._patch_registry(reg), self._patch_state({"backend_id": "preferred"}), self._patch_cheap(False):
+        with self._patch_registry(reg), self._patch_state({"backend_id": "preferred"}):
             result = resolve_backend("chat1", "x" * 200)
         self.assertEqual(result.id, "preferred")
 
@@ -371,7 +339,7 @@ class TestResolveBackend(unittest.TestCase):
             {"id": "sick", "provider": "gemini_cli", "role": "worker", "tags": [], "command": "gemini"},
         ])
         reg.get("sick").healthy = False
-        with self._patch_registry(reg), self._patch_state({"backend_id": "sick"}), self._patch_cheap(False):
+        with self._patch_registry(reg), self._patch_state({"backend_id": "sick"}):
             result = resolve_backend("chat1", "x" * 200)
         self.assertEqual(result.id, "orchestrator")
 
@@ -383,7 +351,7 @@ class TestResolveBackend(unittest.TestCase):
             {"id": "orch", "provider": "claude_cli", "role": "orchestrator",
              "tags": [], "command": "claude"},
         ])
-        with self._patch_registry(reg), self._patch_state({}), self._patch_cheap(False):
+        with self._patch_registry(reg), self._patch_state({}):
             result = resolve_backend("chat1", "x" * 200)
         self.assertEqual(result.id, "orch")
 
@@ -398,7 +366,7 @@ class TestResolveBackend(unittest.TestCase):
              "tags": [], "command": "gemini"},
         ])
         reg.get("unhealthy").healthy = False
-        with self._patch_registry(reg), self._patch_state({}), self._patch_cheap(False):
+        with self._patch_registry(reg), self._patch_state({}):
             result = resolve_backend("chat1", "x" * 200)
         self.assertEqual(result.id, "worker2")
 
@@ -410,7 +378,7 @@ class TestResolveBackend(unittest.TestCase):
             {"id": "only", "provider": "claude_cli", "role": "worker", "tags": [], "command": "claude"},
         ])
         reg.get("only").healthy = False
-        with self._patch_registry(reg), self._patch_state({}), self._patch_cheap(False):
+        with self._patch_registry(reg), self._patch_state({}):
             with self.assertRaises(RuntimeError):
                 resolve_backend("chat1", "hi")
 
@@ -422,7 +390,7 @@ class TestResolveBackend(unittest.TestCase):
             {"id": "orch", "provider": "claude_cli", "role": "orchestrator",
              "tags": ["tools"], "command": "claude"},
         ])
-        with self._patch_registry(reg), self._patch_state({}), self._patch_cheap(False):
+        with self._patch_registry(reg), self._patch_state({}):
             result = resolve_backend("chat1", "hi", has_images=True)
         self.assertEqual(result.id, "orch")
 
