@@ -505,7 +505,10 @@ def _cmd_status(chat_id: str, msg_id: str = None):
                     hist_len = len(_load_hist(s.provider, chat_id))
                     if hist_len:
                         err_str = f" `{hist_len}/{_MAX_HIST}条历史`"
-                spec_lines.append(f"  • {icon} **{s.id}**{sid_str}{fail_str}{err_str}")
+                line = f"  • {icon} **{s.id}**{sid_str}{fail_str}"
+                if err_str:
+                    line += f"\n    {err_str}"
+                spec_lines.append(line)
             disabled_note = f" · {len(disabled)} 个已停用" if disabled else ""
             backend_summary = (
                 f"**AI Backends** {n_healthy}/{n_enabled} 可用{probe_note}{disabled_note}\n"
@@ -523,12 +526,8 @@ def _cmd_status(chat_id: str, msg_id: str = None):
         from larkhelm.crew._backend_resolver import resolve_backend_preview
         preview = resolve_backend_preview()
         if preview:
-            # Group profiles by resolved backend for a compact single-line summary
-            _by_backend: dict = {}
-            for _pname, _bid in preview.items():
-                _by_backend.setdefault(_bid, []).append(_pname)
-            _parts = [f"{'/'.join(profiles)} → {bid}" for bid, profiles in _by_backend.items()]
-            crew_backend_preview = "**路由预览** " + " · ".join(_parts)
+            orch_id = preview.get("orchestrator", "<none>")
+            crew_backend_preview = f"**Crew/Dev 主调度** {orch_id}"
     except Exception as e:
         _debug_log(f"[status] crew backend preview failed: {e}")
 

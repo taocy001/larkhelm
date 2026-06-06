@@ -63,11 +63,11 @@ def resolve_backend(
 
 
 def resolve_backend_preview() -> dict[str, str]:
-    """Return {'active': backend_id} for /status display. Never raises."""
+    """Return {'orchestrator': backend_id} for /status display. Never raises."""
     try:
         from larkhelm.backend_registry import BACKEND_REGISTRY
         orch = BACKEND_REGISTRY.get_orchestrator()
-        return {"active": orch.id if orch else "<none>"}
+        return {"orchestrator": orch.id if orch else "<none>"}
     except Exception as e:
         _debug_log(f"[Crew] BackendResolver preview failed: {e}")
-        return {"active": "<none>"}
+        return {"orchestrator": "<none>"}
