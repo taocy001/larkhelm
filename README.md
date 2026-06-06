@@ -128,6 +128,7 @@ cd larkhelm
 | `hard_timeout` | 硬超时（秒），强制终止子进程 | `21600` |
 | `max_card_len` | 卡片单次最大字符数 | `3000` |
 | `allowed_chat_ids` | 白名单 chat ID 列表，空表示不限制 | `[]` |
+| `require_at_in_group` | 群聊中是否需要 @ 机器人才响应；设为 `false` 则对所有群消息均响应 | `true` |
 | `gemini_idle_ttl` | Gemini 进程空闲回收时间（秒） | `1800` |
 | `default_drive_folder` | crew/dev 文档默认写入的云盘文件夹 token | — |
 | `default_wiki_space_id` | crew/dev 文档默认写入的 Wiki 空间 ID | — |
@@ -267,13 +268,14 @@ sudo systemctl restart larkhelm
 
 ### 聊天命令
 
-所有命令均以 `/` 开头。
+所有命令均以 `/` 开头。发送图片消息会自动转发给 Claude 进行视觉分析，无需任何命令。
 
 **基础对话**
 
 | 命令 | 功能 |
 |---|---|
 | 直接发消息 | 向默认模型提问 |
+| 发送图片 | 自动转发给 Claude 进行视觉分析 |
 | `/c <内容>` 或 `/claude <内容>` | 强制使用 Claude |
 | `/g <内容>` 或 `/gemini <内容>` | 强制使用 Gemini |
 | `/k <内容>` 或 `/kimi <内容>` | 强制使用 Kimi |
@@ -288,9 +290,14 @@ sudo systemctl restart larkhelm
 | `/reset` | 清空当前会话（所有 backend） |
 | `/reset claude` / `/reset gemini` / `/reset kimi` / `/reset deepseek` | 单独重置指定模型会话 |
 | `/reset perm` | 取消「允许所有」授权 |
+| `/reset memory` | 清除会话记忆（全局/项目层保留） |
 | `/model claude\|gemini\|kimi\|deepseek` | 切换当前会话默认模型 |
+| `/lock [<id>\|off]` | 持久锁定 backend（同 `/model`；`list` 查看所有可用 backend） |
+| `/effort [low\|medium\|high\|xhigh]` | 调整 Claude 推理力度；不带参数显示选项卡 |
+| `/lang [zh\|en]` | 切换机器人界面语言；不带参数显示当前设置 |
 | `/rename <名称>` | 给当前会话命名 |
 | `/pickup` | 获取在终端接力会话的命令 |
+| `/compact` | 将对话历史压缩到记忆并重置会话，适用于长对话续跑 |
 
 **目录 & Shell**
 
@@ -298,27 +305,34 @@ sudo systemctl restart larkhelm
 |---|---|
 | `/cd <目录>` / `/pwd` | 切换/查看工作目录 |
 | `/ls [路径]` | 列出目录文件 |
-| `/run <命令>` | 执行 Shell 命令（30s 超时） |
+| `/run <命令>` | 执行 Shell 命令（默认 30s 超时，可配 `shell_timeout_sec`） |
 
 **查询与统计**
 
 | 命令 | 功能 |
 |---|---|
-| `/status` | 查看服务运行状态 |
+| `/status` | 查看服务运行状态（版本 / session ID / backend 健康） |
+| `/context` | 查看当前上下文窗口用量与 token 统计 |
 | `/history` | 查看当前会话对话历史 |
 | `/history all` | 查看全部历史（含重置记录） |
 | `/stats` | 查看 Token 用量统计 |
+| `/stats intent` | 查看意图路由分布 |
 
 **记忆系统**
+
+每 10 轮对话自动从上下文中提炼记忆，无需手工维护。
 
 | 命令 | 功能 |
 |---|---|
 | `/memory` | 查看三层记忆（全局/项目/会话）当前内容 |
 | `/memory status` | 查看记忆数据摘要（chat 数、日志大小等） |
-| `/memory observe` | 容量仪表 + 摘要健康度（详见 PRD `.crew_workspace/prd.md`） |
+| `/memory observe` | 容量仪表 + 摘要健康度 |
 | `/memory update` | 立即触发会话摘要生成 |
+| `/memory set global\|project <内容>` | 手动覆盖全局/项目记忆 |
+| `/memory list` | 列出记忆文件 |
 | `/memory clear session\|project\|global\|all` | 清除指定层记忆 |
 | `/memory gc [天数] [apply]` | 清理 N 天未更新的项目记忆 |
+| `/memory diagnose` | 诊断记忆系统状态 |
 | `/memory export` / `/memory import [file_key]` | 导出/导入记忆数据为 zip |
 
 **多 Agent 协作**
@@ -327,6 +341,7 @@ sudo systemctl restart larkhelm
 |---|---|
 | `/crew <需求>` | 动态规划：Manager 自动分解任务，多 Agent 并行执行 |
 | `/dev <需求>` | 软件工程流水线：PM → 架构师 → 工程师 → QA → 审查员 |
+| `/plan <需求>` | 多阶段串行：`[dev]` `[review]` `[fix]` `[test]`，每步确认后继续 |
 
 **飞书文档**
 
@@ -341,12 +356,21 @@ LarkHelm 没有 `/doc` 用户命令，统一两条入口：
   cat fix.md    | larkhelm doc write  "https://feishu.cn/docx/<token>"
   ```
 
+**Claude 诊断**
+
+| 命令 | 功能 |
+|---|---|
+| `/doctor` | 检查 Claude CLI 版本、会话状态、凭证、perm hook、MCP 配置 |
+| `/mcp` | 列出当前配置的 MCP 服务器 |
+| `/hooks` | 查看 Claude Code hooks 配置（PreToolUse/PostToolUse） |
+
 **其他**
 
 | 命令 | 功能 |
 |---|---|
 | `/cron add "<表达式>" <查询>` | 添加定时任务 |
 | `/cron list` / `/cron del <id>` | 查看/删除定时任务 |
+| `/voice [status\|lang <zh\|en\|auto>]` | 查看/切换语音转写设置 |
 | `/upgrade` | 更新 larkhelm 到最新版本 |
 | `/help` | 显示帮助 |
 
@@ -586,6 +610,7 @@ Config file location:
 | `hard_timeout` | Hard timeout (s), force kill subprocess | `21600` |
 | `max_card_len` | Max characters per card update | `3000` |
 | `allowed_chat_ids` | Chat ID whitelist, empty = no restriction | `[]` |
+| `require_at_in_group` | Require @mention in group chats to respond; set `false` to respond to all group messages | `true` |
 | `gemini_idle_ttl` | Seconds before idle Gemini process is reaped | `1800` |
 | `default_drive_folder` | Drive folder token for crew/dev document output | — |
 | `default_wiki_space_id` | Wiki space ID for crew/dev document output | — |
@@ -663,13 +688,14 @@ On the first run, faster-whisper downloads the selected model from HuggingFace (
 
 ### Chat Commands
 
-All commands start with `/`.
+All commands start with `/`. Sending an image message automatically forwards it to Claude for visual analysis — no command needed.
 
 **Conversation**
 
 | Command | Action |
 |---|---|
 | Send a message | Query the default model |
+| Send an image | Auto-forwarded to Claude for visual analysis |
 | `/c <text>` or `/claude <text>` | Force Claude |
 | `/g <text>` or `/gemini <text>` | Force Gemini |
 | `/k <text>` or `/kimi <text>` | Force Kimi |
@@ -684,9 +710,14 @@ All commands start with `/`.
 | `/reset` | Clear session (all backends) |
 | `/reset claude` / `/reset gemini` / `/reset kimi` / `/reset deepseek` | Reset a specific backend's session |
 | `/reset perm` | Revoke "Allow All" authorization |
+| `/reset memory` | Clear session memory (global/project layers preserved) |
 | `/model claude\|gemini\|kimi\|deepseek` | Switch default model for this chat |
+| `/lock [<id>\|off]` | Persistently lock a backend (same as `/model`; `list` shows all available) |
+| `/effort [low\|medium\|high\|xhigh]` | Set Claude reasoning effort; omit arg to see options card |
+| `/lang [zh\|en]` | Switch bot UI language; omit arg to see current setting |
 | `/rename <name>` | Name the current session |
 | `/pickup` | Get terminal resume commands |
+| `/compact` | Compress conversation history into memory and reset session |
 
 **Directory & Shell**
 
@@ -694,16 +725,35 @@ All commands start with `/`.
 |---|---|
 | `/cd <dir>` / `/pwd` | Change / show working directory |
 | `/ls [path]` | List files |
-| `/run <cmd>` | Execute shell command (30s timeout) |
+| `/run <cmd>` | Execute shell command (default 30s timeout, configurable via `shell_timeout_sec`) |
 
 **Info & Stats**
 
 | Command | Action |
 |---|---|
-| `/status` | Show service status |
+| `/status` | Show service status (version / session ID / backend health) |
+| `/context` | Show context window usage and token stats for current session |
 | `/history` | View current session history |
 | `/history all` | View full history including resets |
 | `/stats` | Token usage statistics |
+| `/stats intent` | Intent routing distribution |
+
+**Memory System**
+
+Memory is extracted from conversation automatically every 10 turns — no manual maintenance needed.
+
+| Command | Action |
+|---|---|
+| `/memory` | View all three memory layers (global / project / session) |
+| `/memory status` | Memory data summary (chat count, log sizes, etc.) |
+| `/memory observe` | Capacity gauge and summary health |
+| `/memory update` | Immediately trigger session summarization |
+| `/memory set global\|project <content>` | Manually override global or project memory |
+| `/memory list` | List memory files |
+| `/memory clear session\|project\|global\|all` | Clear a specific memory layer |
+| `/memory gc [days] [apply]` | Prune project memory not updated in N days |
+| `/memory diagnose` | Diagnose memory system state |
+| `/memory export` / `/memory import [file_key]` | Export / import memory data as a zip |
 
 **Multi-Agent**
 
@@ -711,6 +761,7 @@ All commands start with `/`.
 |---|---|
 | `/crew <task>` | Dynamic planning: Manager decomposes task, agents run in parallel |
 | `/dev <task>` | Software pipeline: PM → Architect → Engineer → QA → Reviewer |
+| `/plan <task>` | Serial multi-stage: `[dev]` `[review]` `[fix]` `[test]`, confirm between stages |
 
 **Feishu Documents**
 
@@ -725,12 +776,21 @@ LarkHelm has no `/doc` user command — there are two unified entry points:
   cat fix.md    | larkhelm doc write  "https://feishu.cn/docx/<token>"
   ```
 
+**Claude Diagnostics**
+
+| Command | Action |
+|---|---|
+| `/doctor` | Check Claude CLI version, session state, credentials, perm hook, MCP config |
+| `/mcp` | List configured MCP servers |
+| `/hooks` | Show Claude Code hooks configuration (PreToolUse/PostToolUse) |
+
 **Other**
 
 | Command | Action |
 |---|---|
 | `/cron add "<expr>" <query>` | Add a scheduled task |
 | `/cron list` / `/cron del <id>` | List / delete scheduled tasks |
+| `/voice [status\|lang <zh\|en\|auto>]` | View / switch voice transcription settings |
 | `/upgrade` | Update larkhelm to the latest version |
 | `/help` | Show help |
 
