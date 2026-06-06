@@ -6,8 +6,7 @@ add a single ``register(...)`` call instead of editing message routing,
 help text, and (for async tasks) a custom thread wrapper.
 
 Conscious omissions: ``/cancel``, ``/rename``, ``/btw`` reply detection,
-the ``/c`` / ``/g`` / ``/k`` / ``/d`` model shortcuts, and intent_router
-flow remain in ``_message.py`` because they touch the per-chat lock,
+the ``/c`` / ``/g`` / ``/k`` / ``/d`` model shortcuts remain in ``_message.py`` because they touch the per-chat lock,
 chat_state, parent_id detection, or cancel-event plumbing in ways that
 don't generalise. Everything else lives here.
 

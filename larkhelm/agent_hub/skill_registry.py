@@ -17,11 +17,6 @@ Each registered :class:`SkillDef` automatically gets a corresponding
 ``AGENT_REGISTRY`` so the existing intent-dispatch pipeline routes to it
 without any changes.  Unregistering a skill removes it from both registries.
 
-L1 keyword rules
------------------
-:meth:`SkillRegistry.get_l1_rules` returns live keyword rules from all enabled
-skills.  ``intent_router._resolve_l1`` calls this at routing time so newly
-added skills are immediately usable without restarting.
 """
 from __future__ import annotations
 

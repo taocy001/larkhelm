@@ -58,11 +58,10 @@ CLI --data-dir > LARKHELM_DATA_DIR env > /var/lib/larkhelm > ~/.local/share/lark
 ### Config fields
 
 > **本表只列 agent 在改代码时高频会碰到 / 必须尊重的字段**——凭证、超时、
-> 行为开关、灰度总开关。完整字段清单（含 doc/voice/health/embedding/P1·P2·P3
-> 灰度旋钮共 80+ 项）见：
+> 行为开关、灰度总开关。完整字段清单见：
 >
 > - `larkhelm_config.example.json` — 带 `_comment_*` 注释的运行示例与默认值
-> - `README.md → 配置文件` / `### Phase D 召回灰度开关` / `### 启用语音功能` — 用户面字段说明
+> - `README.md → 配置文件` / `### 启用语音功能` — 用户面字段说明
 > - `larkhelm/config.py` `setdefault(...)` 调用列表 — **运行时真源**
 > - `.crew_workspace/config_diff.md` — 四方比对矩阵
 >
@@ -97,12 +96,6 @@ CLI --data-dir > LARKHELM_DATA_DIR env > /var/lib/larkhelm > ~/.local/share/lark
 | `chat_agent_cheap_routing_enabled` | 默认 `true`。`ChatAgent.execute` 调 `resolve_backend_for_task(profile=chat, cost_ceiling=0.10)` 走 DeepSeek/Kimi 等 cheap backend；无健康候选时回落 `_get_chat_model` |
 | `backend_aware_budget_enabled` | 默认 `false`。按 backend context window tier 动态缩放记忆注入预算：Gemini/Kimi（≥256K）+20%，mid-tier（≥64K）不变，小窗口（<64K）−30%；联动字段：`context_window_<id>`（9 个，值 0 = 用内置默认，见 `token_budget.DEFAULT_CONTEXT_WINDOWS`）|
 | `cli_skip_recent_turns_when_sid` | 默认 `true`。`sid` 非空时跳过 recent_turns 注入（多省 ~500 input tokens / call）；flip `false` 强制每次注入 |
-| `memory_extract_buffer_window_sec` | 默认 `0` = 禁 buffer，每次 update 立即 cascade（P1 byte-compat）；>0 合并 |
-| `memory_session_smart_compress` | 默认 `true` = 句子级评分 + top-K（确定性，无 LLM）；flip `false` 退回尾截断 |
-| `embedding_enabled` | 默认 `true`。embedding 功能总开关；`false` 时强制 keyword 路径，不受 `embedding_traffic` 影响 |
-| `embedding_traffic` | 默认 `0.1`。embedding / hybrid 召回流量比例（0.0–1.0）；需同时开启 `embedding_enabled=true` 且 `embedding_backend!="none"` |
-| `memory_global_profile_slot_enabled` | **默认 `true`（P5-OPT6）** = 4 槽位（style/format/domain/expertise，≤200 chars 每槽）；局部编辑不会让整段 body 漂移、Anthropic prompt-cache prefix 命中率更稳。翻 `false` 退回整段文本 |
-| `memory_project_section_enabled` | **默认 `true`（P5-OPT6）** = 4 段（TechStack/Conventions/Architecture/Constraints）；翻 `false` 退回整段文本 |
 | `recent_turns_cache_enabled` | 默认 `true`，`_get_recent_turns` 走 LRU；flip `false` 直走 tail-read（bisect 用） |
 | `memory_legacy_cache_enabled` | 默认 `true`，三层 memory 走 LRU（key = layer + path + mtime_ns），单层容量 128 |
 | `doc_inject_cache_enabled` / `doc_inject_cache_ttl_sec` | 默认 `true` / `600`s。命中时 `_inject_doc_context` 加 age hint，metric outcome = `hit_with_age_hint`；`DocPermissionError` 与 `DocError` 不入缓存 |
@@ -114,15 +107,12 @@ CLI --data-dir > LARKHELM_DATA_DIR env > /var/lib/larkhelm > ~/.local/share/lark
 
 | Field | Purpose |
 |---|---|
-| `intent_router_enabled` / `intent_router_traffic` | Phase 5 智能编排总开关 + 0.0–1.0 灰度。默认开启 10% 灰度（`enabled=true` + `traffic=0.1`）；详细分层开关（L1/microlearn/feedback）见 `larkhelm_config.example.json`，升档/回滚流程见 `.crew_workspace/intent_router_rollout.md` |
 | `query_session_v2_traffic` | `_do_query` v2 灰度比 0.0–1.0；默认 `0.0`。`query_session_v2_enabled=true` 时强制 v2 |
 | `metrics_text_legacy` | 默认 `false`；`true` 强制 `/metrics` 走 P1 手写文本（bisect 指标回归用） |
 | `plan_retry_strategy` | `/plan` step 失败重试策略：`now` / `manual` / `off`，默认 `off`（保持 P0-P2 行为） |
 | `cascade_backoff_max_attempts` | memory cascade / extract buffer 的 ExponentialBackoff 最大尝试次数，默认 `3`（即 sleep `[1.0s, 2.0s]`，单次 cap 30s） |
-| `llm_router_circuit_failures` / `llm_router_circuit_cooldown_sec` | cheap 后端连续失败阈值（默认 `5`）+ cool-down 秒（默认 `30.0`）；改 `memory_circuit.py` 必看 |
 | `failure_report_card_enabled` / `plugin_report_card_enabled` | 默认 `false`。失败 / 插件加载诊断卡片总开关，目标 chat 由 `admin_chat_id`（默认 `""`） 决定，为空时退回 `default_owner_open_id` 私聊 |
 | `crew_checkpoint_ttl_days` / `dev_stage_timeouts` | crew 孤儿 checkpoint TTL（默认 `7.0`）+ `/dev` 单 stage 超时覆盖（默认 `{}`，未列 stage 走默认公式） |
-| `memory_gc_interval_hours` | MemoryGC daemon tick 周期（小时），默认 `6.0`；`0` = boot-only 一次性扫描 |
 | `stats_agent_type_breakdown_enabled` | `/stats` Crew Agents 按 agent_type 分桶输出，默认 `true`；`false` 退回单行汇总 |
 | `voice_enabled` | 语音转写总开关，默认 `false`；其余 `voice_*` 见 README §启用语音功能 |
 
@@ -181,14 +171,6 @@ Project is structured as the `larkhelm/` package. 核心模块按角色分组：
 
 ### 记忆系统
 - `memory.py` — 三层记忆（global / project / session）+ `maybe_auto_update` LLM 摘要 + `record_milestone`
-- `memory_global_slots.py` — global memory 4 槽位（style / format / domain / expertise）— P2 REQ-05.1
-- `memory_project_sections.py` — project memory 4 段（TechStack / Conventions / Architecture / Constraints）— P2 REQ-05.2
-- `memory_session_compress.py` — 句子级 score + top-K 压缩（确定性，无 LLM）— P2 REQ-07
-- `memory_extract_buffer.py` — session-cascade buffer（timer / capacity / shutdown 三触发）— P2 REQ-06
-- `memory_embedding.py` — `EmbeddingBackend` 三实现（Local ONNX / HTTP / Stub）+ `EmbeddingCache` + circuit breaker — Phase D
-- `memory_lifecycle.py` — `mark_stale_slices` / `inject_stale_marks` / `unstale_slice_id` — Phase D
-- `memory_circuit.py` — `CircuitBreaker`（cheap-backend 断路保护）
-- `memory_gc.py` — `MemoryGC` daemon（audit rotate + stale 重算）
 - `_context_cache.py` — doc cache（`cached_doc_read_with_meta` 返回 `DocReadResult`）
 
 ### Crew 多 Agent (`crew/`)
@@ -237,14 +219,8 @@ Crew agent 的 `output_file` 在**写盘前**和**验证时**都过 sentinel sca
 - SEC-v2-MED-1 Anthropic XML 结构检查（已落地，**默认 enforced**）：`crew_sentinel_anthropic_loose_enabled=true` 时 `<function_calls>` + `<invoke name=` + `</function_calls>` 三段完整 shape 命中即拒，命中时 `larkhelm_crew_validate_anthropic_loose_total{outcome="hit_enforced"}` +1；翻 `false` 进 observe-only（`hit_observed`），保留 metric 但不 quarantine。结构正则的窗口上限 4 KiB，跨段提及任一 tag 不命中（修了 LOW3 bare-substring 误报）。背景见 `.crew_workspace/review_security_v2.md` § SEC-v2-MED-1
 - SEC-v2-MED-2 backend 排除 TTL（已落地，**默认 60s**）：`AgentState.excluded_backends_until` 是 `dict[str, float]`（backend_id → 失效时间戳，原 `excluded_backend_ids: list[str]` 已重命名+换型）。`_run_agent_wrapper` validate-fail 时按 `time.time() + crew_backend_exclusion_cooldown_sec` 写入；resolver site 与 `_execute` 跨 round retry-target reset block 都只承认/保留 TTL 未过期的 entry，**不再 unconditional clear**。若同一 backend 被重复写入（已有 entry）→ 视为 swing，`larkhelm_crew_backend_swing_total{agent_id}` +1 并 warn 行尾标 `swing-repeat`。设 `crew_backend_exclusion_cooldown_sec=0` 退回 pre-fix 行为（每轮立即 clear）。背景见 `.crew_workspace/review_security_v2.md` § SEC-v2-MED-2
 
-### 智能编排 (`agent_hub/`) · Phase 5
-> 详细设计见 [`.crew_workspace/design.md`](.crew_workspace/design.md) §Phase 5
+### 智能编排 (`agent_hub/`)
 - `intent_types.py` / `agent_base.py` — `AgentExecutor` ABC + `AGENT_REGISTRY` 单例
-- `intent_router.py` — `resolve_intent`: 显式命令 → L1 关键词 → L2 cheap LLM
-- `intent_keywords.py` — L1 关键词分类器
-- `intent_embedding.py` — embedding L2 分类器（P3 REQ-03）
-- `intent_microlearn.py` — 微学习分类器（Phase D-D）
-- `intent_feedback.py` — 6 种 signal_type 反馈（force_chat / cancel_after_dispatch / agent_reswitch / dispatch_failed / l1_gray_zone / l2_dispatched）
 - `agent_audit.py` — write_audit / aggregate_daily（JSONL 0600）
 - `agent_dispatcher.py` — `AgentDispatcher.dispatch` + ACL + 透明化卡片
 - `model_selector.py` — `resolve_backend_for_task` 调 `BackendRegistry.rank_for_task`
@@ -337,15 +313,9 @@ path (which used `{"tag":"div","text":{"tag":"lark_md",...}}` for body and
 than the JSON 2.0 `markdown` element AND silently dropped bullet lists,
 fenced code blocks, and block quotes.
 
-### 6. Phase 5 智能编排层 (`larkhelm/agent_hub/`)
+### 6. Agent 分发层 (`larkhelm/agent_hub/`)
 
-Phase 5 引入意图识别 + Agent 分发层，与现有显式命令**并存**（不替换）。**默认 10% 灰度**（`intent_router_enabled=true` + `intent_router_traffic=0.1`），关闭时 `_message.py` 不 import `agent_hub`；升档 / 回滚 SOP 见 [`.crew_workspace/intent_router_rollout.md`](.crew_workspace/intent_router_rollout.md)。
-
-- 包结构、灰度开关、扩展信号采集、第三方 Agent 接入：详见 [`.crew_workspace/design.md`](.crew_workspace/design.md) §Phase 5
-- 关键审计 / 反馈 JSONL：`DATA_DIR/intent_*.jsonl`（0600 权限）
-- 6 种 signal_type：`force_chat` / `cancel_after_dispatch` / `agent_reswitch` / `dispatch_failed` / `l1_gray_zone` / `l2_dispatched`
-- 指标：`larkhelm_intent_feedback_total{signal_type}`
-- 第三方 plugin 通过 entry-point group `larkhelm.agents` 或 `config["agent_plugins"]` 接入
+Agent 分发层与现有显式命令**并存**（不替换），由 `agent_dispatcher.py` 负责分发与 ACL 控制。第三方 plugin 通过 entry-point group `larkhelm.agents` 或 `config["agent_plugins"]` 接入。
 
 ## 写入飞书文档（Claude Code CLI 集成）
 
@@ -468,12 +438,6 @@ AgentSpec(
 `_run_agent_wrapper` 捕获后调 `_failure_card.emit_agent_failure(stage="backend_select")`
 推送 ⚠️ 卡片，提示用户检查 `/status`。**不会**重试 — 这是 config / 健康问题，
 不是瞬时失败。
-
-### Phase D · Phase 2 召回栈
-
-> 详细设计见 [`.crew_workspace/phase_d_recall.md`](.crew_workspace/phase_d_recall.md)
-
-关键模块：`memory_embedding.py`（EmbeddingBackend + circuit breaker）、`memory_lifecycle.py`（stale slice + `.meta.json` sidecar）。默认全关（灰度 0%），与 Phase 1 完全 byte-compatible。Hybrid 路径：KeywordRetriever → cosine rerank → `α·BM25_norm`（α=0.6）→ stale decay → top_k。embedding 失败时 fail-open 到 Keyword 路径。
 
 ### Dev 模式 Git 快照（Auto Git Commit）
 
@@ -623,7 +587,6 @@ SDK install path: `~/.local/lib/python3.13/site-packages/lark_oapi/`。主要命
 | `[Crew]` / `[Crew] Manager: …` | `[crew]` / `[Crew/Manager]` | 模块统一大写，子组件空格分隔 |
 | `[Checkpoint]` | `[checkpoint]` | |
 | `[Perm]` | `[perm]` | |
-| `[IntentRouter]` | `[intent_router]` | |
 | `[Plan]` | `[plan]` | |
 | `[Dev]` | `[dev]` | |
 | `[BackendRegistry]` | `[recover_thread]` | 用模块名而非线程名 |
@@ -647,8 +610,7 @@ SDK install path: `~/.local/lib/python3.13/site-packages/lark_oapi/`。主要命
 | `error(msg)` | ERROR | 用户可见任务被打断的失败（便于与工单关联） | `log.py:error` |
 
 > `safe_log` 取代 R3 之前 `agent_hub/` 4 处本地 `_safe_log` 副本；
-> `lazy_debug_log` 取代 `config.py`、`agent_hub/agent_base.py.abort()`、
-> `agent_hub/intent_router.py` 中的"双层 try-import"模式。新代码避免再
+> `lazy_debug_log` 取代 `config.py`、`agent_hub/agent_base.py.abort()` 中的"双层 try-import"模式。新代码避免再
 > 引入这两种模式的本地拷贝。
 
 ### `LARKHELM_LOG_LEVEL` 环境变量过滤
@@ -689,7 +651,7 @@ python3 -m larkhelm start
 ## 变更记录索引
 
 每批 REQ 的简短摘要 + flag 与回滚开关：见 [`.crew_workspace/changes.md`](.crew_workspace/changes.md)
-关键子系统的详细设计（Phase 5 / Phase D / Crew task_profile / 断点机制）：见 [`.crew_workspace/design.md`](.crew_workspace/design.md)
+关键子系统的详细设计（Crew task_profile / 断点机制）：见 [`.crew_workspace/design.md`](.crew_workspace/design.md)
 PRD / 任务清单占位：[`prd.md`](.crew_workspace/prd.md) / [`tasks.md`](.crew_workspace/tasks.md)
 
 > 新增 REQ 或灰度 flag 时，请同步：`larkhelm_config.example.json` + `config.py` setdefault + `.crew_workspace/changes.md` + （对用户可见时）README.md。本文件 CLAUDE.md 只保留扩展点契约与架构符号入口，不再粘贴变更日志。

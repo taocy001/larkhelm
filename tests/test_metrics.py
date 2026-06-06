@@ -108,18 +108,6 @@ def test_inc_cascade_extract_per_label(_force_legacy_off):
     assert 'larkhelm_cascade_extract_total{kind="global",outcome="error"} 1' in body
 
 
-# ── Bonus: extract_buffer_flushes counter is wired ────────────────────────
-
-def test_inc_extract_buffer_flush(_force_legacy_off):
-    pytest.importorskip("prometheus_client")
-    _met.inc_extract_buffer_flush("timer")
-    _met.inc_extract_buffer_flush("timer")
-    _met.inc_extract_buffer_flush("capacity")
-    body = _met.render_exposition()
-    assert 'larkhelm_extract_buffer_flushes_total{trigger="timer"} 2' in body
-    assert 'larkhelm_extract_buffer_flushes_total{trigger="capacity"} 1' in body
-
-
 # ── health_server.HealthRequestHandler ↔ metrics bridge ───────────────────
 
 def test_health_server_metrics_route_uses_registry(_force_legacy_off):

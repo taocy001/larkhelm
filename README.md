@@ -19,7 +19,7 @@ LarkHelm 是一个运行在飞书（Lark）中的 AI 助手平台，可以使用
 
 - **实时流式卡片**：工具调用过程可视化，支持进度显示、耗时统计，可一键取消
 - **多 Agent 协作**：`/crew` 动态规划多 Agent 并行执行；`/dev` 完整软件工程流水线（PM → 架构师 → 工程师 → QA → 审查员）
-- **飞书文档集成**：crew/dev 产出自动写入飞书云盘/Wiki；消息中的文档链接自动注入上下文；文档写入走 `larkhelm doc` CLI 或意图识别（智能编排开启时由 DocAgent 自动触发）
+- **飞书文档集成**：crew/dev 产出自动写入飞书云盘/Wiki；消息中的文档链接自动注入上下文；文档写入走 `larkhelm doc` CLI
 - **上下文感知**：回复任意历史消息时自动注入被回复消息内容；回复 crew 结果卡片可直接追问
 - **多模态输入**：支持图片消息，Claude 原生识图
 - **多模型支持**：每个会话独立切换 Claude / Gemini / Kimi
@@ -134,13 +134,11 @@ cd larkhelm
 | `doc_write_confirm` | DocAgent / CLI 覆写文档前要求确认 | `true` |
 | `mcp_config_file` | MCP 配置文件路径（可选） | — |
 | `timezone` | 定时任务时区 | `Asia/Shanghai` |
-| `intent_router_enabled` | Phase 5 智能编排总开关；翻 `true` 才会按下方 traffic 灰度自然语言分派 | `true` |
-| `intent_router_traffic` | 智能编排灰度比例（`0.0`–`1.0`，按 chat_id 哈希分桶） | `0.1` |
 | `crew_breakpoint_timeout_sec` | `/crew` 断点等待用户点「继续 / 取消」的最长秒数；超时自动取消并推橙色卡 | `1800` |
 | `failure_report_card_enabled` | cascade backoff exhausted / circuit open 等诊断失败推送到 admin chat 的橙色卡片总开关 | `false` |
 | `admin_chat_id` | 失败 / 插件加载报告卡片的目标 chat_id；为空时退回 `default_owner_open_id` 私聊 | — |
 
-> 更细的 P1/P2/P3 灰度旋钮（cache、stale 阈值、断路器、循环节流等）见
+> 更细的旋钮（cache TTL、cascade 并发等）见
 > `larkhelm_config.example.json` 注释块与 `CLAUDE.md → Config`。
 
 > **P1 迭代默认变更**（v0.8）：
@@ -340,8 +338,6 @@ LarkHelm 没有 `/doc` 用户命令，统一两条入口：
   cat fix.md    | larkhelm doc write  "https://feishu.cn/docx/<token>"
   ```
 
-  `intent_router_enabled=true` 时，自然语言「帮我把这段写进文档 X」会被 DocAgent 自动识别并调用 `doc_handlers.py` 内的同一套 dispatcher。默认开启 10% 灰度，详见下文「Phase 5 智能编排」。
-
 **其他**
 
 | 命令 | 功能 |
@@ -427,123 +423,6 @@ pip install build
 python3 -m build --wheel
 /path/to/venv/bin/pip install dist/larkhelm-*.whl
 ```
-
-### Phase D 召回灰度开关
-
-Phase D / Phase 2 在 Phase 1 的关键字召回之上叠加了 embedding + hybrid 召回与
-stale slice 软删除。**默认全关**——`embedding_backend="none"` 时只跑 Phase 1
-keyword 路径，无任何新依赖与新行为。
-
-#### 安装可选依赖（仅 local backend 需要）
-
-```bash
-# pipx 用户：
-pipx install -e '.[memory-embedding]'
-
-# 已安装环境：
-pipx runpip larkhelm install onnxruntime>=1.18 numpy>=1.26
-```
-
-HTTP backend（远程 embedding 服务）**不需要**这两个依赖——HTTP 路径靠 stdlib 的
-`urllib.request` 实现，仅 numpy 用于向量数学（local + HTTP 均依赖）。
-
-#### 下载 ONNX 模型（仅 local backend）
-
-```bash
-mkdir -p ~/.larkhelm/models
-# HuggingFace bge-small-zh-v1.5（推荐：中文好 + dim=512 + 体积 100MB 内）
-huggingface-cli download BAAI/bge-small-zh-v1.5 --local-dir ~/.larkhelm/models/bge-small-zh-v1.5/
-
-# 或直接拉 onnx 转换后的版本，文件名落到：
-#   ~/.larkhelm/models/bge-small-zh-v1.5.onnx
-```
-
-> **境内服务器**：`export HF_ENDPOINT=https://hf-mirror.com` 加速下载（与 voice
-> 模型同源）。
-
-#### 打开灰度开关
-
-```jsonc
-// ~/.config/larkhelm/config.json — 推荐分两段灰度推进
-{
-  // Stage A — Phase 1 keyword 灰度（沿用）
-  "memory_retriever_enabled": true,
-  "memory_retriever_traffic": 1.0,
-
-  // Stage B — Phase 2 embedding/hybrid 灰度（新增；与 Stage A 正交）
-  "embedding_backend":        "local",                // local | http | none
-  "embedding_model_path":     "~/.larkhelm/models/bge-small-zh-v1.5.onnx",
-  "embedding_dim":            512,
-  "embedding_enabled":        true,
-  "embedding_traffic":        0.1                     // 先开 10%，观察 audit-summary
-}
-```
-
-切换到 `embedding_backend="http"` 时：
-
-```jsonc
-{
-  "embedding_backend":        "http",
-  "embedding_http_endpoint":  "https://your-embedding.internal/embed",
-  "embedding_http_timeout_sec": 5.0,
-  "embedding_dim":            512
-}
-```
-
-HTTP 协议：`POST {endpoint}` 收 `{"texts": [...]}`，返回 `{"vectors": [[...], ...]}`，
-每条 vector 长度 == `embedding_dim`。失败 5 次后该实例进入 5 分钟 circuit-open，
-召回路径全程 fail-open 到 keyword + `audit.fail_open=true`。
-
-#### 运维入口
-
-```bash
-# 查看最近 1 小时召回分布（mode / p95 / fail-open / 每 agent 细分）
-larkhelm memory audit-summary --since 1h
-
-# 单条恢复被降权的 slice
-larkhelm memory unstale --slice-id <12hex>
-```
-
-飞书会话内：
-
-```text
-/memory diagnose [N]    # 最近 N 条召回审计（N 默认 3，上限 10）
-/memory status          # 现在会带上 stale slice 计数与上次 GC 时间
-```
-
-#### 完整配置字段
-
-| 字段 | 默认 | 含义 |
-|---|---|---|
-| `memory_retriever_mode` | `"auto"` | `auto` / `keyword` / `embedding` / `hybrid` |
-| `embedding_backend` | `"none"` | `local` / `http` / `none` |
-| `embedding_http_endpoint` | `""` | HTTP backend URL |
-| `embedding_model_path` | `~/.larkhelm/models/bge-small-zh-v1.5.onnx` | local backend ONNX 路径 |
-| `embedding_dim` | `512` | 向量维度；变更使 LRU cache 整体失效 |
-| `embedding_http_timeout_sec` | `5.0` | 单次 HTTP 请求超时 |
-| `embedding_enabled` | `false` | Stage B 灰度总开关 |
-| `embedding_traffic` | `0.0` | Stage B hash 分桶比例（0..1） |
-| `memory_stale_window_days` | `30` | 多少天未命中视为 stale |
-| `memory_stale_decay` | `0.5` | stale 召回 relevance 乘子 |
-| `memory_audit_rotate_max_mb` | `32` | 单文件 rotate 阈值 |
-| `memory_audit_retain_days` | `30` | rotated 文件保留天数 |
-
-#### Memory LLM Router（Stage C，可选）
-
-在 Stage A/B 之上叠加一层 cheap-LLM 决策：高复杂度 `/crew` `/dev` 任务从
-top-N 候选池里挑相关 slice。**默认全关**——与 Stage A/B hash 桶正交，**三者
-同时命中**才会真正调用 LLM；任何失败路径都 fail-open 回 Stage A/B 输出，
-不影响主流程。
-
-| 字段 | 默认 | 含义 |
-|---|---|---|
-| `memory_llm_router_enabled` | `false` | Stage C 总开关 |
-| `memory_llm_router_traffic` | `0.0` | Stage C 灰度比例（与 A/B 独立 salt） |
-| `memory_llm_router_max_per_chat_per_min` | `3` | 单聊每分钟最多调用次数（成本封顶） |
-| `memory_llm_router_cache_ttl_sec` | `300` | 相同 (query, candidate_set) 复用 verdict 的 TTL |
-
-调用率与 fail-open 比例同样汇入 `larkhelm memory audit-summary`；
-开启 Stage C 前请先观察一周 Stage A/B 是否稳定（fail_open_rate < 1%）。
 
 ### 监控集成（Prometheus）
 
@@ -717,15 +596,12 @@ Config file location:
 | `doc_write_confirm` | Require confirmation before DocAgent / CLI overwrites a document | `true` |
 | `mcp_config_file` | Path to MCP config file (optional) | — |
 | `timezone` | Timezone for cron tasks | `Asia/Shanghai` |
-| `intent_router_enabled` | Master switch for Phase 5 intent routing; flip `true` and dial `intent_router_traffic` to roll out natural-language agent dispatch | `true` |
-| `intent_router_traffic` | Intent router rollout ratio (`0.0`–`1.0`, hashed per chat_id) | `0.1` |
 | `crew_breakpoint_timeout_sec` | Seconds `/crew` waits for the user's 继续/取消 click before auto-cancelling and emitting an orange card | `1800` |
 | `failure_report_card_enabled` | Push diagnostic-failure orange cards (cascade backoff exhausted / circuit open / etc.) to admin chat | `false` |
 | `admin_chat_id` | Target chat_id for failure / plugin-load report cards; falls back to `default_owner_open_id` DM when empty | — |
 
-> Finer P1/P2/P3 knobs (caches, stale thresholds, circuit breakers, loop
-> throttles) live in the annotation blocks inside
-> `larkhelm_config.example.json` and the `CLAUDE.md → Config` table.
+> Finer knobs (cache TTLs, cascade concurrency, etc.) live in the annotation
+> blocks inside `larkhelm_config.example.json` and the `CLAUDE.md → Config` table.
 
 ### Enable Voice Transcription
 
@@ -842,15 +718,13 @@ All commands start with `/`.
 LarkHelm has no `/doc` user command — there are two unified entry points:
 
 - **Read**: paste a Feishu `docx` / `wiki` / `sheets` URL into the message — the bridge auto-fetches the content and injects it as context. No command needed.
-- **Write**: use the `larkhelm doc` CLI, or let DocAgent take over once intent routing is enabled. The CLI runs anywhere, including inside Feishu via `/run`:
+- **Write**: use the `larkhelm doc` CLI. It runs anywhere, including inside Feishu via `/run`:
 
   ```bash
   cat report.md | larkhelm doc create "Report Title"
   cat more.md   | larkhelm doc append "https://feishu.cn/docx/<token>"
   cat fix.md    | larkhelm doc write  "https://feishu.cn/docx/<token>"
   ```
-
-  When `intent_router_enabled=true`, a natural-language request like "save this to doc X" is auto-routed to DocAgent, which calls the same dispatcher in `doc_handlers.py`. Defaults to a 10% gray rollout — see the intent-routing section.
 
 **Other**
 

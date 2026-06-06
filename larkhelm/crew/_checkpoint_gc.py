@@ -7,13 +7,11 @@ DATA_DIR fills with checkpoints from chats that no longer exist.
 
 This module scans the workspaces root and unlinks any checkpoint whose
 mtime is older than ``ttl_days`` AND whose owning chat has no live
-``_active_crew`` entry. It never raises — the caller is the
-``memory_gc`` tick which must stay alive.
+``_active_crew`` entry. It never raises.
 
 Design (see ``.crew_workspace/design.md`` §1.2 D5):
 
-* Shares the ``MemoryGC._tick`` thread with the audit-rotate /
-  stale-recompute work; no separate daemon.
+* Runs as a standalone sweep triggered from the bridge boot warmup.
 * Uses a configurable ``_now`` callable so tests can advance the clock
   without sleeping.
 * The "active lock" check imports ``crew._state`` lazily so a partial

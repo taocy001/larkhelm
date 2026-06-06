@@ -899,7 +899,7 @@ def lazy_debug_log(msg: str) -> None:
 
     Replaces the inline ``try: from larkhelm.log import _debug_log; _debug_log(msg)
     except Exception: pass`` pattern that was duplicated inside ``config.py``,
-    ``agent_hub/agent_base.py.abort()`` and ``agent_hub/intent_router.py``.
+    ``agent_hub/agent_base.py.abort()``.
     These call sites import ``larkhelm.log`` lazily (inside an exception
     handler) because they are reached from positions where the module may
     not yet be importable (e.g. a recovery thread fires before

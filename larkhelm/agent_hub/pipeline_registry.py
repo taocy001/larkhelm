@@ -10,12 +10,6 @@ User-created pipelines are auto-saved to ``DATA_DIR/pipelines/<id>.json``
 whenever :meth:`PipelineRegistry.register` is called with ``source != "builtin"``.
 :meth:`PipelineRegistry.load_from_dir` scans the same directory at startup.
 
-L1 keyword integration
------------------------
-:meth:`PipelineRegistry.get_l1_rules` returns live keyword rules from all enabled
-pipelines.  ``intent_router._resolve_l1`` merges these alongside SkillRegistry
-rules so newly registered pipelines are immediately routable without a restart.
-
 AGENT_REGISTRY integration
 ---------------------------
 Each registered pipeline gets a corresponding :class:`DevPipelineAgent` in

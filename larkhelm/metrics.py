@@ -727,11 +727,7 @@ def inc_sticky_context_evicted(reason: str) -> None:
 
 def inc_cascade_backoff_exhausted() -> None:
     """Bump ``larkhelm_cascade_backoff_exhausted_total`` when ``ExponentialBackoff``
-    in ``memory_extract_buffer`` / ``memory.cascade_extract`` gave up.
-
-    P1-5a / W14: previously the backoff exhaustion only landed in
-    ``_debug_log`` with no metric, so cascade losses were invisible to
-    Prometheus alerts. Never raises.
+    in ``memory.cascade_extract`` gave up. Never raises.
     """
     reg = get_registry()
     if not reg.available or reg.cascade_backoff_exhausted_total is None:
