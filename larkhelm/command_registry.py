@@ -439,6 +439,17 @@ def _default_registrations() -> None:
         examples=("/effort", "/effort low", "/effort high"),
     ))
 
+    def _h_lang(ctx: DispatchContext) -> None:
+        from larkhelm.commands import _cmd_lang
+        _cmd_lang(ctx.chat_id, ctx.raw_args, ctx.msg_id)
+    register(CommandSpec(
+        name="/lang",
+        handler=_h_lang,
+        match_kind="prefix",
+        description="切换机器人界面语言 zh / en — Switch bot UI language",
+        examples=("/lang", "/lang zh", "/lang en"),
+    ))
+
     # ── /crew / /dev / /plan (async, error-carded) ─────────────────
     def _h_crew(ctx: DispatchContext) -> None:
         from larkhelm.crew import cmd_crew

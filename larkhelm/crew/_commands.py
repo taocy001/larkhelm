@@ -1073,12 +1073,20 @@ def _run_generic_crew_inner_impl(chat_id: str, requirement: str,
         # Completion notification card — sent as new message for Feishu badge
         if _crew_notify_done:
             try:
+                from larkhelm.chat_state import _get_lang
+                from larkhelm.locale import _t as _lt
+                _lang = _get_lang(chat_id)
                 _elapsed = time.time() - _crew_start_time
                 _m, _s = divmod(int(_elapsed), 60)
                 _elapsed_str = f"{_m}分{_s:02d}秒" if _m else f"{_s}秒"
-                send_card(chat_id, "✅ Crew 任务完成",
-                          f"**{requirement[:80]}**\n\n耗时 {_elapsed_str}",
-                          color="green")
+                _elapsed_en = f"{_m}m {_s:02d}s" if _m else f"{_s}s"
+                send_card(
+                    chat_id,
+                    _lt(_lang, "✅ Crew 任务完成", "✅ Crew Task Complete"),
+                    f"**{requirement[:80]}**\n\n"
+                    f"{_lt(_lang, '耗时', 'Completed in')} {_elapsed_str if _lang == 'zh' else _elapsed_en}",
+                    color="green",
+                )
             except Exception as _ne:
                 _debug_log(f"[Crew] completion notification failed: {_ne}")
 
@@ -1336,12 +1344,22 @@ def _run_dev_crew_inner_impl(chat_id: str, requirement: str, user_msg_id: str,
         # Completion notification card — sent as new message for Feishu badge
         if _dev_notify_done:
             try:
+                from larkhelm.chat_state import _get_lang
+                from larkhelm.locale import _t as _lt
+                _lang = _get_lang(chat_id)
                 _elapsed = time.time() - _dev_start_time
                 _m, _s = divmod(int(_elapsed), 60)
                 _elapsed_str = f"{_m}分{_s:02d}秒" if _m else f"{_s}秒"
-                send_card(chat_id, "✅ Dev 任务完成",
-                          f"**{requirement[:80]}**\n\n耗时 {_elapsed_str} · PM→架构→工程→QA→审查",
-                          color="green")
+                _elapsed_en = f"{_m}m {_s:02d}s" if _m else f"{_s}s"
+                _stages = _lt(_lang, "PM→架构→工程→QA→审查", "PM→Arch→Eng→QA→Review")
+                send_card(
+                    chat_id,
+                    _lt(_lang, "✅ Dev 任务完成", "✅ Dev Task Complete"),
+                    f"**{requirement[:80]}**\n\n"
+                    f"{_lt(_lang, '耗时', 'Completed in')} "
+                    f"{_elapsed_str if _lang == 'zh' else _elapsed_en} · {_stages}",
+                    color="green",
+                )
             except Exception as _ne:
                 _debug_log(f"[Dev] completion notification failed: {_ne}")
 

@@ -19,7 +19,9 @@ from larkhelm.chat_state import (
     _load_sid, _clear_sid, _register_btw_msg,
     set_pending_doc_write, pop_pending_doc_write,
     _get_effort, _set_effort,
+    _get_lang, _set_lang,
 )
+from larkhelm.locale import _t
 from larkhelm.concurrency import (
     _get_chat_lock, _trigger_cancel, _pop_pending,
     _cron_lock, _get_btw_lock, _reset_cancel,
@@ -122,7 +124,7 @@ _HELP_LAYOUT: tuple = (
     ("static", "memory_detail"),
     ("static", "doc_section"),
     ("group", "📦 其他命令", (
-        "/voice", "/cron",
+        "/voice", "/cron", "/lang",
         ("/btw", "快问，不占主锁"),
         "/upgrade",
     )),
@@ -383,13 +385,15 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
 def _cmd_status(chat_id: str, msg_id: str = None):
     from larkhelm._version import __version__
     cwd = _get_cwd(chat_id)
+    lang = _get_lang(chat_id)
 
     if _cfg.SKIP_PERMISSIONS:
-        perm_status = "⏭️ 跳过（skip_permissions=true）"
+        perm_status = _t(lang, "⏭️ 跳过（skip_permissions=true）", "⏭️ Skipped (skip_permissions=true)")
     elif is_yolo(chat_id):
-        perm_status = "🚀 允许所有（发送 **/reset perm** 恢复审批）"
+        perm_status = _t(lang, "🚀 允许所有（发送 **/reset perm** 恢复审批）",
+                              "🚀 All allowed (send **/reset perm** to restore)")
     else:
-        perm_status = "🔐 正常审批"
+        perm_status = _t(lang, "🔐 正常审批", "🔐 Normal approval")
 
     # Active crew info
     crew_info = ""
@@ -477,7 +481,10 @@ def _cmd_status(chat_id: str, msg_id: str = None):
                 (getattr(s, "last_probed_at", 0.0) or 0.0 for s in all_specs),
                 default=0.0,
             )
-            probe_note = f" · 上次检测 {_fmt_ago(last_probed_all, now)}" if last_probed_all else ""
+            probe_note = (
+                f" · {_t(lang, '上次检测', 'probed')} {_fmt_ago(last_probed_all, now)}"
+                if last_probed_all else ""
+            )
             for s in enabled + disabled:
                 if not s.enabled:
                     icon = "⏸"
@@ -490,10 +497,10 @@ def _cmd_status(chat_id: str, msg_id: str = None):
                 if s.enabled and s.provider in ("claude_cli", "gemini_cli", "kimi_cli"):
                     _sid = _load_sid(chat_id, s.id)
                     if _sid:
-                        sid_str = f" 会话 **{_sid[:12]}…**"
+                        sid_str = f" {_t(lang, '会话', 'session')} **{_sid[:12]}…**"
                 # Failure pressure (sliding window for TRANSIENT)
                 fw = getattr(s, "failure_window", []) or []
-                fail_str = f" ⚠️{len(fw)}失败" if fw else ""
+                fail_str = f" ⚠️{len(fw)}{_t(lang, '失败', 'fails')}" if fw else ""
                 # Error detail or API history count
                 err_str = ""
                 if not s.healthy and s.enabled and s.last_error:
@@ -501,14 +508,17 @@ def _cmd_status(chat_id: str, msg_id: str = None):
                 elif s.enabled and s.provider in _API_PROVIDERS:
                     hist_len = len(_load_hist(s.provider, chat_id))
                     if hist_len:
-                        err_str = f" `{hist_len}/{_MAX_HIST}条历史`"
+                        err_str = f" `{hist_len}/{_MAX_HIST} {_t(lang, '条历史', 'history')}`"
                 line = f"  • {icon} **{s.id}**{sid_str}{fail_str}"
                 if err_str:
                     line += f"\n    {err_str}"
                 spec_lines.append(line)
-            disabled_note = f" · {len(disabled)} 个已停用" if disabled else ""
+            disabled_note = (
+                f" · {len(disabled)} {_t(lang, '个已停用', 'disabled')}" if disabled else ""
+            )
             backend_summary = (
-                f"**AI Backends** {n_healthy}/{n_enabled} 可用{probe_note}{disabled_note}\n"
+                f"**AI Backends** {n_healthy}/{n_enabled} "
+                f"{_t(lang, '可用', 'healthy')}{probe_note}{disabled_note}\n"
                 + "\n".join(spec_lines)
             )
     except Exception as e:
@@ -524,7 +534,7 @@ def _cmd_status(chat_id: str, msg_id: str = None):
         preview = resolve_backend_preview()
         if preview:
             orch_id = preview.get("orchestrator", "<none>")
-            crew_backend_preview = f"**Crew/Dev 主调度** {orch_id}"
+            crew_backend_preview = f"**{_t(lang, 'Crew/Dev 主调度', 'Crew/Dev Orchestrator')}** {orch_id}"
     except Exception as e:
         _debug_log(f"[status] crew backend preview failed: {e}")
 
@@ -535,27 +545,30 @@ def _cmd_status(chat_id: str, msg_id: str = None):
         if _effort:
             _effort_labels = {"low": "⚡ 快速", "medium": "⚖️ 均衡", "high": "🔍 深度", "xhigh": "🚀 极限"}
             _el = _effort_labels.get(_effort, _effort)
-            _tk = " · 思维链已关闭" if _effort == "low" else ""
-            effort_line = f"**推理力度** {_el} ({_effort}){_tk}"
+            _tk = _t(lang, " · 思维链已关闭", " · thinking off") if _effort == "low" else ""
+            effort_line = f"**{_t(lang, '推理力度', 'Effort')}** {_el} ({_effort}){_tk}"
     except Exception:
         pass
 
+    _name = _get_chat_state(chat_id).get('name', '').replace('**', '').replace('`', '')
+    _name_label = _t(lang, '会话名', 'Name')
     lines = [
-        f"**目录** {cwd}"
-        + (f"　　**会话名** {_get_chat_state(chat_id).get('name', '').replace('**','').replace('`','')}"
-           if _get_chat_state(chat_id).get('name') else ""),
-        f"**版本** {__version__}",
+        f"**{_t(lang, '目录', 'Directory')}** {cwd}"
+        + (f"　　**{_name_label}** {_name}" if _name else ""),
+        f"**{_t(lang, '版本', 'Version')}** {__version__}",
         "",
-        f"**权限模式** {perm_status}",
+        f"**{_t(lang, '权限模式', 'Permissions')}** {perm_status}",
         *([ effort_line ] if effort_line else []),
         *([ crew_info ] if crew_info else []),
-        *([ f"**Token（本次启动）** {token_summary}" ] if token_summary else []),
+        *([ f"**{_t(lang, 'Token（本次启动）', 'Tokens (session)')}** {token_summary}" ] if token_summary else []),
         *([ backend_summary ] if backend_summary else []),
         *([ crew_backend_preview ] if crew_backend_preview else []),
         "",
     ]
 
-    send_card_reply(chat_id, msg_id, "📊 运行状态", "\n".join(lines), color="turquoise", normalize=False)
+    send_card_reply(chat_id, msg_id,
+                   _t(lang, "📊 运行状态", "📊 Status"),
+                   "\n".join(lines), color="turquoise", normalize=False)
 
 
 def _cmd_help(chat_id: str, msg_id: str = None):
@@ -2404,6 +2417,11 @@ def _dispatch_button_cmd(chat_id: str, cmd: str):
         if level in ("low", "medium", "high", "xhigh"):
             _set_effort(chat_id, level)
             _cmd_effort(chat_id, level)
+    elif tl.startswith("lang "):
+        lang_val = tl[5:].strip()
+        if lang_val in ("zh", "en"):
+            _set_lang(chat_id, lang_val)
+            _cmd_lang(chat_id, lang_val)
     elif tl == "doc_write_confirm":
         _cmd_doc_write_do(chat_id)
     elif tl == "doc_write_cancel":
@@ -2604,10 +2622,11 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
 # ═══════════════════════════════════════════════════
 
 _EFFORT_INFO = [
-    ("low",    "⚡ 快速",  "simple Q&A and quick replies — disables extended thinking"),
-    ("medium", "⚖️ 均衡",  "default mode — balances speed and quality"),
-    ("high",   "🔍 深度",  "complex analysis and multi-step reasoning"),
-    ("xhigh",  "🚀 极限",  "Opus-only — maximum reasoning, takes longer"),
+    # (level, icon_label, zh_desc, en_desc)
+    ("low",    "⚡ 快速",  "简单问答、快速回复，关闭思维链",  "fast reply — thinking disabled"),
+    ("medium", "⚖️ 均衡",  "默认模式，平衡速度与质量",        "default — balanced speed and quality"),
+    ("high",   "🔍 深度",  "复杂分析、多步推理，提升准确性",  "deep reasoning for complex tasks"),
+    ("xhigh",  "🚀 极限",  "Opus 专属，最强推理，耗时较长",   "Opus-only — max reasoning, takes longer"),
 ]
 _EFFORT_LABELS_ZH = {
     "low":    "⚡ 快速",
@@ -2619,13 +2638,17 @@ _EFFORT_LABELS_ZH = {
 
 def _cmd_effort(chat_id: str, args: str, msg_id: str = None):
     """/effort [low|medium|high|xhigh] — view or set per-chat Claude reasoning effort."""
+    lang = _get_lang(chat_id)
     level = (args or "").strip().lower()
     valid = {"low", "medium", "high", "xhigh"}
 
     if level and level not in valid:
         send_card_reply(
-            chat_id, msg_id, "⚠️ 无效力度",
-            "有效值：`low` / `medium` / `high` / `xhigh`\n\n直接发 `/effort` 查看选项卡。",
+            chat_id, msg_id,
+            _t(lang, "⚠️ 无效力度", "⚠️ Invalid effort level"),
+            _t(lang,
+               "有效值：`low` / `medium` / `high` / `xhigh`\n\n直接发 `/effort` 查看选项卡。",
+               "Valid values: `low` / `medium` / `high` / `xhigh`\n\nSend `/effort` to view options."),
             color="orange",
         )
         return
@@ -2634,14 +2657,21 @@ def _cmd_effort(chat_id: str, args: str, msg_id: str = None):
         _set_effort(chat_id, level)
 
     current = _get_effort(chat_id) or ""
-    current_label = _EFFORT_LABELS_ZH.get(current, "⚖️ 均衡（默认）")
+    current_label = _EFFORT_LABELS_ZH.get(current, _t(lang, "⚖️ 均衡（默认）", "⚖️ Medium (default)"))
 
-    lines = [f"**当前：{current_label}**\n"]
-    for lvl, icon_label, desc in _EFFORT_INFO:
+    lines = [f"**{_t(lang, '当前', 'Current')}：{current_label}**\n"]
+    for lvl, icon_label, desc_zh, desc_en in _EFFORT_INFO:
+        desc = desc_en if lang == "en" else desc_zh
         mark = " ✓" if lvl == current else ""
         lines.append(f"- {icon_label} `{lvl}` — {desc}{mark}")
-    lines.append("\n💡 `low` 模式自动关闭扩展思维链，节省 token 开销")
-    lines.append("下次对话即刻生效，`/reset claude` 不影响此设置")
+    lines.append(
+        "\n💡 " + _t(lang,
+                    "`low` 模式自动关闭扩展思维链，节省 token 开销",
+                    "`low` automatically disables extended thinking to save tokens")
+    )
+    lines.append(_t(lang,
+                    "下次对话即刻生效，`/reset claude` 不影响此设置",
+                    "Takes effect immediately. `/reset claude` does not affect this setting."))
 
     buttons = [
         ("⚡ 快速", "effort low"),
@@ -2649,9 +2679,47 @@ def _cmd_effort(chat_id: str, args: str, msg_id: str = None):
         ("🔍 深度", "effort high"),
         ("🚀 极限", "effort xhigh"),
     ]
+    title = _t(lang, "🧠 推理力度", "🧠 Reasoning Effort")
 
     if msg_id:
-        send_card_reply(chat_id, msg_id, "🧠 推理力度", "\n".join(lines), color="blue", buttons=buttons)
+        send_card_reply(chat_id, msg_id, title, "\n".join(lines), color="blue", buttons=buttons)
     else:
-        send_card(chat_id, "🧠 推理力度", "\n".join(lines), color="blue", buttons=buttons)
+        send_card(chat_id, title, "\n".join(lines), color="blue", buttons=buttons)
+
+
+# ═══════════════════════════════════════════════════
+#  /lang — UI language switch (zh / en)
+# ═══════════════════════════════════════════════════
+
+def _cmd_lang(chat_id: str, args: str, msg_id: str = None):
+    """/lang [zh|en] — view or switch bot UI language for this chat."""
+    lang_arg = (args or "").strip().lower()
+
+    if lang_arg and lang_arg not in ("zh", "en"):
+        send_card_reply(
+            chat_id, msg_id,
+            "⚠️ 不支持的语言 / Unsupported language",
+            "支持：`zh`（中文）· `en`（English）",
+            color="orange",
+        )
+        return
+
+    if lang_arg:
+        _set_lang(chat_id, lang_arg)
+
+    current = _get_lang(chat_id)
+    flag = "🇨🇳" if current == "zh" else "🇺🇸"
+    name_zh = "中文" if current == "zh" else "英文"
+    name_en = "Chinese" if current == "zh" else "English"
+
+    body = (
+        f"**当前 / Current：{flag} {name_zh} / {name_en}** (`{current}`)\n\n"
+        "切换 / Switch:"
+    )
+    buttons = [("🇨🇳 中文", "lang zh"), ("🇺🇸 English", "lang en")]
+
+    if msg_id:
+        send_card_reply(chat_id, msg_id, "🌐 界面语言 / Language", body, color="blue", buttons=buttons)
+    else:
+        send_card(chat_id, "🌐 界面语言 / Language", body, color="blue", buttons=buttons)
 

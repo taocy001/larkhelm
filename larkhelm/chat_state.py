@@ -21,6 +21,7 @@ __all__ = [
     "_get_backend_id", "_set_backend_id",
     "_get_voice_lang", "_set_voice_lang",
     "_get_effort", "_set_effort",
+    "_get_lang", "_set_lang",
     "_register_btw_msg", "_is_btw_reply",
     "set_pending_doc_write", "pop_pending_doc_write",
     "_get_claude_session_counters",
@@ -328,6 +329,18 @@ def _get_effort(chat_id: str) -> str:
 
 def _set_effort(chat_id: str, level: str) -> None:
     _set_chat_field(chat_id, "effort", level)
+
+
+# ═══════════════════════════════════════════════════
+#  UI language preference (per-chat)
+# ═══════════════════════════════════════════════════
+def _get_lang(chat_id: str) -> str:
+    """Return per-chat UI language: 'zh' (default) or 'en'."""
+    return _get_chat_state(chat_id).get("lang", "zh")
+
+
+def _set_lang(chat_id: str, lang: str) -> None:
+    _set_chat_field(chat_id, "lang", lang)
 
 
 # ═══════════════════════════════════════════════════
