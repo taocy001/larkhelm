@@ -6,7 +6,12 @@ import dataclasses
 import pytest
 
 import larkhelm.config as _cfg
-from larkhelm.memory_slice import InjectionPolicy
+@dataclasses.dataclass
+class InjectionPolicy:
+    agent_type: str
+    token_budget: int
+    layer_weights: dict = dataclasses.field(default_factory=dict)
+    kind_priority: tuple = ()
 from larkhelm.token_budget import (
     DEFAULT_CONTEXT_WINDOWS,
     _MIN_CONTEXT_WINDOW,

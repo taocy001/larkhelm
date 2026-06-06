@@ -187,13 +187,6 @@ def _run_shutdown_sequence() -> dict:
         _debug_log(f"[HealthServer] stop failed (continuing): {e}")
 
     try:
-        from larkhelm import memory_extract_buffer as _meb
-        _meb.flush_all_for_shutdown(timeout_sec=10.0)
-        result["buffer_flushed"] = True
-    except Exception as e:
-        _debug_log(f"[ExtractBuffer] shutdown flush failed (continuing): {e}")
-
-    try:
         _dedup_flush()
     except Exception as e:
         _debug_log(f"[Dedup] shutdown flush failed (continuing): {e}")
@@ -447,31 +440,6 @@ def _start_memory_boot_warmup() -> None:
     the loop are caught and logged.
     """
     def _loop():
-        try:
-            import larkhelm.config as _cfg
-            cfg = getattr(_cfg, "config", None) or {}
-            from larkhelm.memory_lifecycle import (
-                iter_known_chat_cwd_pairs, mark_stale_slices,
-            )
-            window_days = int(cfg.get("memory_stale_window_days", 90) or 90)
-            for chat_id, cwd in iter_known_chat_cwd_pairs():
-                try:
-                    mark_stale_slices(chat_id, cwd, dry_run=False, window_days=window_days)
-                except Exception as inner:
-                    _debug_log(f"[MemoryLifecycle] boot warmup mark_stale failed: {inner}")
-        except Exception as e:
-            _debug_log(f"[MemoryLifecycle] boot warmup phase 1 (stale) failed: {e}")
-
-        try:
-            from larkhelm.memory_embedding import get_embedding_backend
-            backend = get_embedding_backend()
-            if backend is not None:
-                backend.warm()
-                _debug_log(
-                    f"[MemoryRetriever] embedding backend '{backend.name}' warmed"
-                )
-        except Exception as e:
-            _debug_log(f"[MemoryRetriever] embedding warmup failed: {e}")
 
         # Phase 2 — pre-fill memory layer LRU with recently-modified .md files
         try:

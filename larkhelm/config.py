@@ -1720,12 +1720,6 @@ def _init_plugins() -> None:
         from larkhelm.log import lazy_debug_log
         lazy_debug_log(f"[Config] agent plugin load failed: {e}")
 
-    try:
-        from larkhelm.memory_gc import start_memory_gc_thread
-        start_memory_gc_thread()
-    except Exception as e:
-        from larkhelm.log import lazy_debug_log
-        lazy_debug_log(f"[Config] memory_gc start failed: {e}")
 
 
 def validate_config(config: dict) -> list[str]:

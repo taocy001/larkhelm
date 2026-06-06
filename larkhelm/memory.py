@@ -1277,39 +1277,18 @@ def _run_one_shot_with_backoff(
     ns: str,
     cancel_ev: threading.Event | None,
 ) -> str:
-    """REQ-05: wrap ``_run_one_shot(prefer_cheap=True)`` in ExponentialBackoff.
+    """Wrap ``_run_one_shot(prefer_cheap=True)`` with simple retry + exponential sleep.
 
-    Cancellation (``QueryCancelledError``) is **not** retried — it always
-    propagates so the caller's cancel_ev path is honoured immediately.
-    All other exceptions are retried up to ``cascade_backoff_max_attempts``
-    (default 3). The sleep sequence depends on ``max_attempts``: the
-    default 3 yields two sleeps ``[1.0, 2.0]``; set
-    ``cascade_backoff_max_attempts=4`` to get ``[1.0, 2.0, 4.0]``.
-    Each delay is capped at 30s.
+    Cancellation (``QueryCancelledError``) is never retried.
     """
-    try:
-        from larkhelm.memory_circuit import BackoffConfig, ExponentialBackoff
-        # ``_cfg`` is already imported at module top (line 33); the earlier
-        # local re-import was redundant — flagged as STYLE-1 in P3 review.
-        attempts = int(getattr(_cfg, "CASCADE_BACKOFF_MAX_ATTEMPTS", 3) or 3)
-    except Exception:
-        return _run_one_shot(prompt, ns=ns, prefer_cheap=True, cancel_ev=cancel_ev)
-
     from larkhelm.ai_runner import QueryCancelledError
-
-    backoff = ExponentialBackoff(BackoffConfig(max_attempts=max(1, attempts)))
-
-    def _call() -> str:
-        # Re-check cancel before each attempt so a quick cancel during
-        # backoff exits without paying for another LLM round-trip.
+    attempts = max(1, int(getattr(_cfg, "CASCADE_BACKOFF_MAX_ATTEMPTS", 3) or 3))
+    last_exc: "Exception | None" = None
+    for attempt in range(1, attempts + 1):
         if cancel_ev is not None and cancel_ev.is_set():
             raise QueryCancelledError("cancelled before retry")
-        return _run_one_shot(prompt, ns=ns, prefer_cheap=True, cancel_ev=cancel_ev)
-
-    last_exc: "Exception | None" = None
-    for attempt in range(1, max(1, attempts) + 1):
         try:
-            return _call()
+            return _run_one_shot(prompt, ns=ns, prefer_cheap=True, cancel_ev=cancel_ev)
         except QueryCancelledError:
             raise
         except Exception as e:
@@ -1317,14 +1296,10 @@ def _run_one_shot_with_backoff(
             if attempt >= attempts:
                 break
             try:
-                time.sleep(backoff._delay_for(attempt))
+                time.sleep(min(30.0, 1.0 * (2 ** (attempt - 1))))
             except Exception:
                 pass
     if last_exc is not None:
-        # P1-5a (W14): backoff has truly exhausted — bump the exhaustion
-        # counter once before propagating. Sibling site in
-        # ``memory_extract_buffer._invoke_cascade_with_backoff`` does the
-        # same for the buffer-driven cascade path.
         try:
             from larkhelm.metrics import inc_cascade_backoff_exhausted
             inc_cascade_backoff_exhausted()
@@ -1646,21 +1621,7 @@ def maybe_auto_update(chat_id: str, force: bool = False,
             save_memory(chat_id, result[0])
             _notify(True, result[0], None)
 
-            # P2 REQ-06: route through ExtractBuffer so a burst of session
-            # updates within ``memory_extract_buffer_window_sec`` triggers
-            # exactly one cascade. window=0 (default) calls _cascade_extract
-            # synchronously → byte-compat with P1. The buffer is the
-            # *only* code path that invokes _cascade_extract now; tests
-            # pin this contract via test_buffer_disabled_byte_compatible.
-            try:
-                from larkhelm import memory_extract_buffer as _meb
-                _meb.record_session_update(chat_id, result[0])
-            except Exception as _eb_err:
-                # Fail-open: if the buffer machinery itself errors, fall
-                # back to the legacy direct cascade so we don't silently
-                # drop the update.
-                _debug_log(f"[Memory] extract buffer failed, falling back: {_eb_err}")
-                _cascade_extract(result[0], chat_id)
+            _cascade_extract(result[0], chat_id)
 
         except Exception as e:
             _debug_log(f"[Memory] maybe_auto_update error {chat_id}: {e}")

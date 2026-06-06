@@ -198,7 +198,6 @@ def test_inject_doc_and_memory_no_doc_no_memory(monkeypatch):
         raising=False,
     )
     monkeypatch.setattr("larkhelm.memory.load_memory", lambda chat_id: "")
-    monkeypatch.setattr("larkhelm.memory_context.extract_work_context", lambda raw: "")
     monkeypatch.setattr(
         "larkhelm.memory.get_memory_context_v2",
         lambda *a, **kw: ("", []),
@@ -223,7 +222,6 @@ def test_inject_doc_and_memory_returns_enriched(monkeypatch):
         raising=False,
     )
     monkeypatch.setattr("larkhelm.memory.load_memory", lambda chat_id: "")
-    monkeypatch.setattr("larkhelm.memory_context.extract_work_context", lambda raw: "")
     monkeypatch.setattr(
         "larkhelm.memory.get_memory_context_v2",
         lambda *a, **kw: ("[MEM]", ["u: a", "b: c"]),

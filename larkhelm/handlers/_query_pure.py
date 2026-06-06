@@ -109,27 +109,16 @@ def inject_doc_and_memory(
 
     try:
         from larkhelm.log import _get_recent_turns
-        from larkhelm.memory import load_memory
-        from larkhelm.memory_context import extract_work_context
 
         recent_list: list[str] = []
         if skip_recent_turns:
             _debug_log(f"[QueryPure] skip recent_turns (pre-read) chat={chat_id[:8]}")
         else:
-            dedup_prefix: str | None = None
             try:
-                session_raw = load_memory(chat_id)
-                wc = extract_work_context(session_raw)
-                dedup_prefix = wc or None
-            except Exception as e:
-                _debug_log(f"[QueryPure] work_context extract error: {e}")
-                dedup_prefix = None
-
-            try:
-                raw_recent = _get_recent_turns(chat_id, dedup_prefix=dedup_prefix) or ""
-            except Exception as e:
-                _debug_log(f"[QueryPure] dedup recent_turns error: {e}, retrying without prefix")
                 raw_recent = _get_recent_turns(chat_id) or ""
+            except Exception as e:
+                _debug_log(f"[QueryPure] recent_turns error: {e}")
+                raw_recent = ""
 
             recent_list = [ln for ln in raw_recent.splitlines() if ln.strip()] if raw_recent else []
 

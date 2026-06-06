@@ -107,31 +107,7 @@ def _format_age_hint(age_sec: int) -> str:
 
 
 def _compute_doc_query_relevance(query: str, doc_title: str, doc_snippet: str) -> float:
-    """Return cosine similarity in [0.0, 1.0] between query and doc.
-
-    Fails open (returns 1.0) when:
-    - embedding backend is disabled / unavailable
-    - any exception occurs
-    This guarantees the gate never silently drops documents due to infra issues.
-    """
-    try:
-        if not bool(getattr(_cfg, "EMBEDDING_ENABLED", False)):
-            return 1.0
-        from larkhelm.memory_embedding import get_embedding_backend
-        backend = get_embedding_backend()
-        if backend is None:
-            return 1.0
-        q_vec = backend.encode(query[:512])
-        d_text = f"{doc_title} {doc_snippet[:512]}"
-        d_vec = backend.encode(d_text)
-        dot = sum(a * b for a, b in zip(q_vec, d_vec))
-        norm_q = sum(x * x for x in q_vec) ** 0.5
-        norm_d = sum(x * x for x in d_vec) ** 0.5
-        if norm_q < 1e-9 or norm_d < 1e-9:
-            return 1.0
-        return min(1.0, max(0.0, float(dot / (norm_q * norm_d))))
-    except Exception:
-        return 1.0  # fail-open
+    return 1.0
 
 
 def _inject_doc_context(text: str, chat_id: str, backend: str = "") -> str:
@@ -1062,15 +1038,6 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                     # parse miss) cleanly degrades to ``dedup_prefix=None`` →
                     # byte-compatible with the PR-prior behaviour.
                     _dedup_prefix: str | None = None
-                    try:
-                        from larkhelm.memory import load_memory
-                        from larkhelm.memory_context import extract_work_context
-                        _session_raw = load_memory(chat_id)
-                        _wc = extract_work_context(_session_raw)
-                        _dedup_prefix = _wc or None
-                    except Exception as _wc_err:
-                        _debug_log(f"[{trace_id}][DoQuery] work_context extract error: {_wc_err}")
-                        _dedup_prefix = None
                     try:
                         _raw_recent = _get_recent_turns(chat_id, dedup_prefix=_dedup_prefix) or ""
                     except Exception as _rt_err:

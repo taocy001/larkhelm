@@ -19,48 +19,10 @@ def test_relevance_returns_1_on_import_error():
         with patch.dict("sys.modules", {"larkhelm.memory_embedding": None}):
             assert _compute_doc_query_relevance("q", "t", "s") == 1.0
 
-def test_relevance_returns_cosine_sim():
-    """When embedding is available, returns cosine sim of vectors."""
+def test_relevance_always_returns_1():
+    """Embedding removed — function always returns 1.0 (fail-open)."""
     from larkhelm.handlers._query import _compute_doc_query_relevance
-    mock_backend = MagicMock()
-    mock_backend.encode.side_effect = [[1.0, 0.0], [0.0, 1.0]]  # orthogonal → sim=0
-    with patch("larkhelm.handlers._query._cfg") as mock_cfg:
-        mock_cfg.EMBEDDING_ENABLED = True
-        with patch("larkhelm.memory_embedding.get_embedding_backend", return_value=mock_backend):
-            sim = _compute_doc_query_relevance("q", "t", "s")
-    assert sim == pytest.approx(0.0, abs=1e-6)
-
-def test_relevance_identical_vectors_returns_1():
-    """Same vector → cosine sim = 1.0."""
-    from larkhelm.handlers._query import _compute_doc_query_relevance
-    mock_backend = MagicMock()
-    mock_backend.encode.side_effect = [[3.0, 4.0], [3.0, 4.0]]
-    with patch("larkhelm.handlers._query._cfg") as mock_cfg:
-        mock_cfg.EMBEDDING_ENABLED = True
-        with patch("larkhelm.memory_embedding.get_embedding_backend", return_value=mock_backend):
-            sim = _compute_doc_query_relevance("q", "t", "s")
-    assert sim == pytest.approx(1.0, abs=1e-6)
-
-def test_relevance_zero_norm_returns_1():
-    """Zero-norm vector → fail-open to 1.0."""
-    from larkhelm.handlers._query import _compute_doc_query_relevance
-    mock_backend = MagicMock()
-    mock_backend.encode.side_effect = [[0.0, 0.0], [1.0, 0.0]]
-    with patch("larkhelm.handlers._query._cfg") as mock_cfg:
-        mock_cfg.EMBEDDING_ENABLED = True
-        with patch("larkhelm.memory_embedding.get_embedding_backend", return_value=mock_backend):
-            sim = _compute_doc_query_relevance("q", "t", "s")
-    assert sim == 1.0
-
-def test_relevance_exception_returns_1():
-    """Any exception → fail-open."""
-    from larkhelm.handlers._query import _compute_doc_query_relevance
-    mock_backend = MagicMock()
-    mock_backend.encode.side_effect = RuntimeError("boom")
-    with patch("larkhelm.handlers._query._cfg") as mock_cfg:
-        mock_cfg.EMBEDDING_ENABLED = True
-        with patch("larkhelm.memory_embedding.get_embedding_backend", return_value=mock_backend):
-            assert _compute_doc_query_relevance("q", "t", "s") == 1.0
+    assert _compute_doc_query_relevance("query", "title", "snippet") == 1.0
 
 # ── 2. gate disabled → no change ──────────────────────────────────────────
 

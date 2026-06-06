@@ -107,29 +107,12 @@ def _cmd_memory(args, memory_parser):
             # Missing APP_ID in test envs — degrade and continue with module
             # defaults (DATA_DIR may be unset; iter falls back to tempdir).
             pass
-        from larkhelm.memory_retriever import iter_audit_records
-
-        delta = _parse_audit_summary_duration(args.since)
-        records = []
-        for rec in iter_audit_records(delta, chat_id=args.chat_id):
-            if args.mode and rec.get("mode") != args.mode:
-                continue
-            records.append(rec)
-        result = _compute_audit_summary(records, delta)
-        if args.json:
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-        else:
-            print(_render_audit_summary_text(result))
+        print("audit subcommand removed (retriever infrastructure removed)", file=sys.stderr)
+        sys.exit(1)
 
     elif args.memory_command == "unstale":
-        from larkhelm.memory_lifecycle import unstale_slice_id
-        found = unstale_slice_id(args.slice_id)
-        if found:
-            print(f"OK · removed {args.slice_id} from .meta.json sidecars")
-            sys.exit(0)
-        else:
-            print(f"NOT FOUND · {args.slice_id} not present in any .meta.json", file=sys.stderr)
-            sys.exit(1)
+        print("unstale subcommand removed (lifecycle infrastructure removed)", file=sys.stderr)
+        sys.exit(1)
 
     else:
         memory_parser.print_help()
