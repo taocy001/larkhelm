@@ -756,8 +756,9 @@ def _init_app_config() -> None:
         SHELL_TIMEOUT = max(1, int(_raw_shell_to))
     except (TypeError, ValueError):
         SHELL_TIMEOUT = 30
-    MAX_CARD_LEN     = int(config.get("max_card_len", 3000))
-    ALLOWED_CHATS    = set(config.get("allowed_chat_ids", []))
+    MAX_CARD_LEN         = int(config.get("max_card_len", 3000))
+    ALLOWED_CHATS        = set(config.get("allowed_chat_ids", []))
+    REQUIRE_AT_IN_GROUP  = bool(config.setdefault("require_at_in_group", True))
     GEMINI_IDLE_TTL  = int(config.get("gemini_idle_ttl", 1800))
 
     # max_ai_procs: positive int → honour; "auto" / None / 0 / non-int → probe.
