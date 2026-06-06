@@ -3024,7 +3024,7 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
                     color="grey")
     try:
         r = subprocess.run(
-            ["git", "-C", str(source_dir), "pull"],
+            ["git", "-C", str(source_dir), "pull", "--autostash"],
             capture_output=True, text=True, timeout=60,
         )
     except Exception as e:
