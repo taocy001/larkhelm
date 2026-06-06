@@ -182,6 +182,9 @@ _HELP_LAYOUT: tuple = (
         ("/btw", "快问，不占主锁", "Side question — doesn't hold the main lock"),
         "/upgrade",
     )),
+    ("group", ("🔧 Claude 诊断", "🔧 Claude Diagnostics"), (
+        "/compact", "/context", "/doctor", "/mcp", "/hooks",
+    )),
 )
 
 
@@ -2945,6 +2948,323 @@ def _dispatch_button_cmd(chat_id: str, cmd: str):
         pop_pending_doc_write(chat_id)
         send_card(chat_id, "❎ 已取消", "文档写入操作已取消。", color="orange")
 
+
+
+# ═══════════════════════════════════════════════════
+#  /compact — compress conversation history to memory
+# ═══════════════════════════════════════════════════
+
+
+def _cmd_compact(chat_id: str, msg_id: str = None):
+    """/compact: summarize recent conversation into memory and reset session."""
+    lang = _get_lang(chat_id)
+    threading.Thread(target=_do_compact, args=(chat_id, msg_id, lang),
+                     daemon=True, name="compact").start()
+
+
+def _do_compact(chat_id: str, msg_id: str, lang: str):
+    from larkhelm.memory import maybe_auto_update
+    from larkhelm.chat_state import _clear_sid, _get_model, _load_sid
+    from larkhelm import log as _log_mod
+
+    send_card_reply(chat_id, msg_id,
+                    _t(lang, "🗜 压缩中", "🗜 Compacting"),
+                    _t(lang, "正在将对话历史压缩至记忆，请稍候…",
+                       "Summarizing conversation history into memory, please wait…"),
+                    color="grey")
+
+    turn_count = 0
+    try:
+        entries = _log_mod._read_logs_tail(chat_id)
+        turn_count = sum(1 for e in entries if e.get("role") == "user")
+    except Exception:
+        pass
+
+    try:
+        maybe_auto_update(chat_id, force=True)
+    except Exception as e:
+        send_card_reply(chat_id, msg_id,
+                        _t(lang, "❌ 压缩失败", "❌ Compact Failed"),
+                        _t(lang, f"记忆更新失败：{e}", f"Memory update failed: {e}"),
+                        color="red")
+        return
+
+    model = _get_model(chat_id)
+    had_session = bool(_load_sid(chat_id, model))
+    try:
+        _clear_sid(chat_id, model)
+    except Exception as e:
+        _debug_log(f"[Compact] _clear_sid failed: {e}")
+
+    turns_zh = f"**{turn_count}** 轮" if turn_count else ""
+    turns_en = f"**{turn_count}** turn(s)" if turn_count else ""
+    reset_note_zh = "\n\n会话已重置，下次查询将以精简上下文开始。" if had_session else ""
+    reset_note_en = "\n\nSession reset — next query starts with compact context." if had_session else ""
+    send_card_reply(chat_id, msg_id,
+                    _t(lang, "✅ 压缩完成", "✅ Compact Done"),
+                    _t(lang,
+                       f"已将 {turns_zh}对话压缩到记忆，记忆内容完整保留。{reset_note_zh}",
+                       f"Summarized {turns_en} of conversation into memory — fully preserved.{reset_note_en}"),
+                    color="green")
+
+
+# ═══════════════════════════════════════════════════
+#  /context — context window usage
+# ═══════════════════════════════════════════════════
+
+
+def _cmd_context(chat_id: str, msg_id: str = None):
+    """/context: show context window size and recent token usage."""
+    from larkhelm.token_stats import get_token_stats
+    from larkhelm.token_budget import DEFAULT_CONTEXT_WINDOWS, resolve_context_window
+    from larkhelm.chat_state import _get_model, _load_sid
+    from larkhelm.backend_registry import BACKEND_REGISTRY
+    import larkhelm.config as _cfg_mod
+
+    lang = _get_lang(chat_id)
+    model = _get_model(chat_id)
+
+    # Token stats: {model: {input_tokens, output_tokens, cache_read, cache_create, cost_usd, calls}}
+    chat_stats = get_token_stats(chat_id).get(model, {})
+
+    # Context window size
+    ctx_window = DEFAULT_CONTEXT_WINDOWS.get("claude", 200_000)
+    try:
+        spec = BACKEND_REGISTRY.get(model)
+        if spec:
+            ctx_window = resolve_context_window(spec) or ctx_window
+    except Exception:
+        pass
+
+    # Session
+    sid = _load_sid(chat_id, model) or ""
+
+    input_tok   = chat_stats.get("input_tokens", 0)
+    cache_read  = chat_stats.get("cache_read", 0)
+    cache_write = chat_stats.get("cache_create", 0)
+    output_tok  = chat_stats.get("output_tokens", 0)
+    cost_usd    = chat_stats.get("cost_usd", 0.0)
+    calls       = chat_stats.get("calls", 0)
+    total_used  = input_tok + cache_read
+
+    pct = f"{total_used / ctx_window * 100:.1f}%" if ctx_window else "?"
+    sid_line_zh = f"\n- **会话 ID**: `{sid[:16]}…`" if sid else "\n- **会话 ID**: _(无活跃会话)_"
+    sid_line_en = f"\n- **Session ID**: `{sid[:16]}…`" if sid else "\n- **Session ID**: _(none)_"
+    cost_line = f"\n- **本进程费用**: ${cost_usd:.4f} ({calls} 次调用)" if cost_usd else ""
+    cost_line_en = f"\n- **Session cost**: ${cost_usd:.4f} ({calls} calls)" if cost_usd else ""
+
+    body_zh = (
+        f"**模型**: `{model}`\n"
+        f"**上下文窗口**: {ctx_window:,} tokens\n"
+        f"**本进程累计输入**: {total_used:,} tokens ({pct})\n\n"
+        f"| 类型 | 数量 |\n|---|---|\n"
+        f"| 输入 | {input_tok:,} |\n"
+        f"| 缓存读取 | {cache_read:,} |\n"
+        f"| 缓存写入 | {cache_write:,} |\n"
+        f"| 输出 | {output_tok:,} |"
+        f"{cost_line}{sid_line_zh}"
+    )
+    body_en = (
+        f"**Model**: `{model}`\n"
+        f"**Context window**: {ctx_window:,} tokens\n"
+        f"**Cumulative input this process**: {total_used:,} tokens ({pct})\n\n"
+        f"| Type | Count |\n|---|---|\n"
+        f"| Input | {input_tok:,} |\n"
+        f"| Cache read | {cache_read:,} |\n"
+        f"| Cache write | {cache_write:,} |\n"
+        f"| Output | {output_tok:,} |"
+        f"{cost_line_en}{sid_line_en}"
+    )
+    color = "red" if ctx_window and total_used > ctx_window * 0.8 else "blue"
+    send_card_reply(chat_id, msg_id,
+                    _t(lang, "📊 上下文用量", "📊 Context Usage"),
+                    _t(lang, body_zh, body_en), color=color)
+
+
+# ═══════════════════════════════════════════════════
+#  /mcp — list configured MCP servers
+# ═══════════════════════════════════════════════════
+
+
+def _cmd_mcp(chat_id: str, msg_id: str = None):
+    """/mcp: list configured MCP servers."""
+    import json as _json
+    from pathlib import Path as _Path
+    import larkhelm.config as _cfg_mod
+
+    lang = _get_lang(chat_id)
+    servers: dict = {}
+
+    user_mcp_cfg = _cfg_mod.config.get("mcp_config_file", "")
+    if user_mcp_cfg:
+        try:
+            base = _json.loads(_Path(user_mcp_cfg).read_text())
+            servers.update(base.get("mcpServers", {}))
+        except Exception as e:
+            _debug_log(f"[MCP] failed to read user mcp config: {e}")
+
+    # larkhelm MCP server is always injected by runner_claude
+    servers["larkhelm"] = {"command": "larkhelm", "args": ["mcp-server"], "_builtin": True}
+
+    lines = []
+    for name, cfg in servers.items():
+        builtin_tag = _t(lang, " _(内置)_", " _(built-in)_") if cfg.get("_builtin") else ""
+        if cfg.get("url"):
+            detail = f"`http` {cfg['url']}"
+        else:
+            cmd = cfg.get("command", "")
+            args_str = " ".join(str(a) for a in cfg.get("args", []))
+            detail = f"`stdio` `{(cmd + ' ' + args_str).strip()}`"
+        lines.append(f"- **{name}**{builtin_tag}: {detail}")
+
+    send_card_reply(chat_id, msg_id,
+                    _t(lang, f"🔌 MCP 服务器（{len(servers)} 个）",
+                              f"🔌 MCP Servers ({len(servers)})"),
+                    "\n".join(lines) if lines else _t(lang, "_(无)_", "_(none)_"),
+                    color="blue")
+
+
+# ═══════════════════════════════════════════════════
+#  /hooks — show Claude Code hooks configuration
+# ═══════════════════════════════════════════════════
+
+
+def _cmd_hooks(chat_id: str, msg_id: str = None):
+    """/hooks: show configured Claude Code PreToolUse/PostToolUse hooks."""
+    import json as _json
+    from pathlib import Path as _Path
+    import larkhelm.config as _cfg_mod
+
+    lang = _get_lang(chat_id)
+    lines = []
+
+    skip_perm = getattr(_cfg_mod, "SKIP_PERMISSIONS", False)
+    perm_hook_script = getattr(_cfg_mod, "PERM_HOOK_SCRIPT", "")
+    if skip_perm:
+        lines.append(_t(lang,
+            "- **PreToolUse / perm_hook**: _(已禁用，skip_permissions=true)_",
+            "- **PreToolUse / perm_hook**: _(disabled — skip_permissions=true)_"))
+    else:
+        lines.append(_t(lang,
+            f"- **PreToolUse / perm_hook**: `python3 -m larkhelm.perm_hook` ✅",
+            f"- **PreToolUse / perm_hook**: `python3 -m larkhelm.perm_hook` ✅"))
+
+    # User-defined hooks from .claude/settings.json or ~/.claude/settings.json
+    cwd = _get_cwd(chat_id)
+    search_paths = [
+        _Path(cwd) / ".claude" / "settings.json",
+        _Path.home() / ".claude" / "settings.json",
+    ]
+    for settings_path in search_paths:
+        if not settings_path.exists():
+            continue
+        try:
+            settings = _json.loads(settings_path.read_text())
+            hooks = settings.get("hooks", {})
+            if not hooks:
+                continue
+            lines.append(f"\n**{settings_path}:**")
+            for event, hook_list in hooks.items():
+                items = hook_list if isinstance(hook_list, list) else [hook_list]
+                for entry in items:
+                    sub = entry.get("hooks", [entry] if "type" in entry else [])
+                    for h in sub:
+                        cmd = h.get("command", h.get("type", "?"))
+                        lines.append(f"  - **{event}**: `{cmd[:100]}`")
+        except Exception as e:
+            lines.append(f"  _(read error: {e})_")
+
+    send_card_reply(chat_id, msg_id,
+                    _t(lang, "🪝 Hooks 配置", "🪝 Hooks Configuration"),
+                    "\n".join(lines), color="blue")
+
+
+# ═══════════════════════════════════════════════════
+#  /doctor — Claude Code health check
+# ═══════════════════════════════════════════════════
+
+
+def _cmd_doctor(chat_id: str, msg_id: str = None):
+    """/doctor: check Claude Code installation and session health."""
+    import subprocess as _sp
+    import larkhelm.config as _cfg_mod
+    from larkhelm.chat_state import _get_model, _load_sid
+
+    lang = _get_lang(chat_id)
+    checks = []  # (icon, label_zh, label_en, detail)
+
+    # 1. Claude binary
+    claude_cmd = getattr(_cfg_mod, "CLAUDE_CMD", "claude")
+    try:
+        r = _sp.run([claude_cmd, "--version"], capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            ver = r.stdout.strip().splitlines()[0]
+            checks.append(("✅", "Claude CLI", "Claude CLI", f"`{ver}`"))
+        else:
+            checks.append(("❌", "Claude CLI", "Claude CLI",
+                           _t(lang, f"退出码 {r.returncode}", f"exit code {r.returncode}")))
+    except FileNotFoundError:
+        checks.append(("❌", "Claude CLI", "Claude CLI",
+                       _t(lang, f"未找到命令 `{claude_cmd}`", f"command not found: `{claude_cmd}`")))
+    except Exception as e:
+        checks.append(("⚠️", "Claude CLI", "Claude CLI", str(e)[:80]))
+
+    # 2. Session ID
+    model = _get_model(chat_id)
+    sid = _load_sid(chat_id, model) or ""
+    if sid:
+        checks.append(("✅", "会话 ID", "Session ID", f"`{sid[:16]}…`"))
+    else:
+        checks.append(("ℹ️", "会话 ID", "Session ID",
+                       _t(lang, "无活跃会话（下次查询自动创建）",
+                                "no active session (auto-created on next query)")))
+
+    # 3. Feishu credentials
+    app_id = getattr(_cfg_mod, "APP_ID", "")
+    app_secret = getattr(_cfg_mod, "APP_SECRET", "")
+    if app_id and app_secret:
+        checks.append(("✅", "飞书凭证", "Feishu credentials",
+                       _t(lang, f"APP_ID `{app_id[:8]}…` 已配置",
+                                f"APP_ID `{app_id[:8]}…` configured")))
+    else:
+        checks.append(("❌", "飞书凭证", "Feishu credentials",
+                       _t(lang, "APP_ID / APP_SECRET 未设置", "APP_ID / APP_SECRET not set")))
+
+    # 4. Perm hook
+    skip_perm = getattr(_cfg_mod, "SKIP_PERMISSIONS", False)
+    perm_script = getattr(_cfg_mod, "PERM_HOOK_SCRIPT", "")
+    if skip_perm:
+        checks.append(("⚠️", "权限 Hook", "Perm Hook",
+                       _t(lang, "已跳过 (skip_permissions=true)", "skipped (skip_permissions=true)")))
+    elif perm_script and Path(perm_script).exists():
+        checks.append(("✅", "权限 Hook", "Perm Hook", _t(lang, "已配置", "configured")))
+    else:
+        checks.append(("⚠️", "权限 Hook", "Perm Hook",
+                       _t(lang, f"脚本未找到：`{perm_script}`",
+                                f"script not found: `{perm_script}`")))
+
+    # 5. MCP
+    mcp_cfg = _cfg_mod.config.get("mcp_config_file", "")
+    if mcp_cfg:
+        if Path(mcp_cfg).exists():
+            checks.append(("✅", "MCP 配置", "MCP config",
+                           _t(lang, f"已配置：`{mcp_cfg}`", f"configured: `{mcp_cfg}`")))
+        else:
+            checks.append(("❌", "MCP 配置", "MCP config",
+                           _t(lang, f"文件不存在：`{mcp_cfg}`", f"file missing: `{mcp_cfg}`")))
+    else:
+        checks.append(("ℹ️", "MCP 配置", "MCP config",
+                       _t(lang, "仅内置 larkhelm MCP server", "built-in larkhelm MCP only")))
+
+    lines = [
+        f"{icon} **{_t(lang, lzh, len_)}**: {detail}"
+        for icon, lzh, len_, detail in checks
+    ]
+    all_ok = all(c[0] in ("✅", "ℹ️") for c in checks)
+    send_card_reply(chat_id, msg_id,
+                    _t(lang, "🩺 诊断报告", "🩺 Doctor Report"),
+                    "\n".join(lines),
+                    color="green" if all_ok else "orange")
 
 
 def _cmd_upgrade(chat_id: str, msg_id: str = None):

@@ -591,6 +591,66 @@ def _default_registrations() -> None:
         examples=("/voice status", "/voice lang en"),
     ))
 
+    def _h_compact(ctx: DispatchContext) -> None:
+        from larkhelm.commands import _cmd_compact
+        _cmd_compact(ctx.chat_id, ctx.msg_id)
+    register(CommandSpec(
+        name="/compact",
+        handler=_h_compact,
+        match_kind="exact",
+        description="将对话历史压缩到记忆并重置会话，适用于长对话续跑",
+        description_en="Compress conversation history into memory and reset session",
+        examples=("/compact",),
+    ))
+
+    def _h_context(ctx: DispatchContext) -> None:
+        from larkhelm.commands import _cmd_context
+        _cmd_context(ctx.chat_id, ctx.msg_id)
+    register(CommandSpec(
+        name="/context",
+        handler=_h_context,
+        match_kind="exact",
+        description="查看当前会话的上下文窗口用量与 token 统计",
+        description_en="Show context window usage and token stats for current session",
+        examples=("/context",),
+    ))
+
+    def _h_mcp(ctx: DispatchContext) -> None:
+        from larkhelm.commands import _cmd_mcp
+        _cmd_mcp(ctx.chat_id, ctx.msg_id)
+    register(CommandSpec(
+        name="/mcp",
+        handler=_h_mcp,
+        match_kind="exact",
+        description="列出当前配置的 MCP 服务器",
+        description_en="List configured MCP servers",
+        examples=("/mcp",),
+    ))
+
+    def _h_hooks(ctx: DispatchContext) -> None:
+        from larkhelm.commands import _cmd_hooks
+        _cmd_hooks(ctx.chat_id, ctx.msg_id)
+    register(CommandSpec(
+        name="/hooks",
+        handler=_h_hooks,
+        match_kind="exact",
+        description="查看 Claude Code hooks 配置（PreToolUse/PostToolUse）",
+        description_en="Show Claude Code hooks configuration (PreToolUse/PostToolUse)",
+        examples=("/hooks",),
+    ))
+
+    def _h_doctor(ctx: DispatchContext) -> None:
+        from larkhelm.commands import _cmd_doctor
+        _cmd_doctor(ctx.chat_id, ctx.msg_id)
+    register(CommandSpec(
+        name="/doctor",
+        handler=_h_doctor,
+        match_kind="exact",
+        description="检查 Claude Code 安装、会话和配置健康状态",
+        description_en="Check Claude Code installation, session, and config health",
+        examples=("/doctor",),
+    ))
+
 
 # Register defaults at import time. Python caches the module after the first
 # import, so this runs exactly once per process under normal usage. Note:
