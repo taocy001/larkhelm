@@ -56,46 +56,98 @@ from larkhelm.card_builder import _make_card, _fmt_elapsed
 # Splitting these out (rather than hardcoding inside _cmd_help) lets
 # tests monkey-patch a single section, and lets future plugins inject
 # / swap a section without touching the render function.
-_HELP_STATIC_SECTIONS: dict[str, str] = {
-    "intro": "发消息直接提问，命令均以 `/` 开头",
-    "decision_tree": (
-        "**🧭 任务怎么选**\n"
-        "💬 直接发消息 — 单轮问答 / 闲聊 / 代码片段解释\n"
-        "🛠 **/dev** <需求> — 软件工程流水线（PM→架构→工程→QA→审查），产物通常一次 commit\n"
-        "🤖 **/crew** <需求> — 动态规划，Manager 自动分解任务多 Agent 并行\n"
-        "📋 **/plan** — 多阶段串行：`[dev]` `[review]` `[fix]` `[test]`，每步确认；支持飞书文档 URL\n"
-        "💡 不确定时 → 直接发消息让 AI 判断"
+# Each value is a (zh, en) tuple.
+_HELP_STATIC_SECTIONS: dict[str, tuple[str, str]] = {
+    "intro": (
+        "发消息直接提问，命令均以 `/` 开头",
+        "Just send a message to ask anything. Commands start with `/`",
     ),
-    "separator": "---",
+    "decision_tree": (
+        (
+            "**🧭 任务怎么选**\n"
+            "💬 直接发消息 — 单轮问答 / 闲聊 / 代码片段解释\n"
+            "🛠 **/dev** <需求> — 软件工程流水线（PM→架构→工程→QA→审查），产物通常一次 commit\n"
+            "🤖 **/crew** <需求> — 动态规划，Manager 自动分解任务多 Agent 并行\n"
+            "📋 **/plan** — 多阶段串行：`[dev]` `[review]` `[fix]` `[test]`，每步确认；支持飞书文档 URL\n"
+            "💡 不确定时 → 直接发消息让 AI 判断"
+        ),
+        (
+            "**🧭 Which command to use**\n"
+            "💬 Just message — Q&A / chat / code snippets\n"
+            "🛠 **/dev** <task> — software pipeline (PM→Arch→Eng→QA→Review), usually one commit\n"
+            "🤖 **/crew** <task> — dynamic planning, Manager decomposes and runs agents in parallel\n"
+            "📋 **/plan** — staged pipeline: `[dev]` `[review]` `[fix]` `[test]`, confirm each step; supports Feishu doc URLs\n"
+            "💡 Unsure? → just message and let AI decide"
+        ),
+    ),
+    "separator": ("---", "---"),
     "model_shortcuts": (
-        "**🎯 与指定模型对话**\n"
-        "**/c <消息>** — Claude\n"
-        "**/g <消息>** — Gemini\n"
-        "**/k <消息>** — Kimi\n"
-        "**/d <消息>** — DeepSeek"
+        (
+            "**🎯 与指定模型对话**\n"
+            "**/c <消息>** — Claude\n"
+            "**/g <消息>** — Gemini\n"
+            "**/k <消息>** — Kimi\n"
+            "**/d <消息>** — DeepSeek"
+        ),
+        (
+            "**🎯 Talk to a specific model**\n"
+            "**/c <message>** — Claude\n"
+            "**/g <message>** — Gemini\n"
+            "**/k <message>** — Kimi\n"
+            "**/d <message>** — DeepSeek"
+        ),
     ),
     "reset_detail": (
-        "**♻️ 重置细分**\n"
-        "**/reset** claude | gemini | kimi | deepseek — 单独重置某 backend 会话\n"
-        "**/reset perm** — 权限审批\n"
-        "**/reset memory** — 清除会话记忆（全局/项目保留）"
+        (
+            "**♻️ 重置细分**\n"
+            "**/reset** claude | gemini | kimi | deepseek — 单独重置某 backend 会话\n"
+            "**/reset perm** — 权限审批\n"
+            "**/reset memory** — 清除会话记忆（全局/项目保留）"
+        ),
+        (
+            "**♻️ Reset options**\n"
+            "**/reset** claude | gemini | kimi | deepseek — reset a specific backend session\n"
+            "**/reset perm** — permission approvals\n"
+            "**/reset memory** — clear session memory (global/project kept)"
+        ),
     ),
     "memory_detail": (
-        "**🧠 记忆系统**（每 10 轮自动从对话中提取，无需手工维护）\n"
-        "**/memory** — 查看三层（全局/项目/会话）\n"
-        "**/memory observe** — 容量与健康度\n"
-        "**/memory set** global | project <内容> — 手动覆盖偏好/项目记忆\n"
-        "**/memory update** — 立即触发摘要 + 抽取\n"
-        "**/memory clear** session | project | global | all — 清除指定记忆层\n"
-        "**/memory list** — 列出记忆文件\n"
-        "**/memory gc [天数] [apply]** — 清理过期记忆\n"
-        "**/memory export** — 导出记忆 zip\n"
-        "**/memory import [file_key]** — 导入记忆 zip"
+        (
+            "**🧠 记忆系统**（每 10 轮自动从对话中提取，无需手工维护）\n"
+            "**/memory** — 查看三层（全局/项目/会话）\n"
+            "**/memory observe** — 容量与健康度\n"
+            "**/memory set** global | project <内容> — 手动覆盖偏好/项目记忆\n"
+            "**/memory update** — 立即触发摘要 + 抽取\n"
+            "**/memory clear** session | project | global | all — 清除指定记忆层\n"
+            "**/memory list** — 列出记忆文件\n"
+            "**/memory gc [天数] [apply]** — 清理过期记忆\n"
+            "**/memory export** — 导出记忆 zip\n"
+            "**/memory import [file_key]** — 导入记忆 zip"
+        ),
+        (
+            "**🧠 Memory system** (auto-extracts from conversation every 10 turns)\n"
+            "**/memory** — view three layers (global/project/session)\n"
+            "**/memory observe** — capacity & health\n"
+            "**/memory set** global | project <content> — manually set preference/project memory\n"
+            "**/memory update** — trigger summary + extraction now\n"
+            "**/memory clear** session | project | global | all — clear a memory layer\n"
+            "**/memory list** — list memory files\n"
+            "**/memory gc [days] [apply]** — clean up expired memory\n"
+            "**/memory export** — export memory zip\n"
+            "**/memory import [file_key]** — import memory zip"
+        ),
     ),
     "doc_section": (
-        "**📄 飞书文档**\n"
-        "**读** — 在消息里粘贴 `docx` / `wiki` / `sheets` URL，bridge 自动读取并注入上下文\n"
-        "**写** — 终端跑 `larkhelm doc create|append|write`，或在飞书里用 `/run larkhelm doc create \"标题\"`"
+        (
+            "**📄 飞书文档**\n"
+            "**读** — 在消息里粘贴 `docx` / `wiki` / `sheets` URL，bridge 自动读取并注入上下文\n"
+            "**写** — 终端跑 `larkhelm doc create|append|write`，或在飞书里用 `/run larkhelm doc create \"标题\"`"
+        ),
+        (
+            "**📄 Feishu Docs**\n"
+            "**Read** — paste a `docx` / `wiki` / `sheets` URL in a message; bridge auto-reads and injects context\n"
+            "**Write** — run `larkhelm doc create|append|write` in terminal, or use `/run larkhelm doc create \"Title\"` in Feishu"
+        ),
     ),
 }
 
@@ -106,32 +158,34 @@ _HELP_STATIC_SECTIONS: dict[str, str] = {
 # time so the renderer always reflects ``COMMAND_REGISTRY`` — or a
 # (name, fallback_desc) tuple for commands handled in handlers/_message.py
 # (per design.md D1 — those don't belong in the registry).
+# Group titles and inline-row descriptions are (zh, en) tuples.
+# Inline rows: str = registry lookup; (name, zh, en) = manual entry (not in registry).
 _HELP_LAYOUT: tuple = (
     ("static", "intro"),
     ("static", "decision_tree"),
     ("static", "separator"),
-    ("group", "🚀 常用", (
+    ("group", ("🚀 常用", "🚀 Common"), (
         "/reset",
-        ("/cancel", "取消当前查询"),
+        ("/cancel", "取消当前查询", "Cancel the current query"),
         "/cd", "/pwd", "/ls", "/run", "/pickup", "/status",
-        ("/rename", "命名当前会话"),
+        ("/rename", "命名当前会话", "Name this session"),
         "/history", "/stats",
         "/help",
     )),
     ("static", "model_shortcuts"),
-    ("group", "⚙️ 模型与推理", ("/model", "/lock", "/effort")),
+    ("group", ("⚙️ 模型与推理", "⚙️ Model & Reasoning"), ("/model", "/lock", "/effort")),
     ("static", "reset_detail"),
     ("static", "memory_detail"),
     ("static", "doc_section"),
-    ("group", "📦 其他命令", (
+    ("group", ("📦 其他命令", "📦 Other"), (
         "/voice", "/cron", "/lang",
-        ("/btw", "快问，不占主锁"),
+        ("/btw", "快问，不占主锁", "Side question — doesn't hold the main lock"),
         "/upgrade",
     )),
 )
 
 
-def _render_help_body() -> str:
+def _render_help_body(lang: str = "zh") -> str:
     """Compose the /help card body from ``_HELP_LAYOUT`` + ``COMMAND_REGISTRY``.
 
     Pure function — no I/O, no chat_id. Hidden / unregistered rows are
@@ -139,26 +193,37 @@ def _render_help_body() -> str:
     Truncates with a trailing hint if length reaches MAX_CARD_LEN.
     """
     from larkhelm.command_registry import COMMAND_REGISTRY
+    from larkhelm.locale import _t
 
     parts: list[str] = []
     for sec in _HELP_LAYOUT:
         kind = sec[0]
         if kind == "static":
-            parts.append(_HELP_STATIC_SECTIONS[sec[1]])
+            zh_text, en_text = _HELP_STATIC_SECTIONS[sec[1]]
+            parts.append(_t(lang, zh_text, en_text))
             continue
-        # group
-        _, title, rows = sec
+        # group — title is a (zh, en) tuple
+        _, title_pair, rows = sec
+        title = _t(lang, title_pair[0], title_pair[1]) if isinstance(title_pair, tuple) else title_pair
         rendered_rows: list[str] = []
         for row in rows:
             if isinstance(row, str):
                 spec = COMMAND_REGISTRY.lookup(row)
                 if spec is None or spec.hidden:
                     continue
-                desc = spec.description or "（无描述）"
+                if lang == "en" and spec.description_en:
+                    desc = spec.description_en
+                else:
+                    desc = spec.description or "（无描述）"
                 rendered_rows.append(f"**{spec.name}** — {desc}")
             else:
-                name, fallback_desc = row
-                rendered_rows.append(f"**{name}** — {fallback_desc}")
+                # (name, zh_desc, en_desc) or legacy (name, fallback_desc)
+                if len(row) == 3:
+                    name, zh_desc, en_desc = row
+                    desc = _t(lang, zh_desc, en_desc)
+                else:
+                    name, desc = row
+                rendered_rows.append(f"**{name}** — {desc}")
         if not rendered_rows:
             continue
         parts.append(f"**{title}**\n" + "\n".join(rendered_rows))
@@ -166,7 +231,9 @@ def _render_help_body() -> str:
     body = "\n\n".join(parts)
     max_len = getattr(_cfg, "MAX_CARD_LEN", 3000)
     if len(body) >= max_len:
-        body = body[: max_len - 100] + "\n\n...（命令清单已截断，请查看 README）"
+        hint = _t(lang, "...（命令清单已截断，请查看 README）",
+                  "...（command list truncated, see README）")
+        body = body[: max_len - 100] + "\n\n" + hint
     return body
 
 
@@ -572,8 +639,10 @@ def _cmd_status(chat_id: str, msg_id: str = None):
 
 
 def _cmd_help(chat_id: str, msg_id: str = None):
-    body = _render_help_body()
-    send_card_reply(chat_id, msg_id, "📖 帮助", body, color="blue", normalize=False)
+    lang = _get_lang(chat_id)
+    body = _render_help_body(lang)
+    title = "📖 Help" if lang == "en" else "📖 帮助"
+    send_card_reply(chat_id, msg_id, title, body, color="blue", normalize=False)
 
 
 def _cmd_pickup(chat_id: str, msg_id: str = None):

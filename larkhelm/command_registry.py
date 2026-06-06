@@ -107,6 +107,7 @@ class CommandSpec:
     thread_label: str = ""
     hidden: bool = False
     description: str = ""
+    description_en: str = ""
     examples: tuple[str, ...] = ()
 
     # ── matching ───────────────────────────────────────────────────
@@ -284,6 +285,7 @@ def register_simple(
     thread_label: str = "",
     hidden: bool = False,
     description: str = "",
+    description_en: str = "",
     examples: tuple[str, ...] = (),
 ) -> None:
     COMMAND_REGISTRY.register(CommandSpec(
@@ -297,6 +299,7 @@ def register_simple(
         thread_label=thread_label,
         hidden=hidden,
         description=description,
+        description_en=description_en,
         examples=examples,
     ))
 
@@ -350,6 +353,7 @@ def _default_registrations() -> None:
             "/reset permissions", "/reset perm", "/reset memory",
         ),
         description="重置会话（按子命令清除指定 backend / 权限 / 记忆）",
+        description_en="Reset session (clear backend / permissions / memory by sub-command)",
         examples=("/reset", "/reset claude", "/reset memory"),
     ))
 
@@ -358,25 +362,29 @@ def _default_registrations() -> None:
         from larkhelm.commands import _cmd_status
         _cmd_status(ctx.chat_id, ctx.msg_id)
     register_simple("/status", _h_status,
-                    description="查看服务运行状态：版本 / session ID / backend 健康")
+                    description="查看服务运行状态：版本 / session ID / backend 健康",
+                    description_en="Show service status: version / session IDs / backend health")
 
     def _h_help(ctx: DispatchContext) -> None:
         from larkhelm.commands import _cmd_help
         _cmd_help(ctx.chat_id, ctx.msg_id)
     register_simple("/help", _h_help,
-                    description="显示命令帮助卡片")
+                    description="显示命令帮助卡片",
+                    description_en="Show command help card")
 
     def _h_pickup(ctx: DispatchContext) -> None:
         from larkhelm.commands import _cmd_pickup
         _cmd_pickup(ctx.chat_id, ctx.msg_id)
     register_simple("/pickup", _h_pickup,
-                    description="获取在终端接力当前 Claude / Gemini / Kimi 会话的命令")
+                    description="获取在终端接力当前 Claude / Gemini / Kimi 会话的命令",
+                    description_en="Get terminal commands to resume Claude / Gemini / Kimi sessions")
 
     def _h_upgrade(ctx: DispatchContext) -> None:
         from larkhelm.commands import _cmd_upgrade
         _cmd_upgrade(ctx.chat_id, ctx.msg_id)
     register_simple("/upgrade", _h_upgrade,
-                    description="更新 larkhelm 到最新版本")
+                    description="更新 larkhelm 到最新版本",
+                    description_en="Update larkhelm to the latest version")
 
     # ── /history ───────────────────────────────────────────────────
     def _h_history(ctx: DispatchContext) -> None:
@@ -391,6 +399,7 @@ def _default_registrations() -> None:
         match_kind="exact",
         sub_matches=("/history all",),
         description="查看当前会话历史（默认最近 10 条，加 all 查看全部）",
+        description_en="View conversation history (recent 10 by default; add 'all' for full history)",
         examples=("/history", "/history all"),
     ))
 
@@ -403,6 +412,7 @@ def _default_registrations() -> None:
         handler=_h_stats,
         match_kind="prefix",
         description="查看 Token 用量统计（加 intent 子命令查看意图路由分布）",
+        description_en="Token usage stats (add 'intent' for routing distribution)",
         examples=("/stats", "/stats intent"),
     ))
 
@@ -414,6 +424,7 @@ def _default_registrations() -> None:
         handler=_h_memory,
         match_kind="prefix",
         description="查看 / 管理三层记忆（全局 / 项目 / 会话）",
+        description_en="View / manage three-layer memory (global / project / session)",
         examples=("/memory status", "/memory set global 偏好简短回答", "/memory clear session"),
     ))
 
@@ -425,6 +436,7 @@ def _default_registrations() -> None:
         handler=_h_cron,
         match_kind="prefix",
         description="管理定时查询任务（add / list / del）",
+        description_en="Manage scheduled queries (add / list / del)",
         examples=('/cron add "0 9 * * *" 早会提醒', "/cron list", "/cron del abc123"),
     ))
 
@@ -436,6 +448,7 @@ def _default_registrations() -> None:
         handler=_h_effort,
         match_kind="prefix",
         description="调整 Claude 推理力度：low / medium / high / xhigh",
+        description_en="Set Claude reasoning effort: low / medium / high / xhigh",
         examples=("/effort", "/effort low", "/effort high"),
     ))
 
@@ -447,6 +460,7 @@ def _default_registrations() -> None:
         handler=_h_lang,
         match_kind="prefix",
         description="切换机器人界面语言 zh / en — Switch bot UI language",
+        description_en="Switch bot UI language: zh (Chinese) / en (English)",
         examples=("/lang", "/lang zh", "/lang en"),
     ))
 
@@ -461,6 +475,7 @@ def _default_registrations() -> None:
         run_async=True,
         thread_label="Crew",
         description="动态规划：Manager 自动分解任务，多 Agent 并行执行",
+        description_en="Dynamic planning: Manager decomposes task, agents run in parallel",
         examples=("/crew 调研竞品 X 与 Y 的差异",),
     ))
 
@@ -474,6 +489,7 @@ def _default_registrations() -> None:
         run_async=True,
         thread_label="Dev",
         description="软件工程流水线：PM → 架构 → 工程 → QA → 审查",
+        description_en="Software pipeline: PM → Arch → Eng → QA → Review",
         examples=("/dev 给登录页加 SSO 支持", "/dev 修复登录超时 bug --no-confirm"),
     ))
 
@@ -487,6 +503,7 @@ def _default_registrations() -> None:
         run_async=True,
         thread_label="Plan",
         description="多阶段串行流水线：dev → review → fix → test，每步可确认",
+        description_en="Staged pipeline: dev → review → fix → test, confirm each step",
         examples=("/plan 给设置页加深色模式",),
     ))
 
@@ -495,7 +512,8 @@ def _default_registrations() -> None:
         from larkhelm.commands import _cmd_pwd
         _cmd_pwd(ctx.chat_id, ctx.msg_id)
     register_simple("/pwd", _h_pwd,
-                    description="显示当前工作目录")
+                    description="显示当前工作目录",
+                    description_en="Show current working directory")
 
     def _h_cd(ctx: DispatchContext) -> None:
         from larkhelm.commands import _cmd_cd
@@ -506,6 +524,7 @@ def _default_registrations() -> None:
         match_kind="prefix",
         usage_card="`/cd <path>` — 切换工作目录",
         description="切换当前会话的工作目录",
+        description_en="Change the working directory for this session",
         examples=("/cd /home/user/code/larkhelm",),
     ))
 
@@ -517,6 +536,7 @@ def _default_registrations() -> None:
         handler=_h_ls,
         match_kind="prefix",
         description="列出目录文件（默认当前目录，最多 60 条）",
+        description_en="List directory files (current dir by default, max 60)",
         examples=("/ls", "/ls /tmp"),
     ))
 
@@ -531,6 +551,7 @@ def _default_registrations() -> None:
         run_async=True,
         thread_label="Run",
         description="执行 Shell 命令（默认 30s 超时，可配 shell_timeout_sec）",
+        description_en="Execute a shell command (30s timeout by default, configurable via shell_timeout_sec)",
         examples=("/run uname -a", "/run df -h"),
     ))
 
@@ -546,6 +567,7 @@ def _default_registrations() -> None:
         handler=_h_model,
         match_kind="prefix",
         description="切换当前会话默认 backend（list / off / <id>）",
+        description_en="Switch default backend for this session (list / off / <id>)",
         examples=("/model claude", "/model kimi"),
     ))
     register(CommandSpec(
@@ -553,6 +575,7 @@ def _default_registrations() -> None:
         handler=_h_model,
         match_kind="prefix",
         description="持久锁定 backend（list / off / <id>，/model 的同义入口）",
+        description_en="Lock a backend persistently (list / off / <id>, alias of /model)",
         examples=("/lock", "/lock kimi", "/lock off"),
     ))
 
@@ -564,6 +587,7 @@ def _default_registrations() -> None:
         handler=_h_voice,
         match_kind="prefix",
         description="查看 / 切换语音转写设置（status / lang zh|en|auto）",
+        description_en="View / switch voice transcription settings (status / lang zh|en|auto)",
         examples=("/voice status", "/voice lang en"),
     ))
 
