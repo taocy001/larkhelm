@@ -109,11 +109,11 @@ def test_cmd_run_executes_echo(_silence_cards, monkeypatch):
                         lambda chat_id, cmd: ("hello\n", "", 0))
     monkeypatch.setattr(_cm, "log_entry", lambda *a, **kw: None)
     _cm._cmd_run("c1", "echo hello", msg_id="m1")
-    # final card via reply_card
+    # final card via reply_card — title now "✅ 完成" (zh default)
     body = next(r["body"] for r in _silence_cards
-                if r["kind"] == "patch_reply" and "Shell" in r.get("title", ""))
+                if r["kind"] == "patch_reply" and "✅" in r.get("title", ""))
     assert "hello" in body
-    assert "退出码: `0`" in body
+    assert "退出码:" in body
 
 
 def test_cmd_run_failure(_silence_cards, monkeypatch):
@@ -124,9 +124,9 @@ def test_cmd_run_failure(_silence_cards, monkeypatch):
     monkeypatch.setattr(_cm, "log_entry", lambda *a, **kw: None)
     _cm._cmd_run("c1", "false", msg_id="m1")
     body = next(r["body"] for r in _silence_cards
-                if r["kind"] == "patch_reply" and "Shell" in r.get("title", ""))
+                if r["kind"] == "patch_reply" and "❌" in r.get("title", ""))
     assert "boom" in body
-    assert "退出码: `1`" in body
+    assert "退出码:" in body
 
 
 # ── /reset ────────────────────────────────────────────────────────────

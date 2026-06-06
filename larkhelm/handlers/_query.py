@@ -224,18 +224,33 @@ def _maybe_doc_usage_hint(text: str, chat_id: str, user_msg_id: str) -> bool:
     from larkhelm.lark_client import parse_doc_url
     if parse_doc_url(urls[0]) is not None:
         return False
-    body = (
-        "支持的飞书链接类型：\n"
-        "- `docx` — 新版文档 `https://xxx.feishu.cn/docx/...`\n"
-        "- `wiki` — Wiki 页面 `https://xxx.feishu.cn/wiki/...`\n"
-        "- `sheets` — 电子表格 `https://xxx.feishu.cn/sheets/...`\n"
-        "- `folder` / `drive` — 云盘文件夹 `https://xxx.feishu.cn/drive/folder/...`\n\n"
-        "请检查链接类型是否正确，或在 URL 旁补一句你想做的事，"
-        "机器人会按普通对话处理。"
+    from larkhelm.locale import _t
+    from larkhelm.chat_state import _get_lang
+    _lang = _get_lang(chat_id)
+    body = _t(
+        _lang,
+        (
+            "支持的飞书链接类型：\n"
+            "- `docx` — 新版文档 `https://xxx.feishu.cn/docx/...`\n"
+            "- `wiki` — Wiki 页面 `https://xxx.feishu.cn/wiki/...`\n"
+            "- `sheets` — 电子表格 `https://xxx.feishu.cn/sheets/...`\n"
+            "- `folder` / `drive` — 云盘文件夹 `https://xxx.feishu.cn/drive/folder/...`\n\n"
+            "请检查链接类型是否正确，或在 URL 旁补一句你想做的事，"
+            "机器人会按普通对话处理。"
+        ),
+        (
+            "Supported Feishu URL types:\n"
+            "- `docx` — Document `https://xxx.feishu.cn/docx/...`\n"
+            "- `wiki` — Wiki page `https://xxx.feishu.cn/wiki/...`\n"
+            "- `sheets` — Spreadsheet `https://xxx.feishu.cn/sheets/...`\n"
+            "- `folder` / `drive` — Drive folder `https://xxx.feishu.cn/drive/folder/...`\n\n"
+            "Please check the URL type, or add a sentence describing what you want to do "
+            "and the bot will treat it as a normal message."
+        ),
     )
     send_card_reply(
         chat_id, user_msg_id,
-        "⚠️ 飞书 URL 无法识别",
+        _t(_lang, "⚠️ 飞书 URL 无法识别", "⚠️ Unrecognized Feishu URL"),
         body,
         color="orange",
     )
@@ -1127,8 +1142,13 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 if user_msg_id and _eyes_reaction_id[0]:
                     delete_reaction(user_msg_id, _eyes_reaction_id[0])
                     _eyes_reaction_id[0] = None
-                send_card(chat_id, "❌ 锁定后端不可用",
-                          f"{_lbe}\n\n使用 **/lock off** 恢复自动路由。", color="red")
+                from larkhelm.locale import _t as _lt
+                from larkhelm.chat_state import _get_lang as _gl
+                _lbe_lang = _gl(chat_id)
+                send_card(chat_id,
+                          _lt(_lbe_lang, "❌ 锁定后端不可用", "❌ Locked Backend Unavailable"),
+                          f"{_lbe}\n\n" + _lt(_lbe_lang, "使用 **/lock off** 恢复自动路由。", "Use **/lock off** to restore auto-routing."),
+                          color="red")
                 return
             except Exception as _route_err:
                 _debug_log(f"[{trace_id}][DoQuery] routing error: {_route_err}, using orchestrator chain")

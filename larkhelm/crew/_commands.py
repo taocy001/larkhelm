@@ -791,6 +791,9 @@ def _cmd_crew_status(chat_id: str):
         _active_crew, _active_crew_lock, _active_crew_states,
         describe_active_owner,
     )
+    from larkhelm.chat_state import _get_lang
+    from larkhelm.locale import _t
+    lang = _get_lang(chat_id)
 
     # C4 #11: ``_active_crew`` holds the owner token for whatever owns the
     # per-chat slot — crew/dev write a raw hex crew_id, ``cmd_plan`` writes
@@ -808,8 +811,10 @@ def _cmd_crew_status(chat_id: str):
         elapsed = _fmt_elapsed(time.time() - state.start_time)
         n_done  = sum(1 for a in state.agents.values() if a.status == AgentStatus.DONE)
         n_total = len(state.agents)
-        lines   = [f"**任务：** {state.plan.title}",
-                   f"**状态：** {state.phase}  · {n_done}/{n_total} Agent 完成  · 已耗时 {elapsed}"]
+        lines   = [_t(lang, f"**任务：** {state.plan.title}", f"**Task:** {state.plan.title}"),
+                   _t(lang,
+                      f"**状态：** {state.phase}  · {n_done}/{n_total} Agent 完成  · 已耗时 {elapsed}",
+                      f"**Status:** {state.phase}  · {n_done}/{n_total} agents done  · elapsed {elapsed}")]
         from larkhelm.crew_card import _backend_label
         for spec in state.plan.agents:
             ag   = state.agents[spec.id]
@@ -823,7 +828,8 @@ def _cmd_crew_status(chat_id: str):
             _backend = _backend_label(spec, ag)
             _backend_paren = f"（{_backend}）" if _backend else ""
             lines.append(f"{icon} {spec.role}{_backend_paren}")
-        send_card(chat_id, "⚙️ Crew 任务进行中", "\n".join(lines), color="blue")
+        send_card(chat_id, _t(lang, "⚙️ Crew 任务进行中", "⚙️ Crew Task Running"),
+                  "\n".join(lines), color="blue")
     elif owner_token:
         # C4 #11: slot is held by a non-crew owner (today: ``/plan``;
         # any future ``_active_crew`` writer that doesn't populate
@@ -834,10 +840,14 @@ def _cmd_crew_status(chat_id: str):
         # while the chat is in fact serialised.
         owner_desc = describe_active_owner(owner_token)
         send_card(
-            chat_id, "⚙️ 任务进行中",
-            f"当前 chat 正在运行 {owner_desc}。\n\n"
-            "（这不是一个 `/crew` 或 `/dev` 任务——用 `/cancel` 中止，"
-            "或等待完成后再发 `/crew` / `/dev`。）",
+            chat_id, _t(lang, "⚙️ 任务进行中", "⚙️ Task Running"),
+            _t(lang,
+               f"当前 chat 正在运行 {owner_desc}。\n\n"
+               "（这不是一个 `/crew` 或 `/dev` 任务——用 `/cancel` 中止，"
+               "或等待完成后再发 `/crew` / `/dev`。）",
+               f"This chat is currently running {owner_desc}.\n\n"
+               "(This is not a `/crew` or `/dev` task — use `/cancel` to stop it, "
+               "or wait for it to finish before sending `/crew` / `/dev`.)"),
             color="blue",
         )
     else:
@@ -848,14 +858,20 @@ def _cmd_crew_status(chat_id: str):
         if last_crew:
             ts  = last_crew["ts"][:16].replace("T", " ")
             snip = last_crew["content"][:120].replace("\n", " ")
-            send_card(chat_id, "📋 最近 Crew 任务",
-                      f"**完成时间：** {ts}\n**摘要：** {snip}…\n\n"
-                      f"发 `/crew <需求>` 开始新任务",
+            send_card(chat_id, _t(lang, "📋 最近 Crew 任务", "📋 Recent Crew Task"),
+                      _t(lang,
+                         f"**完成时间：** {ts}\n**摘要：** {snip}…\n\n"
+                         f"发 `/crew <需求>` 开始新任务",
+                         f"**Completed:** {ts}\n**Summary:** {snip}…\n\n"
+                         f"Send `/crew <task>` to start a new task"),
                       color="blue")
         else:
-            send_card(chat_id, "📋 Crew 状态",
-                      "当前没有正在运行的 crew 任务。\n\n"
-                      "发 `/crew <需求>` 或 `/dev <需求>` 开始。",
+            send_card(chat_id, _t(lang, "📋 Crew 状态", "📋 Crew Status"),
+                      _t(lang,
+                         "当前没有正在运行的 crew 任务。\n\n"
+                         "发 `/crew <需求>` 或 `/dev <需求>` 开始。",
+                         "No crew task is currently running.\n\n"
+                         "Send `/crew <task>` or `/dev <task>` to start one."),
                       color="blue")
 
 
@@ -900,10 +916,18 @@ def cmd_dev(chat_id: str, args_str: str, user_msg_id: str = None, *,
 
     requirement = args
     if not requirement:
-        send_card(chat_id, "⚠️ 用法",
-                  "`/dev <需求描述 或 飞书文档URL>`\n\n"
-                  "软件工程流水线：PM **[确认]** → 架构师 → 工程师 → QA（失败重试 2×）→ 审查员（重试 1×）\n\n"
-                  "加 `--no-confirm` 可跳过 PM 后的人工确认断点，直接连续执行。",
+        from larkhelm.chat_state import _get_lang as _gl
+        from larkhelm.locale import _t as _lt
+        _lang = _gl(chat_id)
+        send_card(chat_id,
+                  _lt(_lang, "⚠️ 用法", "⚠️ Usage"),
+                  _lt(_lang,
+                      "`/dev <需求描述 或 飞书文档URL>`\n\n"
+                      "软件工程流水线：PM **[确认]** → 架构师 → 工程师 → QA（失败重试 2×）→ 审查员（重试 1×）\n\n"
+                      "加 `--no-confirm` 可跳过 PM 后的人工确认断点，直接连续执行。",
+                      "`/dev <requirement or Feishu doc URL>`\n\n"
+                      "Engineering pipeline: PM **[confirm]** → Architect → Engineer → QA (retry 2×) → Reviewer (retry 1×)\n\n"
+                      "Add `--no-confirm` to skip the PM confirmation breakpoint and run continuously."),
                   color="orange")
         return
     # If requirement contains a Feishu doc URL, read and inline the document content.
@@ -980,9 +1004,15 @@ def _run_generic_crew_inner_impl(chat_id: str, requirement: str,
     with _active_crew_lock:
         if chat_id in _active_crew:
             from larkhelm.crew._state import describe_active_owner
+            from larkhelm.chat_state import _get_lang as _gl
+            from larkhelm.locale import _t as _lt
+            _lang = _gl(chat_id)
             owner_desc = describe_active_owner(_active_crew[chat_id])
-            send_card(chat_id, "⚠️ Crew 已在运行",
-                      f"当前 chat 正在运行 {owner_desc}，发送 `/cancel` 停止后再试。",
+            send_card(chat_id,
+                      _lt(_lang, "⚠️ Crew 已在运行", "⚠️ Crew Already Running"),
+                      _lt(_lang,
+                          f"当前 chat 正在运行 {owner_desc}，发送 `/cancel` 停止后再试。",
+                          f"This chat is running {owner_desc}. Send `/cancel` to stop it first."),
                       color="orange")
             return
         _active_crew[chat_id] = crew_id
@@ -1172,9 +1202,15 @@ def _run_dev_crew_inner_impl(chat_id: str, requirement: str, user_msg_id: str,
     with _active_crew_lock:
         if chat_id in _active_crew:
             from larkhelm.crew._state import describe_active_owner
+            from larkhelm.chat_state import _get_lang as _gl
+            from larkhelm.locale import _t as _lt
+            _lang = _gl(chat_id)
             owner_desc = describe_active_owner(_active_crew[chat_id])
-            send_card(chat_id, "⚠️ Crew 已在运行",
-                      f"当前 chat 正在运行 {owner_desc}，发送 `/cancel` 停止后再试。",
+            send_card(chat_id,
+                      _lt(_lang, "⚠️ Crew 已在运行", "⚠️ Crew Already Running"),
+                      _lt(_lang,
+                          f"当前 chat 正在运行 {owner_desc}，发送 `/cancel` 停止后再试。",
+                          f"This chat is running {owner_desc}. Send `/cancel` to stop it first."),
                       color="orange")
             return
         _active_crew[chat_id] = crew_id
@@ -1241,7 +1277,11 @@ def _run_dev_crew_inner_impl(chat_id: str, requirement: str, user_msg_id: str,
             if stale_notice:
                 try:
                     from larkhelm.lark_client import send_card
-                    send_card(chat_id, "⚠️ Workspace 接力",
+                    from larkhelm.chat_state import _get_lang as _gl
+                    from larkhelm.locale import _t as _lt
+                    _lang = _gl(chat_id)
+                    send_card(chat_id,
+                              _lt(_lang, "⚠️ Workspace 接力", "⚠️ Workspace Resumed"),
                               stale_notice, color="orange")
                 except Exception as _e:
                     _debug_log(f"[Dev] stale notice card failed: {_e}")
@@ -1429,8 +1469,14 @@ def _run_pipeline_inner(
             # owner-aware re-route as the sister sites so the operator
             # knows whether to cancel a plan or a crew.
             owner_desc = describe_active_owner(_active_crew[chat_id])
-            send_card(chat_id, "⚠️ 任务冲突",
-                      f"当前 chat 正在运行 {owner_desc}，发送 `/cancel` 停止后再试。",
+            from larkhelm.chat_state import _get_lang as _gl
+            from larkhelm.locale import _t as _lt
+            _lang = _gl(chat_id)
+            send_card(chat_id,
+                      _lt(_lang, "⚠️ 任务冲突", "⚠️ Task Conflict"),
+                      _lt(_lang,
+                          f"当前 chat 正在运行 {owner_desc}，发送 `/cancel` 停止后再试。",
+                          f"This chat is running {owner_desc}. Send `/cancel` to stop it first."),
                       color="orange")
             return
         _active_crew[chat_id] = crew_id

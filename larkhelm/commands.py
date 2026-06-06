@@ -301,6 +301,7 @@ def _reset_backend(
     backend: str,
     *,
     clear_counters: bool = False,
+    lang: str = "zh",
 ) -> None:
     """Clear session ID + optionally zero session counters for one backend.
 
@@ -318,13 +319,17 @@ def _reset_backend(
         "deepseek": "DeepSeek",
     }
     label = label_map.get(backend, backend)
-    send_card_reply(chat_id, msg_id, "♻️ 已重置",
-                    f"{label} 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
+    send_card_reply(chat_id, msg_id, _t(lang, "♻️ 已重置", "♻️ Reset"),
+                    _t(lang,
+                       f"{label} 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
+                       f"{label} session cleared (memory kept).\n\nTo also clear session memory: `/memory clear session`"),
                     color="green")
 
 
 def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
     """Unified reset logic. which=None resets everything; otherwise 'claude'/'gemini'/'perm'."""
+    lang = _get_lang(chat_id)
+
     # Trigger memory snapshot before clearing session (async, non-blocking)
     if which in (None, "claude", "gemini", "kimi", "deepseek"):
         try:
@@ -354,13 +359,17 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
         clear_session_counters(chat_id)
         log_entry(chat_id, "reset", "reset:all", model="system")
         if _api_clear_failed:
-            send_card_reply(chat_id, msg_id, "⚠️ 部分重置",
-                            "会话 ID 已清除，但 API 历史清除失败，AI 可能仍记得部分上下文。",
+            send_card_reply(chat_id, msg_id, _t(lang, "⚠️ 部分重置", "⚠️ Partial Reset"),
+                            _t(lang,
+                               "会话 ID 已清除，但 API 历史清除失败，AI 可能仍记得部分上下文。",
+                               "Session ID cleared, but API history clear failed — the AI may still remember some context."),
                             color="orange")
         else:
-            send_card_reply(chat_id, msg_id, "♻️ 已重置",
-                            "所有 AI 会话均已清空（三层记忆已保留）。\n\n"
-                            "如需同时清除会话记忆：`/memory clear session`", color="green")
+            send_card_reply(chat_id, msg_id, _t(lang, "♻️ 已重置", "♻️ Reset"),
+                            _t(lang,
+                               "所有 AI 会话均已清空（三层记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
+                               "All AI sessions cleared (three-layer memory kept).\n\nTo also clear session memory: `/memory clear session`"),
+                            color="green")
     elif which == "claude":
         _clear_sid(chat_id, "claude")
         try:
@@ -374,12 +383,16 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
         clear_session_counters(chat_id)
         log_entry(chat_id, "reset", "reset:claude", model="system")
         if _api_clear_failed:
-            send_card_reply(chat_id, msg_id, "⚠️ 部分重置",
-                            "会话 ID 已清除，但 API 历史清除失败，AI 可能仍记得部分上下文。",
+            send_card_reply(chat_id, msg_id, _t(lang, "⚠️ 部分重置", "⚠️ Partial Reset"),
+                            _t(lang,
+                               "会话 ID 已清除，但 API 历史清除失败，AI 可能仍记得部分上下文。",
+                               "Session ID cleared, but API history clear failed — the AI may still remember some context."),
                             color="orange")
         else:
-            send_card_reply(chat_id, msg_id, "♻️ 已重置",
-                            "Claude 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
+            send_card_reply(chat_id, msg_id, _t(lang, "♻️ 已重置", "♻️ Reset"),
+                            _t(lang,
+                               "Claude 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
+                               "Claude session cleared (memory kept).\n\nTo also clear session memory: `/memory clear session`"),
                             color="green")
     elif which == "gemini":
         _clear_sid(chat_id, "gemini")
@@ -396,12 +409,16 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
             _debug_log(f"[reset] clear gemini session counters failed: {_e}")
         log_entry(chat_id, "reset", "reset:gemini", model="system")
         if _api_clear_failed:
-            send_card_reply(chat_id, msg_id, "⚠️ 部分重置",
-                            "会话 ID 已清除，但 API 历史清除失败，AI 可能仍记得部分上下文。",
+            send_card_reply(chat_id, msg_id, _t(lang, "⚠️ 部分重置", "⚠️ Partial Reset"),
+                            _t(lang,
+                               "会话 ID 已清除，但 API 历史清除失败，AI 可能仍记得部分上下文。",
+                               "Session ID cleared, but API history clear failed — the AI may still remember some context."),
                             color="orange")
         else:
-            send_card_reply(chat_id, msg_id, "♻️ 已重置",
-                            "Gemini 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
+            send_card_reply(chat_id, msg_id, _t(lang, "♻️ 已重置", "♻️ Reset"),
+                            _t(lang,
+                               "Gemini 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
+                               "Gemini session cleared (memory kept).\n\nTo also clear session memory: `/memory clear session`"),
                             color="green")
     elif which == "kimi":
         _clear_sid(chat_id, "kimi")
@@ -418,12 +435,16 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
             _debug_log(f"[reset] clear kimi session counters failed: {_e}")
         log_entry(chat_id, "reset", "reset:kimi", model="system")
         if _api_clear_failed:
-            send_card_reply(chat_id, msg_id, "⚠️ 部分重置",
-                            "会话 ID 已清除，但 API 历史清除失败，AI 可能仍记得部分上下文。",
+            send_card_reply(chat_id, msg_id, _t(lang, "⚠️ 部分重置", "⚠️ Partial Reset"),
+                            _t(lang,
+                               "会话 ID 已清除，但 API 历史清除失败，AI 可能仍记得部分上下文。",
+                               "Session ID cleared, but API history clear failed — the AI may still remember some context."),
                             color="orange")
         else:
-            send_card_reply(chat_id, msg_id, "♻️ 已重置",
-                            "Kimi 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
+            send_card_reply(chat_id, msg_id, _t(lang, "♻️ 已重置", "♻️ Reset"),
+                            _t(lang,
+                               "Kimi 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
+                               "Kimi session cleared (memory kept).\n\nTo also clear session memory: `/memory clear session`"),
                             color="green")
     elif which == "deepseek":
         _clear_sid(chat_id, "deepseek")
@@ -433,8 +454,10 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
         except Exception as _e:
             _debug_log(f"[reset] clear deepseek session counters failed: {_e}")
         log_entry(chat_id, "reset", "reset:deepseek", model="system")
-        send_card_reply(chat_id, msg_id, "♻️ 已重置",
-                        "DeepSeek 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
+        send_card_reply(chat_id, msg_id, _t(lang, "♻️ 已重置", "♻️ Reset"),
+                        _t(lang,
+                           "DeepSeek 会话已清空（记忆已保留）。\n\n如需同时清除会话记忆：`/memory clear session`",
+                           "DeepSeek session cleared (memory kept).\n\nTo also clear session memory: `/memory clear session`"),
                         color="green")
     elif which == "memory":
         try:
@@ -443,10 +466,18 @@ def _cmd_reset(chat_id: str, which: str = None, msg_id: str = None):
         except Exception as e:
             _debug_log(f"[reset] memory unlink failed: {e}")
         log_entry(chat_id, "reset", "reset:memory", model="system")
-        send_card_reply(chat_id, msg_id, "♻️ 已重置", "会话记忆已清除（全局/项目记忆保留）。", color="green")
+        send_card_reply(chat_id, msg_id, _t(lang, "♻️ 已重置", "♻️ Reset"),
+                        _t(lang,
+                           "会话记忆已清除（全局/项目记忆保留）。",
+                           "Session memory cleared (global/project memory kept)."),
+                        color="green")
     elif which in ("perm", "permissions"):
         revoke_yolo(chat_id)
-        send_card_reply(chat_id, msg_id, "🔐 权限已重置", "「允许所有」已取消，后续工具调用将重新弹出审批。", color="green")
+        send_card_reply(chat_id, msg_id, _t(lang, "🔐 权限已重置", "🔐 Permissions Reset"),
+                        _t(lang,
+                           "「允许所有」已取消，后续工具调用将重新弹出审批。",
+                           "YOLO mode cancelled — future tool calls will require approval again."),
+                        color="green")
 
 
 def _cmd_status(chat_id: str, msg_id: str = None):
@@ -646,31 +677,32 @@ def _cmd_help(chat_id: str, msg_id: str = None):
 
 
 def _cmd_pickup(chat_id: str, msg_id: str = None):
+    lang = _get_lang(chat_id)
     s_c  = _load_sid(chat_id, "claude")
     s_g  = _load_sid(chat_id, "gemini")
     s_k  = _load_sid(chat_id, "kimi")
     s_d  = _load_sid(chat_id, "deepseek")
     cwd  = _get_cwd(chat_id)
-    lines = [f"**工作目录:** `{cwd}`\n"]
+    lines = [f"{_t(lang, '**工作目录:**', '**Working dir:**')} `{cwd}`\n"]
     if s_c:
-        lines.append(f"**Claude 接力：**\n```bash\ncd {cwd}\nclaude --resume {s_c}\n```")
+        lines.append(f"{_t(lang, '**Claude 接力：**', '**Claude resume:**')}\n```bash\ncd {cwd}\nclaude --resume {s_c}\n```")
     else:
-        lines.append("**Claude:** 无活跃会话")
+        lines.append(_t(lang, "**Claude:** 无活跃会话", "**Claude:** no active session"))
     if s_g:
-        lines.append(f"\n**Gemini 接力：**\n```bash\ncd {cwd}\ngemini --resume {s_g}\n```")
+        lines.append(f"\n{_t(lang, '**Gemini 接力：**', '**Gemini resume:**')}\n```bash\ncd {cwd}\ngemini --resume {s_g}\n```")
     else:
-        lines.append("\n**Gemini:** 无活跃会话")
+        lines.append("\n" + _t(lang, "**Gemini:** 无活跃会话", "**Gemini:** no active session"))
     if s_k:
-        lines.append(f"\n**Kimi 接力：**\n```bash\ncd {cwd}\nkimi --session {s_k}\n```")
+        lines.append(f"\n{_t(lang, '**Kimi 接力：**', '**Kimi resume:**')}\n```bash\ncd {cwd}\nkimi --session {s_k}\n```")
     else:
-        lines.append("\n**Kimi:** 无活跃会话")
+        lines.append("\n" + _t(lang, "**Kimi:** 无活跃会话", "**Kimi:** no active session"))
     # DeepSeek has no terminal CLI
     if s_d:
-        lines.append("\n**DeepSeek:** 无官方 CLI，暂不支持终端接力。如需继续对话请在飞书直接发消息。")
+        lines.append("\n" + _t(lang, "**DeepSeek:** 无官方 CLI，暂不支持终端接力。如需继续对话请在飞书直接发消息。", "**DeepSeek:** no official CLI — resume not supported. Continue chatting in Feishu."))
     else:
-        lines.append("\n**DeepSeek:** 无活跃会话")
-    lines.append("\n> 在终端运行上面命令即可无缝接力")
-    send_card_reply(chat_id, msg_id, "🔗 终端接力", "\n".join(lines), color="purple")
+        lines.append("\n" + _t(lang, "**DeepSeek:** 无活跃会话", "**DeepSeek:** no active session"))
+    lines.append("\n" + _t(lang, "> 在终端运行上面命令即可无缝接力", "> Run the command above in your terminal to resume seamlessly"))
+    send_card_reply(chat_id, msg_id, _t(lang, "🔗 终端接力", "🔗 Terminal Handoff"), "\n".join(lines), color="purple")
 
 
 def _cmd_history(chat_id: str, show_all: bool = False, msg_id: str = None):
@@ -678,6 +710,7 @@ def _cmd_history(chat_id: str, show_all: bool = False, msg_id: str = None):
     By default shows only the current session since the last reset;
     show_all=True shows all records with separator lines at reset points.
     """
+    lang = _get_lang(chat_id)
     records = _read_logs(chat_id)
 
     def _build_pairs(recs: list[dict]) -> list[tuple[dict, dict]]:
@@ -723,17 +756,17 @@ def _cmd_history(chat_id: str, show_all: bool = False, msg_id: str = None):
 
         pairs = _build_pairs(current)
         if not pairs:
-            body = "_当前会话暂无对话记录_"
+            body = _t(lang, "_当前会话暂无对话记录_", "_No conversation records in this session_")
             if pre_count:
-                body += f"\n\n此前会话还有 **{pre_count}** 条记录，发送 `/history all` 查看"
-            send_card_reply(chat_id, msg_id, "📜 当前会话", body, color="blue")
+                body += "\n\n" + _t(lang, f"此前会话还有 **{pre_count}** 条记录，发送 `/history all` 查看", f"Previous sessions have **{pre_count}** more records — send `/history all` to view")
+            send_card_reply(chat_id, msg_id, _t(lang, "📜 当前会话", "📜 Current Session"), body, color="blue")
             return
 
         parts = [_pair_line(u, a) for u, a in pairs]
         footer = ""
         if pre_count:
-            footer = f"\n\n_此前会话还有 **{pre_count}** 条记录，发送 `/history all` 查看_"
-        title = f"📜 当前会话（{len(pairs)} 条）"
+            footer = "\n\n" + _t(lang, f"_此前会话还有 **{pre_count}** 条记录，发送 `/history all` 查看_", f"_Previous sessions: **{pre_count}** more records — send `/history all` to view_")
+        title = _t(lang, f"📜 当前会话（{len(pairs)} 条）", f"📜 This Session ({len(pairs)} entries)")
         send_card_reply(chat_id, msg_id, title, "\n".join(parts) + footer, color="blue", normalize=False)
 
     else:
@@ -749,8 +782,11 @@ def _cmd_history(chat_id: str, show_all: bool = False, msg_id: str = None):
             if r["role"] == "reset":
                 ts = r["ts"][5:16].replace("T", " ")
                 which = r.get("content", "reset:all").replace("reset:", "")
-                label = {"all": "全部", "claude": "Claude", "gemini": "Gemini"}.get(which, which)
-                parts.append(f"— ♻️ 重置（{label}）{ts} —")
+                label = _t(lang,
+                    {"all": "全部", "claude": "Claude", "gemini": "Gemini"}.get(which, which),
+                    {"all": "all", "claude": "Claude", "gemini": "Gemini"}.get(which, which),
+                )
+                parts.append(f"— ♻️ {_t(lang, f'重置（{label}）', f'reset ({label})')} {ts} —")
                 pending_user = None
             elif r["role"] == "user":
                 pending_user = r
@@ -760,12 +796,16 @@ def _cmd_history(chat_id: str, show_all: bool = False, msg_id: str = None):
                 pair_count += 1
 
         if not parts:
-            send_card_reply(chat_id, msg_id, "📜 对话历史", "_暂无对话记录_", color="blue")
+            send_card_reply(chat_id, msg_id, _t(lang, "📜 对话历史", "📜 History"), _t(lang, "_暂无对话记录_", "_No conversation records_"), color="blue")
             return
 
         total_pairs = len(_build_pairs(records))
-        title = f"📜 全部历史（{pair_count} 条"
-        title += f"，共 {total_pairs} 条）" if total_pairs > pair_count else "）"
+        if lang == "en":
+            title = f"📜 History ({pair_count} entries"
+            title += f" of {total_pairs})" if total_pairs > pair_count else ")"
+        else:
+            title = f"📜 全部历史（{pair_count} 条"
+            title += f"，共 {total_pairs} 条）" if total_pairs > pair_count else "）"
         send_card_reply(chat_id, msg_id, title, "\n".join(parts), color="blue", normalize=False)
 
 
@@ -1276,13 +1316,17 @@ def _cmd_cron(chat_id: str, args: str, msg_id: str = None):
     from croniter import croniter, CroniterBadCronError
     import uuid as _uuid
 
+    lang = _get_lang(chat_id)
     parts = args.strip().split(None, 1)
     sub = parts[0].lower() if parts else ""
 
     if sub == "list":
         crons = _get_chat_state(chat_id).get("crons", [])
         if not crons:
-            send_card_reply(chat_id, msg_id, "⏰ 定时任务", "_暂无定时任务_", color="blue")
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "⏰ 定时任务", "⏰ Scheduled Tasks"),
+                            _t(lang, "_暂无定时任务_", "_No scheduled tasks_"),
+                            color="blue")
             return
         lines = []
         for c in crons:
@@ -1290,33 +1334,44 @@ def _cmd_cron(chat_id: str, args: str, msg_id: str = None):
             last_at = c.get("last_run_at", "")
             last_status = c.get("last_run_status", "")
             if not last_at or not last_status:
-                status_line = "上次：从未执行"
+                status_line = _t(lang, "上次：从未执行", "Last: never run")
             else:
                 icon = "✅" if last_status == "ok" else "❌"
-                status_line = f"上次：{icon} {last_at}"
+                status_line = _t(lang, f"上次：{icon} {last_at}", f"Last: {icon} {last_at}")
                 if last_status == "error":
                     last_error = c.get("last_error", "")
                     if last_error:
                         status_line += f"（{last_error[:60]}）"
             block += f"\n{status_line}"
             lines.append(block)
-        send_card_reply(chat_id, msg_id, f"⏰ 定时任务（{len(crons)} 条）",
+        send_card_reply(chat_id, msg_id,
+                        _t(lang, f"⏰ 定时任务（{len(crons)} 条）", f"⏰ Scheduled Tasks ({len(crons)})"),
                         "\n\n---\n\n".join(lines), color="blue")
         return
 
     if sub == "del":
         cron_id = parts[1].strip() if len(parts) > 1 else ""
         if not cron_id:
-            send_card_reply(chat_id, msg_id, "⚠️ 用法", "`/cron del <id>`", color="orange")
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "⚠️ 用法", "⚠️ Usage"),
+                            "`/cron del <id>`", color="orange")
             return
         with _cron_lock:
             crons = _get_chat_state(chat_id).get("crons", [])
             new_crons = [c for c in crons if c["id"] != cron_id]
             _set_chat_field(chat_id, "crons", new_crons)
         if len(new_crons) < len(crons if crons else []):
-            send_card_reply(chat_id, msg_id, "✅ 已删除", f"定时任务 `{cron_id}` 已删除。", color="green")
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "✅ 已删除", "✅ Deleted"),
+                            _t(lang, f"定时任务 `{cron_id}` 已删除。",
+                               f"Scheduled task `{cron_id}` deleted."),
+                            color="green")
         else:
-            send_card_reply(chat_id, msg_id, "❓ 未找到", f"没有 ID 为 `{cron_id}` 的定时任务。", color="orange")
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "❓ 未找到", "❓ Not Found"),
+                            _t(lang, f"没有 ID 为 `{cron_id}` 的定时任务。",
+                               f"No scheduled task with ID `{cron_id}`."),
+                            color="orange")
         return
 
     if sub == "add":
@@ -1324,17 +1379,24 @@ def _cmd_cron(chat_id: str, args: str, msg_id: str = None):
         m = re.match(r'^["\'](.+?)["\'\s](.+)$', rest) or re.match(
             r'^((?:\S+\s+){4}\S+)\s+(.+)$', rest)
         if not m:
-            send_card_reply(chat_id, msg_id, "⚠️ 用法",
-                            '`/cron add "0 9 * * *" 每日早报查询`\n\n'
-                            "cron 表达式为标准 5 字段（分 时 日 月 周）",
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "⚠️ 用法", "⚠️ Usage"),
+                            _t(lang,
+                               '`/cron add "0 9 * * *" 每日早报查询`\n\n'
+                               "cron 表达式为标准 5 字段（分 时 日 月 周）",
+                               '`/cron add "0 9 * * *" daily briefing`\n\n'
+                               "cron expression: standard 5-field (min hour day month weekday)"),
                             color="orange")
             return
         expr, query = m.group(1).strip(), m.group(2).strip()
         try:
             croniter(expr)
         except (CroniterBadCronError, Exception):
-            send_card_reply(chat_id, msg_id, "❌ 表达式错误",
-                            f"`{expr}` 不是有效的 cron 表达式。\n\n示例：`0 9 * * *`（每天 9:00）",
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "❌ 表达式错误", "❌ Invalid Expression"),
+                            _t(lang,
+                               f"`{expr}` 不是有效的 cron 表达式。\n\n示例：`0 9 * * *`（每天 9:00）",
+                               f"`{expr}` is not a valid cron expression.\n\nExample: `0 9 * * *` (daily at 9:00)"),
                             color="red")
             return
         model = _get_chat_model(chat_id)
@@ -1349,20 +1411,33 @@ def _cmd_cron(chat_id: str, args: str, msg_id: str = None):
         from zoneinfo import ZoneInfo
         tz = ZoneInfo(_cfg.CRON_TIMEZONE)
         nxt = croniter(expr, datetime.now(tz)).get_next(datetime)
-        send_card_reply(chat_id, msg_id, "✅ 定时任务已添加",
-                        f"**ID：** `{cron_id}`\n\n"
-                        f"**表达式：** `{expr}`（时区：{_cfg.CRON_TIMEZONE}）\n\n"
-                        f"**查询：** {query[:80]}\n\n"
-                        f"**下次执行：** {nxt.strftime('%Y-%m-%d %H:%M')}\n\n"
-                        f"查看：`/cron list`　删除：`/cron del {cron_id}`",
+        send_card_reply(chat_id, msg_id,
+                        _t(lang, "✅ 定时任务已添加", "✅ Task Scheduled"),
+                        _t(lang,
+                           f"**ID：** `{cron_id}`\n\n"
+                           f"**表达式：** `{expr}`（时区：{_cfg.CRON_TIMEZONE}）\n\n"
+                           f"**查询：** {query[:80]}\n\n"
+                           f"**下次执行：** {nxt.strftime('%Y-%m-%d %H:%M')}\n\n"
+                           f"查看：`/cron list`　删除：`/cron del {cron_id}`",
+                           f"**ID:** `{cron_id}`\n\n"
+                           f"**Expression:** `{expr}` (timezone: {_cfg.CRON_TIMEZONE})\n\n"
+                           f"**Query:** {query[:80]}\n\n"
+                           f"**Next run:** {nxt.strftime('%Y-%m-%d %H:%M')}\n\n"
+                           f"List: `/cron list`　Delete: `/cron del {cron_id}`"),
                         color="green")
         return
 
-    send_card_reply(chat_id, msg_id, "⚠️ 用法",
-                    "`/cron add \"<expr>\" <查询>` — 添加定时任务\n"
-                    "`/cron list` — 查看所有任务\n"
-                    "`/cron del <id>` — 删除任务\n\n"
-                    "示例：`/cron add \"0 9 * * 1-5\" 总结今日 git log`",
+    send_card_reply(chat_id, msg_id,
+                    _t(lang, "⚠️ 用法", "⚠️ Usage"),
+                    _t(lang,
+                       '`/cron add "<expr>" <查询>` — 添加定时任务\n'
+                       "`/cron list` — 查看所有任务\n"
+                       "`/cron del <id>` — 删除任务\n\n"
+                       '示例：`/cron add "0 9 * * 1-5" 总结今日 git log`',
+                       '`/cron add "<expr>" <query>` — add a scheduled task\n'
+                       "`/cron list` — list all tasks\n"
+                       "`/cron del <id>` — delete a task\n\n"
+                       '`/cron add "0 9 * * 1-5" summarise today\'s git log`'),
                     color="orange")
 
 
@@ -1379,38 +1454,57 @@ def _check_cwd_root(p: Path) -> bool:
 
 
 def _cmd_cd(chat_id: str, path: str, msg_id: str = None):
+    lang = _get_lang(chat_id)
     try:
         p = Path(path).expanduser()
         if not p.is_absolute():
             p = Path(_get_cwd(chat_id)) / p
         p = p.resolve()
         if not p.is_dir():
-            send_card_reply(chat_id, msg_id, "❌ 目录不存在", f"`{p}`", color="red")
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "❌ 目录不存在", "❌ Directory Not Found"),
+                            f"`{p}`", color="red")
             return
         if not _check_cwd_root(p):
             _root = _cfg.config.get("cwd_root", "")
-            send_card_reply(chat_id, msg_id, "❌ 超出允许范围",
-                            f"配置的 `cwd_root` 限制了可访问路径：`{_root}`\n\n"
-                            f"请切换到 `{_root}` 内的子目录，例如 `/cd {_root}`", color="red")
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "❌ 超出允许范围", "❌ Outside Allowed Path"),
+                            _t(lang,
+                               f"配置的 `cwd_root` 限制了可访问路径：`{_root}`\n\n"
+                               f"请切换到 `{_root}` 内的子目录，例如 `/cd {_root}`",
+                               f"Configured `cwd_root` restricts accessible paths: `{_root}`\n\n"
+                               f"Switch to a subdirectory under `{_root}`, e.g. `/cd {_root}`"),
+                            color="red")
             return
         _set_chat_field(chat_id, "cwd", str(p))
-        send_card_reply(chat_id, msg_id, "📁 目录已切换", f"`{p}`", color="green")
+        send_card_reply(chat_id, msg_id,
+                        _t(lang, "📁 目录已切换", "📁 Directory Changed"),
+                        f"`{p}`", color="green")
     except Exception as e:
-        send_card_reply(chat_id, msg_id, "❌ 错误", str(e), color="red")
+        send_card_reply(chat_id, msg_id, _t(lang, "❌ 错误", "❌ Error"), str(e), color="red")
 
 
 def _cmd_pwd(chat_id: str, msg_id: str = None):
-    send_card_reply(chat_id, msg_id, "📁 当前目录", f"`{_get_cwd(chat_id)}`", color="blue")
+    lang = _get_lang(chat_id)
+    send_card_reply(chat_id, msg_id,
+                    _t(lang, "📁 当前目录", "📁 Current Directory"),
+                    f"`{_get_cwd(chat_id)}`", color="blue")
 
 
 def _cmd_ls(chat_id: str, path: str = "", msg_id: str = None):
+    lang = _get_lang(chat_id)
     cwd = _get_cwd(chat_id)
     target = (Path(cwd) / path if path else Path(cwd)).resolve()
     if not _check_cwd_root(target):
         _root = _cfg.config.get("cwd_root", "")
-        send_card_reply(chat_id, msg_id, "❌ 超出允许范围",
-                        f"配置的 `cwd_root` 限制了可访问路径：`{_root}`\n\n"
-                        f"请在 `{_root}` 内操作", color="red")
+        send_card_reply(chat_id, msg_id,
+                        _t(lang, "❌ 超出允许范围", "❌ Outside Allowed Path"),
+                        _t(lang,
+                           f"配置的 `cwd_root` 限制了可访问路径：`{_root}`\n\n"
+                           f"请在 `{_root}` 内操作",
+                           f"Configured `cwd_root` restricts accessible paths: `{_root}`\n\n"
+                           f"Please operate within `{_root}`"),
+                        color="red")
         return
     try:
         entries = sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
@@ -1423,30 +1517,38 @@ def _cmd_ls(chat_id: str, path: str = "", msg_id: str = None):
                 size = f"  _{s//1024}KB_" if s >= 1024 else f"  _{s}B_"
             lines.append(f"{icon} `{e.name}`{size}")
         if len(entries) > 60:
-            lines.append(f"\n_... 共 {len(entries)} 项_")
-        send_card_reply(chat_id, msg_id, "📂 文件列表", "\n".join(lines), color="blue", normalize=False)
+            lines.append(f"\n_... {_t(lang, f'共 {len(entries)} 项', f'{len(entries)} entries total')}_")
+        if not entries:
+            lines.append(_t(lang, "（空目录）", "(empty directory)"))
+        send_card_reply(chat_id, msg_id,
+                        _t(lang, "📂 文件列表", "📂 File List"),
+                        "\n".join(lines), color="blue", normalize=False)
     except Exception as e:
-        send_card_reply(chat_id, msg_id, "❌ 错误", str(e), color="red")
+        send_card_reply(chat_id, msg_id, _t(lang, "❌ 错误", "❌ Error"), str(e), color="red")
 
 
 def _cmd_run(chat_id: str, cmd: str, msg_id: str = None):
+    lang = _get_lang(chat_id)
     cwd = _get_cwd(chat_id)
-    mid = send_card_reply(chat_id, msg_id, "⏳ 执行中",
-                          f"```bash\n{cmd}\n```\n目录: `{cwd}`", color="grey")
+    mid = send_card_reply(chat_id, msg_id,
+                          _t(lang, "⏳ 执行中", "⏳ Running"),
+                          f"```bash\n{cmd}\n```\n{_t(lang, '目录:', 'dir:')} `{cwd}`",
+                          color="grey")
     stdout, stderr, rc = _run_shell(chat_id, cmd)
     color = "green" if rc == 0 else "red"
     icon = "✅" if rc == 0 else "❌"
-    body = f"```bash\n{cmd}\n```\n目录: `{cwd}`\n"
+    body = f"```bash\n{cmd}\n```\n{_t(lang, '目录:', 'dir:')} `{cwd}`\n"
     if stdout.strip():
-        body += f"\n**输出：**\n```\n{stdout.strip()[:2000]}\n```"
+        body += f"\n{_t(lang, '**输出：**', '**Output:**')}\n```\n{stdout.strip()[:2000]}\n```"
     if stderr.strip():
-        body += f"\n**错误：**\n```\n{stderr.strip()[:500]}\n```"
+        body += f"\n{_t(lang, '**错误：**', '**Stderr:**')}\n```\n{stderr.strip()[:500]}\n```"
     if not stdout.strip() and not stderr.strip():
-        body += "\n_（无输出）_"
-    body += f"\n\n退出码: `{rc}`"
+        body += f"\n{_t(lang, '_（无输出）_', '_(no output)_')}"
+    body += f"\n\n{_t(lang, '退出码:', 'exit code:')} `{rc}`"
     # Log only the command itself, not its output (stdout/stderr may contain passwords, tokens, etc.)
     log_entry(chat_id, "shell", f"$ {cmd}", model="shell")
-    reply_card(chat_id, mid, f"{icon} Shell", body, color=color)
+    title = f"{icon} {_t(lang, '完成', 'Done')}" if rc == 0 else f"{icon} {_t(lang, '执行失败', 'Failed')}"
+    reply_card(chat_id, mid, title, body, color=color)
 
 
 def _cmd_lock(chat_id: str, args: str = "", msg_id: str = None) -> None:
@@ -1457,6 +1559,7 @@ def _cmd_lock(chat_id: str, args: str = "", msg_id: str = None) -> None:
     /lock               — show current locked_backend status
     """
     from larkhelm.backend_registry import BACKEND_REGISTRY
+    lang = _get_lang(chat_id)
     args = args.strip()
 
     if not args:
@@ -1466,53 +1569,79 @@ def _cmd_lock(chat_id: str, args: str = "", msg_id: str = None) -> None:
             spec = BACKEND_REGISTRY.get(locked_id)
             name = spec.display_name if spec else locked_id
             health = "✅" if (spec and spec.healthy) else "❌"
-            send_card_reply(chat_id, msg_id, "🔒 已锁定 Backend",
-                            f"{health} **{name}** (`{locked_id}`)\n\n解锁: `/lock off`",
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "🔒 已锁定 Backend", "🔒 Backend Locked"),
+                            _t(lang,
+                               f"{health} **{name}** (`{locked_id}`)\n\n解锁: `/lock off`",
+                               f"{health} **{name}** (`{locked_id}`)\n\nUnlock: `/lock off`"),
                             color="blue")
         else:
             specs = BACKEND_REGISTRY.all_enabled()
-            lines = ["_当前使用自动路由_\n", "可用 Backends:"]
+            lines = [
+                _t(lang, "_当前使用自动路由_\n", "_Currently using auto-routing_\n"),
+                _t(lang, "可用 Backends:", "Available Backends:"),
+            ]
             for s in specs:
                 mark = "✅" if s.healthy else "❌"
                 lines.append(f"  {mark} `{s.id}` — {s.display_name} (`{s.provider}`)")
-            lines.append("\n锁定: `/lock <id>`")
-            send_card_reply(chat_id, msg_id, "🔓 自动路由中",
+            lines.append(_t(lang, "\n锁定: `/lock <id>`", "\nLock: `/lock <id>`"))
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "🔓 自动路由中", "🔓 Auto-routing"),
                             "\n".join(lines), color="blue", normalize=False)
         return
 
     if args.lower() == "off":
         _set_chat_field(chat_id, "locked_backend", None)
-        send_card_reply(chat_id, msg_id, "🔓 已解锁",
-                        "已恢复自动路由，不再锁定特定 backend。", color="green")
+        send_card_reply(chat_id, msg_id,
+                        _t(lang, "🔓 已解锁", "🔓 Unlocked"),
+                        _t(lang,
+                           "已恢复自动路由，不再锁定特定 backend。",
+                           "Restored auto-routing — no backend locked."),
+                        color="green")
         return
 
     # Lock to specific backend
     backend_id = args
     spec = BACKEND_REGISTRY.get(backend_id)
     if spec is None:
-        send_card_reply(chat_id, msg_id, "❌ Backend 不存在",
-                        f"未找到 backend: `{backend_id}`\n发送 `/lock` 查看所有可用 backends。",
+        send_card_reply(chat_id, msg_id,
+                        _t(lang, "❌ Backend 不存在", "❌ Backend Not Found"),
+                        _t(lang,
+                           f"未找到 backend: `{backend_id}`\n发送 `/lock` 查看所有可用 backends。",
+                           f"Backend not found: `{backend_id}`\nSend `/lock` to see all available backends."),
                         color="red")
         return
 
     if not spec.enabled:
-        send_card_reply(chat_id, msg_id, "❌ Backend 已禁用",
-                        f"`{backend_id}` 已被禁用（enabled=false），无法锁定。\n\n"
-                        f"发送 `/lock` 查看可用 backends。",
+        send_card_reply(chat_id, msg_id,
+                        _t(lang, "❌ Backend 已禁用", "❌ Backend Disabled"),
+                        _t(lang,
+                           f"`{backend_id}` 已被禁用（enabled=false），无法锁定。\n\n"
+                           f"发送 `/lock` 查看可用 backends。",
+                           f"`{backend_id}` is disabled (enabled=false) and cannot be locked.\n\n"
+                           f"Send `/lock` to see available backends."),
                         color="red")
         return
 
     if not spec.healthy:
-        send_card_reply(chat_id, msg_id, "❌ Backend 不可用",
-                        f"`{backend_id}` 当前不可用（health check 失败）。\n\n"
-                        f"错误: {spec.last_error or '未知'}\n\n"
-                        f"可用: 等待恢复后重试，或 `/lock` 选择其他 backend。",
+        send_card_reply(chat_id, msg_id,
+                        _t(lang, "❌ Backend 不可用", "❌ Backend Unavailable"),
+                        _t(lang,
+                           f"`{backend_id}` 当前不可用（health check 失败）。\n\n"
+                           f"错误: {spec.last_error or '未知'}\n\n"
+                           f"可用: 等待恢复后重试，或 `/lock` 选择其他 backend。",
+                           f"`{backend_id}` is currently unavailable (health check failed).\n\n"
+                           f"Error: {spec.last_error or 'unknown'}\n\n"
+                           f"Try again after it recovers, or `/lock` to choose another backend."),
                         color="red")
         return
 
     _set_chat_field(chat_id, "locked_backend", spec.id)
-    send_card_reply(chat_id, msg_id, "🔒 已锁定 Backend",
-                    f"本 chat 已锁定到 **{spec.display_name}** (`{spec.id}`)。\n\n解锁: `/lock off`",
+    send_card_reply(chat_id, msg_id,
+                    _t(lang, "🔒 已锁定 Backend", "🔒 Backend Locked"),
+                    _t(lang,
+                       f"本 chat 已锁定到 **{spec.display_name}** (`{spec.id}`)。\n\n解锁: `/lock off`",
+                       f"This chat is locked to **{spec.display_name}** (`{spec.id}`).\n\nUnlock: `/lock off`"),
                     color="green")
 
 
@@ -1531,6 +1660,7 @@ def _cmd_voice(chat_id: str, args: str = "", msg_id: str = None) -> None:
     Never raises; failures surface as user-visible cards.
     """
     from larkhelm.chat_state import _get_voice_lang, _set_voice_lang
+    ui_lang = _get_lang(chat_id)
     args = (args or "").strip()
 
     if args == "" or args == "status":
@@ -1540,8 +1670,8 @@ def _cmd_voice(chat_id: str, args: str = "", msg_id: str = None) -> None:
         except Exception as e:
             _debug_log(f"[Voice] is_model_loaded probe failed: {e}")
             loaded = False
-        lang = _get_voice_lang(chat_id)
-        enabled = "✅ 开启" if _cfg.VOICE_ENABLED else "⏸️ 关闭"
+        voice_lang = _get_voice_lang(chat_id)
+        enabled = _t(ui_lang, "✅ 开启", "✅ Enabled") if _cfg.VOICE_ENABLED else _t(ui_lang, "⏸️ 关闭", "⏸️ Disabled")
         engine = (getattr(_cfg, "VOICE_ENGINE", "faster_whisper") or "faster_whisper")
         api_key_set = bool(getattr(_cfg, "VOICE_API_KEY", ""))
 
@@ -1555,46 +1685,68 @@ def _cmd_voice(chat_id: str, args: str = "", msg_id: str = None) -> None:
                 sdk_present = _ilu.find_spec("dashscope") is not None
             except Exception:
                 sdk_present = False
-            sdk_str = "✅ SDK 已装" if sdk_present else "⏸️ SDK 未装（pipx runpip larkhelm install dashscope）"
-            key_str = "✅ 配置" if api_key_set else "⏸️ 未配置（设 $DASHSCOPE_API_KEY）"
-            engine_lines = (
-                f"**引擎：** `dashscope`（云 API）\n"
-                f"**API Key：** {key_str}\n"
-                f"**SDK 状态：** {sdk_str}\n"
-            )
+            sdk_str = _t(ui_lang,
+                         "✅ SDK 已装" if sdk_present else "⏸️ SDK 未装（pipx runpip larkhelm install dashscope）",
+                         "✅ SDK installed" if sdk_present else "⏸️ SDK missing (pipx runpip larkhelm install dashscope)")
+            key_str = _t(ui_lang,
+                         "✅ 配置" if api_key_set else "⏸️ 未配置（设 $DASHSCOPE_API_KEY）",
+                         "✅ Configured" if api_key_set else "⏸️ Not set (set $DASHSCOPE_API_KEY)")
+            engine_lines = _t(ui_lang,
+                              f"**引擎：** `dashscope`（云 API）\n"
+                              f"**API Key：** {key_str}\n"
+                              f"**SDK 状态：** {sdk_str}\n",
+                              f"**Engine:** `dashscope` (cloud API)\n"
+                              f"**API Key:** {key_str}\n"
+                              f"**SDK:** {sdk_str}\n")
         else:
-            loaded_str = "✅ 已加载" if loaded else "⏸️ 未加载（首次语音消息懒加载）"
-            engine_lines = (
-                f"**引擎：** `faster_whisper`（本地）\n"
-                f"**模型：** `{_cfg.VOICE_MODEL_SIZE}` ({_cfg.VOICE_COMPUTE_TYPE})\n"
-                f"**模型状态：** {loaded_str}\n"
-            )
+            loaded_str = _t(ui_lang,
+                            "✅ 已加载" if loaded else "⏸️ 未加载（首次语音消息懒加载）",
+                            "✅ Loaded" if loaded else "⏸️ Not loaded (lazy-loaded on first voice message)")
+            engine_lines = _t(ui_lang,
+                              f"**引擎：** `faster_whisper`（本地）\n"
+                              f"**模型：** `{_cfg.VOICE_MODEL_SIZE}` ({_cfg.VOICE_COMPUTE_TYPE})\n"
+                              f"**模型状态：** {loaded_str}\n",
+                              f"**Engine:** `faster_whisper` (local)\n"
+                              f"**Model:** `{_cfg.VOICE_MODEL_SIZE}` ({_cfg.VOICE_COMPUTE_TYPE})\n"
+                              f"**Model status:** {loaded_str}\n")
 
-        body = (
-            f"**总开关：** {enabled}\n"
-            f"{engine_lines}"
-            f"**当前语种：** `{lang}`（默认 `{_cfg.VOICE_DEFAULT_LANG}`）\n"
-            f"**音频上限：** {_cfg.VOICE_MAX_DURATION_MS // 1000}s\n"
-            f"**合并窗口：** {_cfg.VOICE_MERGE_WINDOW_SEC}s（cap {_cfg.VOICE_MAX_MERGE}）\n\n"
-            f"切换语种：`/voice lang zh|en|auto`"
-        )
-        send_card_reply(chat_id, msg_id, "🎤 Voice 状态", body, color="blue")
+        body = _t(ui_lang,
+                  f"**总开关：** {enabled}\n"
+                  f"{engine_lines}"
+                  f"**当前语种：** `{voice_lang}`（默认 `{_cfg.VOICE_DEFAULT_LANG}`）\n"
+                  f"**音频上限：** {_cfg.VOICE_MAX_DURATION_MS // 1000}s\n"
+                  f"**合并窗口：** {_cfg.VOICE_MERGE_WINDOW_SEC}s（cap {_cfg.VOICE_MAX_MERGE}）\n\n"
+                  f"切换语种：`/voice lang zh|en|auto`",
+                  f"**Master switch:** {enabled}\n"
+                  f"{engine_lines}"
+                  f"**Language:** `{voice_lang}` (default `{_cfg.VOICE_DEFAULT_LANG}`)\n"
+                  f"**Audio limit:** {_cfg.VOICE_MAX_DURATION_MS // 1000}s\n"
+                  f"**Merge window:** {_cfg.VOICE_MERGE_WINDOW_SEC}s (cap {_cfg.VOICE_MAX_MERGE})\n\n"
+                  f"Switch language: `/voice lang zh|en|auto`")
+        send_card_reply(chat_id, msg_id, _t(ui_lang, "🎤 Voice 状态", "🎤 Voice Status"), body, color="blue")
         return
 
     if args.startswith("lang "):
         lang_arg = args[5:].strip().lower()
         if lang_arg in _cfg._VOICE_LANG_WHITELIST:
             _set_voice_lang(chat_id, lang_arg)
-            send_card_reply(chat_id, msg_id, "✅ 语种已切换",
+            send_card_reply(chat_id, msg_id,
+                            _t(ui_lang, "✅ 语种已切换", "✅ Language Switched"),
                             f"voice_lang = `{lang_arg}`", color="green")
         else:
-            send_card_reply(chat_id, msg_id, "❌ 语种无效",
-                            "可选值：`zh` / `en` / `auto`", color="red")
+            send_card_reply(chat_id, msg_id,
+                            _t(ui_lang, "❌ 语种无效", "❌ Invalid Language"),
+                            _t(ui_lang, "可选值：`zh` / `en` / `auto`", "Valid values: `zh` / `en` / `auto`"),
+                            color="red")
         return
 
-    send_card_reply(chat_id, msg_id, "⚠️ 用法",
-                    "`/voice status` — 查看当前配置\n"
-                    "`/voice lang <zh|en|auto>` — 切换语种",
+    send_card_reply(chat_id, msg_id,
+                    _t(ui_lang, "⚠️ 用法", "⚠️ Usage"),
+                    _t(ui_lang,
+                       "`/voice status` — 查看当前配置\n"
+                       "`/voice lang <zh|en|auto>` — 切换语种",
+                       "`/voice status` — show current configuration\n"
+                       "`/voice lang <zh|en|auto>` — switch language"),
                     color="orange")
 
 
@@ -1623,23 +1775,30 @@ _DEEPSEEK_SESSION_CMDS = {
 
 def _cmd_cli_native(chat_id: str, model: str, cmd: str, msg_id: str = None):
     """Handle /c /<cmd>, /g /<cmd>, or /k /<cmd>: passthrough channel for AI CLI native commands."""
+    lang      = _get_lang(chat_id)
     cmd_lower = cmd.lower().strip()
     m_name    = {"claude": "Claude", "gemini": "Gemini", "kimi": "Kimi", "deepseek": "DeepSeek"}.get(model, model.capitalize())
 
     if cmd_lower in ("/help", "--help", "-h"):
         if model == "deepseek":
-            body = (
+            body = _t(lang,
                 "DeepSeek 走 HTTP API，没有官方 CLI 会话命令。\n\n"
                 "**桥接内置：**\n"
                 "`/reset deepseek` — 清空会话历史\n"
                 "`/status` — 查看当前 model / session 长度\n"
                 "\n"
-                "如需切回其他模型：`/model claude` 或 `/model gemini` 等。"
+                "如需切回其他模型：`/model claude` 或 `/model gemini` 等。",
+                "DeepSeek uses HTTP API and has no official CLI session commands.\n\n"
+                "**Bridge built-ins:**\n"
+                "`/reset deepseek` — Clear session history\n"
+                "`/status` — View current model / session length\n"
+                "\n"
+                "To switch back to another model: `/model claude` or `/model gemini` etc.",
             )
             send_card_reply(chat_id, msg_id, f"📖 {m_name}", body, color="blue")
             return
         if model == "kimi":
-            body = (
+            body = _t(lang,
                 "**会话管理**\n"
                 "`/clear` — 清除对话历史，开始新会话\n"
                 "`/history` — 查看历史会话列表\n"
@@ -1649,12 +1808,24 @@ def _cmd_cli_native(chat_id: str, model: str, cmd: str, msg_id: str = None):
                 "`/exit` / `/quit` — 退出 Kimi CLI\n"
                 "\n"
                 "_以上命令仅在终端交互模式下可用。_\n"
-                "_发送 `/pickup` 获取终端接力命令。_"
+                "_发送 `/pickup` 获取终端接力命令。_",
+                "**Session Management**\n"
+                "`/clear` — Clear conversation history, start new session\n"
+                "`/history` — View session history list\n"
+                "`/compact` — Compact context\n"
+                "\n"
+                "**Other**\n"
+                "`/exit` / `/quit` — Exit Kimi CLI\n"
+                "\n"
+                "_These commands are only available in terminal interactive mode._\n"
+                "_Send `/pickup` to get terminal relay commands._",
             )
-            send_card_reply(chat_id, msg_id, f"📖 {m_name} CLI 交互命令", body, color="blue")
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, f"📖 {m_name} CLI 交互命令", f"📖 {m_name} CLI Commands"),
+                            body, color="blue")
             return
         if model == "claude":
-            body = (
+            body = _t(lang,
                 "**会话管理**\n"
                 "`/compact [指令]` — 压缩对话历史，可选保留重点指令\n"
                 "`/clear` — 清除对话历史，开始新会话\n"
@@ -1680,10 +1851,36 @@ def _cmd_cli_native(chat_id: str, model: str, cmd: str, msg_id: str = None):
                 "`/exit` / `/quit` — 退出 Claude CLI\n"
                 "\n"
                 "_以上命令仅在终端交互模式下可用。_\n"
-                "_发送 `/pickup` 获取终端接力命令。_"
+                "_发送 `/pickup` 获取终端接力命令。_",
+                "**Session Management**\n"
+                "`/compact [instructions]` — Compact conversation history, optionally keep key instructions\n"
+                "`/clear` — Clear conversation history, start new session\n"
+                "`/cost` — Show token usage and cost for this session\n"
+                "\n"
+                "**Memory & Config**\n"
+                "`/memory` — View and manage memory files (CLAUDE.md etc.)\n"
+                "`/model` — Switch current model\n"
+                "`/mcp` — Manage MCP server connections\n"
+                "\n"
+                "**Tools**\n"
+                "`/review` — Code / PR review\n"
+                "`/pr_comments` — View comments on current PR\n"
+                "`/init` — Initialize project (generate CLAUDE.md)\n"
+                "\n"
+                "**Terminal**\n"
+                "`/vim` — Toggle Vim keybinding mode\n"
+                "`/terminal-setup` — Configure terminal integration\n"
+                "\n"
+                "**Other**\n"
+                "`/doctor` — Check environment and configuration\n"
+                "`/bug` — Report an issue\n"
+                "`/exit` / `/quit` — Exit Claude CLI\n"
+                "\n"
+                "_These commands are only available in terminal interactive mode._\n"
+                "_Send `/pickup` to get terminal relay commands._",
             )
         else:
-            body = (
+            body = _t(lang,
                 "**会话管理**\n"
                 "`/compress` — 将当前上下文压缩为摘要，节省 Token\n"
                 "`/rewind [n]` — 撤销最近 n 条消息（默认 1 条）\n"
@@ -1704,9 +1901,32 @@ def _cmd_cli_native(chat_id: str, model: str, cmd: str, msg_id: str = None):
                 "`/exit` / `/quit` — 退出 Gemini CLI\n"
                 "\n"
                 "_以上命令仅在终端交互模式下可用。_\n"
-                "_发送 `/pickup` 获取终端接力命令。_"
+                "_发送 `/pickup` 获取终端接力命令。_",
+                "**Session Management**\n"
+                "`/compress` — Compress current context into a summary to save tokens\n"
+                "`/rewind [n]` — Undo last n messages (default 1)\n"
+                "`/chat` / `/resume` — Browse and resume past sessions\n"
+                "`/clear` — Clear screen\n"
+                "\n"
+                "**Info**\n"
+                "`/about` — Show version info\n"
+                "`/stats` — Show session statistics (token usage etc.)\n"
+                "\n"
+                "**Tools & Config**\n"
+                "`/tools` — View available tools\n"
+                "`/memory` — Manage memory files\n"
+                "`/theme` — Switch terminal theme\n"
+                "\n"
+                "**Other**\n"
+                "`/help` / `/?` — Show help\n"
+                "`/exit` / `/quit` — Exit Gemini CLI\n"
+                "\n"
+                "_These commands are only available in terminal interactive mode._\n"
+                "_Send `/pickup` to get terminal relay commands._",
             )
-        send_card_reply(chat_id, msg_id, f"📖 {m_name} CLI 交互命令", body, color="blue")
+        send_card_reply(chat_id, msg_id,
+                        _t(lang, f"📖 {m_name} CLI 交互命令", f"📖 {m_name} CLI Commands"),
+                        body, color="blue")
         return
 
     _all_cmds = {"claude": _CLAUDE_SESSION_CMDS, "gemini": _GEMINI_SESSION_CMDS,
@@ -1727,31 +1947,50 @@ def _cmd_cli_native(chat_id: str, model: str, cmd: str, msg_id: str = None):
     ]
 
     if cmd_lower in my_cmds:
-        send_card_reply(chat_id, msg_id, "🖥️ 需要在终端执行",
-                        f"`{cmd}` 是 {m_name} CLI 的会话命令。\n\n"
-                        f"桥接使用 `--print` 模式运行，该模式不支持 CLI 会话命令。\n"
-                        f"发送 `/pickup` 接入终端后可直接输入 `{cmd}`。",
+        send_card_reply(chat_id, msg_id,
+                        _t(lang, "🖥️ 需要在终端执行", "🖥️ Requires Terminal"),
+                        _t(lang,
+                           f"`{cmd}` 是 {m_name} CLI 的会话命令。\n\n"
+                           f"桥接使用 `--print` 模式运行，该模式不支持 CLI 会话命令。\n"
+                           f"发送 `/pickup` 接入终端后可直接输入 `{cmd}`。",
+                           f"`{cmd}` is a {m_name} CLI session command.\n\n"
+                           f"The bridge runs in `--print` mode, which does not support CLI session commands.\n"
+                           f"Send `/pickup` to connect to a terminal, then type `{cmd}` directly.",
+                        ),
                         color="orange")
         return
 
     for _other_name, _other_pfx, _other_cmds in other_info:
         if cmd_lower in _other_cmds:
-            send_card_reply(chat_id, msg_id, "❓ 模型不匹配",
-                            f"`{cmd}` 是 {_other_name} CLI 的命令，不是 {m_name} CLI 的命令。\n\n"
-                            f"试试：`{_other_pfx} {cmd}`",
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "❓ 模型不匹配", "❓ Model Mismatch"),
+                            _t(lang,
+                               f"`{cmd}` 是 {_other_name} CLI 的命令，不是 {m_name} CLI 的命令。\n\n"
+                               f"试试：`{_other_pfx} {cmd}`",
+                               f"`{cmd}` is a {_other_name} CLI command, not a {m_name} CLI command.\n\n"
+                               f"Try: `{_other_pfx} {cmd}`",
+                            ),
                             color="orange")
             return
 
-    send_card_reply(chat_id, msg_id, "❓ 未知命令",
-                    f"`{cmd}` 不是已知的 {m_name} CLI 命令。\n\n"
-                    f"- 查看 CLI 帮助：`{my_pfx} /help`\n"
-                    f"- 执行 Shell 命令：`/run {cmd[1:]}`\n"
-                    f"- 直接向 AI 提问：`{my_pfx} {cmd[1:]} 是什么`",
+    send_card_reply(chat_id, msg_id,
+                    _t(lang, "❓ 未知命令", "❓ Unknown Command"),
+                    _t(lang,
+                       f"`{cmd}` 不是已知的 {m_name} CLI 命令。\n\n"
+                       f"- 查看 CLI 帮助：`{my_pfx} /help`\n"
+                       f"- 执行 Shell 命令：`/run {cmd[1:]}`\n"
+                       f"- 直接向 AI 提问：`{my_pfx} {cmd[1:]} 是什么`",
+                       f"`{cmd}` is not a known {m_name} CLI command.\n\n"
+                       f"- View CLI help: `{my_pfx} /help`\n"
+                       f"- Run a shell command: `/run {cmd[1:]}`\n"
+                       f"- Ask the AI directly: `{my_pfx} what is {cmd[1:]}`",
+                    ),
                     color="orange")
 
 
 def _cmd_btw(chat_id: str, question: str, user_msg_id: str, *, sender_open_id: str = ""):
     """Handle /btw side-question: uses main session if free, otherwise a dedicated btw session; replies in the original message thread."""
+    lang      = _get_lang(chat_id)
     chat_lock = _get_chat_lock(chat_id)
     btw_lock  = _get_btw_lock(chat_id)
 
@@ -1788,9 +2027,10 @@ def _cmd_btw(chat_id: str, question: str, user_msg_id: str, *, sender_open_id: s
                 sid_key = _spec.id if main_free else f"btw_{_spec.id}"
                 sid = _load_sid(chat_id, sid_key)
 
+            _thinking_text = _t(lang, "> 正在思考...", "> Thinking...")
             mid = _reply_card_raw(
                 user_msg_id,
-                _make_card("💬", "> 正在思考...", color="grey"),
+                _make_card("💬", _thinking_text, color="grey"),
                 in_thread=False,
             )
 
@@ -1800,7 +2040,7 @@ def _cmd_btw(chat_id: str, question: str, user_msg_id: str, *, sender_open_id: s
                 def _on_text(text, status="typing"):
                     cur_text[0] = text
                     if mid:
-                        _patch_card_raw(mid, _make_card("💬", text.strip() or "> 正在思考...", color="grey"))
+                        _patch_card_raw(mid, _make_card("💬", text.strip() or _thinking_text, color="grey"))
 
                 # Inject memory context (L2)
                 # N-1 follow-up: migrate to v2 with ``query=question`` so
@@ -1862,7 +2102,7 @@ def _cmd_btw(chat_id: str, question: str, user_msg_id: str, *, sender_open_id: s
                 else:
                     raise RuntimeError(f"Unknown provider for /btw: {_spec.provider}")
 
-                final = (output or cur_text[0]).strip() or "（无输出）"
+                final = (output or cur_text[0]).strip() or _t(lang, "（无输出）", "(no output)")
                 final_card = _make_card("💬", final, color="blue")
                 if mid:
                     _patch_card_raw(mid, final_card)
@@ -1876,7 +2116,7 @@ def _cmd_btw(chat_id: str, question: str, user_msg_id: str, *, sender_open_id: s
                 react_to_message(user_msg_id, EMOJI_DONE)
 
             except Exception as e:
-                err_card = _make_card("❌ 旁注失败", str(e)[:200], color="red")
+                err_card = _make_card(_t(lang, "❌ 旁注失败", "❌ /btw Failed"), str(e)[:200], color="red")
                 if mid:
                     _patch_card_raw(mid, err_card)
                 else:
@@ -2060,10 +2300,14 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open
     cwd = _get_cwd(chat_id)
     args = args.strip()
     sub = args.lower()
+    lang = _get_lang(chat_id)
 
     # ── /memory export ───────────────────────────────────────────────────────
     if sub == "export":
-        mid = send_card_reply(chat_id, msg_id, "📦 导出中", "正在打包记忆数据…", color="grey")
+        mid = send_card_reply(chat_id, msg_id,
+                              _t(lang, "📦 导出中", "📦 Exporting"),
+                              _t(lang, "正在打包记忆数据…", "Packaging memory data…"),
+                              color="grey")
         try:
             from larkhelm.memory_io import export_memory
             zip_path = export_memory(chat_ids=[chat_id])
@@ -2076,17 +2320,25 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open
                 except Exception:
                     pass
                 if mid:
-                    _patch_card_raw(mid, _make_card("✅ 导出完成",
-                                                     f"文件已发送（{zip_path.name}）。",
-                                                     color="green"))
+                    _patch_card_raw(mid, _make_card(
+                        _t(lang, "✅ 导出完成", "✅ Export Complete"),
+                        _t(lang,
+                           f"文件已发送（{zip_path.name}）。",
+                           f"File sent ({zip_path.name})."),
+                        color="green"))
             else:
                 if mid:
-                    _patch_card_raw(mid, _make_card("❌ 上传失败",
-                                                     "文件生成成功但上传到飞书失败，请查看日志。",
-                                                     color="red"))
+                    _patch_card_raw(mid, _make_card(
+                        _t(lang, "❌ 上传失败", "❌ Upload Failed"),
+                        _t(lang,
+                           "文件生成成功但上传到飞书失败，请查看日志。",
+                           "File generated but upload to Feishu failed — check logs."),
+                        color="red"))
         except Exception as e:
             _debug_log(f"[memory export] failed: {e}")
-            send_card_reply(chat_id, msg_id, "❌ 导出失败", str(e)[:300], color="red")
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "❌ 导出失败", "❌ Export Failed"),
+                            str(e)[:300], color="red")
         return
 
     # ── /memory import ───────────────────────────────────────────────────────
@@ -2095,7 +2347,10 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open
         if rest:
             # Direct import by file_key
             file_key = rest
-            mid = send_card_reply(chat_id, msg_id, "📥 导入中", "正在下载并导入记忆数据…", color="grey")
+            mid = send_card_reply(chat_id, msg_id,
+                                  _t(lang, "📥 导入中", "📥 Importing"),
+                                  _t(lang, "正在下载并导入记忆数据…", "Downloading and importing memory data…"),
+                                  color="grey")
             try:
                 import tempfile
                 from larkhelm.memory_io import import_memory
@@ -2105,24 +2360,36 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open
                 ok = download_file_by_key(file_key, tmp_path)
                 if not ok:
                     if mid:
-                        _patch_card_raw(mid, _make_card("❌ 下载失败",
-                                                         "无法通过 file_key 下载文件，请确认 key 正确。",
-                                                         color="red"))
+                        _patch_card_raw(mid, _make_card(
+                            _t(lang, "❌ 下载失败", "❌ Download Failed"),
+                            _t(lang,
+                               "无法通过 file_key 下载文件，请确认 key 正确。",
+                               "Cannot download file via file_key — check the key."),
+                            color="red"))
                     return
                 report = import_memory(tmp_path)
                 n_written = len(report["written"])
                 n_skipped = len(report["skipped"])
-                lines = [f"**导入成功：** {n_written} 个文件"]
+                lines = [_t(lang,
+                            f"**导入成功：** {n_written} 个文件",
+                            f"**Imported:** {n_written} files")]
                 if n_skipped:
-                    lines.append(f"**跳过：** {n_skipped} 个文件")
+                    lines.append(_t(lang,
+                                    f"**跳过：** {n_skipped} 个文件",
+                                    f"**Skipped:** {n_skipped} files"))
                 if report.get("warnings"):
-                    lines.append(f"**警告：** {'；'.join(report['warnings'])}")
+                    lines.append(_t(lang,
+                                    f"**警告：** {'；'.join(report['warnings'])}",
+                                    f"**Warnings:** {'; '.join(report['warnings'])}"))
                 color = "green" if not n_skipped else "orange"
                 body = "\n\n".join(lines)
                 if mid:
-                    _patch_card_raw(mid, _make_card("✅ 导入完成", body, color=color))
+                    _patch_card_raw(mid, _make_card(
+                        _t(lang, "✅ 导入完成", "✅ Import Complete"), body, color=color))
                 else:
-                    send_card_reply(chat_id, msg_id, "✅ 导入完成", body, color=color)
+                    send_card_reply(chat_id, msg_id,
+                                    _t(lang, "✅ 导入完成", "✅ Import Complete"),
+                                    body, color=color)
                 try:
                     tmp_path.unlink(missing_ok=True)
                 except Exception:
@@ -2130,20 +2397,29 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open
             except Exception as e:
                 _debug_log(f"[memory import] failed: {e}")
                 if mid:
-                    _patch_card_raw(mid, _make_card("❌ 导入失败", str(e)[:300], color="red"))
+                    _patch_card_raw(mid, _make_card(
+                        _t(lang, "❌ 导入失败", "❌ Import Failed"),
+                        str(e)[:300], color="red"))
                 else:
-                    send_card_reply(chat_id, msg_id, "❌ 导入失败", str(e)[:300], color="red")
+                    send_card_reply(chat_id, msg_id,
+                                    _t(lang, "❌ 导入失败", "❌ Import Failed"),
+                                    str(e)[:300], color="red")
             return
         else:
             # Prompt user to reply with a file or pass file_key
             # Store timestamp so the pending flag auto-expires after 10 minutes
             import time as _time
             _set_chat_field(chat_id, "pending_memory_import", _time.time())
-            send_card_reply(chat_id, msg_id, "📥 等待导入",
-                            "请直接回复发送 zip 文件，或发送：\n\n"
-                            "`/memory import <file_key>`\n\n"
-                            "_提示：file_key 可在文件消息的原始内容中获取。_",
-                            color="blue")
+            send_card_reply(
+                chat_id, msg_id,
+                _t(lang, "📥 等待导入", "📥 Awaiting Import"),
+                _t(lang,
+                   "请直接回复发送 zip 文件，或发送：\n\n"
+                   "`/memory import <file_key>`\n\n"
+                   "_提示：file_key 可在文件消息的原始内容中获取。_",
+                   "Please upload a memory zip file (generated by `/memory export`)\n\n"
+                   "Or send: `/memory import <file_key>`"),
+                color="blue")
             return
 
     # ── /memory status ───────────────────────────────────────────────────────
@@ -2152,14 +2428,22 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open
             from larkhelm.memory_io import get_memory_status
             st = get_memory_status(chat_id)
             lines = [
-                f"**Chat 数量：** {st['n_chats']}",
-                f"**Session ID 数：** {st['n_sessions']}",
-                f"**API 会话历史：** {st['n_api_sessions']} 个（{st['api_session_size'] // 1024} KB）",
-                f"**日志总大小：** {st['log_size'] // 1024} KB",
-                f"**数据总大小：** {st['data_size'] // 1024} KB",
-                f"**记忆文件数：** {st['memory_files']}（{st['memory_size'] // 1024} KB）",
+                _t(lang, f"**Chat 数量：** {st['n_chats']}", f"**Chats:** {st['n_chats']}"),
+                _t(lang, f"**Session ID 数：** {st['n_sessions']}", f"**Session IDs:** {st['n_sessions']}"),
+                _t(lang,
+                   f"**API 会话历史：** {st['n_api_sessions']} 个（{st['api_session_size'] // 1024} KB）",
+                   f"**API session history:** {st['n_api_sessions']} ({st['api_session_size'] // 1024} KB)"),
+                _t(lang,
+                   f"**日志总大小：** {st['log_size'] // 1024} KB",
+                   f"**Log size:** {st['log_size'] // 1024} KB"),
+                _t(lang,
+                   f"**数据总大小：** {st['data_size'] // 1024} KB",
+                   f"**Data size:** {st['data_size'] // 1024} KB"),
+                _t(lang,
+                   f"**记忆文件数：** {st['memory_files']}（{st['memory_size'] // 1024} KB）",
+                   f"**Memory files:** {st['memory_files']} ({st['memory_size'] // 1024} KB)"),
             ]
-            # Cron 健康度 — independent of prometheus; reads chat_state.
+            # Cron health — independent of prometheus; reads chat_state.
             # Lock window only covers the shallow copy; aggregation runs
             # lock-free (PRD §4 non-functional).
             try:
@@ -2184,26 +2468,33 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open
                         never += 1
                 total_cron = ok + err + never
                 if total_cron == 0:
-                    lines.append("**Cron 健康度：** 无 cron 任务")
+                    lines.append(_t(lang, "**Cron 健康度：** 无 cron 任务", "**Cron health:** no cron tasks"))
                 else:
-                    lines.append(
-                        f"**Cron 健康度：** ✅{ok} · ❌{err} · ❓{never}"
-                        f"（共 {total_cron} 条）"
-                    )
+                    lines.append(_t(lang,
+                                    f"**Cron 健康度：** ✅{ok} · ❌{err} · ❓{never}（共 {total_cron} 条）",
+                                    f"**Cron health:** ✅{ok} · ❌{err} · ❓{never} ({total_cron} total)"))
             except Exception as inner:
                 _debug_log(f"[memory status] cron health line failed: {inner}")
-                lines.append("**Cron 健康度：** n/a")
+                lines.append(_t(lang, "**Cron 健康度：** n/a", "**Cron health:** n/a"))
 
             if st['chats']:
-                lines.append("\n**各 Chat 摘要：**")
+                lines.append(_t(lang, "\n**各 Chat 摘要：**", "\n**Chat summary:**"))
                 for c in st['chats'][:10]:
-                    lines.append(f"• `{c['chat_id']}` · {c['model']} · {c['turn_count']} 轮")
+                    lines.append(_t(lang,
+                                    f"• `{c['chat_id']}` · {c['model']} · {c['turn_count']} 轮",
+                                    f"• `{c['chat_id']}` · {c['model']} · {c['turn_count']} turns"))
                 if len(st['chats']) > 10:
-                    lines.append(f"_… 共 {len(st['chats'])} 个 chat_")
-            send_card_reply(chat_id, msg_id, "📊 记忆状态", "\n".join(lines), color="blue")
+                    lines.append(_t(lang,
+                                    f"_… 共 {len(st['chats'])} 个 chat_",
+                                    f"_… {len(st['chats'])} chats total_"))
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "📊 记忆状态", "📊 Memory Status"),
+                            "\n".join(lines), color="blue")
         except Exception as e:
             _debug_log(f"[memory status] failed: {e}")
-            send_card_reply(chat_id, msg_id, "❌ 查询失败", str(e)[:300], color="red")
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "❌ 查询失败", "❌ Query Failed"),
+                            str(e)[:300], color="red")
         return
 
     # ── /memory diagnose [N] ─────────────────────────────────────────────────
@@ -2221,24 +2512,33 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open
             send_card_reply(chat_id, msg_id, title, body, color=color, normalize=False)
         except Exception as e:
             _debug_log(f"[Memory] observe failed: {e}")
-            send_card_reply(chat_id, msg_id, "❌ 观测失败", str(e)[:300], color="red")
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "❌ 观测失败", "❌ Observe Failed"),
+                            str(e)[:300], color="red")
         return
 
     # ── /memory set global <text> ────────────────────────────────────────────
     if sub.startswith("set global ") or sub == "set global":
         text = args[11:].strip()  # len("set global ") == 11
         if not text:
-            send_card_reply(chat_id, msg_id, "⚠️ 用法",
-                            "`/memory set global <内容>` — 设置全局记忆（最多 500 字符）",
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "⚠️ 用法", "⚠️ Usage"),
+                            _t(lang,
+                               "`/memory set global <内容>` — 设置全局记忆（最多 500 字符）",
+                               "`/memory set global <text>` — set global memory (max 500 chars)"),
                             color="orange")
             return
         if _global_memory_file(chat_id, sender_open_id=sender_open_id) is None:
-            send_card_reply(chat_id, msg_id, "⚠️ 全局记忆不可用",
-                            "当前会话无法识别发送者身份，全局记忆已跳过（群聊安全保护）。",
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "⚠️ 全局记忆不可用", "⚠️ Global Memory Unavailable"),
+                            _t(lang,
+                               "当前会话无法识别发送者身份，全局记忆已跳过（群聊安全保护）。",
+                               "Sender identity cannot be determined in this chat — global memory skipped (group chat safety)."),
                             color="orange")
             return
         save_global_memory(text, chat_id=chat_id, sender_open_id=sender_open_id)
-        send_card_reply(chat_id, msg_id, "✅ 全局记忆已更新",
+        send_card_reply(chat_id, msg_id,
+                        _t(lang, "✅ 全局记忆已更新", "✅ Global Memory Updated"),
                         f"```\n{text[:200]}\n```", color="green")
         return
 
@@ -2252,13 +2552,20 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open
     if sub.startswith("set project ") or sub == "set project":
         text = args[12:].strip()  # len("set project ") == 12
         if not text:
-            send_card_reply(chat_id, msg_id, "⚠️ 用法",
-                            f"`/memory set project <内容>` — 设置当前项目记忆（cwd: `{cwd}`，最多 1000 字符）",
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "⚠️ 用法", "⚠️ Usage"),
+                            _t(lang,
+                               f"`/memory set project <内容>` — 设置当前项目记忆（cwd: `{cwd}`，最多 1000 字符）",
+                               f"`/memory set project <text>` — set project memory for current cwd: `{cwd}` (max 1000 chars)"),
                             color="orange")
             return
         save_project_memory(cwd, text)
-        send_card_reply(chat_id, msg_id, "✅ 项目记忆已更新",
-                        f"**目录**: `{cwd}`\n\n```\n{text[:200]}\n```", color="green")
+        send_card_reply(chat_id, msg_id,
+                        _t(lang, "✅ 项目记忆已更新", "✅ Project Memory Updated"),
+                        _t(lang,
+                           f"**目录**: `{cwd}`\n\n```\n{text[:200]}\n```",
+                           f"**Directory**: `{cwd}`\n\n```\n{text[:200]}\n```"),
+                        color="green")
         return
 
     # ── /memory clear <layer> ────────────────────────────────────────────────
@@ -2270,58 +2577,87 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open
         try:
             if layer in ("all", "session"):
                 _session_memory_file(chat_id).unlink(missing_ok=True)
-                deleted.append("会话")
+                deleted.append(_t(lang, "会话", "session"))
             if layer in ("all", "global"):
                 _gf = _global_memory_file(chat_id, sender_open_id=sender_open_id)
                 if _gf:
                     _gf.unlink(missing_ok=True)
-                deleted.append("全局")
+                deleted.append(_t(lang, "全局", "global"))
             if layer in ("all", "project"):
                 _project_memory_file(cwd).unlink(missing_ok=True)
-                deleted.append("项目")
+                deleted.append(_t(lang, "项目", "project"))
             if not deleted:
-                send_card_reply(chat_id, msg_id, "⚠️ 未知层级",
-                                "可选: `global` · `project` · `session` · `all`",
+                send_card_reply(chat_id, msg_id,
+                                _t(lang, "⚠️ 未知层级", "⚠️ Unknown Layer"),
+                                _t(lang,
+                                   "可选: `global` · `project` · `session` · `all`",
+                                   "Options: `global` · `project` · `session` · `all`"),
                                 color="orange")
                 return
             if layer == "session":
-                detail = "已清除会话记忆，全局和项目记忆已保留。"
+                detail = _t(lang,
+                            "已清除会话记忆，全局和项目记忆已保留。",
+                            "Session memory cleared; global and project memory retained.")
             else:
-                detail = f"已删除：{'、'.join(deleted)}记忆。"
-            send_card_reply(chat_id, msg_id, "🗑️ 已清除", detail, color="green")
+                detail = _t(lang,
+                            f"已删除：{'、'.join(deleted)}记忆。",
+                            f"Deleted: {', '.join(deleted)} memory.")
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "🗑️ 已清除", "🗑️ Cleared"),
+                            detail, color="green")
         except Exception as e:
-            send_card_reply(chat_id, msg_id, "❌ 清除失败", str(e)[:200], color="red")
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "❌ 清除失败", "❌ Clear Failed"),
+                            str(e)[:200], color="red")
         return
 
     # ── /memory update ───────────────────────────────────────────────────────
     if sub == "update":
-        update_mid = send_card_reply(chat_id, msg_id, "🔄 生成记忆中",
-                                     "正在后台生成会话摘要，预计 10~30 秒，请稍候…", color="grey")
+        update_mid = send_card_reply(
+            chat_id, msg_id,
+            _t(lang, "🔄 生成记忆中", "🔄 Generating Memory"),
+            _t(lang,
+               "正在后台生成会话摘要，预计 10~30 秒，请稍候…",
+               "Generating session summary in background, ~10–30 s — please wait…"),
+            color="grey")
 
-        _ERR_MSG_MAP = {
+        _ERR_MSG_MAP_ZH = {
             "no_logs":              "当前会话暂无对话记录，无法生成摘要。",
             "no_conversation_logs": "当前会话暂无普通对话（只有系统/Shell 记录），无法生成摘要。",
+        }
+        _ERR_MSG_MAP_EN = {
+            "no_logs":              "No conversation logs found — cannot generate summary.",
+            "no_conversation_logs": "No regular conversation found (only system/shell records) — cannot generate summary.",
         }
 
         def _on_update_done(success: bool, content, error):
             if success and content:
                 preview = content[:200]
-                new_card = _make_card("✅ 会话记忆已更新",
-                                     f"```\n{preview}\n```", color="green")
+                new_card = _make_card(
+                    _t(lang, "✅ 会话记忆已更新", "✅ Session Memory Updated"),
+                    f"```\n{preview}\n```", color="green")
             else:
                 if error and error.startswith("timed_out_"):
                     secs = error.replace("timed_out_", "").replace("s", "")
-                    err_msg = f"记忆生成超时（>{secs}s），请稍后重试。"
+                    err_msg = _t(lang,
+                                 f"记忆生成超时（>{secs}s），请稍后重试。",
+                                 f"Memory generation timed out (>{secs}s) — please retry.")
                 else:
-                    err_msg = _ERR_MSG_MAP.get(error or "", "记忆生成失败，请稍后重试。")
-                new_card = _make_card("❌ 记忆生成失败", err_msg, color="red")
+                    _err_map = _ERR_MSG_MAP_EN if lang == "en" else _ERR_MSG_MAP_ZH
+                    _fallback = _t(lang, "记忆生成失败，请稍后重试。", "Memory generation failed — please retry.")
+                    err_msg = _err_map.get(error or "", _fallback)
+                new_card = _make_card(
+                    _t(lang, "❌ 记忆生成失败", "❌ Memory Generation Failed"),
+                    err_msg, color="red")
             if update_mid:
                 _patch_card_raw(update_mid, new_card)
             else:
-                send_card_reply(chat_id, msg_id,
-                                "✅ 会话记忆已更新" if success else "❌ 记忆生成失败",
-                                f"```\n{content[:200]}\n```" if success else err_msg,
-                                color="green" if success else "red")
+                send_card_reply(
+                    chat_id, msg_id,
+                    _t(lang, "✅ 会话记忆已更新", "✅ Session Memory Updated") if success
+                    else _t(lang, "❌ 记忆生成失败", "❌ Memory Generation Failed"),
+                    f"```\n{content[:200]}\n```" if success else err_msg,
+                    color="green" if success else "red")
 
         maybe_auto_update(chat_id, force=True, on_done=_on_update_done)
         return
@@ -2350,24 +2686,38 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open
             except ValueError:
                 bad_tokens.append(tok)
         if bad_tokens:
-            send_card_reply(chat_id, msg_id, "⚠️ 用法",
-                            f"无法识别参数：{' '.join(bad_tokens)}\n\n"
-                            f"`/memory gc [天数] [apply]` — 清理 N 天未更新的项目记忆\n"
-                            f"- `/memory gc` — 30 天 dry-run（默认，不删除）\n"
-                            f"- `/memory gc 60` — 60 天 dry-run\n"
-                            f"- `/memory gc apply` — 实际删除（30 天）\n"
-                            f"- `/memory gc 60 apply` — 实际删除（60 天）",
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "⚠️ 用法", "⚠️ Usage"),
+                            _t(lang,
+                               f"无法识别参数：{' '.join(bad_tokens)}\n\n"
+                               f"`/memory gc [天数] [apply]` — 清理 N 天未更新的项目记忆\n"
+                               f"- `/memory gc` — 30 天 dry-run（默认，不删除）\n"
+                               f"- `/memory gc 60` — 60 天 dry-run\n"
+                               f"- `/memory gc apply` — 实际删除（30 天）\n"
+                               f"- `/memory gc 60 apply` — 实际删除（60 天）",
+                               f"Unrecognized argument(s): {' '.join(bad_tokens)}\n\n"
+                               f"`/memory gc [days] [apply]` — clean up project memory not updated in N days\n"
+                               f"- `/memory gc` — 30-day dry-run (default, no deletion)\n"
+                               f"- `/memory gc 60` — 60-day dry-run\n"
+                               f"- `/memory gc apply` — actually delete (30 days)\n"
+                               f"- `/memory gc 60 apply` — actually delete (60 days)"),
                             color="orange")
             return
         if threshold_days < 1:
-            send_card_reply(chat_id, msg_id, "⚠️ 阈值过低",
-                            "天数必须 ≥ 1（防止误清空所有项目记忆）。", color="orange")
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "⚠️ 阈值过低", "⚠️ Threshold Too Low"),
+                            _t(lang,
+                               "天数必须 ≥ 1（防止误清空所有项目记忆）。",
+                               "Days must be ≥ 1 (prevents accidentally clearing all project memory)."),
+                            color="orange")
             return
 
         try:
             report = gc_project_memory(threshold_days=threshold_days, apply=apply)
         except Exception as e:
-            send_card_reply(chat_id, msg_id, "❌ GC 失败", str(e)[:300], color="red")
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "❌ GC 失败", "❌ GC Failed"),
+                            str(e)[:300], color="red")
             return
 
         scanned = report["scanned"]
@@ -2376,8 +2726,12 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open
         if not cands:
             send_card_reply(
                 chat_id, msg_id,
-                f"🧹 项目记忆 GC（>{threshold_days} 天）",
-                f"扫描 {scanned} 个文件，**无可清理项**。",
+                _t(lang,
+                   f"🧹 项目记忆 GC（>{threshold_days} 天）",
+                   f"🧹 Project Memory GC (>{threshold_days} days)"),
+                _t(lang,
+                   f"扫描 {scanned} 个文件，**无可清理项**。",
+                   f"Scanned {scanned} files — **nothing to clean up**."),
                 color="green",
             )
             return
@@ -2387,33 +2741,47 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open
         lines = []
         for c in cands[:_MAX_ROWS]:
             tag = "🗑️" if c["deleted"] else ("⚠️" if apply else "💤")
-            cwd_disp = c["cwd"] or "_(无 cwd 元数据)_"
+            cwd_disp = c["cwd"] or _t(lang, "_(无 cwd 元数据)_", "_(no cwd metadata)_")
             age_disp = f"{c['age_days']}d" if c["age_days"] is not None else "?"
             lines.append(
-                f"{tag} `{c['name']}` · 龄期 {age_disp} · 原因 `{c['reason']}`\n"
+                f"{tag} `{c['name']}` · "
+                + _t(lang, f"龄期 {age_disp}", f"age {age_disp}")
+                + f" · `{c['reason']}`\n"
                 f"   `{cwd_disp}`"
             )
         if len(cands) > _MAX_ROWS:
-            lines.append(f"_… 另有 {len(cands) - _MAX_ROWS} 个候选未列出_")
+            lines.append(_t(lang,
+                            f"_… 另有 {len(cands) - _MAX_ROWS} 个候选未列出_",
+                            f"_… {len(cands) - _MAX_ROWS} more candidates not shown_"))
         if errs:
-            lines.append("\n**错误**：")
+            lines.append(_t(lang, "\n**错误**：", "\n**Errors:**"))
             for e in errs[:5]:
                 lines.append(f"- `{Path(e['path']).name}` — {e['err'][:120]}")
             if len(errs) > 5:
-                lines.append(f"_… 另有 {len(errs) - 5} 个错误_")
+                lines.append(_t(lang,
+                                f"_… 另有 {len(errs) - 5} 个错误_",
+                                f"_… {len(errs) - 5} more errors_"))
 
         if apply:
             n_deleted = sum(1 for c in cands if c["deleted"])
-            title = f"🧹 项目记忆 GC 已执行（>{threshold_days} 天）"
-            header = f"扫描 {scanned}，已删除 **{n_deleted}**，错误 {len(errs)}\n\n"
+            title = _t(lang,
+                       f"🧹 项目记忆 GC 已执行（>{threshold_days} 天）",
+                       f"🧹 Project Memory GC Done (>{threshold_days} days)")
+            header = _t(lang,
+                        f"扫描 {scanned}，已删除 **{n_deleted}**，错误 {len(errs)}\n\n",
+                        f"Scanned {scanned}, deleted **{n_deleted}**, errors {len(errs)}\n\n")
             color = "green" if n_deleted and not errs else "orange"
         else:
-            title = f"🧹 项目记忆 GC · 预演（>{threshold_days} 天）"
-            header = (
-                f"扫描 {scanned}，发现 **{len(cands)}** 个候选。\n"
-                f"_这是预演，未删除任何文件。要实际清理：_\n"
-                f"`/memory gc {threshold_days} apply`\n\n"
-            )
+            title = _t(lang,
+                       f"🧹 项目记忆 GC · 预演（>{threshold_days} 天）",
+                       f"🧹 Project Memory GC · Dry Run (>{threshold_days} days)")
+            header = _t(lang,
+                        f"扫描 {scanned}，发现 **{len(cands)}** 个候选。\n"
+                        f"_这是预演，未删除任何文件。要实际清理：_\n"
+                        f"`/memory gc {threshold_days} apply`\n\n",
+                        f"Scanned {scanned}, found **{len(cands)}** candidates.\n"
+                        f"_This is a dry run — no files deleted. To actually clean up:_\n"
+                        f"`/memory gc {threshold_days} apply`\n\n")
             color = "blue"
 
         send_card_reply(chat_id, msg_id, title,
@@ -2426,7 +2794,10 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open
         _ensure_dir()
         project_files = sorted(MEMORY_HOME_DIR.glob("project_*.md"))
         if not project_files:
-            send_card_reply(chat_id, msg_id, "📂 项目记忆", "_暂无项目记忆文件_", color="blue")
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "📂 项目记忆", "📂 Project Memory"),
+                            _t(lang, "_暂无项目记忆文件_", "_No project memory files_"),
+                            color="blue")
             return
         lines = []
         for pf in project_files:
@@ -2437,8 +2808,16 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open
             _stored_resolved = str(Path(stored_cwd).resolve()) if stored_cwd else ""
             _cwd_resolved = str(Path(cwd).resolve()) if cwd else ""
             mark = "📍" if _stored_resolved and _stored_resolved == _cwd_resolved else "📁"
-            lines.append(f"{mark} **{pf.stem}**\n`{stored_cwd}`  更新: {updated}  大小: {len(body)} 字符")
-        send_card_reply(chat_id, msg_id, f"📂 项目记忆（{len(project_files)} 个）",
+            lines.append(
+                f"{mark} **{pf.stem}**\n`{stored_cwd}`  "
+                + _t(lang,
+                     f"更新: {updated}  大小: {len(body)} 字符",
+                     f"updated: {updated}  size: {len(body)} chars")
+            )
+        send_card_reply(chat_id, msg_id,
+                        _t(lang,
+                           f"📂 项目记忆（{len(project_files)} 个）",
+                           f"📂 Project Memory ({len(project_files)} files)"),
                         "\n\n---\n\n".join(lines), color="blue", normalize=False)
         return
 
@@ -2451,7 +2830,7 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open
             return ""
         fm = _load_md_frontmatter(path)
         ts = (fm.get("updated_at") or "")[:16].replace("T", " ")
-        return f" _(更新: {ts})_" if ts else ""
+        return _t(lang, f" _(更新: {ts})_", f" _(updated: {ts})_") if ts else ""
 
     g = load_global_memory(chat_id, sender_open_id=sender_open_id)
     p = load_project_memory(cwd)
@@ -2463,26 +2842,48 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open
 
     sections: list[str] = []
     if g:
-        sections.append(f"### 🌐 全局记忆{_fm_meta(_g_path)}\n{g}")
+        sections.append(
+            _t(lang, f"### 🌐 全局记忆{_fm_meta(_g_path)}", f"### 🌐 Global Memory{_fm_meta(_g_path)}")
+            + f"\n{g}")
     else:
-        sections.append("### 🌐 全局记忆\n_（空）_ — `/memory set global <内容>` 设置")
+        sections.append(_t(lang,
+                           "### 🌐 全局记忆\n_（空）_ — `/memory set global <内容>` 设置",
+                           "### 🌐 Global Memory\n_(empty)_ — set with `/memory set global <text>`"))
 
     if p:
-        sections.append(f"### 📁 项目记忆 (`{cwd}`){_fm_meta(_p_path)}\n{p}")
+        sections.append(
+            _t(lang,
+               f"### 📁 项目记忆 (`{cwd}`){_fm_meta(_p_path)}",
+               f"### 📁 Project Memory (`{cwd}`){_fm_meta(_p_path)}")
+            + f"\n{p}")
     else:
-        sections.append(f"### 📁 项目记忆 (`{cwd}`)\n_（空）_ — `/memory set project <内容>` 设置")
+        sections.append(_t(lang,
+                           f"### 📁 项目记忆 (`{cwd}`)\n_（空）_ — `/memory set project <内容>` 设置",
+                           f"### 📁 Project Memory (`{cwd}`)\n_(empty)_ — set with `/memory set project <text>`"))
 
     if s:
         _next_turn = _turn + (AUTO_UPDATE_EVERY - (_turn % AUTO_UPDATE_EVERY) if _turn % AUTO_UPDATE_EVERY else AUTO_UPDATE_EVERY)
-        sections.append(f"### 💬 会话记忆{_fm_meta(_s_path)} _(当前第 {_turn} 轮，第 {_next_turn} 轮时自动更新，可 `/memory update` 立即触发)_\n{s}")
+        sections.append(
+            _t(lang,
+               f"### 💬 会话记忆{_fm_meta(_s_path)} _(当前第 {_turn} 轮，第 {_next_turn} 轮时自动更新，可 `/memory update` 立即触发)_",
+               f"### 💬 Session Memory{_fm_meta(_s_path)} _(turn {_turn}, auto-update at turn {_next_turn}, or `/memory update` now)_")
+            + f"\n{s}")
     else:
-        sections.append(f"### 💬 会话记忆 _(当前第 {_turn} 轮)_\n_（空）_ — 每 {AUTO_UPDATE_EVERY} 轮自动生成，或 `/memory update` 立即生成")
+        sections.append(_t(lang,
+                           f"### 💬 会话记忆 _(当前第 {_turn} 轮)_\n_（空）_ — 每 {AUTO_UPDATE_EVERY} 轮自动生成，或 `/memory update` 立即生成",
+                           f"### 💬 Session Memory _(turn {_turn})_\n_(empty)_ — auto-generated every {AUTO_UPDATE_EVERY} turns, or `/memory update` now"))
 
     body = "\n\n---\n\n".join(sections)
-    body += ("\n\n---\n`/memory set global|project <内容>` 写入 · "
-             "`/memory clear session|project|global|all` 清除 · "
-             "`/memory update` 更新会话 · `/memory list` 查看项目记忆文件")
-    send_card_reply(chat_id, msg_id, "🧠 三层记忆系统", body, color="blue", normalize=False)
+    body += _t(lang,
+               "\n\n---\n`/memory set global|project <内容>` 写入 · "
+               "`/memory clear session|project|global|all` 清除 · "
+               "`/memory update` 更新会话 · `/memory list` 查看项目记忆文件",
+               "\n\n---\n`/memory set global|project <text>` write · "
+               "`/memory clear session|project|global|all` clear · "
+               "`/memory update` update session · `/memory list` list project memory files")
+    send_card_reply(chat_id, msg_id,
+                    _t(lang, "🧠 三层记忆系统", "🧠 Memory System"),
+                    body, color="blue", normalize=False)
 
 
 # ═══════════════════════════════════════════════════
@@ -2559,6 +2960,8 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
     from larkhelm.config import _resolve_source_dir
     from larkhelm import config as _cfg_mod
 
+    lang = _get_lang(chat_id)
+
     # Re-resolve SOURCE_DIR / editable mode on every entry rather than reading
     # the boot-time frozen globals. pipx can flip install layout (wheel ↔
     # editable) while the bridge is running, which leaves ``_cfg.SOURCE_DIR``
@@ -2571,20 +2974,32 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
     # message misleads operators when the real problem is that the directory
     # was deleted by a reinstall.
     if not source_dir.exists():
-        send_card_reply(chat_id, msg_id, "❌ 升级失败",
-                        f"`SOURCE_DIR` 已不存在：`{source_dir}`\n\n"
-                        f"通常意味着 pipx / pip 重装时换了 install 模式，"
-                        f"旧路径被删除。建议重启 bridge（让 `_init_runtime` "
-                        f"重新解析）或 `pipx reinstall larkhelm` 后再 `/upgrade`。",
+        send_card_reply(chat_id, msg_id,
+                        _t(lang, "❌ 升级失败", "❌ Upgrade Failed"),
+                        _t(lang,
+                           f"`SOURCE_DIR` 已不存在：`{source_dir}`\n\n"
+                           f"通常意味着 pipx / pip 重装时换了 install 模式，"
+                           f"旧路径被删除。建议重启 bridge（让 `_init_runtime` "
+                           f"重新解析）或 `pipx reinstall larkhelm` 后再 `/upgrade`。",
+                           f"`SOURCE_DIR` no longer exists: `{source_dir}`\n\n"
+                           f"This usually means pipx / pip reinstalled in a different mode and "
+                           f"deleted the old path. Try restarting the bridge (so `_init_runtime` "
+                           f"re-resolves) or run `pipx reinstall larkhelm` then `/upgrade` again."),
                         color="red")
         return
     if not (source_dir / ".git").exists():
-        send_card_reply(chat_id, msg_id, "❌ 升级失败",
-                        f"`SOURCE_DIR` 不是 git 仓库：`{source_dir}`\n\n"
-                        f"editable 安装：`pipx install -e <repo>` 或 "
-                        f"`pip install -e <repo>`；\n"
-                        f"非 editable 安装：保留原始源目录不要删 —— "
-                        f"`/upgrade` 依赖 dist-info `direct_url.json` 定位",
+        send_card_reply(chat_id, msg_id,
+                        _t(lang, "❌ 升级失败", "❌ Upgrade Failed"),
+                        _t(lang,
+                           f"`SOURCE_DIR` 不是 git 仓库：`{source_dir}`\n\n"
+                           f"editable 安装：`pipx install -e <repo>` 或 "
+                           f"`pip install -e <repo>`；\n"
+                           f"非 editable 安装：保留原始源目录不要删 —— "
+                           f"`/upgrade` 依赖 dist-info `direct_url.json` 定位",
+                           f"`SOURCE_DIR` is not a git repository: `{source_dir}`\n\n"
+                           f"Editable install: `pipx install -e <repo>` or `pip install -e <repo>`\n"
+                           f"Non-editable install: keep the original source directory — "
+                           f"`/upgrade` uses dist-info `direct_url.json` to locate it"),
                         color="red")
         return
 
@@ -2603,24 +3018,33 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
         _debug_log(f"[Upgrade] prev_head probe failed: {e}")
 
     # Step 1: git pull
-    send_card_reply(chat_id, msg_id, "🔄 升级中", "正在拉取最新代码…", color="grey")
+    send_card_reply(chat_id, msg_id,
+                    _t(lang, "🔄 升级中", "🔄 Upgrading"),
+                    _t(lang, "正在拉取最新代码…", "Pulling latest code…"),
+                    color="grey")
     try:
         r = subprocess.run(
             ["git", "-C", str(source_dir), "pull"],
             capture_output=True, text=True, timeout=60,
         )
     except Exception as e:
-        send_card_reply(chat_id, msg_id, "❌ 升级失败", f"git pull 异常：{e}", color="red")
+        send_card_reply(chat_id, msg_id,
+                        _t(lang, "❌ 升级失败", "❌ Upgrade Failed"),
+                        _t(lang, f"git pull 异常：{e}", f"git pull error: {e}"),
+                        color="red")
         return
 
     if r.returncode != 0:
-        send_card_reply(chat_id, msg_id, "❌ 升级失败",
+        send_card_reply(chat_id, msg_id,
+                        _t(lang, "❌ 升级失败", "❌ Upgrade Failed"),
                         f"```\n{(r.stderr or r.stdout)[:600]}\n```", color="red")
         return
 
     output = r.stdout.strip()
     if "Already up to date" in output:
-        send_card_reply(chat_id, msg_id, "✅ 已是最新版本", output, color="green")
+        send_card_reply(chat_id, msg_id,
+                        _t(lang, "✅ 已是最新版本", "✅ Already Up to Date"),
+                        output, color="green")
         return
 
     # Step 2: reinstall package into the running venv so execv picks up new
@@ -2629,9 +3053,12 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
     # ``--force-reinstall`` to re-stage the package files in site-packages
     # without converting the install to editable (operator chose non-
     # editable for a reason; don't silently flip the install mode).
-    send_card_reply(chat_id, msg_id, "🔄 升级中",
-                    f"**拉取完成：**\n```\n{output[:400]}\n```\n\n"
-                    "正在安装新版本…", color="blue")
+    send_card_reply(chat_id, msg_id,
+                    _t(lang, "🔄 升级中", "🔄 Upgrading"),
+                    _t(lang,
+                       f"**拉取完成：**\n```\n{output[:400]}\n```\n\n正在安装新版本…",
+                       f"**Pull complete:**\n```\n{output[:400]}\n```\n\nInstalling new version…"),
+                    color="blue")
     pip_install_cmd = [
         _sys.executable, "-m", "pip", "install", "--no-deps", "-q",
     ]
@@ -2647,21 +3074,33 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
             capture_output=True, text=True, timeout=120,
         )
         if ri.returncode != 0:
-            send_card_reply(chat_id, msg_id, "❌ 升级失败",
-                            f"pip install 失败：\n```\n{(ri.stderr or ri.stdout)[:400]}\n```",
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "❌ 升级失败", "❌ Upgrade Failed"),
+                            _t(lang,
+                               f"pip install 失败：\n```\n{(ri.stderr or ri.stdout)[:400]}\n```",
+                               f"pip install failed:\n```\n{(ri.stderr or ri.stdout)[:400]}\n```"),
                             color="red")
             return
     except Exception as e:
-        send_card_reply(chat_id, msg_id, "❌ 升级失败", f"pip install 异常：{e}", color="red")
+        send_card_reply(chat_id, msg_id,
+                        _t(lang, "❌ 升级失败", "❌ Upgrade Failed"),
+                        _t(lang, f"pip install 异常：{e}", f"pip install error: {e}"),
+                        color="red")
         return
 
     # Step 3: wait for in-flight tasks to finish
-    send_card_reply(chat_id, msg_id, "🔄 升级中",
-                    f"**安装完成。**\n\n正在等待进行中的任务完成后重启…", color="blue")
+    send_card_reply(chat_id, msg_id,
+                    _t(lang, "🔄 升级中", "🔄 Upgrading"),
+                    _t(lang,
+                       "**安装完成。**\n\n正在等待进行中的任务完成后重启…",
+                       "**Installation complete.**\n\nWaiting for in-flight tasks to finish before restarting…"),
+                    color="blue")
 
     set_shutting_down()
     from larkhelm.crew import cancel_all_crews, wait_crews_done
-    cancel_all_crews(reason="服务升级中，Crew 任务重启后将自动恢复")
+    cancel_all_crews(reason=_t(lang,
+                               "服务升级中，Crew 任务重启后将自动恢复",
+                               "Service upgrading — Crew tasks will resume automatically after restart"))
     wait_crews_done(timeout=30.0)
     idle_ok = wait_for_idle(timeout=60.0)
     if not idle_ok:
@@ -2678,8 +3117,12 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
         if busy_cid == chat_id:
             continue
         try:
-            send_card(busy_cid, "⚠️ 查询已中断",
-                      "服务正在升级重启，当前查询被中断，请稍后重新发送。",
+            busy_lang = _get_lang(busy_cid)
+            send_card(busy_cid,
+                      _t(busy_lang, "⚠️ 查询已中断", "⚠️ Query Interrupted"),
+                      _t(busy_lang,
+                         "服务正在升级重启，当前查询被中断，请稍后重新发送。",
+                         "Service is restarting for an upgrade. Your current query was interrupted — please resend it in a moment."),
                       color="orange")
         except Exception as e:
             _debug_log(f"[Upgrade] in-flight notify failed: {e}")
@@ -2728,7 +3171,10 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
     # directly is wrong because sys.argv[0] is the __main__.py path, not the program name,
     # so the new Python process would try to open sys.argv[1] ('start') as a script.
     _debug_log("[Upgrade] os.execv replacing process")
-    send_card_reply(chat_id, msg_id, "🔄 升级中", "服务正在重启，连接将在数秒内恢复…", color="blue")
+    send_card_reply(chat_id, msg_id,
+                    _t(lang, "🔄 升级中", "🔄 Upgrading"),
+                    _t(lang, "服务正在重启，连接将在数秒内恢复…", "Service restarting — connection will resume in a few seconds…"),
+                    color="blue")
     time.sleep(1)   # Give send_card enough time to deliver
     _os.execv(_sys.executable, [_sys.executable, "-m", "larkhelm"] + _sys.argv[1:])
 
