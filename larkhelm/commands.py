@@ -769,10 +769,11 @@ def _cmd_history(chat_id: str, show_all: bool = False, msg_id: str = None):
         send_card_reply(chat_id, msg_id, title, "\n".join(parts), color="blue", normalize=False)
 
 
-def _fmt_token_block(label: str, data: dict) -> str:
+def _fmt_token_block(label: str, data: dict, lang: str = "zh") -> str:
     """Format a {model: {...}} statistics dict as a markdown block."""
+    from larkhelm.locale import _t
     if not data:
-        return f"**{label}** — 暂无数据"
+        return f"**{label}** — {_t(lang, '暂无数据', 'No data')}"
     lines = [f"**{label}**"]
     for model, m in sorted(data.items()):
         model_label = model
@@ -823,15 +824,19 @@ def _fmt_token_block(label: str, data: dict) -> str:
         # detail row is intentionally retained — three audit regressions
         # (cache-arithmetic / overlap cases) pin that exact substring.
         lines.append(
-            f"› **{model_label}**  {calls} 次  合计 **{total:,}** tokens  费用 **{cost_str}**\n"
-            f"  缓存命中率 **{hit_pct}%**  写入比 **{create_pct}%**\n"
-            f"  新输入 {inp:,}  输出 {out:,}\n"
-            f"  缓存命中 {cr:,}（{hit_pct}%）  缓存写入 {cc:,}（{create_pct}%）"
+            f"› **{model_label}**  {calls} {_t(lang, '次', 'calls')}  "
+            f"{_t(lang, '合计', 'total')} **{total:,}** tokens  "
+            f"{_t(lang, '费用', 'cost')} **{cost_str}**\n"
+            f"  {_t(lang, '缓存命中率', 'hit rate')} **{hit_pct}%**  "
+            f"{_t(lang, '写入比', 'write ratio')} **{create_pct}%**\n"
+            f"  {_t(lang, '新输入', 'new input')} {inp:,}  {_t(lang, '输出', 'output')} {out:,}\n"
+            f"  {_t(lang, '缓存命中', 'cache hits')} {cr:,}（{hit_pct}%）  "
+            f"{_t(lang, '缓存写入', 'cache writes')} {cc:,}（{create_pct}%）"
         )
     return "\n".join(lines)
 
 
-def _render_crew_agent_breakdown(chat_id: str) -> list[str]:
+def _render_crew_agent_breakdown(chat_id: str, lang: str = "zh") -> list[str]:
     """Build the markdown lines for the /stats "Crew Agents" block.
 
     Returns ``[]`` when there are no crew-agent tokens (caller suppresses
@@ -842,6 +847,7 @@ def _render_crew_agent_breakdown(chat_id: str) -> list[str]:
       * ``False`` → single-line P2-byte-compat fallback
         (REQ-09; for the rare card-overflow escape hatch).
     """
+    from larkhelm.locale import _t
     breakdown_on = bool(
         getattr(_cfg, "STATS_AGENT_TYPE_BREAKDOWN_ENABLED", True)
     )
@@ -856,12 +862,14 @@ def _render_crew_agent_breakdown(chat_id: str) -> list[str]:
         )
         cost_val = summary.get("cost_usd", 0.0)
         cost_str = "—" if cost_val is None else f"${cost_val:.4f}"
+        header = _t(lang, "**🤖 Crew Agents（本进程）**", "**🤖 Crew Agents (this process)**")
         return [
             "---",
             (
-                f"**🤖 Crew Agents（本进程）**\n"
-                f"› {summary['agents']} agents  合计 **{crew_total:,}** tokens  "
-                f"费用 **{cost_str}**"
+                f"{header}\n"
+                f"› {summary['agents']} agents  "
+                f"{_t(lang, '合计', 'total')} **{crew_total:,}** tokens  "
+                f"{_t(lang, '费用', 'cost')} **{cost_str}**"
             ),
         ]
 
@@ -877,25 +885,33 @@ def _render_crew_agent_breakdown(chat_id: str) -> list[str]:
         )
 
     ordered = sorted(buckets.items(), key=_bucket_total, reverse=True)
-    lines = ["---", "**🤖 Crew Agents（本进程·按类型）**"]
+    header = _t(lang, "**🤖 Crew Agents（本进程·按类型）**",
+                "**🤖 Crew Agents (this process · by type)**")
+    lines = ["---", header]
     for type_name, agg in ordered:
         total = _bucket_total((type_name, agg))
         cost_val = agg.get("cost_usd", 0.0)
         cost_str = "—" if cost_val is None else f"${cost_val:.4f}"
         lines.append(
             f"› **{type_name}** {agg['agents']} agents  "
-            f"合计 **{total:,}** tokens  费用 **{cost_str}**"
+            f"{_t(lang, '合计', 'total')} **{total:,}** tokens  "
+            f"{_t(lang, '费用', 'cost')} **{cost_str}**"
         )
     return lines
 
 
-def _cmd_stats_intent(chat_id: str, msg_id: str = None, date: str | None = None):
+def _cmd_stats_intent(chat_id: str, msg_id: str = None, date: str | None = None,
+                      lang: str = "zh"):
     """Render today's intent dispatcher aggregate (hit rate / latency / cost)."""
+    from larkhelm.locale import _t
     try:
         from larkhelm.agent_hub.agent_audit import aggregate_daily
     except Exception as e:
-        send_card_reply(chat_id, msg_id, "📊 Intent 统计",
-                        f"agent_hub 未启用或导入失败：{e}", color="orange")
+        send_card_reply(chat_id, msg_id,
+                        _t(lang, "📊 Intent 统计", "📊 Intent Stats"),
+                        _t(lang, f"agent_hub 未启用或导入失败：{e}",
+                           f"agent_hub not enabled or import failed: {e}"),
+                        color="orange")
         return
     # Round-4 audit P1 (R4-1d): pass the current chat_id so the aggregate
     # only reflects this chat's own intent dispatches. Pre-fix returned
@@ -905,8 +921,11 @@ def _cmd_stats_intent(chat_id: str, msg_id: str = None, date: str | None = None)
     # is the (future) admin CLI.
     agg = aggregate_daily(date, chat_id=chat_id)
     if agg["total"] == 0:
-        send_card_reply(chat_id, msg_id, f"📊 Intent 统计 · {agg['date']}",
-                        "_当日没有 Agent 调度记录_", color="grey")
+        send_card_reply(chat_id, msg_id,
+                        f"{_t(lang, '📊 Intent 统计', '📊 Intent Stats')} · {agg['date']}",
+                        _t(lang, "_当日没有 Agent 调度记录_",
+                           "_No agent dispatches recorded today_"),
+                        color="grey")
         return
     # ``agg['total_cost']`` was always rendered as "$0.0000" because none
     # of the 5 builtin agents (chat / dev / crew / plan / doc) populate
@@ -917,43 +936,49 @@ def _cmd_stats_intent(chat_id: str, msg_id: str = None, date: str | None = None)
     # Independent stats audit caught this as a UI lie.
     has_cost = bool(agg.get("total_cost"))
     header = (
-        f"**成功率：** {agg['success_rate'] * 100:.1f}%　·　"
-        f"平均耗时：{agg['avg_duration']:.2f}s"
+        f"**{_t(lang, '成功率', 'Success rate')}：** {agg['success_rate'] * 100:.1f}%　·　"
+        f"{_t(lang, '平均耗时', 'Avg duration')}：{agg['avg_duration']:.2f}s"
     )
     if has_cost:
-        header += f"　·　成本：${agg['total_cost']:.4f}"
+        header += f"　·　{_t(lang, '成本', 'cost')}：${agg['total_cost']:.4f}"
     lines = [
-        f"**调度总数：** {agg['total']}",
+        f"**{_t(lang, '调度总数', 'Total dispatches')}：** {agg['total']}",
         header,
         "",
-        "**按 Agent：**",
+        f"**{_t(lang, '按 Agent', 'By agent')}：**",
     ]
     for atype, info in sorted(agg["per_agent"].items()):
         lines.append(
-            f"- `{atype}`：{info['count']} 次（成功 {info['success']}，"
+            f"- `{atype}`：{info['count']} {_t(lang, '次', 'calls')}"
+            f"（{_t(lang, '成功', 'success')} {info['success']}，"
             f"avg {info['avg_duration']:.2f}s）"
         )
-    send_card_reply(chat_id, msg_id, f"📊 Intent 统计 · {agg['date']}",
+    send_card_reply(chat_id, msg_id,
+                    f"{_t(lang, '📊 Intent 统计', '📊 Intent Stats')} · {agg['date']}",
                     "\n".join(lines), color="turquoise")
 
 
-def _cmd_stats_cache(chat_id: str, msg_id: str = None):
+def _cmd_stats_cache(chat_id: str, msg_id: str = None, lang: str = "zh"):
     """Render prompt-cache savings summary and per-backend session counters."""
+    from larkhelm.locale import _t
     lines: list[str] = []
     try:
         savings = get_cache_savings_summary()
         if savings:
-            lines.append("**累计 Cache 节省（估算）：**")
+            lines.append(f"**{_t(lang, '累计 Cache 节省（估算）', 'Total cache savings (estimated)')}：**")
             for model, usd in sorted(savings.items()):
                 lines.append(f"- `{model}`：${usd:.4f}")
         else:
-            lines.append("_暂无 cache 节省数据（本次进程尚无 cache_read 记录）_")
+            lines.append(_t(lang,
+                            "_暂无 cache 节省数据（本次进程尚无 cache_read 记录）_",
+                            "_No cache savings yet (no cache_read records this process)_"))
     except Exception as e:
         _debug_log(f"[stats] cache savings failed: {e}")
-        lines.append(f"_cache savings 读取失败：{e}_")
+        lines.append(_t(lang, f"_cache savings 读取失败：{e}_",
+                        f"_Failed to read cache savings: {e}_"))
 
     lines.append("")
-    lines.append("**各 Backend 会话计数器：**")
+    lines.append(f"**{_t(lang, '各 Backend 会话计数器', 'Backend session counters')}：**")
     try:
         from larkhelm import session_guard as _sg
         for _backend in ("claude", "gemini", "kimi", "deepseek"):
@@ -967,13 +992,16 @@ def _cmd_stats_cache(chat_id: str, msg_id: str = None):
             _pct_c = min(100, int(_sc_cache * 100 / max(1, _t_cache))) if _t_cache else 0
             _pct_t = min(100, int(_sc_turns * 100 / max(1, _t_turns))) if _t_turns else 0
             _pct = max(_pct_c, _pct_t)
+            _turns_label = _t(lang, "轮", "turns")
+            _threshold_label = _t(lang, f"（距阈值 {_pct}%）", f" ({_pct}% to threshold)")
             lines.append(
-                f"- `{_backend}`：{_sc_turns} 轮 / {_sc_cache:,} tokens cache_read"
-                + (f"（距阈值 {_pct}%）" if _pct else "")
+                f"- `{_backend}`：{_sc_turns} {_turns_label} / {_sc_cache:,} tokens cache_read"
+                + (_threshold_label if _pct else "")
             )
     except Exception as e:
         _debug_log(f"[stats] cache counters failed: {e}")
-        lines.append(f"_会话计数器读取失败：{e}_")
+        lines.append(_t(lang, f"_会话计数器读取失败：{e}_",
+                        f"_Failed to read session counters: {e}_"))
 
     # Cache hit rate block
     try:
@@ -981,7 +1009,7 @@ def _cmd_stats_cache(chat_id: str, msg_id: str = None):
         _hit_summary = get_cache_hit_rate_summary()
         if _hit_summary:
             lines.append("")
-            lines.append("**命中率（process-local）：**")
+            lines.append(f"**{_t(lang, '命中率（process-local）', 'Hit rate (process-local)')}：**")
             for _m, _d in sorted(_hit_summary.items()):
                 _r = int(_d.get("read", 0) or 0)
                 _i = int(_d.get("input", 0) or 0)
@@ -989,7 +1017,7 @@ def _cmd_stats_cache(chat_id: str, msg_id: str = None):
                     continue
                 _hr = int(_r * 100 / (_r + _i)) if (_r + _i) > 0 else 0
                 lines.append(
-                    f"- `{_m}`：命中率 {_hr}%（本进程累计 {_r:,} tokens cache_read）"
+                    f"- `{_m}`：{_t(lang, f'命中率 {_hr}%（本进程累计 {_r:,} tokens cache_read）', f'hit rate {_hr}% ({_r:,} tokens cache_read this process)')}"
                 )
     except Exception as _he:
         _debug_log(f"[stats] cache hit rate failed: {_he}")
@@ -1007,13 +1035,15 @@ def _cmd_stats_cache(chat_id: str, msg_id: str = None):
                     _by_backend[_b] = _by_backend.get(_b, 0) + int(_sample.value or 0)
             if _by_backend:
                 lines.append("")
-                lines.append("**Prefix 稳定性：**")
+                lines.append(f"**{_t(lang, 'Prefix 稳定性', 'Prefix stability')}：**")
                 for _b, _n in sorted(_by_backend.items()):
-                    lines.append(f"- `{_b}`：变更 {_n} 次")
+                    lines.append(f"- `{_b}`：{_t(lang, f'变更 {_n} 次', f'{_n} changes')}")
     except Exception as _pse:
         _debug_log(f"[stats] prefix stability failed: {_pse}")
 
-    send_card_reply(chat_id, msg_id, "💾 Cache 统计", "\n".join(lines), color="turquoise")
+    send_card_reply(chat_id, msg_id,
+                    _t(lang, "💾 Cache 统计", "💾 Cache Stats"),
+                    "\n".join(lines), color="turquoise")
 
 
 def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
@@ -1026,16 +1056,18 @@ def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
     # token as the subcommand and forward the rest verbatim (no lower()
     # — ISO dates are case-irrelevant but keep the original casing for
     # any future subcommand args).
+    from larkhelm.locale import _t as _lt
+    lang = _get_lang(chat_id)
     parts = (args or "").split(None, 1)
     sub = parts[0].lower() if parts else ""
     sub_args = parts[1].strip() if len(parts) > 1 else ""
     if sub == "intent":
         # sub_args is the optional `YYYY-MM-DD` date; empty → today.
         date = sub_args or None
-        _cmd_stats_intent(chat_id, msg_id, date=date)
+        _cmd_stats_intent(chat_id, msg_id, date=date, lang=lang)
         return
     if sub == "cache":
-        _cmd_stats_cache(chat_id, msg_id)
+        _cmd_stats_cache(chat_id, msg_id, lang=lang)
         return
     now   = datetime.now()
     today = now.strftime("%Y-%m-%d")
@@ -1142,23 +1174,33 @@ def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
         if total_cache_read == 0 or total_savings <= 0:
             return None
         hit_pct = int(total_cache_read * 100 / total_input) if total_input > 0 else 0
-        return f"缓存节省 **${total_savings:.4f}**（命中 {hit_pct}%）"
+        return _lt(lang,
+                   f"缓存节省 **${total_savings:.4f}**（命中 {hit_pct}%）",
+                   f"Cache savings **${total_savings:.4f}** (hit rate {hit_pct}%)")
 
     # In-memory stats for this process run (fallback if all.jsonl is empty)
     stats_mem   = get_token_stats(chat_id)
 
-    _today_block = _fmt_token_block(f"📅 今日（{today}）", stats_today)
-    _month_block = _fmt_token_block(f"🗓 本月（{month}）", stats_month)
-    _all_block = _fmt_token_block("📦 累计（全部）", stats_all)
+    _today_label = _lt(lang, f"📅 今日（{today}）", f"📅 Today ({today})")
+    _month_label = _lt(lang, f"🗓 本月（{month}）", f"🗓 This month ({month})")
+    _all_label   = _lt(lang, "📦 累计（全部）", "📦 All-time")
+
+    _today_block = _fmt_token_block(_today_label, stats_today, lang)
+    _month_block = _fmt_token_block(_month_label, stats_month, lang)
+    _all_block   = _fmt_token_block(_all_label,   stats_all,   lang)
 
     def _append_savings(block: str, stats: dict) -> str:
         sl = _savings_line(stats)
         return (block + "\n" + sl) if sl else block
 
+    _turns_word = _lt(lang, "轮", "turns")
     parts = [
-        f"**统计日期：** {today}",
-        f"今日对话：**{user_count}** 次　错误：**{error_count}** 次　"
-        f"平均耗时：**{_fmt_elapsed(avg) if avg else '—'}**",
+        f"**{_lt(lang, '统计日期', 'Stats date')}：** {today}",
+        (
+            f"{_lt(lang, '今日对话', 'Today')}：**{user_count}** {_lt(lang, '次', 'queries')}"
+            f"　{_lt(lang, '错误', 'errors')}：**{error_count}**　"
+            f"{_lt(lang, '平均耗时', 'avg duration')}：**{_fmt_elapsed(avg) if avg else '—'}**"
+        ),
         "---",
         _append_savings(_today_block, stats_today),
         "---",
@@ -1182,8 +1224,9 @@ def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
             pct = max(pct_cache, pct_turns)
             parts.append("---")
             parts.append(
-                f"**当前 session：{sc_turns} 轮 / {sc_cache:,} tokens "
-                f"cache_read（距离阈值 {pct}%）**"
+                f"**{_lt(lang, '当前 session', 'Current session')}："
+                f"{sc_turns} {_turns_word} / {sc_cache:,} tokens cache_read"
+                f"{_lt(lang, f'（距离阈值 {pct}%）', f' ({pct}% to threshold)')}**"
             )
         # REQ-02: show counters for other backends when thresholds are configured
         try:
@@ -1200,8 +1243,8 @@ def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
                 _pct_t = min(100, int(_sc_turns * 100 / max(1, _t_turns))) if _t_turns else 0
                 _pct = max(_pct_c, _pct_t)
                 parts.append(
-                    f"**{_backend} session：{_sc_turns} 轮 / {_sc_cache:,} tokens "
-                    f"cache_read（距离阈值 {_pct}%）**"
+                    f"**{_backend} session：{_sc_turns} {_turns_word} / {_sc_cache:,} tokens "
+                    f"cache_read{_lt(lang, f'（距离阈值 {_pct}%）', f' ({_pct}% to threshold)')}**"
                 )
         except Exception as _be:
             _debug_log(f"[stats] backend session counters render failed: {_be}")
@@ -1211,7 +1254,9 @@ def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
     # If persistent data is empty (fresh deploy or upgrade from old version), show in-memory stats as fallback
     if not stats_all and stats_mem:
         parts.append("---")
-        parts.append(_fmt_token_block("⚡ 本次启动（内存）", stats_mem))
+        parts.append(_fmt_token_block(
+            _lt(lang, "⚡ 本次启动（内存）", "⚡ This session (memory)"),
+            stats_mem, lang))
 
     # Round-4 audit P1 (R4-1e) + P5 REQ-07/09: expose the in-memory
     # per-crew-agent counter. Counters reset on bridge restart so the
@@ -1219,9 +1264,11 @@ def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
     # chat's persistent stats above, so this is a per-agent split, not a
     # separate accounting source. STATS_AGENT_TYPE_BREAKDOWN_ENABLED=false
     # restores the P2 single-line summary.
-    parts.extend(_render_crew_agent_breakdown(chat_id))
+    parts.extend(_render_crew_agent_breakdown(chat_id, lang))
 
-    send_card_reply(chat_id, msg_id, "📊 Token 统计", "\n\n".join(parts), color="turquoise")
+    send_card_reply(chat_id, msg_id,
+                    _lt(lang, "📊 Token 统计", "📊 Token Stats"),
+                    "\n\n".join(parts), color="turquoise")
 
 
 def _cmd_cron(chat_id: str, args: str, msg_id: str = None):
