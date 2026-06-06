@@ -133,8 +133,6 @@ class _RuntimeConfig:
     # GitHubAgent (agent_hub.builtin.github_agent)
     GITHUB_TOKEN:          str = ""
     GITHUB_REPO:           str = ""       # "owner/repo" default; inferred from git remote if empty
-    # Week-2
-    BACKEND_AWARE_BUDGET_ENABLED: bool = False
 
 # ── Runtime config (assigned by _init_runtime()) ────────────────────────
 CONFIG_PATH: Path
@@ -678,7 +676,6 @@ def _init_app_config() -> None:
     global DOC_INJECT_CACHE_TTL_SEC_KIMI, DOC_INJECT_CACHE_TTL_SEC_DEEPSEEK
     global FILE_ENABLED, MAX_FILE_SIZE_BYTES, FILE_TEXT_EXTENSIONS
     global FILE_PDF_ENABLED, FILE_PDF_LIB
-    global BACKEND_AWARE_BUDGET_ENABLED
     global FEISHU_DOC_DEFAULT_VIS, FEISHU_DOC_COLLABORATORS
 
     try:
@@ -1006,7 +1003,6 @@ def _init_app_config() -> None:
     config.setdefault("plugin_report_card_enabled", False)
     config.setdefault("failure_report_card_enabled", False)
     config.setdefault("admin_chat_id", "")
-    config.setdefault("memory_gc_interval_hours", 6.0)
     config.setdefault("crew_checkpoint_ttl_days", 7.0)
     config.setdefault("dev_stage_timeouts", {})
     # SEC-CRIT-4 layer-2 sentinel heuristic (review_security.md). The
@@ -1298,11 +1294,6 @@ def _init_app_config() -> None:
     config.setdefault("context_window_google_api", 0)
     config.setdefault("context_window_openai_compat_api", 0)
     config.setdefault("context_window_deepseek_api", 0)
-
-    global BACKEND_AWARE_BUDGET_ENABLED
-    BACKEND_AWARE_BUDGET_ENABLED = bool(
-        config.get("backend_aware_budget_enabled", False)
-    )
 
     # ── Cache hit rate alert threshold (REQ-05) ────────────────────────────
     config.setdefault("cache_hit_rate_alert_threshold", 0.5)
@@ -1610,7 +1601,6 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         SEARCH_API_KEY=SEARCH_API_KEY,
         GITHUB_TOKEN=GITHUB_TOKEN,
         GITHUB_REPO=GITHUB_REPO,
-        BACKEND_AWARE_BUDGET_ENABLED=BACKEND_AWARE_BUDGET_ENABLED,
     )
 
 

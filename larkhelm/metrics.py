@@ -119,8 +119,6 @@ class LarkhelmMetricsRegistry:
             self.cascade_dropped_total = None
             self.cascade_midflight_cancelled_total = None
             self.query_duration_seconds = None
-            self.extract_buffer_flushes_total = None
-            self.llm_router_circuit_state = None
             self.recent_turns_cache_total = None
             self.memory_layer_cache_total = None
             self.doc_inject_cache_total = None
@@ -193,20 +191,6 @@ class LarkhelmMetricsRegistry:
             "larkhelm_query_duration_seconds",
             "Query end-to-end latency",
             buckets=(0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600),
-            registry=self._registry,
-        )
-        self.extract_buffer_flushes_total = pc.Counter(
-            "larkhelm_extract_buffer_flushes_total",
-            "Buffer-induced cascade flushes",
-            ["trigger"],
-            registry=self._registry,
-        )
-        # P3 REQ-04: circuit-breaker state per LLM-router backend.
-        # 0 = closed, 1 = half_open, 2 = open.
-        self.llm_router_circuit_state = pc.Gauge(
-            "larkhelm_llm_router_circuit_state",
-            "LLM router circuit-breaker state (0=closed,1=half_open,2=open)",
-            ["backend"],
             registry=self._registry,
         )
         # P1 context-cache counters (REQ-01..03). Each cache reports
@@ -511,43 +495,6 @@ def observe_query_duration(seconds: float) -> None:
         reg.query_duration_seconds.observe(float(seconds))
     except Exception as e:
         safe_log(f"[Metrics] observe_query_duration failed (seconds={seconds!r}): {e}")
-
-
-def inc_extract_buffer_flush(trigger: str) -> None:
-    """Bump ``larkhelm_extract_buffer_flushes_total{trigger}``.
-
-    ``trigger`` ∈ {timer, capacity, manual, shutdown}.
-    """
-    reg = get_registry()
-    if not reg.available or reg.extract_buffer_flushes_total is None:
-        return
-    try:
-        reg.extract_buffer_flushes_total.labels(trigger=trigger).inc()
-    except Exception as e:
-        safe_log(f"[Metrics] inc_extract_buffer_flush failed (trigger={trigger}): {e}")
-
-
-_CIRCUIT_STATE_CODE = {"closed": 0, "half_open": 1, "open": 2}
-
-
-def set_llm_router_circuit_state(backend: str, state: str) -> None:
-    """Reflect a :class:`CircuitBreaker` state into Prometheus (REQ-04).
-
-    Recognised states: ``closed`` (0), ``half_open`` (1), ``open`` (2).
-    Unknown strings collapse to 0 so a typo never poisons the gauge.
-    Safe to call when prometheus-client is missing (no-op).
-    """
-    reg = get_registry()
-    if not reg.available or reg.llm_router_circuit_state is None:
-        return
-    value = _CIRCUIT_STATE_CODE.get(state, 0)
-    try:
-        reg.llm_router_circuit_state.labels(backend=str(backend)).set(value)
-    except Exception as e:
-        safe_log(
-            f"[Metrics] set_llm_router_circuit_state failed "
-            f"(backend={backend}, state={state}): {e}"
-        )
 
 
 def update_health_gauges(snapshot: "HealthSnapshot") -> None:
@@ -1133,8 +1080,6 @@ __all__ = [
     "render_exposition",
     "inc_cascade_extract",
     "observe_query_duration",
-    "inc_extract_buffer_flush",
-    "set_llm_router_circuit_state",
     "update_health_gauges",
     "inc_recent_turns_cache",
     "inc_memory_layer_cache",
