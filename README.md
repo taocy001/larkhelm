@@ -119,7 +119,9 @@ cd larkhelm
 | `claude_command` | Claude CLI 路径或命令名 | `claude` |
 | `gemini_command` | Gemini CLI 路径或命令名 | `gemini` |
 | `kimi_command` | Kimi Code CLI 路径或命令名 | `kimi` |
-| `default_model` | 默认模型：`claude` 或 `gemini` | `claude` |
+| `deepseek_api_key` | DeepSeek API Key；非空时自动注册 DeepSeek backend，`/d` 快捷命令生效 | — |
+| `deepseek_base_url` | DeepSeek API 地址（可换兼容端点） | `https://api.deepseek.com` |
+| `default_model` | 默认模型：`claude` / `gemini` / `kimi` / `deepseek` | `claude` |
 | `default_cwd` | Shell 命令的初始工作目录 | `~/code` |
 | `skip_permissions` | 自动放行 Claude 工具权限审批（生产环境建议保持 `false`，仅在受信开发机临时打开） | `false` |
 | `response_timeout` | 软超时（秒），超时后后台继续运行 | `300` |
@@ -275,6 +277,7 @@ sudo systemctl restart larkhelm
 | `/c <内容>` 或 `/claude <内容>` | 强制使用 Claude |
 | `/g <内容>` 或 `/gemini <内容>` | 强制使用 Gemini |
 | `/k <内容>` 或 `/kimi <内容>` | 强制使用 Kimi |
+| `/d <内容>` 或 `/deepseek <内容>` | 强制使用 DeepSeek（HTTP API，需配置 `deepseek_api_key`） |
 | `/btw <问题>` | 快问（不占主任务锁，回复到消息线程） |
 | `/cancel` | 中断当前任务 |
 
@@ -282,10 +285,10 @@ sudo systemctl restart larkhelm
 
 | 命令 | 功能 |
 |---|---|
-| `/reset` | 清空当前会话（Claude + Gemini + Kimi） |
-| `/reset claude` / `/reset gemini` / `/reset kimi` | 单独重置指定模型会话 |
+| `/reset` | 清空当前会话（所有 backend） |
+| `/reset claude` / `/reset gemini` / `/reset kimi` / `/reset deepseek` | 单独重置指定模型会话 |
 | `/reset perm` | 取消「允许所有」授权 |
-| `/model claude\|gemini\|kimi` | 切换当前会话默认模型 |
+| `/model claude\|gemini\|kimi\|deepseek` | 切换当前会话默认模型 |
 | `/rename <名称>` | 给当前会话命名 |
 | `/pickup` | 获取在终端接力会话的命令 |
 
@@ -377,44 +380,37 @@ systemctl --user restart larkhelm
 **macOS：**
 ```bash
 launchctl list | grep larkhelm
-tail -f ~/Library/Logs/larkhelm/larkhelm.log
+tail -f ~/.local/share/larkhelm/logs/larkhelm.log
 ```
 
 ### 日志轮转
 
-larkhelm 在 `$LOG_DIR/` 下写两份关键日志：`debug.log`（运维诊断、~50 MB/天）
+larkhelm 在 `$LOG_DIR/` 下写两份关键日志：`larkhelm.log`（运维诊断、~50 MB/天）
 与 `all.jsonl`（结构化对话日志、~5–10 MB/天）。两个平台都需要轮转，否则磁盘
 最终会被填满。
 
-**Linux（推荐用 logrotate）**：仓库自带 `templates/larkhelm.logrotate`，覆盖
-`debug.log` 与 `all.jsonl` 两个 stanza，配置为 `copytruncate` 模式（零停机、
-不需要 SIGHUP）。安装步骤：
+**Linux（推荐用 logrotate）**：`install.sh` 会自动安装 `templates/larkhelm.logrotate`
+到 `/etc/logrotate.d/larkhelm`（覆盖 `larkhelm.log` 与 `all.jsonl` 两个 stanza，
+`copytruncate` 模式，零停机）。如需手动安装：
 
 ```bash
-# 1) 复制模板到 /etc/logrotate.d/
+# 复制并替换路径（install.sh 会自动做这一步）
 sudo cp templates/larkhelm.logrotate /etc/logrotate.d/larkhelm
+sudo sed -i "s|__LOG_DIR__|$LOG_DIR|g" /etc/logrotate.d/larkhelm
 
-# 2) 把模板里的 LOG_DIR_PLACEHOLDER 替换为实际 LOG_DIR
-sudo sed -i "s|LOG_DIR_PLACEHOLDER|$LOG_DIR|g" /etc/logrotate.d/larkhelm
-
-# 3) dry-run 验证：应该输出 "rotating pattern" 而非语法错误
+# dry-run 验证
 sudo logrotate -d /etc/logrotate.d/larkhelm
 ```
 
-`install.sh` 也会在 daemon-reload 后打印该提示，方便复制。
-
-**macOS**：larkhelm 进程内置 `rotate_jsonl_if_needed` + `rotate_debug_log_if_needed`
-（在 `larkhelm/log.py`）作为兜底——`all.jsonl` 超 100 MB / `debug.log` 超 50 MB
-时进程自轮换并保留 `.1` 备份。若希望 OS 层再加一层 newsyslog 守护，最小示例：
+**macOS**：larkhelm 进程内置自轮换兜底——`all.jsonl` 超 100 MB / `larkhelm.log` 超 50 MB
+时进程自轮换并保留 `.1` 备份。若希望 newsyslog 额外管理：
 
 ```text
 # /etc/newsyslog.d/larkhelm.conf
-# logfilename                                                [owner:group]    mode count size when  flags
-$HOME/Library/Logs/larkhelm/debug.log                        ${USER}:staff    644  7     50000 *     J
-$HOME/Library/Logs/larkhelm/all.jsonl                        ${USER}:staff    644  7     50000 *     J
+# logfilename                                                          mode count size when  flags
+/Users/YOUR_USER/.local/share/larkhelm/logs/larkhelm.log             644  7     50000 *     J
+/Users/YOUR_USER/.local/share/larkhelm/logs/all.jsonl                644  7     50000 *     J
 ```
-
-> Owner / group 写入时把 `${USER}` 换成实际用户名（newsyslog 不展开 shell 变量）。
 
 ### 从源码构建
 
@@ -581,7 +577,9 @@ Config file location:
 | `claude_command` | Claude CLI path or command name | `claude` |
 | `gemini_command` | Gemini CLI path or command name | `gemini` |
 | `kimi_command` | Kimi Code CLI path or command name | `kimi` |
-| `default_model` | Default model: `claude` or `gemini` | `claude` |
+| `deepseek_api_key` | DeepSeek API key; non-empty automatically registers the DeepSeek backend and enables `/d` | — |
+| `deepseek_base_url` | DeepSeek API base URL (swap for compatible endpoints) | `https://api.deepseek.com` |
+| `default_model` | Default model: `claude` / `gemini` / `kimi` / `deepseek` | `claude` |
 | `default_cwd` | Initial working directory for shell commands | `~/code` |
 | `skip_permissions` | Auto-approve Claude tool permission prompts (keep `false` in production; only flip on a trusted dev box) | `false` |
 | `response_timeout` | Soft timeout (s), task continues in background | `300` |
@@ -638,7 +636,7 @@ brew install ffmpeg               # macOS
    ```bash
    sudo systemctl restart larkhelm                      # Linux system service
    systemctl --user restart larkhelm                    # Linux user service
-   launchctl kickstart -k gui/$UID/com.larkhelm.bridge  # macOS
+   launchctl kickstart -k gui/$UID/com.larkhelm  # macOS
    ```
 
 > **Mainland-China hosts**: set a HuggingFace mirror via a systemd drop-in (`Environment="HF_ENDPOINT=https://hf-mirror.com"`) or your shell startup script before the restart, otherwise the first model download will likely time out.
@@ -675,6 +673,7 @@ All commands start with `/`.
 | `/c <text>` or `/claude <text>` | Force Claude |
 | `/g <text>` or `/gemini <text>` | Force Gemini |
 | `/k <text>` or `/kimi <text>` | Force Kimi |
+| `/d <text>` or `/deepseek <text>` | Force DeepSeek (HTTP API, requires `deepseek_api_key`) |
 | `/btw <question>` | Quick aside (bypasses task queue, replies in thread) |
 | `/cancel` | Interrupt current task |
 
@@ -682,10 +681,10 @@ All commands start with `/`.
 
 | Command | Action |
 |---|---|
-| `/reset` | Clear session (Claude + Gemini + Kimi) |
-| `/reset claude` / `/reset gemini` / `/reset kimi` | Reset a specific model's session |
+| `/reset` | Clear session (all backends) |
+| `/reset claude` / `/reset gemini` / `/reset kimi` / `/reset deepseek` | Reset a specific backend's session |
 | `/reset perm` | Revoke "Allow All" authorization |
-| `/model claude\|gemini\|kimi` | Switch default model for this chat |
+| `/model claude\|gemini\|kimi\|deepseek` | Switch default model for this chat |
 | `/rename <name>` | Name the current session |
 | `/pickup` | Get terminal resume commands |
 
@@ -718,7 +717,7 @@ All commands start with `/`.
 LarkHelm has no `/doc` user command — there are two unified entry points:
 
 - **Read**: paste a Feishu `docx` / `wiki` / `sheets` URL into the message — the bridge auto-fetches the content and injects it as context. No command needed.
-- **Write**: use the `larkhelm doc` CLI. It runs anywhere, including inside Feishu via `/run`:
+- **Write**: use the `larkhelm doc` CLI or the DocAgent (natural language). CLI works anywhere, including inside Feishu via `/run`:
 
   ```bash
   cat report.md | larkhelm doc create "Report Title"
@@ -765,7 +764,7 @@ systemctl --user restart larkhelm
 **macOS:**
 ```bash
 launchctl list | grep larkhelm
-tail -f ~/Library/Logs/larkhelm/larkhelm.log
+tail -f ~/.local/share/larkhelm/logs/larkhelm.log
 ```
 
 ### Building from Source
