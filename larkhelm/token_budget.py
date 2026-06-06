@@ -234,26 +234,3 @@ def compute_api_max_tokens(
     return max(min_output, min(cap, available))
 
 
-def apply_backend_aware_budget(
-    policy,  # InjectionPolicy
-    spec: "BackendSpec | None",
-) -> object:  # InjectionPolicy
-    """Return a copy of *policy* with ``token_budget`` adjusted for *spec*.
-
-    This is a thin convenience wrapper around
-    :func:`compute_memory_char_budget`.  When the feature flag is off or
-    *spec* is ``None``, the original policy is returned unchanged
-    (no copy) to avoid unnecessary allocation.
-    """
-    if spec is None:
-        return policy
-
-    cfg = _config()
-    if not bool(cfg.get("backend_aware_budget_enabled", False)):
-        return policy
-
-    new_budget = compute_memory_char_budget(spec, policy.agent_type, base_budget=policy.token_budget)
-    if new_budget == policy.token_budget:
-        return policy
-
-    return dataclasses.replace(policy, token_budget=new_budget)

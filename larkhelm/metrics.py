@@ -130,7 +130,6 @@ class LarkhelmMetricsRegistry:
             self.session_auto_reset_total = None
             self.sticky_context_evicted_total = None
             self.workspace_hint_total = None
-            self.intent_feedback_total = None
             self.injection_gate_total = None
             self.cache_write_tokens_total = None
             self.cache_read_tokens_total = None
@@ -272,18 +271,6 @@ class LarkhelmMetricsRegistry:
             ["outcome"],
             registry=self._registry,
         )
-        # Phase D follow-up (May 2026): intent_feedback.jsonl writes by
-        # signal_type. signal_type ∈ {force_chat, cancel_after_dispatch,
-        # agent_reswitch, dispatch_failed, l1_gray_zone, l2_dispatched}.
-        # Lets operators see whether the extended-signal collector is
-        # producing the rates a downstream L1 trainer expects (>0 across
-        # all live buckets).
-        self.intent_feedback_total = pc.Counter(
-            "larkhelm_intent_feedback_total",
-            "intent_feedback.jsonl rows written by signal_type",
-            ["signal_type"],
-            registry=self._registry,
-        )
         # P0 injection-gate telemetry: emitted on every gate decision so
         # operators can observe skip rates before enabling gates.
         # point ∈ {recent_turns_api, memory_intent_global, memory_intent_project,
@@ -295,21 +282,6 @@ class LarkhelmMetricsRegistry:
             "larkhelm_injection_gate_total",
             "Context injection gate skip decisions",
             ["point", "outcome"],
-            registry=self._registry,
-        )
-        # P1-5a (review_summary §3 ROI table + W8/W9/W14): observability for
-        # the intent classifier layers and cascade-backoff exhaustion. These
-        # were the three blind spots the operator-facing review flagged as
-        # blocking the Phase 5 default-on rollout (P1-4).
-        self.intent_layer_total = pc.Counter(
-            "larkhelm_intent_layer_total",
-            "Intent resolution outcomes per layer",
-            ["layer", "outcome"],
-            registry=self._registry,
-        )
-        self.intent_l2_fallback_total = pc.Counter(
-            "larkhelm_intent_l2_fallback_total",
-            "L2 classifier fallback to chat",
             registry=self._registry,
         )
         self.cascade_backoff_exhausted_total = pc.Counter(
@@ -806,59 +778,6 @@ def inc_sticky_context_evicted(reason: str) -> None:
         safe_log(f"[Metrics] inc_sticky_context_evicted failed (reason={reason}): {e}")
 
 
-def inc_intent_feedback(signal_type: str) -> None:
-    """Bump ``larkhelm_intent_feedback_total{signal_type}``.
-
-    Called from :func:`larkhelm.agent_hub.intent_feedback._bump_metric`
-    on every JSONL row write. ``signal_type`` is currently one of
-    ``force_chat`` / ``cancel_after_dispatch`` / ``agent_reswitch`` /
-    ``dispatch_failed`` / ``l1_gray_zone`` / ``l2_dispatched`` but the
-    label isn't whitelisted here so plugins that introduce their own
-    signal types can opt into the same observability without registry
-    changes. Operators should monitor cardinality if a plugin starts
-    emitting per-text labels.
-    """
-    reg = get_registry()
-    if not reg.available or reg.intent_feedback_total is None:
-        return
-    try:
-        reg.intent_feedback_total.labels(signal_type=str(signal_type)).inc()
-    except Exception as e:
-        safe_log(f"[Metrics] inc_intent_feedback failed (signal_type={signal_type}): {e}")
-
-
-def inc_intent_layer(layer: str, outcome: str) -> None:
-    """Bump ``larkhelm_intent_layer_total{layer, outcome}``.
-
-    P1-5a: Called from ``intent_router.resolve_intent`` at every layer
-    decision. ``layer`` ∈ {explicit, l1, microlearn, l2_embedding, l2_llm,
-    fallback}; ``outcome`` ∈ {hit, abstain, error}. Never raises.
-    """
-    reg = get_registry()
-    if not reg.available or reg.intent_layer_total is None:
-        return
-    try:
-        reg.intent_layer_total.labels(layer=str(layer), outcome=str(outcome)).inc()
-    except Exception as e:
-        safe_log(f"[Metrics] inc_intent_layer failed (layer={layer},outcome={outcome}): {e}")
-
-
-def inc_intent_l2_fallback() -> None:
-    """Bump ``larkhelm_intent_l2_fallback_total`` once per L2→chat fallback.
-
-    P1-5a: Counts every time the L2 path (embedding or LLM) couldn't
-    resolve and ``_fallback("chat")`` was returned. Used to gauge whether
-    raising L2 confidence thresholds is safe. Never raises.
-    """
-    reg = get_registry()
-    if not reg.available or reg.intent_l2_fallback_total is None:
-        return
-    try:
-        reg.intent_l2_fallback_total.inc()
-    except Exception as e:
-        safe_log(f"[Metrics] inc_intent_l2_fallback failed: {e}")
-
-
 def inc_cascade_backoff_exhausted() -> None:
     """Bump ``larkhelm_cascade_backoff_exhausted_total`` when ``ExponentialBackoff``
     in ``memory_extract_buffer`` / ``memory.cascade_extract`` gave up.
@@ -1227,7 +1146,6 @@ __all__ = [
     "inc_sticky_context_evicted",
     "inc_workspace_hint",
     "inc_injection_gate",
-    "inc_intent_feedback",
     "inc_crew_backend_swing",
     "inc_cache_write_tokens",
     "inc_cache_read_tokens",

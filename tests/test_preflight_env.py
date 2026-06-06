@@ -142,13 +142,6 @@ class TestConfigSchema(unittest.TestCase):
         })
         self.assertTrue(any("max_card_len" in e for e in errors))
 
-    def test_embedding_traffic_above_one(self):
-        from larkhelm.config import validate_config
-        errors = validate_config({
-            "APP_ID": "x", "APP_SECRET": "y", "embedding_traffic": 1.5,
-        })
-        self.assertTrue(any("embedding_traffic" in e for e in errors))
-
     def test_valid_config_returns_empty(self):
         from larkhelm.config import validate_config
         errors = validate_config({
@@ -157,7 +150,6 @@ class TestConfigSchema(unittest.TestCase):
             "response_timeout": 300,
             "hard_timeout": 21600,
             "max_card_len": 3000,
-            "embedding_traffic": 0.1,
         })
         self.assertEqual(errors, [])
 

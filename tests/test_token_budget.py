@@ -15,7 +15,6 @@ class InjectionPolicy:
 from larkhelm.token_budget import (
     DEFAULT_CONTEXT_WINDOWS,
     _MIN_CONTEXT_WINDOW,
-    apply_backend_aware_budget,
     compute_api_max_tokens,
     compute_memory_char_budget,
     resolve_context_window,
@@ -155,48 +154,6 @@ def test_api_max_tokens_respects_min_output():
 
 def test_api_max_tokens_none_spec():
     assert compute_api_max_tokens(None) == 8192
-
-
-# ── apply_backend_aware_budget ───────────────────────────────────────────────
-
-def test_apply_no_change_when_disabled():
-    policy = InjectionPolicy(
-        agent_type="chat", token_budget=1200,
-        layer_weights={"session": 0.5, "global": 0.4, "project": 0.1},
-        kind_priority=("preference",),
-    )
-    spec = _StubSpec(id="claude", provider="claude_cli")
-    new_policy = apply_backend_aware_budget(policy, spec)
-    # flag off → same object returned
-    assert new_policy is policy
-
-
-def test_apply_changes_when_enabled():
-    _set_budget_enabled(True)
-    try:
-        policy = InjectionPolicy(
-            agent_type="chat", token_budget=1200,
-            layer_weights={"session": 0.5, "global": 0.4, "project": 0.1},
-            kind_priority=("preference",),
-        )
-        spec = _StubSpec(id="gemini", provider="gemini_cli")
-        new_policy = apply_backend_aware_budget(policy, spec)
-        assert new_policy is not policy
-        assert new_policy.token_budget == int(1200 * 1.20)
-        # other fields untouched
-        assert new_policy.layer_weights == policy.layer_weights
-        assert new_policy.kind_priority == policy.kind_priority
-    finally:
-        _set_budget_enabled(False)
-
-
-def test_apply_returns_original_when_spec_none():
-    policy = InjectionPolicy(
-        agent_type="chat", token_budget=1200,
-        layer_weights={"session": 0.5, "global": 0.4, "project": 0.1},
-        kind_priority=("preference",),
-    )
-    assert apply_backend_aware_budget(policy, None) is policy
 
 
 # ── _fmt_token_block context window annotation (AC-07) ───────────────────────

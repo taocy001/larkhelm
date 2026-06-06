@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from larkhelm.agent_hub.agent_audit import write_audit
 from larkhelm.agent_hub.agent_base import AGENT_REGISTRY, AgentExecutor, AgentRegistry
-from larkhelm.agent_hub.intent_feedback import record_feedback
 from larkhelm.agent_hub.intent_types import (
     AgentContext, AgentDispatch, AgentResult, IntentResult, TaskProfile,
 )
@@ -21,6 +20,6 @@ __all__ = [
     # Skill layer
     "SkillDef", "KeywordRuleSpec",
     "SkillExecutor", "SKILL_REGISTRY", "register_injector",
-    # Audit / feedback
-    "record_feedback", "write_audit",
+    # Audit
+    "write_audit",
 ]

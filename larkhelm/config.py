@@ -91,16 +91,6 @@ class _RuntimeConfig:
     # P2 toggles
     METRICS_TEXT_LEGACY:                bool = False
     ANTHROPIC_EXTENDED_CACHE_ENABLED:   bool = True
-    MEMORY_EXTRACT_BUFFER_WINDOW_SEC:   int = 0
-    MEMORY_SESSION_SMART_COMPRESS:      bool = False
-    # P5-OPT6: defaults flipped to True at every layer (dataclass /
-    # module-level / setdefault) so ``is_enabled()`` returns the production
-    # default even before ``_init_runtime`` runs — tests that touch the
-    # module without booting the runtime now see the same behaviour as
-    # production. Pinned by
-    # ``tests/test_memory_*_slots.py::test_is_enabled_default_true``.
-    MEMORY_GLOBAL_PROFILE_SLOT_ENABLED: bool = True
-    MEMORY_PROJECT_SECTION_ENABLED:     bool = True
     # Context-injection cache toggles (REQ-01..04)
     RECENT_TURNS_CACHE_ENABLED:        bool = True
     MEMORY_LEGACY_CACHE_ENABLED:       bool = True
@@ -283,50 +273,15 @@ CREW_BREAKPOINT_TIMEOUT_SEC: int   # Phase C: max wait for human confirmation in
 # the safe fallback rather than an AttributeError.
 HEALTH_ENDPOINT_PORT: int = 0
 HEALTH_BIND_ADDR: str = "127.0.0.1"
-SESSION_LAYER_BUDGETS: dict = {
-    "work_context": 1200,
-    "decisions":     800,
-    "history":       600,
-}
 MEMORY_CASCADE_MIDFLIGHT_CANCEL: bool = True
 QUERY_SESSION_V2_ENABLED: bool = False
-MEMORY_SESSION_LAYER_SMART: bool = True
 
 # ── P2 globals (REQ-01 / 05 / 06 / 07) ─────────────────────────────────────
-# All P2 toggles default to "feature off" so byte-compatibility with P1 holds
-# when the operator hasn't opted in. Reads through ``getattr(_cfg, NAME, default)``
-# so an unmigrated process (worker spawned before _init_runtime) sees the safe
-# fallback rather than an AttributeError.
 METRICS_TEXT_LEGACY: bool = False
 ANTHROPIC_EXTENDED_CACHE_ENABLED: bool = True
-MEMORY_EXTRACT_BUFFER_WINDOW_SEC: int = 0
-MEMORY_SESSION_SMART_COMPRESS: bool = False
-MEMORY_GLOBAL_PROFILE_SLOT_ENABLED: bool = True
-MEMORY_PROJECT_SECTION_ENABLED: bool = True
 
 # ── P3 globals (REQ-02 / 03 / 04 / 05 / 06 / 07 / 08 / 09 / 10) ────────────
-# All eleven default to "feature off / status quo" so byte-compat with P2 holds.
-# Operators flip them in config.json; setdefault preserves their override.
 QUERY_SESSION_V2_TRAFFIC: float = 0.0
-INTENT_EMBEDDING_THRESHOLD: float = 0.30
-# Phase D intent-router quality knobs (May 2026). L1 keyword score must
-# exceed the threshold to short-circuit; below it the router defers to
-# L2 (embedding or LLM JSON). Setting intent_l1_enabled=false bisects
-# the entire keyword tier without restart.
-INTENT_L1_ENABLED: bool = True
-INTENT_L1_PROMOTION_THRESHOLD: float = 0.70
-INTENT_MICROLEARN_ENABLED: bool = False
-INTENT_MICROLEARN_MIN_CONFIDENCE: float = 0.65
-# Phase D follow-up (May 2026): extended user-behaviour signals piped into
-# intent_feedback.jsonl beyond the force_chat button. Master switch +
-# tunables; setting EXTENDED_SIGNALS=False reverts to the legacy
-# force_chat-only behaviour without restart.
-INTENT_FEEDBACK_EXTENDED_SIGNALS: bool = True
-INTENT_FEEDBACK_CANCEL_WINDOW_SEC: float = 60.0
-INTENT_FEEDBACK_SIGNAL_TEXT_MAX: int = 800
-INTENT_FEEDBACK_L1_GRAY_BAND: float = 0.10
-LLM_ROUTER_CIRCUIT_FAILURES: int = 5
-LLM_ROUTER_CIRCUIT_COOLDOWN_SEC: float = 30.0
 CASCADE_BACKOFF_MAX_ATTEMPTS: int = 3
 PLAN_RETRY_STRATEGY: str = "off"             # "now" | "manual" | "off"
 PLUGIN_REPORT_CARD_ENABLED: bool = False
@@ -337,7 +292,6 @@ METRICS_ALERT_INTERVAL_SEC: int = 60
 METRICS_ALERT_ACTIVE_QUERIES_THRESHOLD: int = 20
 METRICS_ALERT_ERROR_RATE_THRESHOLD: float = 0.1
 METRICS_ALERT_RSS_BYTES_THRESHOLD: int = 2 * 1024 * 1024 * 1024
-MEMORY_GC_INTERVAL_HOURS: float = 6.0
 CREW_CHECKPOINT_TTL_DAYS: float = 7.0
 DEV_STAGE_TIMEOUTS: "dict[str, int]" = {}
 # B3: window during which a different-task workspace_meta under the same
@@ -706,17 +660,13 @@ def _init_app_config() -> None:
     global VOICE_DEFAULT_LANG, VOICE_MERGE_WINDOW_SEC, VOICE_MAX_MERGE, VOICE_KEEP_AUDIO
     global MEMORY_LIMIT_MB
     global HEALTH_ENDPOINT_PORT, HEALTH_BIND_ADDR
-    global SESSION_LAYER_BUDGETS, MEMORY_CASCADE_MIDFLIGHT_CANCEL
-    global QUERY_SESSION_V2_ENABLED, MEMORY_SESSION_LAYER_SMART
+    global MEMORY_CASCADE_MIDFLIGHT_CANCEL
+    global QUERY_SESSION_V2_ENABLED
     global METRICS_TEXT_LEGACY, ANTHROPIC_EXTENDED_CACHE_ENABLED
-    global MEMORY_EXTRACT_BUFFER_WINDOW_SEC
-    global MEMORY_SESSION_SMART_COMPRESS
-    global MEMORY_GLOBAL_PROFILE_SLOT_ENABLED, MEMORY_PROJECT_SECTION_ENABLED
-    global QUERY_SESSION_V2_TRAFFIC, INTENT_EMBEDDING_THRESHOLD
-    global LLM_ROUTER_CIRCUIT_FAILURES, LLM_ROUTER_CIRCUIT_COOLDOWN_SEC
+    global QUERY_SESSION_V2_TRAFFIC
     global CASCADE_BACKOFF_MAX_ATTEMPTS, PLAN_RETRY_STRATEGY
     global PLUGIN_REPORT_CARD_ENABLED, FAILURE_REPORT_CARD_ENABLED, ADMIN_CHAT_ID
-    global MEMORY_GC_INTERVAL_HOURS, CREW_CHECKPOINT_TTL_DAYS, DEV_STAGE_TIMEOUTS
+    global CREW_CHECKPOINT_TTL_DAYS, DEV_STAGE_TIMEOUTS
     global WORKSPACE_FINALIZE_PROMPT_AGE_SEC
     global RECENT_TURNS_CACHE_ENABLED, MEMORY_LEGACY_CACHE_ENABLED
     global DOC_INJECT_CACHE_ENABLED, DOC_INJECT_CACHE_TTL_SEC
@@ -977,101 +927,14 @@ def _init_app_config() -> None:
     DEFAULT_WIKI_PARENT_TOKEN = config.get("default_wiki_parent_token", "")
     DEFAULT_OWNER_OPEN_ID     = config.get("default_owner_open_id",     "")
 
-    # Phase 5: intent router / agent_hub flags (all optional). P1-4 flipped
-    # the default to a 10% gray rollout (intent_router_enabled=True,
-    # intent_router_traffic=0.1); set traffic to 0.0 or enabled to False to
-    # disable. Explicit user-provided values in config.json are preserved
-    # via setdefault (legacy `false` deployments stay unaffected).
-    config.setdefault("intent_router_enabled", True)
-    config.setdefault("intent_router_traffic", 0.1)
-    # Default flipped from "llm" → "embedding" (Phase D-C, May 2026).
-    # Embedding L2 is faster, deterministic, and cheaper than the cheap
-    # LLM JSON path. When the ONNX runtime / model isn't available the
-    # embedding backend returns None and the router auto-falls-back to
-    # the LLM path — no operator action needed for the legacy code path.
-    config.setdefault("intent_layer2_strategy", "embedding")
-    # L1 keyword-tier overrides (Phase D-A, May 2026). intent_l1_enabled
-    # =false skips the keyword classifier entirely; threshold controls
-    # how high a keyword score must be to short-circuit to L1
-    # (otherwise abstain → fall through to L2).
-    config.setdefault("intent_l1_enabled", True)
-    config.setdefault("intent_l1_promotion_threshold", 0.70)
-    # Phase D-D: opt-in micro-learn classifier trained from
-    # intent_feedback.jsonl. Off by default; flip on once a checkpoint
-    # exists at ``data_dir/intent_microlearn.pkl``. See
-    # ``larkhelm/agent_hub/intent_microlearn.py`` for the inference API
-    # and ``scripts/train_intent_classifier.py`` for training.
-    config.setdefault("intent_microlearn_enabled", False)
-    config.setdefault("intent_microlearn_min_confidence", 0.65)
-    # Phase D follow-up: extended-signal collection for intent_feedback.jsonl
-    # (see ``larkhelm/agent_hub/intent_feedback.py``). Defaults to ON so the
-    # L1 keyword tuner has real-world data to train against; flip
-    # ``intent_feedback_extended_signals=false`` for instant rollback.
-    config.setdefault("intent_feedback_extended_signals", True)
-    config.setdefault("intent_feedback_cancel_window_sec", 60.0)
-    config.setdefault("intent_feedback_signal_text_max", 800)
-    config.setdefault("intent_feedback_l1_gray_band", 0.10)
+    # agent_hub plugin loader + audit flags
     config.setdefault("agent_plugins", [])
-    config.setdefault("agent_acl", {})
-    config.setdefault("intent_feedback_path", "")
     config.setdefault("intent_audit_path", "")
 
-    # Phase D: on-demand memory retriever knobs (default off — flag-gated
-    # roll-out, same model as intent_router_*). Algorithm: see
-    # ``larkhelm/_gating.py`` and ``larkhelm/memory_retriever.py``.
-    config.setdefault("memory_retriever_enabled", False)
-    config.setdefault("memory_retriever_traffic", 0.0)
-    # Phase D / Phase 2 — was "keyword"; now "auto" follows POLICY_TABLE,
-    # which already encodes the three "hybrid" entries (dev/crew/plan).
-    # Operators wanting the Phase 1 behaviour explicitly can still set this
-    # to "keyword".
-    config.setdefault("memory_retriever_mode", "auto")
-    config.setdefault("memory_retriever_top_k_default", 6)
-    config.setdefault("memory_retriever_alpha_recency", 0.3)
-    config.setdefault("memory_retriever_alpha_importance", 0.3)
-    config.setdefault("memory_retriever_alpha_relevance", 0.4)
-    config.setdefault("memory_retriever_debug_card", False)
-    config.setdefault("memory_retriever_audit_path", "")
-
-    # Phase D / Phase 2 — hybrid recall + stale lifecycle knobs (REQ-48).
-    # All default to "off / neutral" so the bridge runs as Phase 1 unless an
-    # operator explicitly opens the gate. See design.md §6.3 for the table.
-    config.setdefault("embedding_backend", "none")          # "local" | "http" | "none"
-    config.setdefault("embedding_http_endpoint", "")
-    config.setdefault("embedding_model_path", "~/.larkhelm/models/bge-small-zh-v1.5.onnx")
-    config.setdefault("embedding_dim", 512)
-    config.setdefault("embedding_http_timeout_sec", 5.0)
-    config.setdefault("embedding_traffic", 0.1)             # Stage B gradual rollout, orthogonal to memory_retriever_traffic
-    config.setdefault("embedding_enabled", True)            # Stage B master switch
-    # MEM-C2: stale window must not exceed audit retention (30d) — audit records
-    # older than retain_days are deleted, so slices can't be validated as "hit"
-    # beyond that horizon and would be wrongly marked stale.
-    config.setdefault("memory_stale_window_days", 30)       # how far back to look for "never hit"
-    config.setdefault("memory_stale_decay", 0.5)            # stale relevance multiplier
-    config.setdefault("memory_audit_rotate_max_mb", 32)     # per-file rollover threshold
-    config.setdefault("memory_audit_retain_days", 30)       # unlink rotated files older than this
-
-    # Phase D · Phase 3 — LLM memory router (Stage C). Decorator over the
-    # underlying keyword/hybrid retriever; cheap LLM picks the most
-    # relevant slices from the top-N candidate pool. Gated by all four
-    # flags + scope: agent_type ∈ {crew, dev} AND complexity == "high".
-    # Defaults conservative — feature off, 3 calls/chat/min, 5 min cache.
-    config.setdefault("memory_llm_router_enabled", False)             # Stage C master switch
-    config.setdefault("memory_llm_router_traffic", 0.0)               # Stage C gradual rollout, orthogonal to A/B
-    config.setdefault("memory_llm_router_max_per_chat_per_min", 3)    # per-chat rate ceiling
-    config.setdefault("memory_llm_router_cache_ttl_sec", 300)         # (query, candidate_set) verdict TTL
-
-    # Phase B: memory token-optimization flags (S49–S53 + S3 GC).
-    # All default to "true" so the new code paths run by default; toggle
-    # individually to bisect token-regression reports without redeploying.
-    config.setdefault("memory_lazy_global", True)
-    config.setdefault("memory_project_conditional", True)
-    config.setdefault("memory_session_layered", True)
+    # Memory execution flags (still read by memory.py / log.py)
     config.setdefault("memory_recent_turns_dedup", True)
     config.setdefault("memory_cascade_shortcircuit", True)
     config.setdefault("memory_cascade_max_concurrent", 4)
-    config.setdefault("memory_session_gc_enabled", True)
-    config.setdefault("memory_session_gc_max_age_days", 7)
 
     # Phase C: max seconds to wait for the user to click 继续/取消 at a
     # crew breakpoint. Default 1800s (30 min); see crew/_runner.py
@@ -1124,69 +987,19 @@ def _init_app_config() -> None:
         HEALTH_ENDPOINT_PORT = 0
     HEALTH_BIND_ADDR = str(config.get("health_bind_addr", "127.0.0.1") or "127.0.0.1")
     QUERY_SESSION_V2_ENABLED = bool(config.get("query_session_v2_enabled", False))
-    MEMORY_SESSION_LAYER_SMART = bool(config.get("memory_session_layer_smart", True))
     MEMORY_CASCADE_MIDFLIGHT_CANCEL = bool(config.get("memory_cascade_midflight_cancel", True))
 
-    # ── P2 new keys (REQ-01 / 05 / 06 / 07) ────────────────────────────────
-    # All five default to "feature off" so the bridge stays byte-compatible
-    # with P1 unless an operator explicitly opens the gate. ``setdefault``
-    # preserves any operator override already in config.json.
+    # ── P2 new keys (REQ-01) ────────────────────────────────────────────────
     config.setdefault("metrics_text_legacy", False)
     config.setdefault("anthropic_extended_cache_enabled", True)
-    config.setdefault("memory_extract_buffer_window_sec", 0)
-    config.setdefault("memory_session_smart_compress", True)
-    # P5-OPT6: 4 slots / 4 sections default on — local edits stay scoped to
-    # the modified slot/section, so global/project memory body doesn't
-    # rotate on every cascade and Anthropic prompt-cache prefix survives.
-    # Legacy free-form bodies parse into the first slot/section (backward
-    # compatible); next cheap-LLM cascade migrates them in place.
-    #
-    # Module-level globals and the ``_RuntimeConfig`` dataclass defaults
-    # were flipped to True alongside this setdefault so a test that imports
-    # the slot module without booting ``_init_runtime`` still sees the
-    # production default. Pinned by
-    # ``test_memory_*_slots.py::test_is_enabled_default_true`` (with a
-    # paired ``can_be_disabled`` for the ``false`` override path).
-    config.setdefault("memory_global_profile_slot_enabled", True)
-    config.setdefault("memory_project_section_enabled", True)
 
     METRICS_TEXT_LEGACY = bool(config.get("metrics_text_legacy", False))
     ANTHROPIC_EXTENDED_CACHE_ENABLED = bool(
         config.get("anthropic_extended_cache_enabled", True)
     )
-    try:
-        MEMORY_EXTRACT_BUFFER_WINDOW_SEC = max(
-            0, int(config.get("memory_extract_buffer_window_sec", 0) or 0),
-        )
-    except (TypeError, ValueError):
-        MEMORY_EXTRACT_BUFFER_WINDOW_SEC = 0
-    MEMORY_SESSION_SMART_COMPRESS = bool(
-        config.get("memory_session_smart_compress", False)
-    )
-    MEMORY_GLOBAL_PROFILE_SLOT_ENABLED = bool(
-        config.get("memory_global_profile_slot_enabled", False)
-    )
-    MEMORY_PROJECT_SECTION_ENABLED = bool(
-        config.get("memory_project_section_enabled", False)
-    )
 
-    _budgets = config.get("memory_session_layer_budgets") or {}
-    try:
-        SESSION_LAYER_BUDGETS = {
-            "work_context": int(_budgets.get("work_context", 1200) or 1200),
-            "decisions":    int(_budgets.get("decisions",     800) or 800),
-            "history":      int(_budgets.get("history",       600) or 600),
-        }
-    except (TypeError, ValueError):
-        SESSION_LAYER_BUDGETS = {"work_context": 1200, "decisions": 800, "history": 600}
-
-    # ── P3 new keys (REQ-02 / 03 / 04 / 05 / 06 / 07 / 08 / 09 / 10) ──────
-    # All eleven flags default to "feature off / status quo" so prod operators
-    # have to opt in. setdefault preserves any operator override.
+    # ── P3 new keys ──────────────────────────────────────────────────────────
     config.setdefault("query_session_v2_traffic", 0.0)
-    config.setdefault("intent_embedding_top_k_threshold", 0.30)
-    config.setdefault("llm_router_circuit_failures", 5)
-    config.setdefault("llm_router_circuit_cooldown_sec", 30.0)
     config.setdefault("cascade_backoff_max_attempts", 3)
     config.setdefault("plan_retry_strategy", "off")
     config.setdefault("plan_pre_check_cmd", "")
@@ -1255,68 +1068,6 @@ def _init_app_config() -> None:
         QUERY_SESSION_V2_TRAFFIC = 0.0
 
     try:
-        INTENT_EMBEDDING_THRESHOLD = max(
-            0.0, min(1.0, float(config.get("intent_embedding_top_k_threshold", 0.30) or 0.30)),
-        )
-    except (TypeError, ValueError):
-        INTENT_EMBEDDING_THRESHOLD = 0.30
-
-    global INTENT_L1_ENABLED, INTENT_L1_PROMOTION_THRESHOLD
-    global INTENT_MICROLEARN_ENABLED, INTENT_MICROLEARN_MIN_CONFIDENCE
-    INTENT_L1_ENABLED = bool(config.get("intent_l1_enabled", True))
-    try:
-        INTENT_L1_PROMOTION_THRESHOLD = max(
-            0.05, min(1.0, float(config.get("intent_l1_promotion_threshold", 0.70) or 0.70)),
-        )
-    except (TypeError, ValueError):
-        INTENT_L1_PROMOTION_THRESHOLD = 0.70
-    INTENT_MICROLEARN_ENABLED = bool(config.get("intent_microlearn_enabled", False))
-    try:
-        INTENT_MICROLEARN_MIN_CONFIDENCE = max(
-            0.0, min(1.0, float(config.get("intent_microlearn_min_confidence", 0.65) or 0.65)),
-        )
-    except (TypeError, ValueError):
-        INTENT_MICROLEARN_MIN_CONFIDENCE = 0.65
-
-    global INTENT_FEEDBACK_EXTENDED_SIGNALS, INTENT_FEEDBACK_CANCEL_WINDOW_SEC
-    global INTENT_FEEDBACK_SIGNAL_TEXT_MAX, INTENT_FEEDBACK_L1_GRAY_BAND
-    INTENT_FEEDBACK_EXTENDED_SIGNALS = bool(
-        config.get("intent_feedback_extended_signals", True)
-    )
-    try:
-        INTENT_FEEDBACK_CANCEL_WINDOW_SEC = max(
-            0.0, float(config.get("intent_feedback_cancel_window_sec", 60.0) or 60.0),
-        )
-    except (TypeError, ValueError):
-        INTENT_FEEDBACK_CANCEL_WINDOW_SEC = 60.0
-    try:
-        INTENT_FEEDBACK_SIGNAL_TEXT_MAX = max(
-            0, int(config.get("intent_feedback_signal_text_max", 800) or 800),
-        )
-    except (TypeError, ValueError):
-        INTENT_FEEDBACK_SIGNAL_TEXT_MAX = 800
-    try:
-        INTENT_FEEDBACK_L1_GRAY_BAND = max(
-            0.0, min(0.5, float(config.get("intent_feedback_l1_gray_band", 0.10) or 0.10)),
-        )
-    except (TypeError, ValueError):
-        INTENT_FEEDBACK_L1_GRAY_BAND = 0.10
-
-    try:
-        LLM_ROUTER_CIRCUIT_FAILURES = max(
-            1, int(config.get("llm_router_circuit_failures", 5) or 5),
-        )
-    except (TypeError, ValueError):
-        LLM_ROUTER_CIRCUIT_FAILURES = 5
-
-    try:
-        LLM_ROUTER_CIRCUIT_COOLDOWN_SEC = max(
-            1.0, float(config.get("llm_router_circuit_cooldown_sec", 30.0) or 30.0),
-        )
-    except (TypeError, ValueError):
-        LLM_ROUTER_CIRCUIT_COOLDOWN_SEC = 30.0
-
-    try:
         CASCADE_BACKOFF_MAX_ATTEMPTS = max(
             1, int(config.get("cascade_backoff_max_attempts", 3) or 3),
         )
@@ -1331,13 +1082,6 @@ def _init_app_config() -> None:
     PLUGIN_REPORT_CARD_ENABLED = bool(config.get("plugin_report_card_enabled", False))
     FAILURE_REPORT_CARD_ENABLED = bool(config.get("failure_report_card_enabled", False))
     ADMIN_CHAT_ID = str(config.get("admin_chat_id", "") or "")
-
-    try:
-        MEMORY_GC_INTERVAL_HOURS = max(
-            0.0, float(config.get("memory_gc_interval_hours", 6.0) or 6.0),
-        )
-    except (TypeError, ValueError):
-        MEMORY_GC_INTERVAL_HOURS = 6.0
 
     try:
         CREW_CHECKPOINT_TTL_DAYS = max(
@@ -1767,18 +1511,6 @@ def validate_config(config: dict) -> list[str]:
     except (TypeError, ValueError):
         errors.append("[ConfigError] shell_timeout_sec: must be an integer")
     try:
-        et = float(config.get("embedding_traffic", 0.1))
-        if not (0.0 <= et <= 1.0):
-            errors.append(f"[ConfigError] embedding_traffic: must be in [0.0, 1.0] (got {et})")
-    except (TypeError, ValueError):
-        errors.append("[ConfigError] embedding_traffic: must be a float")
-    try:
-        irt = float(config.get("intent_router_traffic", 0.1))
-        if not (0.0 <= irt <= 1.0):
-            errors.append(f"[ConfigError] intent_router_traffic: must be in [0.0, 1.0] (got {irt})")
-    except (TypeError, ValueError):
-        errors.append("[ConfigError] intent_router_traffic: must be a float")
-    try:
         qst = float(config.get("query_session_v2_traffic", 0.0))
         if not (0.0 <= qst <= 1.0):
             errors.append(f"[ConfigError] query_session_v2_traffic: must be in [0.0, 1.0] (got {qst})")
@@ -1844,10 +1576,7 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         CREW_BREAKPOINT_TIMEOUT_SEC=CREW_BREAKPOINT_TIMEOUT_SEC,
         METRICS_TEXT_LEGACY=METRICS_TEXT_LEGACY,
         ANTHROPIC_EXTENDED_CACHE_ENABLED=ANTHROPIC_EXTENDED_CACHE_ENABLED,
-        MEMORY_EXTRACT_BUFFER_WINDOW_SEC=MEMORY_EXTRACT_BUFFER_WINDOW_SEC,
-        MEMORY_SESSION_SMART_COMPRESS=MEMORY_SESSION_SMART_COMPRESS,
-        MEMORY_GLOBAL_PROFILE_SLOT_ENABLED=MEMORY_GLOBAL_PROFILE_SLOT_ENABLED,
-        MEMORY_PROJECT_SECTION_ENABLED=MEMORY_PROJECT_SECTION_ENABLED,
+
         RECENT_TURNS_CACHE_ENABLED=RECENT_TURNS_CACHE_ENABLED,
         MEMORY_LEGACY_CACHE_ENABLED=MEMORY_LEGACY_CACHE_ENABLED,
         DOC_INJECT_CACHE_ENABLED=DOC_INJECT_CACHE_ENABLED,

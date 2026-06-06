@@ -40,8 +40,6 @@ def test_init_app_config_loads_keys(fresh_cfg):
     # P1-3 / P1-5 / P1-6 / P1-8 new globals exist with defaults
     assert _cfg.HEALTH_ENDPOINT_PORT == 0
     assert _cfg.HEALTH_BIND_ADDR == "127.0.0.1"
-    assert isinstance(_cfg.SESSION_LAYER_BUDGETS, dict)
-    assert _cfg.SESSION_LAYER_BUDGETS["work_context"] >= 200
     assert _cfg.MEMORY_CASCADE_MIDFLIGHT_CANCEL in (True, False)
 
 
@@ -94,15 +92,9 @@ def test_init_app_config_picks_up_new_p1_keys(tmp_path):
         "APP_ID": "X", "APP_SECRET": "Y",
         "health_endpoint_port": 9300,
         "memory_cascade_midflight_cancel": False,
-        "memory_session_layer_budgets": {
-            "work_context": 999, "decisions": 500, "history": 400,
-        },
     }))
     import larkhelm.config as _cfg
     _cfg._init_paths(str(cfg_path), str(tmp_path))
     _cfg._init_app_config()
     assert _cfg.HEALTH_ENDPOINT_PORT == 9300
     assert _cfg.MEMORY_CASCADE_MIDFLIGHT_CANCEL is False
-    assert _cfg.SESSION_LAYER_BUDGETS == {
-        "work_context": 999, "decisions": 500, "history": 400,
-    }

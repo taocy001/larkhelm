@@ -161,26 +161,7 @@ class TestMeterInjection(_ObserveTestBase):
     ``_layer_meter_line`` directly via ``_aggregate_memory_observation``, so
     the per-layer capacity readout for humans is unaffected.
 
-    Slots/sections (P5-OPT6) are disabled inside this class so the free-form
-    fixture body lands verbatim in ctx — keeping the focus on meter-line
-    behaviour, not on slot truncation (which is exercised separately).
     """
-
-    def setUp(self):
-        super().setUp()
-        self._meter_patches = [
-            patch.object(larkhelm_memory._cfg, "MEMORY_GLOBAL_PROFILE_SLOT_ENABLED",
-                         False, create=True),
-            patch.object(larkhelm_memory._cfg, "MEMORY_PROJECT_SECTION_ENABLED",
-                         False, create=True),
-        ]
-        for p in self._meter_patches:
-            p.start()
-
-    def tearDown(self):
-        for p in self._meter_patches:
-            p.stop()
-        super().tearDown()
 
     def _setup_layers(self, *, global_n: int, project_n: int, session_n: int):
         cwd = str(self.tmp / "proj")
