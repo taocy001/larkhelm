@@ -18,6 +18,7 @@ from larkhelm.chat_state import (
     _get_cwd, _set_chat_field, _get_chat_state, _get_chat_model,
     _load_sid, _clear_sid, _register_btw_msg,
     set_pending_doc_write, pop_pending_doc_write,
+    _get_effort, _set_effort,
 )
 from larkhelm.concurrency import (
     _get_chat_lock, _trigger_cancel, _pop_pending,
@@ -116,7 +117,7 @@ _HELP_LAYOUT: tuple = (
         "/help",
     )),
     ("static", "model_shortcuts"),
-    ("group", "🔒 Backend 锁定", ("/model", "/lock")),
+    ("group", "⚙️ 模型与推理", ("/model", "/lock", "/effort")),
     ("static", "reset_detail"),
     ("static", "memory_detail"),
     ("static", "doc_section"),
@@ -527,6 +528,18 @@ def _cmd_status(chat_id: str, msg_id: str = None):
     except Exception as e:
         _debug_log(f"[status] crew backend preview failed: {e}")
 
+    # Effort level
+    effort_line = ""
+    try:
+        _effort = _get_effort(chat_id)
+        if _effort:
+            _effort_labels = {"low": "⚡ 快速", "medium": "⚖️ 均衡", "high": "🔍 深度", "xhigh": "🚀 极限"}
+            _el = _effort_labels.get(_effort, _effort)
+            _tk = " · 思维链已关闭" if _effort == "low" else ""
+            effort_line = f"**推理力度** {_el} ({_effort}){_tk}"
+    except Exception:
+        pass
+
     lines = [
         f"**目录** {cwd}"
         + (f"　　**会话名** {_get_chat_state(chat_id).get('name', '').replace('**','').replace('`','')}"
@@ -534,6 +547,7 @@ def _cmd_status(chat_id: str, msg_id: str = None):
         f"**版本** {__version__}",
         "",
         f"**权限模式** {perm_status}",
+        *([ effort_line ] if effort_line else []),
         *([ crew_info ] if crew_info else []),
         *([ f"**Token（本次启动）** {token_summary}" ] if token_summary else []),
         *([ backend_summary ] if backend_summary else []),
@@ -2385,6 +2399,11 @@ def _dispatch_button_cmd(chat_id: str, cmd: str):
         send_card(chat_id, "🛑 已取消", body, color="orange")
     elif tl.startswith("/model "):
         _cmd_model(chat_id, cmd[7:].strip())
+    elif tl.startswith("effort "):
+        level = tl[7:].strip()
+        if level in ("low", "medium", "high", "xhigh"):
+            _set_effort(chat_id, level)
+            _cmd_effort(chat_id, level)
     elif tl == "doc_write_confirm":
         _cmd_doc_write_do(chat_id)
     elif tl == "doc_write_cancel":
@@ -2578,4 +2597,61 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
     send_card_reply(chat_id, msg_id, "🔄 升级中", "服务正在重启，连接将在数秒内恢复…", color="blue")
     time.sleep(1)   # Give send_card enough time to deliver
     _os.execv(_sys.executable, [_sys.executable, "-m", "larkhelm"] + _sys.argv[1:])
+
+
+# ═══════════════════════════════════════════════════
+#  /effort — Claude 推理力度控制
+# ═══════════════════════════════════════════════════
+
+_EFFORT_INFO = [
+    ("low",    "⚡ 快速",  "simple Q&A and quick replies — disables extended thinking"),
+    ("medium", "⚖️ 均衡",  "default mode — balances speed and quality"),
+    ("high",   "🔍 深度",  "complex analysis and multi-step reasoning"),
+    ("xhigh",  "🚀 极限",  "Opus-only — maximum reasoning, takes longer"),
+]
+_EFFORT_LABELS_ZH = {
+    "low":    "⚡ 快速",
+    "medium": "⚖️ 均衡",
+    "high":   "🔍 深度",
+    "xhigh":  "🚀 极限",
+}
+
+
+def _cmd_effort(chat_id: str, args: str, msg_id: str = None):
+    """/effort [low|medium|high|xhigh] — view or set per-chat Claude reasoning effort."""
+    level = (args or "").strip().lower()
+    valid = {"low", "medium", "high", "xhigh"}
+
+    if level and level not in valid:
+        send_card_reply(
+            chat_id, msg_id, "⚠️ 无效力度",
+            "有效值：`low` / `medium` / `high` / `xhigh`\n\n直接发 `/effort` 查看选项卡。",
+            color="orange",
+        )
+        return
+
+    if level:
+        _set_effort(chat_id, level)
+
+    current = _get_effort(chat_id) or ""
+    current_label = _EFFORT_LABELS_ZH.get(current, "⚖️ 均衡（默认）")
+
+    lines = [f"**当前：{current_label}**\n"]
+    for lvl, icon_label, desc in _EFFORT_INFO:
+        mark = " ✓" if lvl == current else ""
+        lines.append(f"- {icon_label} `{lvl}` — {desc}{mark}")
+    lines.append("\n💡 `low` 模式自动关闭扩展思维链，节省 token 开销")
+    lines.append("下次对话即刻生效，`/reset claude` 不影响此设置")
+
+    buttons = [
+        ("⚡ 快速", "effort low"),
+        ("⚖️ 均衡", "effort medium"),
+        ("🔍 深度", "effort high"),
+        ("🚀 极限", "effort xhigh"),
+    ]
+
+    if msg_id:
+        send_card_reply(chat_id, msg_id, "🧠 推理力度", "\n".join(lines), color="blue", buttons=buttons)
+    else:
+        send_card(chat_id, "🧠 推理力度", "\n".join(lines), color="blue", buttons=buttons)
 

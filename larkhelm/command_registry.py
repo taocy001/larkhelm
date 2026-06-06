@@ -428,6 +428,17 @@ def _default_registrations() -> None:
         examples=('/cron add "0 9 * * *" 早会提醒', "/cron list", "/cron del abc123"),
     ))
 
+    def _h_effort(ctx: DispatchContext) -> None:
+        from larkhelm.commands import _cmd_effort
+        _cmd_effort(ctx.chat_id, ctx.raw_args, ctx.msg_id)
+    register(CommandSpec(
+        name="/effort",
+        handler=_h_effort,
+        match_kind="prefix",
+        description="调整 Claude 推理力度：low / medium / high / xhigh",
+        examples=("/effort", "/effort low", "/effort high"),
+    ))
+
     # ── /crew / /dev / /plan (async, error-carded) ─────────────────
     def _h_crew(ctx: DispatchContext) -> None:
         from larkhelm.crew import cmd_crew

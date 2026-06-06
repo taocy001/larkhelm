@@ -89,6 +89,15 @@ class ClaudeRunner(BaseProcessRunner):
         if self.images:
             args += ["--input-format", "stream-json"]
 
+        # Per-chat reasoning effort (set via /effort command)
+        try:
+            from larkhelm.chat_state import _get_effort
+            effort = _get_effort(self.chat_id)
+            if effort:
+                args += ["--effort", effort]
+        except Exception:
+            pass
+
         if _cfg.SKIP_PERMISSIONS:
             args.append("--dangerously-skip-permissions")
         else:
@@ -158,7 +167,7 @@ class ClaudeRunner(BaseProcessRunner):
 
     def build_env(self) -> dict:
         ns = self._ns
-        return {
+        env = {
             **os.environ,
             "DBUS_SESSION_BUS_ADDRESS": "",
             "GCM_CREDENTIAL_STORAGE": "file",
@@ -166,6 +175,14 @@ class ClaudeRunner(BaseProcessRunner):
             "FEISHU_PERM_SOCKET": _cfg.PERM_SOCKET_PATH,
             "FEISHU_PERM_YOLO": "1" if is_yolo(ns) else "0",
         }
+        # low effort → disable extended thinking (avoids thinking-token overhead)
+        try:
+            from larkhelm.chat_state import _get_effort
+            if _get_effort(self.chat_id) == "low":
+                env["MAX_THINKING_TOKENS"] = "0"
+        except Exception:
+            pass
+        return env
 
     def build_stdin(self) -> str | None:
         if self.images:

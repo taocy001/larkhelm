@@ -974,6 +974,8 @@ def _run_generic_crew_inner_impl(chat_id: str, requirement: str,
 
     cancel_ev = _get_cancel_event(chat_id)
     cwd       = _get_cwd(chat_id)
+    _crew_start_time = time.time()
+    _crew_notify_done = False
 
     with _active_crew_lock:
         if chat_id in _active_crew:
@@ -1054,6 +1056,8 @@ def _run_generic_crew_inner_impl(chat_id: str, requirement: str,
             _active_crew_states[chat_id] = state
 
         _run_crew(state, total_timeout)
+        if not cancel_ev.is_set():
+            _crew_notify_done = True
 
     finally:
         with _active_crew_lock:
@@ -1066,6 +1070,17 @@ def _run_generic_crew_inner_impl(chat_id: str, requirement: str,
             record_milestone(chat_id, "crew", summary=requirement)
         except Exception as _e:
             _debug_log(f"[Crew] milestone record failed: {_e}")
+        # Completion notification card — sent as new message for Feishu badge
+        if _crew_notify_done:
+            try:
+                _elapsed = time.time() - _crew_start_time
+                _m, _s = divmod(int(_elapsed), 60)
+                _elapsed_str = f"{_m}分{_s:02d}秒" if _m else f"{_s}秒"
+                send_card(chat_id, "✅ Crew 任务完成",
+                          f"**{requirement[:80]}**\n\n耗时 {_elapsed_str}",
+                          color="green")
+            except Exception as _ne:
+                _debug_log(f"[Crew] completion notification failed: {_ne}")
 
 
 def _run_dev_crew(chat_id: str, requirement: str, user_msg_id: str,
@@ -1143,6 +1158,8 @@ def _run_dev_crew_inner_impl(chat_id: str, requirement: str, user_msg_id: str,
 
     cancel_ev = _get_cancel_event(chat_id)
     cwd       = _get_cwd(chat_id)
+    _dev_start_time = time.time()
+    _dev_notify_done = False
 
     with _active_crew_lock:
         if chat_id in _active_crew:
@@ -1299,6 +1316,8 @@ def _run_dev_crew_inner_impl(chat_id: str, requirement: str, user_msg_id: str,
                 finalize_workspace(chat_id, requirement[:80], kind="dev")
             except Exception as _fe:
                 _debug_log(f"[Dev] workspace finalisation failed: {_fe}")
+            if not cancel_ev.is_set():
+                _dev_notify_done = True
 
     finally:
         with _active_crew_lock:
@@ -1314,6 +1333,17 @@ def _run_dev_crew_inner_impl(chat_id: str, requirement: str, user_msg_id: str,
             record_milestone(chat_id, "dev", summary=requirement)
         except Exception as _e:
             _debug_log(f"[Dev] milestone record failed: {_e}")
+        # Completion notification card — sent as new message for Feishu badge
+        if _dev_notify_done:
+            try:
+                _elapsed = time.time() - _dev_start_time
+                _m, _s = divmod(int(_elapsed), 60)
+                _elapsed_str = f"{_m}分{_s:02d}秒" if _m else f"{_s}秒"
+                send_card(chat_id, "✅ Dev 任务完成",
+                          f"**{requirement[:80]}**\n\n耗时 {_elapsed_str} · PM→架构→工程→QA→审查",
+                          color="green")
+            except Exception as _ne:
+                _debug_log(f"[Dev] completion notification failed: {_ne}")
 
 
 def run_pipeline(
