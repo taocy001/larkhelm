@@ -138,24 +138,14 @@ cd larkhelm
 | `mcp_config_file` | MCP 配置文件路径（可选） | — |
 | `timezone` | 定时任务时区 | `Asia/Shanghai` |
 | `crew_breakpoint_timeout_sec` | `/crew` 断点等待用户点「继续 / 取消」的最长秒数；超时自动取消并推橙色卡 | `1800` |
-| `failure_report_card_enabled` | cascade backoff exhausted / circuit open 等诊断失败推送到 admin chat 的橙色卡片总开关 | `false` |
+| `shell_timeout_sec` | `/run` 命令的硬超时（秒），floor 1s，不受 `response_timeout`/`hard_timeout` 约束 | `30` |
+| `max_ai_procs` | 并发 AI 子进程上限：正整数 / `"auto"` / 缺省（`"auto"` 按可用内存自动探测） | `"auto"` |
+| `default_owner_open_id` | 文档所有权转移目标用户 open_id；也是 `admin_chat_id` 为空时失败卡片的兜底发送目标 | — |
+| `failure_report_card_enabled` | crew agent 失败 / 插件加载诊断卡片推送到 admin chat 的总开关 | `false` |
 | `admin_chat_id` | 失败 / 插件加载报告卡片的目标 chat_id；为空时退回 `default_owner_open_id` 私聊 | — |
 
 > 更细的旋钮（cache TTL、cascade 并发等）见
 > `larkhelm_config.example.json` 注释块与 `CLAUDE.md → Config`。
-
-> **P1 迭代默认变更**（v0.8）：
-> - `memory_session_layer_smart=true` —— session 记忆三段（工作上下文 / 决策 /
->   历史）现在分别做语义 truncate，并在总预算紧张时按优先级降级（drop history → decisions → work_context）；
->   行为差异肉眼可见但内容含义不变。如需回滚到旧的整段 `[:budget]` 截断，
->   设为 `false`。
-> - `memory_cascade_midflight_cancel=true` —— 级联抽取在流式 LLM 调用进行中
->   也会响应 `cancel_ev`，避免 60s 超时后 daemon 线程继续花 token。回滚设为 `false`。
-> - `health_endpoint_port=0`（默认禁用）—— 开启后 stdlib HTTP server 暴露
->   `/health` / `/ready` / `/metrics`（Prometheus 纯文本），绑 `127.0.0.1`，
->   常用值 `8080`。
-> - `query_session_v2_enabled=false` —— `_do_query` 的 `QuerySession` 类化
->   重构灰度开关；默认关，启用前请先观察 1 周。
 
 ### 启用语音功能
 
@@ -377,13 +367,13 @@ LarkHelm 没有 `/doc` 用户命令，统一两条入口：
 ### 数据目录结构
 
 ```
-/var/lib/larkhelm/             # Linux 系统服务（或 ~/.local/share/larkhelm/）
-├── sessions/                  # AI 会话 ID 和状态
-├── logs/                      # 对话历史日志
-└── state.json                 # 每个聊天的模型/工作目录偏好
-
-/var/log/larkhelm/
-└── larkhelm.log               # 运行日志
+/var/lib/larkhelm/                        # Linux 系统服务（或 ~/.local/share/larkhelm/）
+├── .feishu_sessions/                     # AI 会话 ID（每个 chat 一个 .sid 文件）
+├── .feishu_logs/                         # 对话历史日志
+│   ├── <chat_id>/YYYY-MM-DD.md           # 每 chat 每日 Markdown 日志
+│   └── all.jsonl                         # 全局结构化事件日志
+├── .feishu_state.json                    # 每个聊天的模型/工作目录偏好
+└── larkhelm.log                          # 运行日志
 ```
 
 ### 服务管理
@@ -404,14 +394,15 @@ systemctl --user restart larkhelm
 **macOS：**
 ```bash
 launchctl list | grep larkhelm
-tail -f ~/.local/share/larkhelm/logs/larkhelm.log
+launchctl kickstart -k gui/$(id -u)/com.larkhelm   # 重启服务
+tail -f ~/.local/share/larkhelm/larkhelm.log
 ```
 
 ### 日志轮转
 
-larkhelm 在 `$LOG_DIR/` 下写两份关键日志：`larkhelm.log`（运维诊断、~50 MB/天）
-与 `all.jsonl`（结构化对话日志、~5–10 MB/天）。两个平台都需要轮转，否则磁盘
-最终会被填满。
+larkhelm 写两份关键日志：`larkhelm.log`（运维诊断、~50 MB/天，DATA_DIR 根目录下）
+与 `all.jsonl`（结构化对话日志、~5–10 MB/天，`DATA_DIR/.feishu_logs/all.jsonl`）。
+两个平台都需要轮转，否则磁盘最终会被填满。
 
 **Linux（推荐用 logrotate）**：`install.sh` 会自动安装 `templates/larkhelm.logrotate`
 到 `/etc/logrotate.d/larkhelm`（覆盖 `larkhelm.log` 与 `all.jsonl` 两个 stanza，
@@ -431,9 +422,9 @@ sudo logrotate -d /etc/logrotate.d/larkhelm
 
 ```text
 # /etc/newsyslog.d/larkhelm.conf
-# logfilename                                                          mode count size when  flags
-/Users/YOUR_USER/.local/share/larkhelm/logs/larkhelm.log             644  7     50000 *     J
-/Users/YOUR_USER/.local/share/larkhelm/logs/all.jsonl                644  7     50000 *     J
+# logfilename                                                               mode count size when  flags
+/Users/YOUR_USER/.local/share/larkhelm/larkhelm.log                        644  7     50000 *     J
+/Users/YOUR_USER/.local/share/larkhelm/.feishu_logs/all.jsonl              644  7     50000 *     J
 ```
 
 ### 从源码构建
@@ -446,8 +437,8 @@ python3 -m build --wheel
 
 ### 监控集成（Prometheus）
 
-P2 REQ-01 引入 `larkhelm.metrics` 注册中心，把所有 `larkhelm_*` Prometheus
-指标集中管理。装可选 extras 后 `/metrics` 自动走 prometheus-client 渲染：
+`larkhelm.metrics` 注册中心统一管理所有 `larkhelm_*` 指标。装可选 extras
+后 `/metrics` 自动走 prometheus-client 渲染：
 
 ```bash
 pipx install -e ".[metrics]"     # 安装 prometheus-client
@@ -468,25 +459,23 @@ systemctl --user restart larkhelm
   scrape_interval: 15s
 ```
 
-回滚开关：`config.json` 设 `metrics_text_legacy: true` → 强制走 P1 手写
-文本路径（byte-compat 旧 scraper）。卸装 prometheus-client 也会自动 fallback。
-完整指标清单见 `CLAUDE.md → 监控集成（Prometheus，P2 REQ-01）`。
+未安装 prometheus-client 时自动 fallback 到纯文本 `/metrics`。
+完整指标清单见 `.crew_workspace/metrics_reference.md`。
 
-### 本地开发（make 入口）
+### 本地开发
 
-P2 REQ-11 引入统一 make 入口，本地 + CI 共享 `scripts/check.sh`：
+本地与 CI 共享统一 make 入口：
 
 ```bash
 make test                            # 跑 pytest 全套
 make lint                            # ruff 跑 bug-detector 子集
 make type                            # mypy 跑严格白名单 6 模块
 make all                             # 上面三个
-make ci                              # alias of make all（GitHub Actions 调用）
 make test ARGS="-k pure -x"          # 转发额外参数
 ```
 
 `scripts/check.sh` 是真正的命令位置（pytest / ruff / mypy 调用都在那）；
-`Makefile` 只做命名转发。可在没有 `make` 的环境（windows / IDE）直接跑
+`Makefile` 只做命名转发。可在没有 `make` 的环境（Windows / IDE）直接跑
 `./scripts/check.sh test`。
 
 ---
@@ -580,6 +569,7 @@ Config file location:
   "claude_command":        "claude",
   "gemini_command":        "gemini",
   "kimi_command":          "kimi",
+  "deepseek_api_key":      "",
   "default_model":         "claude",
   "default_cwd":           "/home/YOUR_USER/code",
   "skip_permissions":      false,
@@ -605,9 +595,12 @@ Config file location:
 | `deepseek_base_url` | DeepSeek API base URL (swap for compatible endpoints) | `https://api.deepseek.com` |
 | `default_model` | Default model: `claude` / `gemini` / `kimi` / `deepseek` | `claude` |
 | `default_cwd` | Initial working directory for shell commands | `~/code` |
+| `default_owner_open_id` | User open_id for document ownership transfer; also the fallback DM target for failure cards when `admin_chat_id` is empty | — |
 | `skip_permissions` | Auto-approve Claude tool permission prompts (keep `false` in production; only flip on a trusted dev box) | `false` |
 | `response_timeout` | Soft timeout (s), task continues in background | `300` |
 | `hard_timeout` | Hard timeout (s), force kill subprocess | `21600` |
+| `shell_timeout_sec` | Hard timeout (s) for `/run` commands; floor 1s; independent of `response_timeout`/`hard_timeout` | `30` |
+| `max_ai_procs` | Max concurrent AI subprocesses: positive integer / `"auto"` / omit (auto-probes based on available RAM) | `"auto"` |
 | `max_card_len` | Max characters per card update | `3000` |
 | `allowed_chat_ids` | Chat ID whitelist, empty = no restriction | `[]` |
 | `require_at_in_group` | Require @mention in group chats to respond; set `false` to respond to all group messages | `true` |
@@ -619,8 +612,8 @@ Config file location:
 | `doc_write_confirm` | Require confirmation before DocAgent / CLI overwrites a document | `true` |
 | `mcp_config_file` | Path to MCP config file (optional) | — |
 | `timezone` | Timezone for cron tasks | `Asia/Shanghai` |
-| `crew_breakpoint_timeout_sec` | Seconds `/crew` waits for the user's 继续/取消 click before auto-cancelling and emitting an orange card | `1800` |
-| `failure_report_card_enabled` | Push diagnostic-failure orange cards (cascade backoff exhausted / circuit open / etc.) to admin chat | `false` |
+| `crew_breakpoint_timeout_sec` | Seconds `/crew` waits for a 继续/取消 click before auto-cancelling and emitting an orange card | `1800` |
+| `failure_report_card_enabled` | Master switch for crew agent failure / plugin-load diagnostic cards pushed to admin chat | `false` |
 | `admin_chat_id` | Target chat_id for failure / plugin-load report cards; falls back to `default_owner_open_id` DM when empty | — |
 
 > Finer knobs (cache TTLs, cascade concurrency, etc.) live in the annotation
@@ -628,22 +621,71 @@ Config file location:
 
 ### Enable Voice Transcription
 
-LarkHelm can transcribe Feishu voice messages locally with [faster-whisper](https://github.com/SYSTRAN/faster-whisper) and feed the transcript to the AI as a normal query. All transcription runs on the host; no paid STT service is involved.
+LarkHelm can transcribe Feishu voice messages using either a local [faster-whisper](https://github.com/SYSTRAN/faster-whisper) model or the [DashScope](https://dashscope.aliyuncs.com/) cloud API. The transcript is fed to the AI as a normal query.
 
-#### Install System Dependencies
+#### Quick Start: Auto-probe
 
-faster-whisper needs ffmpeg to decode the audio Feishu delivers:
+After installing larkhelm, run the probe command once to let it decide the best setup for your hardware:
+
+```bash
+larkhelm voice probe
+```
+
+It will:
+1. Check whether `ffmpeg` is installed.
+2. Inspect CPU flags (AVX2 / AVX / SSE4) and available RAM.
+3. Run a 1-second test clip and measure RTF (real-time factor; passes if < 0.8).
+4. Auto-write the result back to `config.json`: passes → `voice_enabled=true`, `voice_engine="faster_whisper"`, recommended model size; fails → prints the DashScope opt-in path.
+
+```bash
+larkhelm voice probe --no-benchmark   # CPU/RAM check only, skip live test
+larkhelm voice probe --no-write       # print result without modifying config
+```
+
+#### Path A: Local faster-whisper (probe passed)
+
+The probe already updated your config. Just install ffmpeg and restart:
 
 ```bash
 sudo apt install ffmpeg          # Debian / Ubuntu
 brew install ffmpeg               # macOS
+sudo systemctl restart larkhelm
 ```
+
+> **Mainland-China servers**: add `Environment="HF_ENDPOINT=https://hf-mirror.com"` in a systemd drop-in before restarting so the first model download doesn't time out (`small` ≈ 460 MB cached under `~/.cache/huggingface/`).
+
+#### Path B: DashScope cloud API (probe failed, or prefer higher accuracy)
+
+```bash
+# 1. Install DashScope SDK
+pipx runpip larkhelm install dashscope
+
+# 2. Obtain an API key from Alibaba Cloud DashScope
+# 3. Inject the key via systemd drop-in (keep out of git)
+sudo tee /etc/systemd/system/larkhelm.service.d/voice-env.conf <<'EOF'
+[Service]
+Environment="DASHSCOPE_API_KEY=sk-..."
+EOF
+sudo systemctl daemon-reload
+
+# 4. Set in config.json:
+#    "voice_enabled":  true,
+#    "voice_engine":   "dashscope",
+#    "voice_api_key":  "${DASHSCOPE_API_KEY}"
+
+# 5. Restart
+sudo systemctl restart larkhelm
+```
+
+If `voice_enabled=true` but `voice_api_key` resolves to empty, the bridge prints a stderr warning and temporarily disables voice on startup — it will not crash or silently bill you.
 
 #### Configuration Fields
 
 | Field | Default | Description |
 |---|---|---|
-| `voice_enabled` | `false` | Master switch for voice transcription; bridge behavior is unchanged when off |
+| `voice_enabled` | `false` | Master switch; bridge behavior is unchanged when off |
+| `voice_engine` | `"faster_whisper"` | Engine: `faster_whisper` (local) / `dashscope` (cloud) |
+| `voice_api_key` | `""` | DashScope API key; supports `${DASHSCOPE_API_KEY}` placeholder |
 | `voice_model_size` | `"small"` | faster-whisper model size: `tiny` / `base` / `small` / `medium` / `large-v3` |
 | `voice_compute_type` | `"int8"` | Compute type, e.g. `int8` / `float16` |
 | `voice_max_duration_ms` | `180000` | Max milliseconds per clip (floor `1000`) |
@@ -652,39 +694,25 @@ brew install ffmpeg               # macOS
 | `voice_max_merge` | `5` | Max clips merged in one transcription pass (floor `1`) |
 | `voice_keep_audio` | `false` | Keep the original audio file after transcription |
 
-#### Enable Steps
+#### Model Size Selection (faster-whisper only)
 
-1. Install ffmpeg (see above).
-2. Add `"voice_enabled": true` to `config.json` and tweak the other `voice_*` fields as needed.
-3. Restart the service to load the new configuration:
-
-   ```bash
-   sudo systemctl restart larkhelm                      # Linux system service
-   systemctl --user restart larkhelm                    # Linux user service
-   launchctl kickstart -k gui/$UID/com.larkhelm  # macOS
-   ```
-
-> **Mainland-China hosts**: set a HuggingFace mirror via a systemd drop-in (`Environment="HF_ENDPOINT=https://hf-mirror.com"`) or your shell startup script before the restart, otherwise the first model download will likely time out.
-
-On the first run, faster-whisper downloads the selected model from HuggingFace (`small` + `int8` ≈ 460 MB); the cold start can take tens of seconds to several minutes. Models are cached under `~/.cache/huggingface/` and reused on subsequent restarts.
-
-#### Model Size Selection
-
-| Size | Disk | Recommended Use |
-|---|---|---|
-| `tiny` | ~75 MB | Severely resource-constrained devices; lower accuracy |
-| `base` | ~140 MB | Lightweight workloads, speed-first |
-| `small` | ~460 MB | ✓ Default; balanced accuracy and speed |
-| `medium` | ~1.5 GB | High accuracy; needs more memory |
-| `large-v3` | ~2.9 GB | Highest accuracy; GPU recommended |
+| Size | Disk | Peak RAM (int8) | Recommended Use |
+|---|---|---|---|
+| `tiny` | ~75 MB | ~500 MB | Severely resource-constrained; lower accuracy |
+| `base` | ~140 MB | ~800 MB | Lightweight; speed-first |
+| `small` | ~460 MB | ~1.5 GB | ✓ Default; balanced accuracy and speed |
+| `medium` | ~1.5 GB | ~2.5 GB | High accuracy; needs more memory + AVX2 |
+| `large-v3` | ~2.9 GB | ~4 GB | Highest accuracy; GPU recommended |
 
 #### Switch Transcription Language
 
 ```text
-/voice status            # show the current language
+/voice status            # show engine, language, and model/SDK status
 /voice lang en           # switch to English transcription
 /voice lang auto         # auto-detect
 ```
+
+> Feishu's native in-app voice-to-text result is not delivered via events, so the bridge cannot read it even if you see it in the Feishu app. LarkHelm always transcribes via the engine you explicitly configure.
 
 ### Chat Commands
 
@@ -797,13 +825,13 @@ LarkHelm has no `/doc` user command — there are two unified entry points:
 ### Data Layout
 
 ```
-/var/lib/larkhelm/             # Linux system service (or ~/.local/share/larkhelm/)
-├── sessions/                  # AI session IDs and state
-├── logs/                      # Conversation history
-└── state.json                 # Per-chat model and working directory preferences
-
-/var/log/larkhelm/
-└── larkhelm.log               # Runtime log
+/var/lib/larkhelm/                        # Linux system service (or ~/.local/share/larkhelm/)
+├── .feishu_sessions/                     # AI session IDs (one .sid file per chat)
+├── .feishu_logs/                         # Conversation history
+│   ├── <chat_id>/YYYY-MM-DD.md           # Per-chat daily Markdown logs
+│   └── all.jsonl                         # Global structured event log
+├── .feishu_state.json                    # Per-chat model and working directory
+└── larkhelm.log                          # Runtime log
 ```
 
 ### Service Management
@@ -824,7 +852,8 @@ systemctl --user restart larkhelm
 **macOS:**
 ```bash
 launchctl list | grep larkhelm
-tail -f ~/.local/share/larkhelm/logs/larkhelm.log
+launchctl kickstart -k gui/$(id -u)/com.larkhelm   # restart service
+tail -f ~/.local/share/larkhelm/larkhelm.log
 ```
 
 ### Building from Source
@@ -840,7 +869,23 @@ python3 -m build --wheel
 ```
 larkhelm [--version]
 larkhelm start [--config PATH] [--data-dir DIR]
+larkhelm voice probe [--no-benchmark] [--no-write]
+larkhelm memory export [output.zip] [--chat-ids ID…] [--data-dir DIR] [--include-debug-log]
+larkhelm memory import <archive.zip> [--replace] [--dry-run] [--data-dir DIR]
+larkhelm doc create "<title>"
+larkhelm doc append "<url-or-token>"
+larkhelm doc write "<url-or-token>"
 ```
+
+| Subcommand | Description |
+|---|---|
+| `start` | Run the bridge (main process) |
+| `voice probe` | Auto-detect hardware and write recommended voice config |
+| `memory export` | Export all persisted data to a zip archive (bridge need not be running) |
+| `memory import` | Restore data from a zip; default: merge; `--replace`: overwrite |
+| `doc create` | Create a new Feishu document from stdin; prints the document URL |
+| `doc append` | Append stdin content to an existing document |
+| `doc write` | Overwrite an existing document with stdin content |
 
 | Flag | Description |
 |---|---|
