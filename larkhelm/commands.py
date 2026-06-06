@@ -92,7 +92,7 @@ _HELP_STATIC_SECTIONS: dict[str, str] = {
     "doc_section": (
         "**📄 飞书文档**\n"
         "**读** — 在消息里粘贴 `docx` / `wiki` / `sheets` URL，bridge 自动读取并注入上下文\n"
-        "**写** — 终端跑 `larkhelm doc create|append|write`；或开启智能编排后由 DocAgent 自动接管"
+        "**写** — 终端跑 `larkhelm doc create|append|write`，或在飞书里用 `/run larkhelm doc create \"标题\"`"
     ),
 }
 
@@ -572,15 +572,9 @@ def _cmd_pickup(chat_id: str, msg_id: str = None):
         lines.append(f"\n**Kimi 接力：**\n```bash\ncd {cwd}\nkimi --session {s_k}\n```")
     else:
         lines.append("\n**Kimi:** 无活跃会话")
-    # DeepSeek has no terminal CLI; show a one-liner curl scaffold using the persisted history file
+    # DeepSeek has no terminal CLI
     if s_d:
-        from larkhelm.chat_state import _sid_file as _sf
-        sid_path = _sf(chat_id, "deepseek")
-        lines.append(
-            f"\n**DeepSeek 接力（HTTP）：**\n"
-            f"无官方 CLI；会话历史保存在 `{sid_path}`，可在脚本中 POST 到 "
-            f"`{_cfg.DEEPSEEK_BASE_URL}/chat/completions` 复用。"
-        )
+        lines.append("\n**DeepSeek:** 无官方 CLI，暂不支持终端接力。如需继续对话请在飞书直接发消息。")
     else:
         lines.append("\n**DeepSeek:** 无活跃会话")
     lines.append("\n> 在终端运行上面命令即可无缝接力")
@@ -1766,7 +1760,7 @@ def _render_observe_card(obs: dict) -> tuple[str, str, str]:
       1. 三层容量条 (含百分比 + ⚠️)
       2. 最近成功摘要时间
       3. 近 7 天 UNCHANGED ``m/n (X%)``
-      4. 近 7 天 cheap→orchestrator fallback ``k 次, X%``
+      4. 近 7 天记忆摘要降级到主模型次数（低成本模型失败）
     """
     layers = obs.get("layers", {}) or {}
     any_near = any((layers.get(k) or {}).get("near_limit") for k in ("global", "project", "session"))
@@ -1815,13 +1809,13 @@ def _render_observe_card(obs: dict) -> tuple[str, str, str]:
 
     fb = obs.get("fallback", {}) or {}
     if fb.get("unavailable"):
-        lines.append(f"**近 {fb.get('window_days', 7)} 天 cheap→orchestrator fallback**: _(不可用)_")
+        lines.append(f"**近 {fb.get('window_days', 7)} 天 记忆摘要降级到主模型**: _(不可用)_")
     else:
         k = fb.get("count", 0)
         pct = int(round((fb.get("ratio", 0.0) * 100)))
         ts = fb.get("last_ts")
         ts_suffix = f"（最近 `{ts}`）" if ts else ""
-        lines.append(f"**近 {fb.get('window_days', 7)} 天 cheap→orchestrator fallback**: `{k} 次` ({pct}%){ts_suffix}")
+        lines.append(f"**近 {fb.get('window_days', 7)} 天 记忆摘要降级到主模型**: `{k} 次` ({pct}%){ts_suffix}")
 
     return "🔍 记忆观测", "\n".join(lines), color
 

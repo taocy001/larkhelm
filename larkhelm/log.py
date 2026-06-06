@@ -880,8 +880,7 @@ def error(msg: str) -> None:
 def safe_log(msg: str) -> None:
     """``_debug_log`` 的"永不抛"版本，用于异常清理 / 日志降级路径。
 
-    Replaces the 4 identical ``_safe_log`` copies that previously lived in
-    ``agent_hub/{agent_dispatcher,agent_audit,intent_feedback,plugin_loader}.py``.
+    Replaces identical ``_safe_log`` copies that previously lived in agent_hub modules.
     The wrapping ``try/except Exception: pass`` guards against any regression
     that would make ``_debug_log`` itself raise (e.g. config not yet loaded
     in early bootstrap). All four call sites were behaviorally identical, so
