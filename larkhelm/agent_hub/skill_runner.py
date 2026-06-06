@@ -168,23 +168,10 @@ def _resolve_skill_backend(ctx: AgentContext, profile: str) -> str | None:
     """Return a backend id suitable for *profile*, or None to fall back."""
     if ctx.force_backend_id:
         return ctx.force_backend_id
-    if not profile or profile == "chat":
-        # Try cheap routing the same way ChatAgent does.
-        try:
-            from larkhelm.agent_hub.builtin.chat_agent import _resolve_cheap_backend_id
-            return _resolve_cheap_backend_id(ctx.chat_id)
-        except Exception:
-            return None
     try:
-        from larkhelm.agent_hub.model_selector import resolve_backend_for_task
-        from larkhelm.crew._backend_resolver import TASK_PROFILES
-        tp = TASK_PROFILES.get(profile)
-        if tp is None:
-            return None
-        spec = resolve_backend_for_task(ctx.chat_id, tp)
-        if spec is None:
-            return None
-        return str(getattr(spec, "id", "") or "")
+        from larkhelm.backend_registry import BACKEND_REGISTRY
+        orch = BACKEND_REGISTRY.get_orchestrator()
+        return str(orch.id) if orch else None
     except Exception as e:
         from larkhelm.log import lazy_debug_log
         lazy_debug_log(f"[SkillRunner] backend resolve profile={profile!r}: {e}")

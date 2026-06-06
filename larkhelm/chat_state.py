@@ -12,9 +12,6 @@ import larkhelm.config as _cfg
 from larkhelm.log import _debug_log
 from larkhelm.secure_io import secure_atomic_write
 
-if TYPE_CHECKING:
-    from larkhelm.agent_hub.intent_types import IntentResult
-
 __all__ = [
     "_state_lock", "_chat_state_store",
     "_load_global_state", "_save_state", "_get_chat_state", "_set_chat_field",
@@ -25,7 +22,6 @@ __all__ = [
     "_get_voice_lang", "_set_voice_lang",
     "_register_btw_msg", "_is_btw_reply",
     "set_pending_doc_write", "pop_pending_doc_write",
-    "_set_pending_intent", "_pop_pending_intent",
     "_get_claude_session_counters",
     "_increment_claude_session_counters",
     "_clear_claude_session_counters",
@@ -388,32 +384,3 @@ def pop_pending_doc_write(chat_id: str) -> dict | None:
     return None
 
 
-# ═══════════════════════════════════════════════════
-#  Pending intent — per-chat IntentResult handoff
-# ═══════════════════════════════════════════════════
-# Phase D: ``handlers/_message.py`` resolves an IntentResult before deciding
-# whether to dispatch via AgentDispatcher or fall through to ``_do_query`` for
-# the chat agent_type. When falling through, ``_do_query`` needs the same
-# IntentResult so that ``get_memory_context_v2`` can apply the per-agent
-# memory injection policy. The dict below is the handoff channel: set by the
-# upstream resolver, popped (and cleared) by ``_do_query``. Pop semantics
-# avoid leaking an old intent into the next user turn.
-_pending_intents: dict[str, "IntentResult"] = {}
-_pending_intents_lock = threading.Lock()
-
-
-def _set_pending_intent(chat_id: str, intent: "IntentResult | None") -> None:
-    """Stage the resolved IntentResult for the next ``_do_query`` on this chat.
-
-    No-op when ``intent`` is None. Thread-safe via a dedicated lock so it
-    does not contend with the persistent ``_state_lock``."""
-    if intent is None:
-        return
-    with _pending_intents_lock:
-        _pending_intents[chat_id] = intent
-
-
-def _pop_pending_intent(chat_id: str) -> "IntentResult | None":
-    """Atomically pop and return the staged intent; returns None when absent."""
-    with _pending_intents_lock:
-        return _pending_intents.pop(chat_id, None)

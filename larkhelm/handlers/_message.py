@@ -633,31 +633,6 @@ def handle_message(data: P2ImMessageReceiveV1):
                 chat_lock.release()
             pending = _pop_pending(chat_id)
             _trigger_cancel(chat_id)
-            # Phase D follow-up: a /cancel that lands inside the configured
-            # window after an AgentDispatcher dispatch is strong evidence
-            # the routing was wrong. We `consume_dispatch` (not `peek`) so
-            # the same /cancel can't be billed against the same dispatch
-            # twice. Skip when the prior intent was already ``chat`` —
-            # chat cancellations are mostly "I changed my mind", not a
-            # routing error.
-            try:
-                from larkhelm.agent_hub.intent_feedback import (
-                    consume_dispatch as _consume_disp,
-                    record_signal as _rec_signal,
-                )
-                from larkhelm.config import INTENT_FEEDBACK_CANCEL_WINDOW_SEC as _CANCEL_W
-                _hit = _consume_disp(chat_id, max_age_sec=_CANCEL_W)
-                if _hit is not None:
-                    _prior_intent, _prior_text, _age = _hit
-                    if _prior_intent.agent_type != "chat":
-                        _rec_signal(
-                            "cancel_after_dispatch", _prior_intent, chat_id,
-                            corrected="chat", text=_prior_text,
-                            metadata={"elapsed_sec": round(_age, 2),
-                                      "was_running": bool(is_running)},
-                        )
-            except Exception as _ce:
-                _debug_log(f"[IntentFeedback] cancel signal failed: {_ce}")
             if is_running:
                 body = "已向当前任务发送中断信号。"
                 if pending:

@@ -97,12 +97,11 @@ class TestAgentRegistry(unittest.TestCase):
 
 
 class TestBuiltinRegistration(unittest.TestCase):
-    def test_5_builtins_registered(self):
-        # Importing agent_hub triggers builtin registration as a side effect.
+    def test_agent_registry_importable(self):
+        # builtin agents removed; registry starts empty but is importable
         import larkhelm.agent_hub  # noqa: F401
         types = AGENT_REGISTRY.list_types()
-        for required in ("chat", "dev", "crew", "plan", "doc"):
-            self.assertIn(required, types)
+        self.assertIsInstance(types, list)
 
 
 if __name__ == "__main__":

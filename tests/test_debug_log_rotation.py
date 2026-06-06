@@ -150,13 +150,9 @@ class TestSafeAndLazyHelpers(unittest.TestCase):
         dbg.assert_called_once_with("[Test] hello")
 
     def test_agent_hub_safe_log_aliases_centralized(self):
-        """All four agent_hub modules must now reference the same callable
-        as ``larkhelm.log.safe_log`` (no local copies left)."""
-        from larkhelm.agent_hub import (
-            agent_dispatcher, agent_audit, intent_feedback, plugin_loader,
-        )
+        """agent_hub modules that remain must reference the same safe_log."""
+        from larkhelm.agent_hub import agent_audit, intent_feedback, plugin_loader
         canonical = larkhelm_log.safe_log
-        self.assertIs(agent_dispatcher._safe_log, canonical)
         self.assertIs(agent_audit._safe_log, canonical)
         self.assertIs(intent_feedback._safe_log, canonical)
         self.assertIs(plugin_loader._safe_log, canonical)
