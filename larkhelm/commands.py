@@ -3074,19 +3074,81 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
             capture_output=True, text=True, timeout=120,
         )
         if ri.returncode != 0:
-            send_card_reply(chat_id, msg_id,
-                            _t(lang, "❌ 升级失败", "❌ Upgrade Failed"),
-                            _t(lang,
-                               f"pip install 失败：\n```\n{(ri.stderr or ri.stdout)[:400]}\n```",
-                               f"pip install failed:\n```\n{(ri.stderr or ri.stdout)[:400]}\n```"),
-                            color="red")
-            return
+            _pip_err = ri.stderr or ri.stdout
+            # PEP 668: system Python refuses pip install — retry with --break-system-packages
+            if "externally-managed-environment" in _pip_err or "externally managed" in _pip_err.lower():
+                _debug_log("[Upgrade] PEP 668 detected, retrying pip install --break-system-packages")
+                try:
+                    ri = subprocess.run(
+                        pip_install_cmd + ["--break-system-packages"],
+                        capture_output=True, text=True, timeout=120,
+                    )
+                except Exception as _e2:
+                    send_card_reply(chat_id, msg_id,
+                                    _t(lang, "❌ 升级失败", "❌ Upgrade Failed"),
+                                    _t(lang, f"pip install 异常：{_e2}", f"pip install error: {_e2}"),
+                                    color="red")
+                    return
+            if ri.returncode != 0:
+                send_card_reply(chat_id, msg_id,
+                                _t(lang, "❌ 升级失败", "❌ Upgrade Failed"),
+                                _t(lang,
+                                   f"pip install 失败：\n```\n{(ri.stderr or ri.stdout)[:400]}\n```",
+                                   f"pip install failed:\n```\n{(ri.stderr or ri.stdout)[:400]}\n```"),
+                                color="red")
+                return
     except Exception as e:
         send_card_reply(chat_id, msg_id,
                         _t(lang, "❌ 升级失败", "❌ Upgrade Failed"),
                         _t(lang, f"pip install 异常：{e}", f"pip install error: {e}"),
                         color="red")
         return
+
+    # Step 2b: pre-flight checks — catch problems that would silently crash the new process
+
+    # Config file permissions: SEC-H1 kills the new process on startup if group/world-readable.
+    # Try to auto-fix; if chmod fails, warn but still proceed (user sees the issue).
+    try:
+        _config_path = Path(_cfg_mod.CONFIG_PATH)
+        _config_mode = _config_path.stat().st_mode & 0o777
+        if _config_mode & 0o077:
+            try:
+                _config_path.chmod(0o600)
+                _debug_log(f"[Upgrade] auto-fixed config permissions {oct(_config_mode)} → 0o600")
+            except OSError as _perm_e:
+                send_card_reply(chat_id, msg_id,
+                                _t(lang, "⚠️ 升级警告", "⚠️ Upgrade Warning"),
+                                _t(lang,
+                                   f"配置文件权限 `{oct(_config_mode)}` 不安全，自动修复失败：`{_perm_e}`\n\n"
+                                   f"请手动执行：\n```\nchmod 600 {_config_path}\n```\n\n"
+                                   f"升级继续，但重启后服务可能因权限检查退出。",
+                                   f"Config file permissions `{oct(_config_mode)}` are insecure; auto-fix failed: `{_perm_e}`\n\n"
+                                   f"Run manually:\n```\nchmod 600 {_config_path}\n```\n\n"
+                                   f"Upgrade will continue, but the service may exit after restart due to the permission check."),
+                                color="orange")
+    except OSError:
+        pass
+
+    # Import smoke test: catch syntax errors or missing deps in the new code before execv.
+    # Failure here aborts the upgrade — old version keeps running, no disruption.
+    try:
+        _smoke = subprocess.run(
+            [_sys.executable, "-c", "import larkhelm.bridge"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if _smoke.returncode != 0:
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "❌ 升级失败", "❌ Upgrade Failed"),
+                            _t(lang,
+                               f"新版本代码导入失败，升级已中止（当前版本继续运行）：\n"
+                               f"```\n{(_smoke.stderr or _smoke.stdout)[:400]}\n```",
+                               f"New code failed to import — upgrade aborted (current version still running):\n"
+                               f"```\n{(_smoke.stderr or _smoke.stdout)[:400]}\n```"),
+                            color="red")
+            return
+    except Exception as _smoke_e:
+        _debug_log(f"[Upgrade] smoke test error: {_smoke_e}")
+        # Non-fatal — proceed; smoke test failure doesn't prove new code is broken
 
     # Step 3: wait for in-flight tasks to finish
     send_card_reply(chat_id, msg_id,
@@ -3176,7 +3238,22 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
                     _t(lang, "服务正在重启，连接将在数秒内恢复…", "Service restarting — connection will resume in a few seconds…"),
                     color="blue")
     time.sleep(1)   # Give send_card enough time to deliver
-    _os.execv(_sys.executable, [_sys.executable, "-m", "larkhelm"] + _sys.argv[1:])
+    try:
+        _os.execv(_sys.executable, [_sys.executable, "-m", "larkhelm"] + _sys.argv[1:])
+    except OSError as _execv_e:
+        # execv failed — fall back to sys.exit(0) so systemd / launchctl restarts the process.
+        _debug_log(f"[Upgrade] os.execv failed: {_execv_e}, falling back to sys.exit(0)")
+        try:
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "⚠️ 重启方式降级", "⚠️ Restart Fallback"),
+                            _t(lang,
+                               f"os.execv 失败：`{_execv_e}`\n\n已回退到 exit(0)，等待 systemd / launchctl 重启服务…",
+                               f"os.execv failed: `{_execv_e}`\n\nFalling back to exit(0) — waiting for systemd / launchctl to restart…"),
+                            color="orange")
+            time.sleep(2)
+        except Exception:
+            pass
+        _sys.exit(0)
 
 
 # ═══════════════════════════════════════════════════
