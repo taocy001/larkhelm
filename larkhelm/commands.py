@@ -2964,7 +2964,7 @@ def _cmd_compact(chat_id: str, msg_id: str = None):
 
 def _do_compact(chat_id: str, msg_id: str, lang: str):
     from larkhelm.memory import maybe_auto_update
-    from larkhelm.chat_state import _clear_sid, _get_model, _load_sid
+    from larkhelm.chat_state import _clear_sid, _get_chat_model, _load_sid
     from larkhelm import log as _log_mod
 
     send_card_reply(chat_id, msg_id,
@@ -2989,7 +2989,7 @@ def _do_compact(chat_id: str, msg_id: str, lang: str):
                         color="red")
         return
 
-    model = _get_model(chat_id)
+    model = _get_chat_model(chat_id)
     had_session = bool(_load_sid(chat_id, model))
     try:
         _clear_sid(chat_id, model)
@@ -3017,18 +3017,18 @@ def _cmd_context(chat_id: str, msg_id: str = None):
     """/context: show context window size and recent token usage."""
     from larkhelm.token_stats import get_token_stats
     from larkhelm.token_budget import DEFAULT_CONTEXT_WINDOWS, resolve_context_window
-    from larkhelm.chat_state import _get_model, _load_sid
+    from larkhelm.chat_state import _get_chat_model, _load_sid
     from larkhelm.backend_registry import BACKEND_REGISTRY
     import larkhelm.config as _cfg_mod
 
     lang = _get_lang(chat_id)
-    model = _get_model(chat_id)
+    model = _get_chat_model(chat_id)
 
     # Token stats: {model: {input_tokens, output_tokens, cache_read, cache_create, cost_usd, calls}}
     chat_stats = get_token_stats(chat_id).get(model, {})
 
     # Context window size
-    ctx_window = DEFAULT_CONTEXT_WINDOWS.get("claude", 200_000)
+    ctx_window = DEFAULT_CONTEXT_WINDOWS.get(model, 200_000)
     try:
         spec = BACKEND_REGISTRY.get(model)
         if spec:
@@ -3188,7 +3188,7 @@ def _cmd_doctor(chat_id: str, msg_id: str = None):
     """/doctor: check Claude Code installation and session health."""
     import subprocess as _sp
     import larkhelm.config as _cfg_mod
-    from larkhelm.chat_state import _get_model, _load_sid
+    from larkhelm.chat_state import _get_chat_model, _load_sid
 
     lang = _get_lang(chat_id)
     checks = []  # (icon, label_zh, label_en, detail)
@@ -3210,7 +3210,7 @@ def _cmd_doctor(chat_id: str, msg_id: str = None):
         checks.append(("⚠️", "Claude CLI", "Claude CLI", str(e)[:80]))
 
     # 2. Session ID
-    model = _get_model(chat_id)
+    model = _get_chat_model(chat_id)
     sid = _load_sid(chat_id, model) or ""
     if sid:
         checks.append(("✅", "会话 ID", "Session ID", f"`{sid[:16]}…`"))

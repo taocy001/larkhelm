@@ -646,6 +646,8 @@ def _default_registrations() -> None:
         name="/doctor",
         handler=_h_doctor,
         match_kind="exact",
+        run_async=True,
+        thread_label="doctor",
         description="检查 Claude Code 安装、会话和配置健康状态",
         description_en="Check Claude Code installation, session, and config health",
         examples=("/doctor",),

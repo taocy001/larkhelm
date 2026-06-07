@@ -101,7 +101,7 @@ Project is structured as the `larkhelm/` package. 核心模块按角色分组：
 ### 入口与配置
 - `__main__.py` — CLI 入口（`larkhelm start` / `larkhelm voice probe` / `larkhelm memory ...` / `larkhelm doc ...`）
 - `bridge.py` — `main()` 主程序、`_start_memory_boot_warmup()` 启动 daemon、`.register_p2_*` 注册飞书事件
-- `config.py` — 运行时配置加载、~91 个 `setdefault`、自动发现 backend（`_auto_discover_cli` / `_auto_discover_http`）
+- `config.py` — 运行时配置加载、~88 个 `setdefault`、自动发现 backend（`_auto_discover_cli` / `_auto_discover_http`）
 - `command_registry.py` — `CommandSpec` + `COMMAND_REGISTRY` 集中式 slash 命令注册表（替代旧的 600 行 if/elif 链）
 
 ### 飞书事件层 (`handlers/`)
@@ -339,6 +339,13 @@ cat updated.md | larkhelm doc write "https://feishu.cn/docx/xxxx"
 | `/crew <task>` | `cmd_crew()` | `crew/_commands.py` | Multi-agent collaborative planning |
 | `/dev <task> [--no-confirm]` | `cmd_dev()` | `crew/_commands.py` | Software engineering pipeline |
 | `/plan <task>` | `cmd_plan()` | `cmd_plan.py` | 多阶段串行：`[dev]` `[review]` `[fix]` `[test]` |
+| `/compact` | `_cmd_compact()` | `commands.py` | Compress conversation history into memory, reset session |
+| `/context` | `_cmd_context()` | `commands.py` | Show context window usage and token stats |
+| `/mcp` | `_cmd_mcp()` | `commands.py` | List configured MCP servers |
+| `/hooks` | `_cmd_hooks()` | `commands.py` | Show Claude Code hooks configuration |
+| `/doctor` | `_cmd_doctor()` | `commands.py` | Check Claude Code installation and config health |
+| `/lang <zh\|en>` | `_cmd_lang()` | `commands.py` | Switch bot UI language zh / en |
+| `/effort <low\|medium\|high\|xhigh>` | `_cmd_effort()` | `commands.py` | Set Claude reasoning effort |
 
 > **文档操作**：没有 `/doc` 用户命令。读：消息含飞书 URL 时由 `_inject_doc_context` 自动注入内容；写：`larkhelm doc` CLI 或意图识别后的 DocAgent（两者共用 `doc_handlers.py` 的 dispatcher）。命令面入口由 `command_registry.py` 集中注册，硬编码命令保留在 `handlers/_message.py` 顶部（仅 `/cancel` / `/rename` / `/btw` / model shortcut 等需要触发 per-chat 锁 / cancel_event 的特例）。
 

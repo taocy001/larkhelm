@@ -46,6 +46,10 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
     (re.compile(r"\bds-[a-zA-Z0-9]{32,}\b"), "ds-***"),
     # REQ-08: high-entropy hex strings (40+ chars)
     (re.compile(r"\b[0-9a-f]{40,}\b"), "***hex***"),
+    # Feishu APP_ID / APP_SECRET in JSON form: "APP_SECRET": "cli_xxx..."
+    (re.compile(r'(?i)("APP_(?:ID|SECRET)"\s*:\s*")[^"]{8,}"'), r'\1***"'),
+    # tenant_access_token / user_access_token values (token= or token:)
+    (re.compile(r'(?i)(tokens?\s*[=:]\s*)[^\s,;\'"\)]{16,}'), r'\1***'),
 )
 
 
