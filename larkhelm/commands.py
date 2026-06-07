@@ -779,7 +779,7 @@ def _cmd_history(chat_id: str, show_all: bool = False, msg_id: str = None):
         # at 20 pairs, so users saw the 20 *oldest* entries — not what
         # "全部历史" implies. Build the full chronological item list first,
         # then keep the tail. ──
-        MAX_PAIRS = 50
+        MAX_PAIRS = 100
 
         # items: (is_pair, rendered_line) in chronological order. Reset
         # markers are interleaved so separators stay anchored to the pairs
@@ -3378,21 +3378,30 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
                     _t(lang, "🔄 升级中", "🔄 Upgrading"),
                     _t(lang, "正在拉取最新代码…", "Pulling latest code…"),
                     color="grey")
+
+    def _git(*args, timeout=60):
+        return subprocess.run(
+            ["git", "-C", str(source_dir), *args],
+            capture_output=True, text=True, timeout=timeout,
+        )
+
     try:
-        _br = subprocess.run(
-            ["git", "-C", str(source_dir), "branch", "--show-current"],
-            capture_output=True, text=True, timeout=10,
-        )
-        branch = _br.stdout.strip() or "master"
-        _rm = subprocess.run(
-            ["git", "-C", str(source_dir), "remote"],
-            capture_output=True, text=True, timeout=10,
-        )
-        remote = (_rm.stdout.strip().splitlines() or ["origin"])[0]
-        r = subprocess.run(
-            ["git", "-C", str(source_dir), "pull", "--autostash", remote, branch],
-            capture_output=True, text=True, timeout=60,
-        )
+        branch = _git("branch", "--show-current", timeout=10).stdout.strip() or "master"
+        remote = (_git("remote", timeout=10).stdout.strip().splitlines() or ["origin"])[0]
+        # Fetch FIRST and separately, so the remote ref is current and
+        # available for the reset fallback even if the merge step fails. A
+        # failed fetch is a real error (network / auth / bad remote) and must
+        # not be papered over by a stale-ref reset.
+        fetch = _git("fetch", remote, branch, timeout=60)
+        if fetch.returncode != 0:
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "❌ 升级失败", "❌ Upgrade Failed"),
+                            _t(lang,
+                               f"git fetch 失败（网络 / 认证 / remote 配置）：\n```\n{(fetch.stderr or fetch.stdout)[:500]}\n```",
+                               f"git fetch failed (network / auth / remote config):\n```\n{(fetch.stderr or fetch.stdout)[:500]}\n```"),
+                            color="red")
+            return
+        r = _git("pull", "--autostash", remote, branch, timeout=60)
     except Exception as e:
         send_card_reply(chat_id, msg_id,
                         _t(lang, "❌ 升级失败", "❌ Upgrade Failed"),
@@ -3400,18 +3409,77 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
                         color="red")
         return
 
+    # Recovery: `git pull --autostash` cannot resolve an unmerged / conflicted
+    # working tree (e.g. the delete/modify conflict on the auto-generated
+    # `larkhelm/_version.py` left behind by pulling across the "untrack
+    # _version.py" commit). It just dies with "you have unmerged files".
+    # Rather than dumping the error and stranding the operator on the old
+    # version, fall back to a hard reset onto the freshly-fetched remote ref —
+    # but ONLY when HEAD has no commits that aren't already on the remote, so
+    # we never silently discard unpushed local work.
+    recovery_note = ""
     if r.returncode != 0:
-        send_card_reply(chat_id, msg_id,
-                        _t(lang, "❌ 升级失败", "❌ Upgrade Failed"),
-                        f"```\n{(r.stderr or r.stdout)[:600]}\n```", color="red")
-        return
+        pull_err = (r.stderr or r.stdout) or ""
+        ahead = "?"
+        try:
+            _av = _git("rev-list", "--count", f"{remote}/{branch}..HEAD", timeout=10)
+            if _av.returncode == 0:
+                ahead = _av.stdout.strip()
+        except Exception as _ae:
+            _debug_log(f"[Upgrade] ahead-count probe failed: {_ae}")
+        if ahead == "0":
+            _debug_log(
+                f"[Upgrade] pull failed on dirty/unmerged tree; "
+                f"resetting --hard to {remote}/{branch}"
+            )
+            try:
+                rs = _git("reset", "--hard", f"{remote}/{branch}", timeout=60)
+            except Exception as _re:
+                rs = None
+                _debug_log(f"[Upgrade] reset --hard raised: {_re}")
+            if rs is not None and rs.returncode == 0:
+                r = rs  # treat the reset output as the pull result below
+                recovery_note = _t(lang,
+                    "⚠️ 工作区存在冲突/未合并文件，已 `git reset --hard` 到 "
+                    f"`{remote}/{branch}`（丢弃了本地未提交改动）。\n\n",
+                    "⚠️ Working tree had conflicts/unmerged files; "
+                    f"hard-reset to `{remote}/{branch}` (discarded local uncommitted changes).\n\n")
+            else:
+                _rs_err = (rs.stderr or rs.stdout) if rs is not None else "reset raised exception"
+                send_card_reply(chat_id, msg_id,
+                                _t(lang, "❌ 升级失败", "❌ Upgrade Failed"),
+                                _t(lang,
+                                   f"git pull 失败，自动恢复（reset --hard）也失败：\n"
+                                   f"```\n{pull_err[:280]}\n— reset —\n{_rs_err[:280]}\n```",
+                                   f"git pull failed and auto-recovery (reset --hard) also failed:\n"
+                                   f"```\n{pull_err[:280]}\n— reset —\n{_rs_err[:280]}\n```"),
+                                color="red")
+                return
+        else:
+            # Local-only commits exist (or ahead-count unknown): a hard reset
+            # would destroy unpushed work, so stop and tell the operator.
+            send_card_reply(chat_id, msg_id,
+                            _t(lang, "❌ 升级失败", "❌ Upgrade Failed"),
+                            _t(lang,
+                               f"git pull 失败，且本地有 **{ahead}** 个未推送提交，已停止自动恢复以免丢失：\n"
+                               f"```\n{pull_err[:400]}\n```\n\n"
+                               f"请手动解决冲突后重试；或确认可丢弃本地改动后执行 "
+                               f"`git -C {source_dir} reset --hard {remote}/{branch}`。",
+                               f"git pull failed and there are **{ahead}** unpushed local commit(s); "
+                               f"auto-recovery stopped to avoid data loss:\n"
+                               f"```\n{pull_err[:400]}\n```\n\n"
+                               f"Resolve manually then retry, or (if local changes are disposable) run "
+                               f"`git -C {source_dir} reset --hard {remote}/{branch}`."),
+                            color="red")
+            return
 
     output = r.stdout.strip()
-    if "Already up to date" in output:
+    if not recovery_note and "Already up to date" in output:
         send_card_reply(chat_id, msg_id,
                         _t(lang, "✅ 已是最新版本", "✅ Already Up to Date"),
                         output, color="green")
         return
+    output = recovery_note + output
 
     # Step 2: reinstall package into the running venv so execv picks up new
     # code. Editable installs reuse ``pip install -e`` (re-links the venv
