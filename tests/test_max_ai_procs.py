@@ -391,7 +391,8 @@ class DetectorEdgeCasesTests(unittest.TestCase):
             self.assertIsNone(rb._detect_cgroup_memory_max())
 
     def test_detect_physical_ram_mb_default_on_failure(self):
-        """If /proc/meminfo unreadable, return the conservative 4096 fallback."""
+        """If both /proc/meminfo and `sysctl hw.memsize` are unavailable,
+        return the conservative 4096 fallback."""
         from larkhelm import runner_base as rb
         import builtins
         real_open = builtins.open
@@ -401,8 +402,28 @@ class DetectorEdgeCasesTests(unittest.TestCase):
                 raise OSError("simulated")
             return real_open(path, *a, **kw)
 
-        with patch("builtins.open", side_effect=fake_open):
+        # Also fail the macOS/BSD sysctl fallback so the final 4096 is reached.
+        with patch("builtins.open", side_effect=fake_open), \
+                patch("larkhelm.runner_base.subprocess.run",
+                      side_effect=OSError("no sysctl")):
             self.assertEqual(rb._detect_physical_ram_mb(), 4096)
+
+    def test_detect_physical_ram_mb_macos_sysctl_fallback(self):
+        """On macOS (no /proc/meminfo) the probe reads `sysctl hw.memsize`."""
+        from larkhelm import runner_base as rb
+        import builtins
+        from unittest.mock import MagicMock
+        real_open = builtins.open
+
+        def fake_open(path, *a, **kw):
+            if str(path) == "/proc/meminfo":
+                raise OSError("simulated")
+            return real_open(path, *a, **kw)
+
+        fake_proc = MagicMock(returncode=0, stdout=str(24 * 1024 * 1024 * 1024))
+        with patch("builtins.open", side_effect=fake_open), \
+                patch("larkhelm.runner_base.subprocess.run", return_value=fake_proc):
+            self.assertEqual(rb._detect_physical_ram_mb(), 24 * 1024)
 
 
 if __name__ == "__main__":

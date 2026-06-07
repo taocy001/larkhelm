@@ -139,24 +139,40 @@ def _detect_cgroup_memory_max() -> int | None:
 
 
 def _detect_physical_ram_mb() -> int:
-    """Read ``MemTotal`` from /proc/meminfo; returns MB, or 4096 on failure.
+    """Return physical RAM in MB.
 
-    The conservative 4 GB fallback matches typical 4-GB VPS where the OOM
-    incidents originated — guessing high would silently re-introduce the OOM.
+    Linux: read ``MemTotal`` from /proc/meminfo.
+    macOS / BSD: fall back to ``sysctl hw.memsize`` (the bridge runs locally
+    on dev Macs too, where /proc/meminfo doesn't exist — without this the
+    probe silently returned 4096 and capped MAX_AI_PROCS to 4 on a 24 GB box,
+    *and* every claude SIGKILL got mislabelled "cgroup OOM").
+
+    Final fallback is the conservative 4 GB that matches typical 4-GB VPS
+    where the original OOM incidents occurred — guessing high would silently
+    re-introduce the OOM.
     """
+    # Linux — /proc/meminfo
     try:
         with open("/proc/meminfo", "r") as f:
             first = f.readline()
-    except OSError:
-        return 4096
-    # Format: "MemTotal:       16321448 kB"
-    parts = first.split()
-    if len(parts) < 2:
-        return 4096
+        parts = first.split()  # "MemTotal:       16321448 kB"
+        if len(parts) >= 2:
+            return int(parts[1]) // 1024
+    except (OSError, ValueError):
+        pass
+
+    # macOS / BSD — sysctl hw.memsize (bytes)
     try:
-        return int(parts[1]) // 1024
-    except ValueError:
-        return 4096
+        out = subprocess.run(
+            ["sysctl", "-n", "hw.memsize"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return int(out.stdout.strip()) // (1024 * 1024)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+
+    return 4096
 
 
 def _compute_max_procs(worker_rss_mb: int = WORKER_RSS_MB_DEFAULT) -> tuple[int, str]:
@@ -436,26 +452,35 @@ class BaseProcessRunner(abc.ABC):
         #      set just before that ``self._proc.kill()`` call. The user
         #      should see a timeout-shaped error.
         #
-        #   B. The OS / cgroup OOM-killer killed it. cgroup MemoryMax on
-        #      the larkhelm.service is typically 2.8G, and the node-based
-        #      claude CLI's *virtual* memory routinely exceeds 20 GB even
-        #      with NODE_OPTIONS=--max-old-space-size=384 (V8 only caps
-        #      the old-gen heap, not buffer pools / mmap / JIT cache). The
-        #      kernel selects the largest task in the cgroup — almost
-        #      always the CLI subprocess, not the python bridge — as the
-        #      OOM victim. Pre-fix bug: this path raised TimeoutError too,
-        #      so the user saw "执行超过 360 分钟" cards for what was
-        #      actually an OOM kill 5 minutes into the task.
+        #   B. The OS killed it with SIGKILL. The likely cause differs by
+        #      platform, so the message branches on sys.platform — the old
+        #      unconditional "cgroup OOM / systemctl / dmesg / node CLI"
+        #      wording was Linux/systemd-specific and badly misled macOS dev
+        #      users (no cgroup exists, claude is a native arm64 binary not
+        #      node, and the box had 24 GB free when the kill fired).
+        #      Pre-fix bug: this path raised TimeoutError too, so the user
+        #      saw "执行超过 360 分钟" cards for what was actually a kill.
         if self._watch_killed:
             raise TimeoutError(
                 f"{self.backend_name} force-killed (no output for ≥{_cfg.HARD_TIMEOUT}s)"
             )
+        if sys.platform == "linux":
+            raise RuntimeError(
+                f"{self.backend_name} killed by OS (rc=-9, likely cgroup OOM). "
+                "Check `systemctl status larkhelm` and dmesg for "
+                "'task=claude ... oom-kill'. Probable causes: CLI virtual "
+                "memory exceeded cgroup MemoryMax (default 2.8G), large file/"
+                "image attachments expanding tool buffers, or runaway tool output."
+            )
+        # macOS / other: no cgroup. Most likely the kernel's memory-pressure
+        # killer (jetsam) or the CLI process crashing. Point the operator at
+        # the right diagnostics instead of Linux-only tooling.
         raise RuntimeError(
-            f"{self.backend_name} killed by OS (rc=-9, likely cgroup OOM). "
-            "Check `systemctl status larkhelm` and dmesg for "
-            "'task=claude ... oom-kill'. Probable causes: node CLI virtual "
-            "memory exceeded cgroup MemoryMax (default 2.8G), large file/"
-            "image attachments expanding tool buffers, or runaway tool output."
+            f"{self.backend_name} killed by OS (rc=-9 / SIGKILL). On macOS this is "
+            "usually the memory-pressure killer (jetsam) or a CLI crash, not a "
+            "config OOM limit. Check Console.app / `log show --predicate "
+            "'eventMessage CONTAINS \"jetsam\"'` and free memory; large "
+            "attachments or runaway tool output can also trigger it."
         )
 
     def _handle_non_json_stdout(self, line: str) -> None:
@@ -730,6 +755,11 @@ class BaseProcessRunner(abc.ABC):
                 try:
                     self._proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
+                    # We're killing it ourselves (cleanup after the read loop
+                    # ended), so flag it — otherwise the resulting rc=-9 would
+                    # funnel into _on_kill_signal's external-SIGKILL branch and
+                    # mislabel an already-completed query as an OOM kill.
+                    self._watch_killed = True
                     try:
                         self._proc.kill()
                         self._proc.wait(timeout=10)
@@ -752,7 +782,11 @@ class BaseProcessRunner(abc.ABC):
             raise QueryCancelledError("query cancelled")
 
         rc = self._proc.returncode
-        if rc == -9:
+        # Only treat SIGKILL as fatal when we have no result. If the read loop
+        # already parsed a complete result and broke out, a lingering process
+        # killed during cleanup (finally block) is harmless — don't surface it
+        # as an OOM/timeout error and discard a perfectly good answer.
+        if rc == -9 and not self._result_text:
             self._on_kill_signal()
 
         if rc != 0 and not self._result_text:
