@@ -1196,6 +1196,7 @@ def _init_app_config() -> None:
     config.setdefault("anthropic_layered_cache_traffic", 0.0)
     config.setdefault("claude_session_reset_turns", 50)
     config.setdefault("chat_agent_cheap_routing_enabled", True)
+    config.setdefault("memory_prefer_cheap_enabled", True)
     config.setdefault("recent_crew_sticky_ttl_sec", 1800)
     config.setdefault("recent_crew_sticky_max_injections", 5)
 

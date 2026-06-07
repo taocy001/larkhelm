@@ -892,7 +892,9 @@ def _run_one_shot(prompt: str, ns: str, prefer_cheap: bool = False,
 
     cheap_spec = None
     if prefer_cheap:
-        cheap_spec = BACKEND_REGISTRY.get_by_tag(["cheap"])
+        import larkhelm.config as _cfg
+        if _cfg.config.get("memory_prefer_cheap_enabled", True):
+            cheap_spec = BACKEND_REGISTRY.get_by_tag(["cheap"])
         if cheap_spec is not None:
             _debug_log(f"[Memory] one_shot using cheap backend {cheap_spec.id} (ns={ns})")
 
