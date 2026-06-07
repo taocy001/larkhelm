@@ -6,40 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **LarkHelm** is a Python integration layer that bridges Feishu (Lark) messenger with Claude and Gemini AI CLIs. It maintains a WebSocket connection to Feishu and dispatches user messages to AI processes, streaming responses back as interactive Feishu cards.
 
-## Running the Bridge
+## Running / Testing
 
-```bash
-# 推荐通过 install.sh 安装（依赖通过 pyproject.toml 统一管理）
-# 参见 README.md 快速开始
+> 安装与启动见 README.md §快速开始；本地开发见 README.md §本地开发。
 
-# 开发模式手动安装
-pipx install -e .
-# 或不使用 pipx：
-pip install -e .
-
-# Run
-python3 -m larkhelm start
-python3 -m larkhelm start --config /path/to/config.json --data-dir /path/to/data
-```
-
-## Testing
-
-仓库自带 pytest 套件（`tests/` 下 ~170 个测试文件），统一入口在 `Makefile` / `scripts/check.sh`：
-
-```bash
-make test                       # pytest 全套（含 pytest-timeout 守护）
-make lint                       # ruff bug-detector 子集
-make type                       # mypy 严格白名单
-make all                        # 上面三个
-
-make test ARGS="-k pure -x"     # 转发额外参数
-./scripts/check.sh test         # 没装 make 时直接调脚本
-
-python3 -c "import larkhelm.bridge; print('OK')"   # 仅检查包能否 import
-python3 -m larkhelm --help                          # 命令行入口
-```
-
-> 跑测试 / lint / type check 需要 `pip install -e ".[dev]"`（带 pytest-timeout / mypy / ruff）。
+`make test` 是正确的测试入口（含 pytest-timeout 守护），不要直接 `pytest`。针对性运行：`make test ARGS="-k xxx"`。需要先 `pip install -e ".[dev]"`。
 
 ## Configuration
 
@@ -371,13 +342,7 @@ cat updated.md | larkhelm doc write "https://feishu.cn/docx/xxxx"
 
 > **文档操作**：没有 `/doc` 用户命令。读：消息含飞书 URL 时由 `_inject_doc_context` 自动注入内容；写：`larkhelm doc` CLI 或意图识别后的 DocAgent（两者共用 `doc_handlers.py` 的 dispatcher）。命令面入口由 `command_registry.py` 集中注册，硬编码命令保留在 `handlers/_message.py` 顶部（仅 `/cancel` / `/rename` / `/btw` / model shortcut 等需要触发 per-chat 锁 / cancel_event 的特例）。
 
-外部 CLI（不是飞书命令）：
-
-| CLI | 作用 |
-|---|---|
-| `larkhelm voice probe [--no-benchmark] [--no-write]` | 安装时一次性 probe：检 ffmpeg + CPU flags + RAM + 实测 RTF；自动写回 `config.json` 的 `voice_enabled` / `voice_engine` / `voice_model_size` |
-| `larkhelm memory export [output.zip] [--chat-ids ID…] [--data-dir DIR] [--include-debug-log]` | 导出持久化数据到 zip 文件（无需 bridge 在线） |
-| `larkhelm memory import <archive.zip> [--replace] [--dry-run] [--data-dir DIR]` | 从 zip 恢复数据；默认合并（state.json merge + JSONL 去重）；`--replace` 覆盖写入 |
+外部 CLI 用法见 README.md §CLI Reference。
 
 ## Key Features
 
@@ -498,11 +463,9 @@ register(CommandSpec(
 | New crew agent type | `agent_hub/builtin/` 子类化 `AgentExecutor`，或通过 `pyproject.toml` `[project.entry-points."larkhelm.agents"]` 暴露 plugin | 详见 [`.crew_workspace/design.md`](.crew_workspace/design.md) §Phase 5 |
 | New memory layer | `memory.py` + sidecar（如 `memory_*_slots.py`）+ retriever 接入 | 走 LRU + mtime_ns 缓存协议 |
 
-## 监控集成（Prometheus，P2 REQ-01）
+## 监控集成（Prometheus）
 
-> 完整指标列表（23 条）见 [`.crew_workspace/metrics_reference.md`](.crew_workspace/metrics_reference.md)
-
-`health_endpoint_port > 0` 时，`larkhelm.health_server` 暴露 `/health` `/ready` `/metrics`。`/metrics` 默认走 prometheus-client（需 `pip install -e ".[metrics]"`），缺装或 `metrics_text_legacy=true` 时回退 P1 手写文本。
+> 用户面配置见 README.md §监控集成；完整指标列表见 [`.crew_workspace/metrics_reference.md`](.crew_workspace/metrics_reference.md)。
 
 新增指标时在 `metrics.py` 注册，同步更新 `.crew_workspace/metrics_reference.md`。`health_bind_addr` 默认 `127.0.0.1`，不要直接暴露 `0.0.0.0`。
 
