@@ -1123,7 +1123,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
 
             from larkhelm.router import resolve_backend, LockedBackendUnavailableError
             from larkhelm.backend_registry import BACKEND_REGISTRY
-            from larkhelm.health_signals import NO_HEALTH_UPDATE
+            from larkhelm.health_signals import NO_HEALTH_UPDATE, NON_RETRIABLE
             from larkhelm.backend_cli import run_claude, run_gemini, run_kimi
             from larkhelm.backend_api import run_anthropic, run_google, run_openai_compat
             from larkhelm.api_session import load_history, save_history
@@ -1202,12 +1202,12 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                                           on_soft_timeout=_on_soft_timeout,
                                           images=images)
             else:
-                # Failover loop: iterate orchestrator chain, mark unhealthy on exception
-                # No delegation when the user explicitly forced a specific backend.
-                worker_specs = {} if _force_direct else {
-                    s.id: s for s in BACKEND_REGISTRY.all_enabled()
-                    if s.healthy and s.role != "orchestrator"
-                }
+                # Failover loop: iterate orchestrator chain, mark unhealthy on exception.
+                # Delegation (worker_specs) is disabled: with a single orchestrator backend
+                # the DELEGATE round-trip adds overhead with no benefit.  Worker-role
+                # backends (e.g. DeepSeek) are still registered for other purposes but
+                # should not receive user queries via the delegation path.
+                worker_specs: dict = {}
                 output = None
                 last_err: Exception | None = None
                 for attempt_spec in chain:
@@ -1236,6 +1236,11 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                         _debug_log(f"[{trace_id}][DoQuery] backend {attempt_spec.id} failed: {_be}")
                         category = BACKEND_REGISTRY.record_call_failure(attempt_spec.id, str(_be))
                         last_err = _be
+                        # OOM / timeout: host resource issue, not a retriable backend fault.
+                        # Re-raise immediately so the outer handler shows an error card
+                        # instead of silently falling back to a different backend.
+                        if category in NON_RETRIABLE:
+                            raise
                         # Show brief failover notice to user if more backends remain
                         remaining = [s for s in chain if s.healthy and s.id != attempt_spec.id]
                         if remaining and category not in NO_HEALTH_UPDATE:

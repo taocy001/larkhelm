@@ -31,6 +31,12 @@ NO_HEALTH_UPDATE = frozenset({USER_CANCEL, TIMEOUT})
 #: Categories that flip healthy=False on the very first occurrence.
 INSTANT_UNHEALTHY = frozenset({AUTH, QUOTA, MODEL_NOT_FOUND})
 
+#: Categories that must NOT be retried on a different backend.
+#: OOM/TIMEOUT is a host resource issue — falling back to another backend is wrong:
+#: it silently serves a different AI while the real problem (memory pressure) goes unnoticed.
+#: USER_CANCEL is also non-retriable (user intent).
+NON_RETRIABLE = frozenset({TIMEOUT, USER_CANCEL})
+
 # ── Pattern table (applied top-down) ──────────────────────────────────────────
 
 _PATTERNS: list[tuple[str, list[str]]] = [

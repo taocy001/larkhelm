@@ -140,4 +140,11 @@ def resolve_backend(
         _debug_log(f"[router] {chat_id}: orchestrator → {orch_chain[0].id}")
         return orch_chain[0]
 
+    # No orchestrators available — fall back to any healthy+enabled backend
+    # (covers edge cases where all backends are role=worker or non-standard config)
+    for spec in BACKEND_REGISTRY._specs.values():
+        if spec.healthy and spec.enabled:
+            _debug_log(f"[router] {chat_id}: no-orchestrator fallback → {spec.id}")
+            return spec
+
     raise RuntimeError("No healthy backend available — all backends are down or disabled")

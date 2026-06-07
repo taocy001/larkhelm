@@ -226,7 +226,7 @@ def test_resolve_backend_honours_exclude_backend_ids(
     )
     reg._specs["kimi"] = BackendSpec(
         id="kimi", provider="kimi_cli",
-        display_name="Kimi", role="worker",
+        display_name="Kimi", role="orchestrator",
         tags=["tools"], healthy=True, enabled=True,
         capability_scores={"coding": 0.8, "tools": 0.9},
     )

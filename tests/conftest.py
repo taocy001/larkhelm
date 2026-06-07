@@ -204,8 +204,9 @@ def fake_backend_registry(monkeypatch):
     import larkhelm.backend_registry as _br_mod
 
     reg = BackendRegistry()
-    # Default: 3 backends — orchestrator (claude), worker (kimi), worker (deepseek)
-    # so resolver tests can flip flags without touching internals.
+    # Default: 3 backends — orchestrator (claude + kimi), worker (deepseek)
+    # Kimi is orchestrator because provider=kimi_cli + tags=[tools] (matches auto-inference rule).
+    # Deepseek stays worker: no tools tag, API-only backend.
     reg._specs["claude"] = BackendSpec(
         id="claude", provider="claude_cli", display_name="Claude",
         role="orchestrator", tags=["tools", "vision"],
@@ -215,7 +216,7 @@ def fake_backend_registry(monkeypatch):
     )
     reg._specs["kimi"] = BackendSpec(
         id="kimi", provider="kimi_cli", display_name="Kimi",
-        role="worker", tags=["tools"],
+        role="orchestrator", tags=["tools"],
         capability_scores={"reasoning": 0.8, "coding": 0.85,
                            "long_context": 0.85, "tools": 0.8, "chat": 0.85},
         healthy=True, enabled=True, command="kimi",

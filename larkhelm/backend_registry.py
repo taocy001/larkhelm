@@ -331,7 +331,8 @@ class BackendRegistry:
             [s for s in candidates
              if s.role == "orchestrator" and "tools" in s.tags and not s.provider.endswith("_cli")],
             [s for s in candidates if s.role == "orchestrator"],
-            candidates,
+            # group 4 intentionally omitted: worker-role backends (e.g. DeepSeek) must not
+            # receive user queries via the failover chain — OOM/failure shows an error card.
         ]
         for group in groups:
             for spec in group:
