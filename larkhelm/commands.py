@@ -773,15 +773,20 @@ def _cmd_history(chat_id: str, show_all: bool = False, msg_id: str = None):
         send_card_reply(chat_id, msg_id, title, "\n".join(parts) + footer, color="blue", normalize=False)
 
     else:
-        # ── /history all: all records, separator lines at resets, max 20 entries ──
-        parts: list[str] = []
-        pending_user: dict = None
-        pair_count = 0
-        MAX_PAIRS = 20
+        # ── /history all: all records across resets, separators at reset
+        # points, showing the MOST RECENT entries (capped to keep the card
+        # sane). The previous code iterated from the oldest record and broke
+        # at 20 pairs, so users saw the 20 *oldest* entries — not what
+        # "全部历史" implies. Build the full chronological item list first,
+        # then keep the tail. ──
+        MAX_PAIRS = 50
 
+        # items: (is_pair, rendered_line) in chronological order. Reset
+        # markers are interleaved so separators stay anchored to the pairs
+        # that follow them.
+        items: list[tuple[bool, str]] = []
+        pending_user: dict = None
         for r in records:
-            if pair_count >= MAX_PAIRS:
-                break
             if r["role"] == "reset":
                 ts = r["ts"][5:16].replace("T", " ")
                 which = r.get("content", "reset:all").replace("reset:", "")
@@ -789,20 +794,37 @@ def _cmd_history(chat_id: str, show_all: bool = False, msg_id: str = None):
                     {"all": "全部", "claude": "Claude", "gemini": "Gemini"}.get(which, which),
                     {"all": "all", "claude": "Claude", "gemini": "Gemini"}.get(which, which),
                 )
-                parts.append(f"— ♻️ {_t(lang, f'重置（{label}）', f'reset ({label})')} {ts} —")
+                items.append((False, f"— ♻️ {_t(lang, f'重置（{label}）', f'reset ({label})')} {ts} —"))
                 pending_user = None
             elif r["role"] == "user":
                 pending_user = r
             elif r["role"] in ("assistant", "error") and pending_user:
-                parts.append(_pair_line(pending_user, r))
+                items.append((True, _pair_line(pending_user, r)))
                 pending_user = None
-                pair_count += 1
+
+        total_pairs = sum(1 for is_pair, _ in items if is_pair)
+
+        # Keep the tail: walk backwards collecting until MAX_PAIRS pairs are
+        # gathered (reset markers in that window come along for free).
+        if total_pairs > MAX_PAIRS:
+            kept: list[tuple[bool, str]] = []
+            pc = 0
+            for is_pair, line in reversed(items):
+                kept.append((is_pair, line))
+                if is_pair:
+                    pc += 1
+                    if pc >= MAX_PAIRS:
+                        break
+            kept.reverse()
+            items = kept
+
+        parts = [line for _, line in items]
+        pair_count = sum(1 for is_pair, _ in items if is_pair)
 
         if not parts:
             send_card_reply(chat_id, msg_id, _t(lang, "📜 对话历史", "📜 History"), _t(lang, "_暂无对话记录_", "_No conversation records_"), color="blue")
             return
 
-        total_pairs = len(_build_pairs(records))
         if lang == "en":
             title = f"📜 History ({pair_count} entries"
             title += f" of {total_pairs})" if total_pairs > pair_count else ")"
@@ -1255,6 +1277,10 @@ def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
     # P0 (design.md §6.5 AC-03): show Claude session counters and how far
     # they are from triggering an auto-reset, so operators can spot a
     # prefix-bloat session before the threshold actually fires.
+    # Collect every backend's session-counter line into ONE block so the
+    # "\n\n".join(parts) below only adds a single blank line before the block
+    # (not between each backend line — part of the "too many blank lines" fix).
+    _session_lines: list[str] = []
     try:
         sc = get_session_counters(chat_id)
         if sc.get("enabled"):
@@ -1265,9 +1291,8 @@ def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
             pct_cache = min(100, int(sc_cache * 100 / t_cache))
             pct_turns = min(100, int(sc_turns * 100 / t_turns))
             pct = max(pct_cache, pct_turns)
-            parts.append("---")
-            parts.append(
-                f"**{_lt(lang, '当前 session', 'Current session')}："
+            _session_lines.append(
+                f"› **{_lt(lang, '当前 session', 'Current session')}："
                 f"{sc_turns} {_turns_word} / {sc_cache:,} tokens cache_read"
                 f"{_lt(lang, f'（距离阈值 {pct}%）', f' ({pct}% to threshold)')}**"
             )
@@ -1285,14 +1310,17 @@ def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
                 _pct_c = min(100, int(_sc_cache * 100 / max(1, _t_cache))) if _t_cache else 0
                 _pct_t = min(100, int(_sc_turns * 100 / max(1, _t_turns))) if _t_turns else 0
                 _pct = max(_pct_c, _pct_t)
-                parts.append(
-                    f"**{_backend} session：{_sc_turns} {_turns_word} / {_sc_cache:,} tokens "
+                _session_lines.append(
+                    f"› **{_backend} session：{_sc_turns} {_turns_word} / {_sc_cache:,} tokens "
                     f"cache_read{_lt(lang, f'（距离阈值 {_pct}%）', f' ({_pct}% to threshold)')}**"
                 )
         except Exception as _be:
             _debug_log(f"[stats] backend session counters render failed: {_be}")
     except Exception as e:
         _debug_log(f"[stats] session counters render failed: {e}")
+    if _session_lines:
+        parts.append("---")
+        parts.append("\n".join(_session_lines))
 
     # If persistent data is empty (fresh deploy or upgrade from old version), show in-memory stats as fallback
     if not stats_all and stats_mem:
@@ -1307,7 +1335,14 @@ def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
     # chat's persistent stats above, so this is a per-agent split, not a
     # separate accounting source. STATS_AGENT_TYPE_BREAKDOWN_ENABLED=false
     # restores the P2 single-line summary.
-    parts.extend(_render_crew_agent_breakdown(chat_id, lang))
+    # _render_crew_agent_breakdown returns ["---", header, row1, row2, ...].
+    # Keep the "---" as its own top-level part (blank-line-separated divider),
+    # but join the header + rows into ONE block so the "\n\n".join(parts) below
+    # doesn't insert a blank line between every crew-agent row.
+    _crew_lines = _render_crew_agent_breakdown(chat_id, lang)
+    if _crew_lines:
+        parts.append(_crew_lines[0])              # "---" divider
+        parts.append("\n".join(_crew_lines[1:]))  # header + agent rows, tight
 
     send_card_reply(chat_id, msg_id,
                     _lt(lang, "📊 Token 统计", "📊 Token Stats"),

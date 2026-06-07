@@ -49,9 +49,26 @@ def _is_table_line(line: str) -> bool:
     return s.startswith("|") and s.endswith("|") and len(s) > 2
 
 
+def _is_tight_line(s: str) -> bool:
+    """A "tight" line is a markdown list item or an indented continuation —
+    consecutive tight lines should stack without a blank line between them
+    (otherwise structured blocks like /stats get a blank line after every
+    row). Plain prose lines are NOT tight and still get paragraph breaks."""
+    if not s:
+        return False
+    if s[:1] in (" ", "\t"):          # indented continuation row
+        return True
+    t = s.lstrip()
+    # markdown list markers plus the "›" detail glyph used by /stats blocks
+    return bool(re.match(r"(?:[-*+›]\s|\d+[.)]\s)", t))
+
+
 def _normalize_newlines(text: str) -> str:
-    """Double newlines outside code blocks for Feishu paragraph breaks.
-    Table rows are kept contiguous so _md_to_body_elements can detect them."""
+    """Insert Feishu paragraph breaks between prose lines, but keep consecutive
+    list/indented ("tight") lines together with a markdown hard break (two
+    trailing spaces) so structured blocks don't get a blank line after every
+    row. Code blocks are preserved verbatim; table rows are kept contiguous so
+    _md_to_body_elements can detect them."""
     lines = text.split("\n")
     result: list[str] = []
     in_code = False
@@ -64,10 +81,15 @@ def _normalize_newlines(text: str) -> str:
             result.append(line)
         else:
             curr_table = _is_table_line(line)
-            prev_table = bool(result) and _is_table_line(result[-1])
+            prev_raw = result[-1] if result else ""
+            prev_table = bool(result) and _is_table_line(prev_raw)
             if not curr_table and not prev_table:
-                if result and result[-1] != "" and line != "":
-                    result.append("")
+                if result and prev_raw != "" and line != "":
+                    if _is_tight_line(line) and _is_tight_line(prev_raw):
+                        # Stack tight rows with a hard break, no blank line.
+                        result[-1] = prev_raw.rstrip() + "  "
+                    else:
+                        result.append("")
             result.append(line)
     return "\n".join(result)
 
