@@ -3337,14 +3337,25 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
     except Exception as e:
         _debug_log(f"[Upgrade] prev_head probe failed: {e}")
 
-    # Step 1: git pull
+    # Step 1: git pull — resolve branch + remote explicitly so pull works
+    # even when the local branch has no upstream tracking info.
     send_card_reply(chat_id, msg_id,
                     _t(lang, "🔄 升级中", "🔄 Upgrading"),
                     _t(lang, "正在拉取最新代码…", "Pulling latest code…"),
                     color="grey")
     try:
+        _br = subprocess.run(
+            ["git", "-C", str(source_dir), "branch", "--show-current"],
+            capture_output=True, text=True, timeout=10,
+        )
+        branch = _br.stdout.strip() or "master"
+        _rm = subprocess.run(
+            ["git", "-C", str(source_dir), "remote"],
+            capture_output=True, text=True, timeout=10,
+        )
+        remote = (_rm.stdout.strip().splitlines() or ["origin"])[0]
         r = subprocess.run(
-            ["git", "-C", str(source_dir), "pull", "--autostash"],
+            ["git", "-C", str(source_dir), "pull", "--autostash", remote, branch],
             capture_output=True, text=True, timeout=60,
         )
     except Exception as e:
