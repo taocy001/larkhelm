@@ -1200,6 +1200,12 @@ def _init_app_config() -> None:
     config.setdefault("recent_crew_sticky_ttl_sec", 1800)
     config.setdefault("recent_crew_sticky_max_injections", 5)
 
+    # Claude Code Workflow（多 Agent 编排，CLI ≥ 2.1.154）。默认关：workflow
+    # 单次可烧数十万 token，必须由用户通过 /ultra 显式 opt-in。关闭时通过
+    # CLAUDE_CODE_DISABLE_WORKFLOWS=1 在 CLI 侧硬禁用（覆盖 skip_permissions
+    # 模式下 bypassPermissions 放行一切工具的情况）。
+    config.setdefault("claude_workflow_enabled", False)
+
     global CLAUDE_SESSION_AUTO_RESET_ENABLED, CLAUDE_SESSION_RESET_CACHE_TOKENS
     global CLAUDE_SESSION_RESET_TURNS, CHAT_AGENT_CHEAP_ROUTING_ENABLED
     global RECENT_CREW_STICKY_TTL_SEC, RECENT_CREW_STICKY_MAX_INJECTIONS

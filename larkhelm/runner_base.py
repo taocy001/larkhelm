@@ -316,6 +316,36 @@ def _dec_active() -> None:
         _active_proc_count -= 1
 
 
+def _summarize_workflow_input(inp: dict) -> str:
+    """Render a Workflow tool_use input as a one-line card summary.
+
+    Workflow 脚本必须以 ``export const meta = {name, description, phases}``
+    开头（纯字面量），所以只在脚本头部做正则抽取；script 缺失时退到
+    scriptPath / name 字段（命名 workflow / resume 调用）。
+    """
+    import re
+    script = inp.get("script") or ""
+    label = str(inp.get("name") or "")
+    desc = ""
+    phases: list[str] = []
+    if isinstance(script, str) and script:
+        head = script[:1500]  # meta 块必在脚本开头；限窗避免匹配到 script body
+        m = re.search(r"name:\s*['\"]([^'\"]+)['\"]", head)
+        if m:
+            label = label or m.group(1)
+        m = re.search(r"description:\s*['\"]([^'\"]+)['\"]", head)
+        if m:
+            desc = m.group(1)[:60]
+        phases = re.findall(r"title:\s*['\"]([^'\"]+)['\"]", head)
+    elif inp.get("scriptPath"):
+        label = label or Path(str(inp["scriptPath"])).stem
+    parts = [p for p in (label, desc) if p]
+    out = " — ".join(parts) if parts else "(inline script)"
+    if phases:
+        out += f"（{len(phases)} phases: {' → '.join(phases[:5])}）"
+    return out[:160]
+
+
 def _truncate_tool_result(content: str, is_error: bool) -> str:
     """Non-error: first 200 chars to last newline. Error: last 200 chars."""
     if is_error:
@@ -680,6 +710,8 @@ class BaseProcessRunner(abc.ABC):
                 return str(todos)[:80]
             if name == "Agent" and "prompt" in inp:
                 return inp["prompt"][:100]
+            if name == "Workflow":
+                return _summarize_workflow_input(inp)
             return ", ".join(f"{k}={repr(v)[:40]}" for k, v in list(inp.items())[:2])
         return str(inp)[:120]
 

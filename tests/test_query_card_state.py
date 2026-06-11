@@ -362,6 +362,82 @@ class ConcurrencyTests(unittest.TestCase):
         self.assertEqual(s.n_completed_tools(), 3 * N)
 
 
+class WorkflowToolTests(unittest.TestCase):
+    """Claude Code Workflow 的特殊生命周期：tool_result 只代表“已启动”。"""
+
+    def test_workflow_result_keeps_in_flight(self):
+        s = _new_state()
+        s.on_tool("Workflow", "review-changes — audit（2 phases）", "wf_1")
+        s.on_tool_result("wf_1", "Started workflow run wf_abc123", False, 0.5)
+        self.assertIn("wf_1", s.active_tools)
+        self.assertTrue(s.active_tools["wf_1"].started_bg)
+        self.assertEqual(s.n_completed_tools(), 0)
+
+    def test_workflow_error_result_completes_as_error(self):
+        s = _new_state()
+        s.on_tool("Workflow", "review-changes", "wf_1")
+        s.on_tool_result("wf_1", "permission denied", True, 0.5)
+        self.assertNotIn("wf_1", s.active_tools)
+        comp = s.snapshot_completed_tools()
+        self.assertEqual(len(comp), 1)
+        self.assertTrue(comp[0].is_error)
+
+    def test_workflow_survives_subsequent_tool(self):
+        s = _new_state()
+        s.on_tool("Workflow", "review-changes", "wf_1")
+        s.on_tool_result("wf_1", "started", False, 0.5)
+        s.on_tool("Bash", "ls", "t_2")
+        self.assertIn("wf_1", s.active_tools)
+        self.assertIn("t_2", s.active_tools)
+        s.on_tool_result("t_2", "ok", False, 0.1)
+        self.assertIn("wf_1", s.active_tools)
+        comp = s.snapshot_completed_tools()
+        self.assertEqual([t.name for t in comp], ["Bash"])
+
+    def test_non_workflow_still_flushed_by_next_tool(self):
+        s = _new_state()
+        s.on_tool("Bash", "ls", "t_1")
+        s.on_tool("Read", "/tmp/x", "t_2")
+        self.assertNotIn("t_1", s.active_tools)
+        self.assertEqual(s.snapshot_completed_tools()[0].name, "Bash")
+
+    def test_render_workflow_block_and_title(self):
+        s = _new_state()
+        s.on_tool("Workflow", "review-changes — audit", "wf_1")
+        r = s.render_body()
+        self.assertIn("🧬", r.tools_md)
+        self.assertIn("编排启动中", r.tools_md)
+        self.assertIn("Workflow 编排中", r.title)
+        s.on_tool_result("wf_1", "started", False, 0.5)
+        r = s.render_body()
+        self.assertIn("后台编排中", r.tools_md)
+
+    def test_workflow_exempt_from_stall_warning(self):
+        from larkhelm.handlers._query_card_state import STALL_THRESHOLD
+        s = _new_state()
+        s.on_tool("Workflow", "review-changes", "wf_1")
+        s.active_tools["wf_1"].start = time.monotonic() - STALL_THRESHOLD - 100
+        r = s.render_body()
+        self.assertNotIn("响应停滞", r.tools_md)
+
+    def test_mixed_active_uses_generic_title(self):
+        s = _new_state()
+        s.on_tool("Workflow", "review-changes", "wf_1")
+        s.on_tool_result("wf_1", "started", False, 0.5)
+        s.on_tool("Bash", "ls", "t_2")
+        r = s.render_body()
+        self.assertIn("工具调用中", r.title)
+
+    def test_snapshot_flushes_workflow_to_completed(self):
+        s = _new_state()
+        s.on_tool("Workflow", "review-changes", "wf_1")
+        s.on_tool_result("wf_1", "started", False, 0.5)
+        s.snapshot_active_tools_as_completed()
+        self.assertEqual(len(s.active_tools), 0)
+        comp = s.snapshot_completed_tools()
+        self.assertEqual([t.name for t in comp], ["Workflow"])
+
+
 class FmtDescTests(unittest.TestCase):
     def test_empty(self):
         self.assertEqual(_fmt_desc(""), "")

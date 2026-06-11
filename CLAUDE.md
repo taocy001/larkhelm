@@ -64,6 +64,7 @@ CLI --data-dir > LARKHELM_DATA_DIR env > /var/lib/larkhelm > ~/.local/share/lark
 | `claude_session_auto_reset_enabled` | 默认 `true`。`claude --resume` 累积 prefix 越过下面任一阈值时自动 `_clear_sid + reset` 并写 milestone；翻 `false` 仅统计不触发 |
 | `claude_session_reset_cache_tokens` | 累计 `usage.cache_read` 阈值，默认 `5_000_000`（5M）；`reason="cache_tokens"` |
 | `claude_session_reset_turns` | 累计 `record_token_usage(model="claude")` 次数阈值，默认 `50`；`reason="turns"` |
+| `claude_workflow_enabled` | 默认 `false`。Claude Code Workflow（多 Agent 编排，CLI ≥ 2.1.154）总开关：`true` 时 `/ultra <task>` 重写 prompt 注入 `ultracode:` 关键字、`Workflow(*)` 进 permission allow 列表；`false` 时 `build_env` 注入 `CLAUDE_CODE_DISABLE_WORKFLOWS=1` 在 CLI 侧硬禁用（覆盖 `skip_permissions` 放行一切的情况）。版本探测 `runner_claude.workflow_supported`（进程内缓存） |
 | `chat_agent_cheap_routing_enabled` | 默认 `true`。`ChatAgent.execute` 调 `resolve_backend_for_task(profile=chat, cost_ceiling=0.10)` 走 DeepSeek/Kimi 等 cheap backend；无健康候选时回落 `_get_chat_model` |
 | `backend_aware_budget_enabled` | 默认 `false`。按 backend context window tier 动态缩放记忆注入预算：Gemini/Kimi（≥256K）+20%，mid-tier（≥64K）不变，小窗口（<64K）−30%；联动字段：`context_window_<id>`（9 个，值 0 = 用内置默认，见 `token_budget.DEFAULT_CONTEXT_WINDOWS`）|
 | `cli_skip_recent_turns_when_sid` | 默认 `true`。`sid` 非空时跳过 recent_turns 注入（多省 ~500 input tokens / call）；flip `false` 强制每次注入 |
@@ -346,6 +347,7 @@ cat updated.md | larkhelm doc write "https://feishu.cn/docx/xxxx"
 | `/doctor` | `_cmd_doctor()` | `commands.py` | Check Claude Code installation and config health |
 | `/lang <zh\|en>` | `_cmd_lang()` | `commands.py` | Switch bot UI language zh / en |
 | `/effort <low\|medium\|high\|xhigh>` | `_cmd_effort()` | `commands.py` | Set Claude reasoning effort |
+| `/ultra <task>` | `_ultra_precheck()` + inline | `commands.py` + `handlers/_message.py` | Claude Code Workflow（注入 `ultracode:` 关键字走主查询流程；需 `claude_workflow_enabled`）|
 
 > **文档操作**：没有 `/doc` 用户命令。读：消息含飞书 URL 时由 `_inject_doc_context` 自动注入内容；写：`larkhelm doc` CLI 或意图识别后的 DocAgent（两者共用 `doc_handlers.py` 的 dispatcher）。命令面入口由 `command_registry.py` 集中注册，硬编码命令保留在 `handlers/_message.py` 顶部（仅 `/cancel` / `/rename` / `/btw` / model shortcut 等需要触发 per-chat 锁 / cancel_event 的特例）。
 

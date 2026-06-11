@@ -124,6 +124,7 @@ cd larkhelm
 | `default_model` | 默认模型：`claude` / `gemini` / `kimi` / `deepseek` | `claude` |
 | `default_cwd` | Shell 命令的初始工作目录 | `~/code` |
 | `skip_permissions` | 自动放行 Claude 工具权限审批（生产环境建议保持 `false`，仅在受信开发机临时打开） | `false` |
+| `claude_workflow_enabled` | 启用 `/ultra`（Claude Code Workflow 多 Agent 编排，需 claude CLI ≥ 2.1.154）；单次 workflow 可消耗数十万 token，按需开启 | `false` |
 | `response_timeout` | 软超时（秒），超时后后台继续运行 | `300` |
 | `hard_timeout` | 硬超时（秒），强制终止子进程 | `21600` |
 | `max_card_len` | 卡片单次最大字符数 | `3000` |
@@ -284,6 +285,7 @@ sudo systemctl restart larkhelm
 | `/model claude\|gemini\|kimi\|deepseek` | 切换当前会话默认模型 |
 | `/lock [<id>\|off]` | 持久锁定 backend（同 `/model`；`list` 查看所有可用 backend） |
 | `/effort [low\|medium\|high\|xhigh]` | 调整 Claude 推理力度；不带参数显示选项卡 |
+| `/ultra <任务>` | 用 Claude Code Workflow（多 Agent 编排）执行任务；token 消耗远高于普通查询，需在配置中开启 `claude_workflow_enabled` 且 claude CLI ≥ 2.1.154 |
 | `/lang [zh\|en]` | 切换机器人界面语言；不带参数显示当前设置 |
 | `/rename <名称>` | 给当前会话命名 |
 | `/pickup` | 获取在终端接力会话的命令 |
@@ -742,6 +744,7 @@ All commands start with `/`. Sending an image message automatically forwards it 
 | `/model claude\|gemini\|kimi\|deepseek` | Switch default model for this chat |
 | `/lock [<id>\|off]` | Persistently lock a backend (same as `/model`; `list` shows all available) |
 | `/effort [low\|medium\|high\|xhigh]` | Set Claude reasoning effort; omit arg to see options card |
+| `/ultra <task>` | Run the task via Claude Code Workflow (multi-agent orchestration); token-heavy — requires `claude_workflow_enabled` in config and claude CLI ≥ 2.1.154 |
 | `/lang [zh\|en]` | Switch bot UI language; omit arg to see current setting |
 | `/rename <name>` | Name the current session |
 | `/pickup` | Get terminal resume commands |

@@ -57,6 +57,11 @@ class ToolRecord:
     result: str = ""
     full_result: str = ""        # populated when result > 200 chars
     is_error: bool = False
+    # Claude Code Workflow（多 Agent 编排）特殊语义：tool_result 只代表
+    # “已启动”（立即返回 task ID，编排在后台继续），所以 workflow 记录
+    # 不随 result 落到 completed，而是保持 in-flight 到查询结束。
+    is_workflow: bool = False
+    started_bg: bool = False     # workflow 已收到“启动成功”的 tool_result
 
 
 @dataclass
@@ -210,19 +215,33 @@ class QueryCardState:
         with self._tools_lock:
             now_mono = time.monotonic()
             for tid, t in list(self.active_tools.items()):
+                if t.is_workflow:
+                    # 后台 workflow 不被后续工具调用 flush——它仍在编排中，
+                    # elapsed 持续累计到查询结束。
+                    continue
                 self.completed_tools.append(ToolRecord(
                     name=t.name, desc=t.desc,
                     elapsed=now_mono - t.start,
                     is_error=False, result="",
                 ))
-            self.active_tools.clear()
-            self.active_tools[tool_id] = ToolRecord(name=name, desc=desc, start=now_mono)
+                del self.active_tools[tid]
+            self.active_tools[tool_id] = ToolRecord(
+                name=name, desc=desc, start=now_mono,
+                is_workflow=(name == "Workflow"),
+            )
         self.set_dirty(True)
 
     def on_tool_result(self, tool_id: str, result: str, is_error: bool, elapsed: float) -> None:
         """Backend callback: a tool invocation has produced a result."""
         with self._tools_lock:
-            info = self.active_tools.pop(tool_id, None)
+            info = self.active_tools.get(tool_id)
+            if info is not None and info.is_workflow and not is_error:
+                # Workflow 的成功 tool_result 只表示后台编排已启动，
+                # 保持 in-flight；失败（权限拒绝 / 功能未启用）才落 completed。
+                info.started_bg = True
+                info = None  # 不走下面的 pop 分支
+            else:
+                info = self.active_tools.pop(tool_id, None)
             if info is not None:
                 self.completed_tools.append(ToolRecord(
                     name=info.name, desc=info.desc,
@@ -306,7 +325,13 @@ class QueryCardState:
         for t in act.values():
             tool_elapsed = now_mono - t.start
             desc_str = _fmt_desc(t.desc)
-            if tool_elapsed > STALL_THRESHOLD:
+            if t.is_workflow:
+                # 后台编排长时间无 stdout 是正常形态，豁免停滞告警。
+                label = "后台编排中" if t.started_bg else "编排启动中"
+                tool_parts.append(
+                    f"🧬 **{t.name}** {label} ({_fmt_elapsed(tool_elapsed)}){desc_str}"
+                )
+            elif tool_elapsed > STALL_THRESHOLD:
                 tool_parts.append(
                     f"🔧 **{t.name}** ⚠️ 响应停滞 ({_fmt_elapsed(tool_elapsed)}){desc_str}"
                 )
@@ -326,7 +351,9 @@ class QueryCardState:
             response_md = ""
 
         bg_prefix = "后台·" if in_bg else ""
-        if act:
+        if act and all(t.is_workflow for t in act.values()):
+            title = f"🧬 {self.model_name} · {bg_prefix}Workflow 编排中 ({elapsed})"
+        elif act:
             title = f"⚙️ {self.model_name} · {bg_prefix}工具调用中 ({elapsed})"
         elif cur_text.strip():
             title = f"✍️ {self.model_name} · {bg_prefix}回应中 ({elapsed})"

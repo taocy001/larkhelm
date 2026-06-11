@@ -173,7 +173,11 @@ _HELP_LAYOUT: tuple = (
         "/help",
     )),
     ("static", "model_shortcuts"),
-    ("group", ("⚙️ 模型与推理", "⚙️ Model & Reasoning"), ("/model", "/lock", "/effort")),
+    ("group", ("⚙️ 模型与推理", "⚙️ Model & Reasoning"), (
+        "/model", "/lock", "/effort",
+        ("/ultra", "Workflow 多 Agent 编排（高 token 消耗，需在配置启用）",
+         "Claude Code Workflow orchestration (token-heavy, opt-in via config)"),
+    )),
     ("static", "reset_detail"),
     ("static", "memory_detail"),
     ("static", "doc_section"),
@@ -651,6 +655,21 @@ def _cmd_status(chat_id: str, msg_id: str = None):
     except Exception:
         pass
 
+    # Workflow 行仅在 flag 开启时显示（默认关，不占卡片空间）
+    workflow_line = ""
+    try:
+        if _cfg.config.get("claude_workflow_enabled", False):
+            from larkhelm.runner_claude import workflow_supported
+            _wf_ok, _wf_ver = workflow_supported()
+            if _wf_ok:
+                workflow_line = (f"**Workflow** ✅ {_t(lang, '已启用', 'enabled')}"
+                                 f" (claude {_wf_ver})")
+            else:
+                workflow_line = (f"**Workflow** ⚠️ {_t(lang, 'CLI 过旧，需 ≥ 2.1.154，当前', 'CLI too old, need ≥ 2.1.154, got')}"
+                                 f" {_wf_ver or _t(lang, '未知', 'unknown')}")
+    except Exception:
+        pass
+
     _name = _get_chat_state(chat_id).get('name', '').replace('**', '').replace('`', '')
     _name_label = _t(lang, '会话名', 'Name')
     lines = [
@@ -663,6 +682,7 @@ def _cmd_status(chat_id: str, msg_id: str = None):
         *([ crew_info ] if crew_info else []),
         *([ f"**{_t(lang, 'Token（本次启动）', 'Tokens (session)')}** {token_summary}" ] if token_summary else []),
         *([ backend_summary ] if backend_summary else []),
+        *([ workflow_line ] if workflow_line else []),
         *([ crew_backend_preview ] if crew_backend_preview else []),
         "",
     ]
@@ -1809,6 +1829,51 @@ _KIMI_SESSION_CMDS = {
 _DEEPSEEK_SESSION_CMDS = {
     "/clear", "/reset", "/history", "/exit", "/quit",
 }
+
+
+def _ultra_precheck(chat_id: str, text: str, msg_id: str = None) -> str | None:
+    """Validate a ``/ultra <task>`` invocation; return the rewritten prompt.
+
+    返回 None 表示已回了提示卡（空参数 / flag 关闭 / CLI 过旧），调用方
+    （handlers/_message.py 的 model dispatch 段）直接 return。返回字符串则
+    是注入 ultracode 关键字后的 prompt，沿正常 Claude 查询主流程走。
+    Body 放在 commands.py 是为了让测试不经过消息路由即可直接 import。
+    """
+    lang = _get_lang(chat_id)
+    task = text[len("/ultra"):].strip()
+    if not task:
+        send_card_reply(chat_id, msg_id, _t(lang, "⚠️ 用法", "⚠️ Usage"),
+                        _t(lang,
+                           "`/ultra <任务>` — 用 Claude Code Workflow（多 Agent 编排）执行任务。\n\n"
+                           "适合大型审查 / 调研 / 迁移类任务；**token 消耗远高于普通查询**，请按需使用。",
+                           "`/ultra <task>` — run the task via Claude Code Workflow "
+                           "(multi-agent orchestration).\n\n"
+                           "Best for large reviews / research / migrations; "
+                           "**token cost is far higher than a normal query**."),
+                        color="orange")
+        return None
+    if not _cfg.config.get("claude_workflow_enabled", False):
+        send_card_reply(chat_id, msg_id, _t(lang, "⚠️ Workflow 未启用", "⚠️ Workflow Disabled"),
+                        _t(lang,
+                           "Claude Code Workflow 功能未启用。\n\n"
+                           "在配置文件中设置 `\"claude_workflow_enabled\": true` 并重启服务后可用。",
+                           "Claude Code Workflow is disabled.\n\n"
+                           "Set `\"claude_workflow_enabled\": true` in the config file "
+                           "and restart the service."),
+                        color="orange")
+        return None
+    from larkhelm.runner_claude import workflow_supported
+    supported, ver = workflow_supported()
+    if not supported:
+        send_card_reply(chat_id, msg_id, _t(lang, "⚠️ claude CLI 版本过旧", "⚠️ claude CLI Too Old"),
+                        _t(lang,
+                           f"Workflow 需要 claude CLI ≥ 2.1.154，当前检测到：`{ver or '未知'}`。\n\n"
+                           "升级 claude CLI 后重启服务再试。",
+                           f"Workflow requires claude CLI ≥ 2.1.154; detected: `{ver or 'unknown'}`.\n\n"
+                           "Upgrade the claude CLI and restart the service."),
+                        color="orange")
+        return None
+    return f"ultracode: {task}"
 
 
 def _cmd_cli_native(chat_id: str, model: str, cmd: str, msg_id: str = None):

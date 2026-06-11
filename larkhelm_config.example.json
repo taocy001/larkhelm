@@ -281,6 +281,8 @@
   "claude_session_auto_reset_enabled": true,
   "claude_session_reset_cache_tokens": 5000000,
   "claude_session_reset_turns": 50,
+  "_comment_claude_workflow_enabled": "Claude Code Workflow (multi-agent orchestration, claude CLI >= 2.1.154). Default false: a single workflow can burn hundreds of thousands of tokens, so it must be explicitly opted in. When true, /ultra <task> rewrites the prompt with the ultracode keyword and Workflow(*) is added to the permission allow list; when false, CLAUDE_CODE_DISABLE_WORKFLOWS=1 hard-disables the tool even under skip_permissions.",
+  "claude_workflow_enabled": false,
   "cli_skip_recent_turns_when_sid": true,
   "context_window_kimi-code": 0,
   "crew_checkpoint_ttl_days": 7.0,

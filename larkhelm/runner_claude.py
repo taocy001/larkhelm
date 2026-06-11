@@ -13,6 +13,38 @@ from larkhelm.perm import is_yolo
 from larkhelm.runner_base import BaseProcessRunner, _truncate_tool_result
 
 
+# ── Claude Code Workflow support probe ──────────────────────────────────
+# Workflow tool（多 Agent 编排）于 claude CLI 2.1.154 引入。探测结果按
+# command 路径缓存进程内，bridge 长驻期间 CLI 升级需重启后生效（与
+# backend 健康探测同语义）。
+_WORKFLOW_MIN_VERSION = (2, 1, 154)
+_workflow_probe_cache: dict[str, tuple[bool, str]] = {}
+
+
+def workflow_supported(command: str | None = None) -> tuple[bool, str]:
+    """Return (supported, version_str) for the claude CLI at *command*.
+
+    Probe failure（CLI 缺失 / 超时 / 输出不可解析）返回 (False, "")。
+    """
+    import re as _re
+    import subprocess as _sp
+    cmd = command or _cfg.CLAUDE_CMD
+    if cmd in _workflow_probe_cache:
+        return _workflow_probe_cache[cmd]
+    supported, ver = False, ""
+    try:
+        out = _sp.run([cmd, "--version"], capture_output=True, text=True,
+                      timeout=10).stdout
+        m = _re.search(r"(\d+)\.(\d+)\.(\d+)", out or "")
+        if m:
+            ver = m.group(0)
+            supported = tuple(int(g) for g in m.groups()) >= _WORKFLOW_MIN_VERSION
+    except Exception as e:
+        _debug_log(f"[claude] workflow version probe failed: {e}")
+    _workflow_probe_cache[cmd] = (supported, ver)
+    return supported, ver
+
+
 def _build_stream_json_input(text: str, image_paths: list[str]) -> str:
     """Build stdin for Claude --input-format stream-json with base64-encoded images."""
     import base64
@@ -101,14 +133,15 @@ class ClaudeRunner(BaseProcessRunner):
         if _cfg.SKIP_PERMISSIONS:
             args.append("--dangerously-skip-permissions")
         else:
+            _perm_allow = [
+                "Bash(*)", "Read(*)", "Write(*)", "Edit(*)",
+                "Glob(*)", "Grep(*)", "WebFetch(*)", "WebSearch(*)",
+                "TodoWrite(*)", "TodoRead(*)", "Agent(*)",
+            ]
+            if _cfg.config.get("claude_workflow_enabled", False):
+                _perm_allow.append("Workflow(*)")
             hook_settings = {
-                "permissions": {
-                    "allow": [
-                        "Bash(*)", "Read(*)", "Write(*)", "Edit(*)",
-                        "Glob(*)", "Grep(*)", "WebFetch(*)", "WebSearch(*)",
-                        "TodoWrite(*)", "TodoRead(*)", "Agent(*)",
-                    ]
-                },
+                "permissions": {"allow": _perm_allow},
                 "hooks": {
                     "PreToolUse": [{
                         "hooks": [{
@@ -175,6 +208,10 @@ class ClaudeRunner(BaseProcessRunner):
             "FEISHU_PERM_SOCKET": _cfg.PERM_SOCKET_PATH,
             "FEISHU_PERM_YOLO": "1" if is_yolo(ns) else "0",
         }
+        # flag 关闭时在 CLI 侧硬禁用 Workflow——skip_permissions 模式下
+        # bypassPermissions 会放行一切工具，单靠 allow 列表挡不住。
+        if not _cfg.config.get("claude_workflow_enabled", False):
+            env["CLAUDE_CODE_DISABLE_WORKFLOWS"] = "1"
         # low effort → disable extended thinking (avoids thinking-token overhead)
         try:
             from larkhelm.chat_state import _get_effort

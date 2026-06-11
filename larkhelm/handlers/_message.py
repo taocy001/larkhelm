@@ -711,6 +711,18 @@ def handle_message(data: P2ImMessageReceiveV1):
             target_model = "deepseek"
             prompt = text.split(" ", 1)[1].strip()
             force_backend_id = "deepseek"
+        elif tl == "/ultra" or text.startswith("/ultra "):
+            # Claude Code Workflow（多 Agent 编排）：重写 prompt 注入
+            # ultracode 关键字后走正常 Claude 查询主流程。放在 model
+            # dispatch 段（而非 registry）是因为它要继续占用 per-chat
+            # 锁的 _do_query 路径，与 /c /g /k /d 同类。
+            from larkhelm.commands import _ultra_precheck
+            _rewritten = _ultra_precheck(chat_id, text, _mid)
+            if _rewritten is None:
+                return
+            target_model = "claude"
+            force_backend_id = "claude"
+            prompt = _rewritten
 
         # Vision routing: gemini CLI and DeepSeek HTTP don't support image input;
         # force a vision-capable model.

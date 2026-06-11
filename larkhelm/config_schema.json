@@ -12,6 +12,7 @@
     "default_model":    { "enum": ["claude", "gemini", "kimi", "deepseek"] },
     "default_cwd":      { "type": "string" },
     "skip_permissions": { "type": "boolean" },
+    "claude_workflow_enabled": { "type": "boolean" },
     "response_timeout": { "type": "integer", "minimum": 10 },
     "hard_timeout":     { "type": "integer", "minimum": 60 },
     "max_card_len":     { "type": "integer", "minimum": 200 },
