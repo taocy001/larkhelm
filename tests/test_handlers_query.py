@@ -203,6 +203,134 @@ class TestInjectDocContext(unittest.TestCase):
         self.assertIn("---", result)
 
 
+class TestInjectDocContextSessionDedup(unittest.TestCase):
+    """Session-level doc-injection dedup: the same (chat_id, backend,
+    doc_token, content_hash) injected twice within one backend session
+    downgrades the second injection to a one-line marker. Records are
+    deferred — collected into ``pending_doc_records`` and only effective
+    after the caller commits them via ``record_doc_injection`` (the query
+    path does so after backend success). Clearing the sid
+    (``chat_state._clear_sid(chat_id, model)``) drops only that backend's
+    records.
+    """
+
+    _PATCH_CLIENT = "larkhelm.lark_client.FeishuDocClient"
+    _PATCH_PARSE  = "larkhelm.lark_client.parse_doc_url"
+    _CHAT = "chat_dedup"
+    _TEXT = "请读 https://x.feishu.cn/docx/TOK1"
+
+    def setUp(self):
+        import larkhelm._context_cache as _cc
+        _cc.reset_for_tests()
+
+    def _inject_once(self, content: str, backend: str = "claude",
+                     commit: bool = True, chat_id: str | None = None) -> str:
+        """Run one injection; ``commit=True`` mimics the _do_query success
+        path (records committed after the backend returned), ``commit=False``
+        mimics /cancel or an all-backends-failed query."""
+        chat_id = chat_id or self._CHAT
+        mock_client = MagicMock()
+        mock_client.read.return_value = _make_doc_result("标题A", content)
+        ref = MagicMock()
+        ref.token = "TOK1"
+        pending: list[tuple[str, str]] = []
+        # Disable the TTL doc cache so each call re-reads `content` —
+        # the dedup record (not the cache) is the unit under test here.
+        with patch.object(_cfg_module, "DOC_INJECT_CACHE_ENABLED", False), \
+             patch(self._PATCH_CLIENT, return_value=mock_client), \
+             patch(self._PATCH_PARSE, return_value=ref):
+            result = _inject_doc_context(self._TEXT, chat_id, backend=backend,
+                                         pending_doc_records=pending)
+        if commit:
+            from larkhelm._context_cache import record_doc_injection
+            for tok, h in pending:
+                record_doc_injection(chat_id, backend, tok, h)
+        return result
+
+    def test_second_injection_downgraded_to_marker(self):
+        first = self._inject_once("正文内容V1")
+        self.assertIn("正文内容V1", first)
+
+        second = self._inject_once("正文内容V1")
+        self.assertNotIn("正文内容V1", second)
+        self.assertIn("本会话已注入且未变更", second)
+        self.assertIn("标题A", second)
+        # original message always survives
+        self.assertIn(self._TEXT, second)
+
+    def test_changed_content_reinjects_full_body(self):
+        self._inject_once("正文内容V1")
+        changed = self._inject_once("正文内容V2")
+        self.assertIn("正文内容V2", changed)
+        self.assertNotIn("本会话已注入且未变更", changed)
+
+    def test_clear_sid_restores_full_injection(self):
+        self._inject_once("正文内容V1")
+        # /reset、session_guard、runner crash-recovery 都收敛到 _clear_sid
+        from larkhelm.chat_state import _clear_sid
+        _clear_sid(self._CHAT, "claude")
+        again = self._inject_once("正文内容V1")
+        self.assertIn("正文内容V1", again)
+        self.assertNotIn("本会话已注入且未变更", again)
+
+    def test_dedup_is_per_chat(self):
+        self._inject_once("正文内容V1")
+        other = self._inject_once("正文内容V1", chat_id="another_chat")
+        self.assertIn("正文内容V1", other)
+
+    # ── Cross-backend correctness (sessions are per-(chat, backend)) ──────
+
+    def test_cross_backend_reinjects_full_body(self):
+        """A body injected into the claude session must NOT be downgraded
+        when the same URL is routed to another backend (/g, /model switch,
+        failover): that backend's session never saw the body."""
+        self._inject_once("正文内容V1", backend="claude")
+        on_gemini = self._inject_once("正文内容V1", backend="gemini")
+        self.assertIn("正文内容V1", on_gemini)
+        self.assertNotIn("本会话已注入且未变更", on_gemini)
+        # …and back on claude the record still holds.
+        on_claude = self._inject_once("正文内容V1", backend="claude")
+        self.assertIn("本会话已注入且未变更", on_claude)
+
+    def test_clear_sid_only_drops_that_backends_records(self):
+        self._inject_once("正文内容V1", backend="claude")
+        self._inject_once("正文内容V1", backend="gemini")
+        from larkhelm.chat_state import _clear_sid
+        _clear_sid(self._CHAT, "gemini")
+        # gemini session reset → full body again
+        gem = self._inject_once("正文内容V1", backend="gemini")
+        self.assertIn("正文内容V1", gem)
+        # claude session untouched → still deduped
+        cla = self._inject_once("正文内容V1", backend="claude")
+        self.assertIn("本会话已注入且未变更", cla)
+
+    def test_clear_doc_injections_without_backend_drops_all(self):
+        self._inject_once("正文内容V1", backend="claude")
+        self._inject_once("正文内容V1", backend="gemini")
+        from larkhelm._context_cache import clear_doc_injections
+        clear_doc_injections(self._CHAT)
+        for b in ("claude", "gemini"):
+            full = self._inject_once("正文内容V1", backend=b, commit=False)
+            self.assertIn("正文内容V1", full)
+
+    # ── Deferred commit (query failure / cancel leaves no record) ─────────
+
+    def test_record_deferred_until_commit(self):
+        from larkhelm._context_cache import doc_injection_seen
+        import hashlib
+        self._inject_once("正文内容V1", commit=False)
+        h = hashlib.sha256("正文内容V1".encode("utf-8")).hexdigest()
+        self.assertFalse(doc_injection_seen(self._CHAT, "claude", "TOK1", h))
+
+    def test_failed_query_reinjects_full_body(self):
+        """No commit (cancelled / all backends failed) → the next attempt
+        must inject the full body again, not the marker."""
+        self._inject_once("正文内容V1", commit=False)
+        retry = self._inject_once("正文内容V1", commit=False)
+        self.assertIn("正文内容V1", retry)
+        self.assertNotIn("本会话已注入且未变更", retry)
+
+
 class TestRunBackendSingleSidSkipsSystem(unittest.TestCase):
     """REQ-05 regression: claude_cli with non-empty sid must NOT re-inject
     system_prompt — the resumed session already carries that context, and

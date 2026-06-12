@@ -155,3 +155,43 @@ def test_run_deepseek_timeout(monkeypatch):
                         lambda **kw: (_ for _ in ()).throw(TimeoutError("t")))
     with pytest.raises(TimeoutError):
         _bcli.run_deepseek(_spec(provider="deepseek_api"), "c1", "hi", None, "/tmp")
+
+
+# ── session_key override (/btw dedicated session) ─────────────────────
+
+
+def test_run_claude_session_key_defaults_to_spec_id(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(_bcli, "_spawn_claude_proc",
+                        lambda **kw: captured.update(kw) or "ok")
+    _bcli.run_claude(_spec(), "c1", "hi", None, "/tmp")
+    assert captured["session_key"] == "test-cli"
+
+
+def test_run_claude_session_key_override(monkeypatch):
+    """/btw passes session_key=btw_<spec.id> so a new sid does NOT
+    overwrite the main-session sid."""
+    captured = {}
+    monkeypatch.setattr(_bcli, "_spawn_claude_proc",
+                        lambda **kw: captured.update(kw) or "ok")
+    _bcli.run_claude(_spec(), "c1", "hi", None, "/tmp",
+                     session_key="btw_test-cli")
+    assert captured["session_key"] == "btw_test-cli"
+
+
+def test_run_gemini_session_key_override(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(_bcli, "_spawn_gemini_proc",
+                        lambda **kw: captured.update(kw) or "ok")
+    _bcli.run_gemini(_spec(provider="gemini_cli"), "c1", "hi", None, "/tmp",
+                     session_key="btw_test-cli")
+    assert captured["session_key"] == "btw_test-cli"
+
+
+def test_run_kimi_session_key_override(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(_bcli, "_spawn_kimi_proc",
+                        lambda **kw: captured.update(kw) or "ok")
+    _bcli.run_kimi(_spec(provider="kimi_cli"), "c1", "hi", None, "/tmp",
+                   session_key="btw_test-cli")
+    assert captured["session_key"] == "btw_test-cli"

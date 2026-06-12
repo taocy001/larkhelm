@@ -158,7 +158,6 @@ def test_background_threads_skips_perm_when_skip_permissions(monkeypatch, fake_c
     monkeypatch.setattr(_br, "_start_perm_server", lambda: perm_called.append(True))
     monkeypatch.setattr(_br, "_start_cron_scheduler", lambda: None)
     monkeypatch.setattr(_br, "_start_gc_thread", lambda: None)
-    monkeypatch.setattr(_br, "_start_memory_boot_warmup", lambda: None)
     import larkhelm.memory_watchdog as _mw
     monkeypatch.setattr(_mw, "start_memory_watchdog", lambda _x: None)
     # Health server: monkey-patch so the test doesn't bind a port.

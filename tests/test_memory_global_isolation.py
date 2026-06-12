@@ -123,6 +123,103 @@ def test_contextvar_is_thread_isolated(tmp_path, monkeypatch):
     assert results["alice"] != results["bob"]
 
 
+# ─── MEM-C1 cascade write path: explicit sender_open_id pass-through ──────────
+#
+# ContextVar does NOT cross threads (CPython 3.14 default build:
+# sys.flags.thread_inherit_context=0; ≤3.13 has no inheritance at all), so
+# the cascade write path must carry sender_open_id as an explicit parameter
+# all the way down — otherwise group chats fall back to chat_state's
+# last-writer-wins value and pollute another user's global memory.
+
+def _reset_cascade_coordinator(mem):
+    with mem._active_cancels_lock:
+        mem._active_cascade_cancels.clear()
+    with mem._CASCADE_SEM_LOCK:
+        mem._CASCADE_SEM = None
+
+
+def test_cascade_passes_explicit_sender_to_global_extract(tmp_path, monkeypatch):
+    """_cascade_extract must hand the EXPLICIT sender_open_id to
+    _try_extract_global — not the chat_state fallback value."""
+    import larkhelm.memory as mem
+    _patch_mem(monkeypatch, mem, tmp_path)
+    _reset_cascade_coordinator(mem)
+
+    received = {}
+    done = threading.Event()
+
+    def fake_global(session_content, chat_id, cancel_ev=None, *,
+                    sender_open_id=None):
+        received["sender_open_id"] = sender_open_id
+        done.set()
+
+    monkeypatch.setattr(mem, "_try_extract_global", fake_global)
+    monkeypatch.setattr(mem, "_try_extract_project", lambda *a, **k: None)
+    monkeypatch.setattr("larkhelm.chat_state._get_cwd", lambda chat_id: None)
+    # Group-chat scenario: chat_state holds ANOTHER user (last-writer-wins).
+    monkeypatch.setattr(mem, "_get_chat_state",
+                        lambda chat_id: {"sender_open_id": "ou_bob"})
+
+    mem._cascade_extract("session payload", "chat_grp",
+                         sender_open_id="ou_alice")
+    assert done.wait(timeout=5), "global extract worker did not run"
+    assert received["sender_open_id"] == "ou_alice"
+
+
+def test_cascade_default_sender_is_none(tmp_path, monkeypatch):
+    """Legacy callers (no sender) keep the old fallback chain: the cascade
+    forwards sender_open_id=None untouched."""
+    import larkhelm.memory as mem
+    _patch_mem(monkeypatch, mem, tmp_path)
+    _reset_cascade_coordinator(mem)
+
+    received = {}
+    done = threading.Event()
+
+    def fake_global(session_content, chat_id, cancel_ev=None, *,
+                    sender_open_id="SENTINEL"):
+        received["sender_open_id"] = sender_open_id
+        done.set()
+
+    monkeypatch.setattr(mem, "_try_extract_global", fake_global)
+    monkeypatch.setattr(mem, "_try_extract_project", lambda *a, **k: None)
+    monkeypatch.setattr("larkhelm.chat_state._get_cwd", lambda chat_id: None)
+
+    mem._cascade_extract("session payload", "chat_legacy")
+    assert done.wait(timeout=5), "global extract worker did not run"
+    assert received["sender_open_id"] is None
+
+
+def test_maybe_auto_update_forwards_sender_to_cascade(tmp_path, monkeypatch):
+    """maybe_auto_update(sender_open_id=...) must reach _cascade_extract."""
+    import larkhelm.memory as mem
+    _patch_mem(monkeypatch, mem, tmp_path)
+
+    received = {}
+    done = threading.Event()
+
+    def fake_cascade(session_content, chat_id, *, sender_open_id=None):
+        received["sender_open_id"] = sender_open_id
+        done.set()
+
+    monkeypatch.setattr(mem, "_cascade_extract", fake_cascade)
+    monkeypatch.setattr(mem, "_get_turn_count", lambda chat_id: 5)
+    monkeypatch.setattr(mem, "_read_logs_tail", lambda chat_id: [
+        {"ts": "2026-06-12T00:00:00", "role": "user",
+         "content": "hi", "model": "claude"},
+        {"ts": "2026-06-12T00:00:01", "role": "assistant",
+         "content": "hello", "model": "claude"},
+    ])
+    monkeypatch.setattr(mem, "load_memory", lambda chat_id: None)
+    monkeypatch.setattr(mem, "generate_memory",
+                        lambda *a, **k: "## Summary\nsubstantial content here")
+    monkeypatch.setattr(mem, "save_memory", lambda *a, **k: True)
+
+    mem.maybe_auto_update("chat_grp", force=True, sender_open_id="ou_alice")
+    assert done.wait(timeout=5), "cascade was not invoked"
+    assert received["sender_open_id"] == "ou_alice"
+
+
 # ─── load/save round-trip with explicit param ─────────────────────────────────
 
 def test_load_save_roundtrip_with_explicit_param(tmp_path, monkeypatch):

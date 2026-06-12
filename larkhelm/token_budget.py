@@ -1,11 +1,8 @@
-"""larkhelm · Backend-aware token budget manager (Week-2 milestone).
+"""larkhelm · Backend-aware token budget manager.
 
-Maps each backend / provider to its context-window size and computes:
-
-1. **Memory injection budget** — how many characters of retrieved memory
-   should be composed into the prompt, scaled to the backend's capacity.
-2. **API max_tokens** — a safe output-token ceiling that leaves headroom
-   for the estimated input size.
+Maps each backend / provider to its context-window size and computes
+**API max_tokens** — a safe output-token ceiling that leaves headroom
+for the estimated input size.
 
 All defaults are conservative (slightly below advertised max) to account
 for tokenisation overhead, system instructions, and tool definitions.
@@ -48,30 +45,6 @@ _MIN_CONTEXT_WINDOW = 32_000
 # Safety factor: only use 85 % of the advertised window so tokenisation
 # overhead, system instructions, and tool definitions don't blow the limit.
 _DEFAULT_SAFETY_FACTOR = 0.85
-
-# Memory-budget scale factors by context-window tier.
-# Tier boundaries are intuitive rather than precise; the goal is to avoid
-# choking small-window models while letting large-window ones breathe.
-# Ordered **descending** so the first match is the highest applicable tier.
-# Anything below the smallest boundary uses _SMALL_SCALE (−30 %).
-_SMALL_SCALE = 0.70
-_TIER_SCALES: list[tuple[int, float]] = [
-    (256_000, 1.20),   # large  → +20 % over POLICY_TABLE default
-    (64_000,  1.00),   # medium → keep default
-    (0,       _SMALL_SCALE),  # small  → −30 %
-]
-
-# Floor for any memory budget (chars) — never drop below this.
-_MEMORY_BUDGET_FLOOR = 400
-
-# Default per-agent_type token_budget from POLICY_TABLE (chars).
-# Kept here so token_budget stays importable without dragging
-# memory_retriever (and its heavy import graph) at module level.
-_DEFAULT_AGENT_BUDGETS: dict[str, int] = {
-    "chat": 1200,
-    "btw":   800,
-    "doc":   800,
-}
 
 # All backends currently share the same output cap (8192 tokens).
 # Stored as a constant; if a future backend needs a different cap,
@@ -138,46 +111,6 @@ def resolve_context_window(spec: "BackendSpec | None") -> int:
 
     # 4. Floor
     return _MIN_CONTEXT_WINDOW
-
-
-def compute_memory_char_budget(
-    spec: "BackendSpec | None",
-    agent_type: str = "chat",
-    *,
-    base_budget: int | None = None,
-) -> int:
-    """Backend-aware memory-injection budget in **characters**.
-
-    The returned value is meant to replace ``InjectionPolicy.token_budget``
-    (which is expressed in characters, not tokens, for historical reasons).
-
-    Algorithm:
-      * Look up the backend's context window.
-      * Pick a tier scale (large +20 %, medium ±0 %, small −30 %).
-      * Multiply the base budget (from ``POLICY_TABLE`` or *base_budget*)
-        by the scale.
-      * Clamp to ``_MEMORY_BUDGET_FLOOR``.
-
-    When the feature flag ``backend_aware_budget_enabled`` is ``False``
-    (or when *spec* is ``None``), the base budget is returned unchanged
-    so existing callers see no behaviour change.
-    """
-    cfg = _config()
-    if not bool(cfg.get("backend_aware_budget_enabled", False)):
-        return base_budget if base_budget is not None else _DEFAULT_AGENT_BUDGETS.get(agent_type, 1200)
-
-    window = resolve_context_window(spec)
-    base = base_budget if base_budget is not None else _DEFAULT_AGENT_BUDGETS.get(agent_type, 1200)
-
-    # Walk tiers descending; the last entry (boundary=0) always matches.
-    scale = _SMALL_SCALE
-    for boundary, s in _TIER_SCALES:
-        if window >= boundary:
-            scale = s
-            break
-
-    budget = int(base * scale)
-    return max(_MEMORY_BUDGET_FLOOR, budget)
 
 
 def compute_api_max_tokens(

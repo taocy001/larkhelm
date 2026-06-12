@@ -53,6 +53,11 @@ def _cache_set(chat_id: str, file_key: str, extracted: "ExtractedFile") -> None:
             _file_cache.popitem(last=False)
 
 
+def _approx_kb(n: int) -> int:
+    """Approximate size in KB for user-facing truncation hints (min 1)."""
+    return max(1, round(n / 1024))
+
+
 # ── AI output file marker regex ──────────────────────────────────────────────
 _FILE_MARKER_RE = re.compile(
     r"<!--FILE:([^\s>]+?)-->([\s\S]*?)<!--/FILE-->",
@@ -140,7 +145,10 @@ class FileProcessor:
                 result.files.append(_cached)
                 if _cached.content is not None:
                     result.blocks.append(
-                        self._build_block(_cached.file_name, _cached.ext, _cached.content)
+                        self._build_block(
+                            _cached.file_name, _cached.ext, _cached.content,
+                            size=_cached.size, path=_cached.path,
+                        )
                     )
                 return result
 
@@ -195,7 +203,9 @@ class FileProcessor:
             result.files.append(extracted)
 
             if content is not None:
-                result.blocks.append(self._build_block(file_name, ext, content))
+                result.blocks.append(self._build_block(
+                    file_name, ext, content, size=actual_size, path=local_path,
+                ))
             else:
                 result.warnings.append(
                     f"文件 `{file_name}` 内容提取失败，请尝试发送截图或粘贴文本。"
@@ -264,8 +274,25 @@ class FileProcessor:
             _bump_extract_error("pdf", "unknown")
             return None
 
-    def _build_block(self, file_name: str, ext: str, content: str) -> str:
+    def _build_block(
+        self,
+        file_name: str,
+        ext: str,
+        content: str,
+        size: int = 0,
+        path: str = "",
+    ) -> str:
+        """Build a markdown code block for one file, truncating to the per-file
+        char budget (``file_inject_max_chars_per_file``, ``<= 0`` disables)."""
         lang = self._lang_tag(ext)
+        max_chars = int(getattr(_cfg, "FILE_INJECT_MAX_CHARS_PER_FILE", 4000))
+        if max_chars > 0 and len(content) > max_chars:
+            kb = _approx_kb(size if size > 0 else len(content))
+            ref = path or file_name
+            return (
+                f"### {file_name}\n```{lang}\n{content[:max_chars]}\n```\n"
+                f"（已截断，原文件约 {kb} KB，完整文件见 {ref}）"
+            )
         return f"### {file_name}\n```{lang}\n{content}\n```"
 
     def _lang_tag(self, ext: str) -> str:
@@ -316,11 +343,23 @@ def files_to_prompt_fragment(files: "list[ExtractedFile]") -> str:
     if not files:
         return ""
     fp = FileProcessor()
-    blocks = [
-        fp._build_block(f.file_name, f.ext, f.content)
-        for f in files
-        if f.content is not None
-    ]
+    total_budget = int(getattr(_cfg, "FILE_INJECT_MAX_CHARS_TOTAL", 8000))
+    blocks: list[str] = []
+    used = 0
+    for f in files:
+        if f.content is None:
+            continue
+        block = fp._build_block(f.file_name, f.ext, f.content, size=f.size, path=f.path)
+        if total_budget > 0 and used + len(block) > total_budget:
+            kb = _approx_kb(f.size if f.size > 0 else len(f.content))
+            blocks.append(f"[文件 {f.file_name} ({kb} KB) 未注入，超出总预算]")
+            _debug_log(
+                f"[FileHandler] total inject budget exceeded, degraded "
+                f"file={f.file_name!r} (used={used}, budget={total_budget})"
+            )
+            continue
+        blocks.append(block)
+        used += len(block)
     if not blocks:
         return ""
     return "[用户上传了以下文件]\n\n" + "\n\n".join(blocks) + "\n\n---\n\n"

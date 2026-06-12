@@ -64,9 +64,8 @@ class HealthSnapshot:
 # ── Active-query counter ────────────────────────────────────────────────
 #
 # Single source of truth: ``_query_card_state._DIAG_ACTIVE``, mutated by
-# ``record_query_start`` / ``record_query_end`` which BOTH legacy
-# ``_do_query`` and ``QuerySession.run`` already call (see
-# ``_query.py:435/938`` and ``_query_session.py:97/140``). The earlier
+# ``record_query_start`` / ``record_query_end`` which ``_do_query``
+# already calls. The earlier
 # ``increment_active_query`` / ``decrement_active_query`` pair lived here
 # but was never wired to production code — independent P1 review caught
 # that ``/metrics``'s ``larkhelm_active_queries`` gauge was permanently

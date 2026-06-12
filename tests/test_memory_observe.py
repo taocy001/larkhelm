@@ -231,7 +231,7 @@ class TestMeterInjection(_ObserveTestBase):
 
 
 class TestBudgetUnchanged(_ObserveTestBase):
-    """AC-07: full three-layer load + new overhead → still ≤ TOTAL_MEMORY_BUDGET."""
+    """AC-07: full three-layer load + tag overhead → still ≤ layer caps + slack."""
 
     def test_total_within_budget_after_meter_injection(self):
         cwd = str(self.tmp / "proj")
@@ -249,10 +249,12 @@ class TestBudgetUnchanged(_ObserveTestBase):
                   extra_fm="chat_id: chat_B\nturns: 1\nversion: 1\n")
 
         ctx = larkhelm_memory.get_memory_context("chat_B", cwd=cwd)
-        # Budget: 4500 + slack from tag/meter overhead.
-        # Combined raw content = 4300; full tags + meter lines should fit
-        # comfortably under TOTAL_MEMORY_BUDGET + 3 * _TAG_OVERHEAD_PER_LAYER.
-        upper_bound = larkhelm_memory.TOTAL_MEMORY_BUDGET + 3 * larkhelm_memory._TAG_OVERHEAD_PER_LAYER
+        # Combined raw content = 800 + 1500 + 2000 = 4300 chars; allow ~90
+        # chars/layer of slack for the [LAYER]…[/LAYER] tags + separators.
+        raw_total = (larkhelm_memory.GLOBAL_MAX_CHARS
+                     + larkhelm_memory.PROJECT_MAX_CHARS
+                     + larkhelm_memory.SESSION_MAX_CHARS)
+        upper_bound = raw_total + 3 * 90
         self.assertLessEqual(len(ctx), upper_bound,
                              f"len(ctx)={len(ctx)} exceeds {upper_bound}")
         # The content must still be visible — trimming hasn't replaced the

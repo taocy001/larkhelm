@@ -154,6 +154,17 @@ def _save_sid(chat_id: str, sid: str, model: str) -> None:
 
 def _clear_sid(chat_id: str, model: str) -> None:
     _sid_file(chat_id, model).unlink(missing_ok=True)
+    # The doc-injection session records (one full body injected per session,
+    # see _context_cache) are scoped to the per-(chat, model) session
+    # lifetime: every sid-clear path (/reset, /compact, session_guard,
+    # runner crash-recovery) must also drop that model's records so the
+    # next fresh session re-injects full doc bodies. Other models' sessions
+    # still carry their bodies, so their records survive.
+    try:
+        from larkhelm._context_cache import clear_doc_injections
+        clear_doc_injections(chat_id, model)
+    except Exception as e:
+        _debug_log(f"[Session] clear_doc_injections failed: {e}")
 
 
 # ═══════════════════════════════════════════════════

@@ -76,7 +76,11 @@ def run_claude(
     system_prompt: str | None = None,
     suppress_token_recording: bool = False,
     usage_holder: dict | None = None,
+    session_key: str | None = None,
 ) -> str:
+    """``session_key`` overrides the sid storage key (default: ``spec.id``).
+    Used by /btw to persist its dedicated session under ``btw_<spec.id>``
+    instead of overwriting the main-session sid."""
     try:
         out = _spawn_claude_proc(
             chat_id=chat_id,
@@ -95,7 +99,7 @@ def run_claude(
             command=spec.command or None,
             model=spec.model or None,
             extra_args=spec.extra_args or None,
-            session_key=spec.id,
+            session_key=session_key or spec.id,
             system_prompt=system_prompt,
             suppress_token_recording=suppress_token_recording,
             usage_holder=usage_holder,
@@ -122,6 +126,7 @@ def run_gemini(
     use_session: bool = True,
     suppress_token_recording: bool = False,
     usage_holder: dict | None = None,
+    session_key: str | None = None,
 ) -> str:
     try:
         out = _spawn_gemini_proc(
@@ -138,7 +143,7 @@ def run_gemini(
             command=spec.command or None,
             model=spec.model or None,
             extra_args=spec.extra_args or None,
-            session_key=spec.id,
+            session_key=session_key or spec.id,
             suppress_token_recording=suppress_token_recording,
             usage_holder=usage_holder,
         )
@@ -222,6 +227,7 @@ def run_kimi(
     allow_retry: bool = False,
     suppress_token_recording: bool = False,
     usage_holder: dict | None = None,
+    session_key: str | None = None,
 ) -> str:
     try:
         out = _spawn_kimi_proc(
@@ -241,7 +247,7 @@ def run_kimi(
             command=spec.command or None,
             model=spec.model or None,
             extra_args=spec.extra_args or None,
-            session_key=spec.id,
+            session_key=session_key or spec.id,
             suppress_token_recording=suppress_token_recording,
             usage_holder=usage_holder,
         )

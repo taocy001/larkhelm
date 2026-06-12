@@ -3,13 +3,10 @@
 Covers:
   * LRUCache hit/miss/promote/evict semantics
   * TTLCache get/expire/invalidate_chat
-  * cached_recent_turns: hit + mtime / size invalidation + dedup_prefix
-    differentiation + LRU eviction
-  * cached_memory_layer: 3-layer key isolation + mtime invalidation +
-    file_path=None bypass
+  * cached_recent_turns: hit + conv_seqno invalidation + LRU eviction
   * cached_doc_read: 60s hit window + 61s expiry + chat_id isolation +
     DocPermissionError NOT cached
-  * Flag-off bypass: 3 enabled flags → loader called every time
+  * Flag-off bypass: enabled flags → loader called every time
   * Prometheus counter bridge increments
   * 4-thread concurrency stress check (no KeyError, no torn state)
 """
@@ -17,7 +14,6 @@ from __future__ import annotations
 
 import atexit
 import json
-import os
 import shutil
 import tempfile
 import threading
@@ -161,8 +157,8 @@ class CachedRecentTurnsTests(unittest.TestCase):
             calls[0] += 1
             return "fixed-result"
 
-        a = cc.cached_recent_turns("chatA", 6, 2000, None, loader=loader)
-        b = cc.cached_recent_turns("chatA", 6, 2000, None, loader=loader)
+        a = cc.cached_recent_turns("chatA", 6, 2000, loader=loader)
+        b = cc.cached_recent_turns("chatA", 6, 2000, loader=loader)
         self.assertEqual(a, "fixed-result")
         self.assertEqual(b, "fixed-result")
         self.assertEqual(calls[0], 1, "second call should have hit cache")
@@ -175,10 +171,10 @@ class CachedRecentTurnsTests(unittest.TestCase):
             calls[0] += 1
             return f"v{calls[0]}"
 
-        a = cc.cached_recent_turns("chatA", 6, 2000, None, conv_seqno=0,
+        a = cc.cached_recent_turns("chatA", 6, 2000, conv_seqno=0,
                                    loader=loader)
         # Simulate a new conversation turn (seqno incremented by log_entry).
-        b = cc.cached_recent_turns("chatA", 6, 2000, None, conv_seqno=1,
+        b = cc.cached_recent_turns("chatA", 6, 2000, conv_seqno=1,
                                    loader=loader)
         self.assertEqual(calls[0], 2, "different seqno → cache miss → loader called twice")
         self.assertNotEqual(a, b)
@@ -193,29 +189,30 @@ class CachedRecentTurnsTests(unittest.TestCase):
             return f"v{calls[0]}"
 
         # First call (miss, seqno=5)
-        a = cc.cached_recent_turns("chatA", 6, 2000, None, conv_seqno=5,
+        a = cc.cached_recent_turns("chatA", 6, 2000, conv_seqno=5,
                                    loader=loader)
         # Retry call (same seqno=5 — no new user/assistant entry yet) → hit
-        b = cc.cached_recent_turns("chatA", 6, 2000, None, conv_seqno=5,
+        b = cc.cached_recent_turns("chatA", 6, 2000, conv_seqno=5,
                                    loader=loader)
         self.assertEqual(calls[0], 1, "same seqno → second call hits cache")
         self.assertEqual(a, b)
 
-    def test_dedup_prefix_excluded_from_key(self):
-        # dedup_prefix is intentionally NOT part of the cache key (see
-        # RecentTurnsKey docstring).  Two calls with different dedup_prefix
-        # values but the same (chat_id, max_turns, max_chars, conv_seqno)
-        # should share the same cache entry — the second call is a hit.
-        calls = [0]
+    def test_dedup_pipeline_removed(self):
+        # The recent-turns dedup pipeline was dead code (dedup_prefix was
+        # hardcoded to None at the only call site) AND its post-dedup output
+        # was cached under a key that did not include the prefix — a latent
+        # cache-poisoning bug. Both were deleted together; pin the removal
+        # so the parameter / helpers don't silently come back without a
+        # prefix-aware cache key.
+        import inspect
+        import larkhelm.log as _log
 
-        def loader():
-            calls[0] += 1
-            return f"v{calls[0]}"
-
-        a = cc.cached_recent_turns("chatA", 6, 2000, "prefix-A", loader=loader)
-        b = cc.cached_recent_turns("chatA", 6, 2000, "prefix-B", loader=loader)
-        self.assertEqual(calls[0], 1, "same conv_seqno → second call is a cache hit")
-        self.assertEqual(a, b, "same cached payload returned for both calls")
+        for name in ("_should_dedup", "_turn_body_prefix", "_match_dedup_prefix"):
+            self.assertFalse(hasattr(_log, name), f"log.{name} should be deleted")
+        for fn in (_log._get_recent_turns, _log._get_recent_turns_uncached,
+                   cc.cached_recent_turns):
+            self.assertNotIn("dedup_prefix", inspect.signature(fn).parameters,
+                             f"{fn.__name__} must not accept dedup_prefix")
 
     def test_lru_eviction_when_capacity_exceeded(self):
         # Reach into the singleton to test capacity behaviour deterministically.
@@ -227,7 +224,7 @@ class CachedRecentTurnsTests(unittest.TestCase):
             return f"v{loader_calls[0]}"
 
         for i in range(65):
-            cc.cached_recent_turns(f"chat{i:04d}", 6, 2000, None, loader=loader)
+            cc.cached_recent_turns(f"chat{i:04d}", 6, 2000, loader=loader)
         # chat0000 should have been evicted.
         stats = cc._recent_turns_cache.stats()
         self.assertLessEqual(stats["size"], 64)
@@ -241,100 +238,9 @@ class CachedRecentTurnsTests(unittest.TestCase):
             return "x"
 
         with patch.object(_cfg, "RECENT_TURNS_CACHE_ENABLED", False):
-            cc.cached_recent_turns("chatA", 6, 2000, None, loader=loader)
-            cc.cached_recent_turns("chatA", 6, 2000, None, loader=loader)
+            cc.cached_recent_turns("chatA", 6, 2000, loader=loader)
+            cc.cached_recent_turns("chatA", 6, 2000, loader=loader)
         self.assertEqual(calls[0], 2, "flag off → loader runs every call")
-
-
-# ════════════════════════════════════════════════════════════════════════
-#  cached_memory_layer
-# ════════════════════════════════════════════════════════════════════════
-
-
-class CachedMemoryLayerTests(unittest.TestCase):
-
-    def setUp(self):
-        cc.reset_for_tests()
-        self.tmp = Path(_TMP) / "mem"
-        self.tmp.mkdir(parents=True, exist_ok=True)
-        self.global_md = self.tmp / "global.md"
-        self.project_md = self.tmp / "project.md"
-        self.global_md.write_text("global body v1")
-        self.project_md.write_text("project body v1")
-        _cfg.MEMORY_LEGACY_CACHE_ENABLED = True
-
-    def test_hit_avoids_loader(self):
-        calls = [0]
-
-        def loader():
-            calls[0] += 1
-            return "out"
-
-        a = cc.cached_memory_layer("global", self.global_md, loader=loader)
-        b = cc.cached_memory_layer("global", self.global_md, loader=loader)
-        self.assertEqual(a, "out")
-        self.assertEqual(b, "out")
-        self.assertEqual(calls[0], 1)
-
-    def test_three_layer_keys_are_isolated(self):
-        # global and project both point to two different files; same loader
-        # output must NOT share keys across layers.
-        gcalls = [0]
-        pcalls = [0]
-
-        def gload():
-            gcalls[0] += 1
-            return "G"
-
-        def pload():
-            pcalls[0] += 1
-            return "P"
-
-        cc.cached_memory_layer("global", self.global_md, loader=gload)
-        cc.cached_memory_layer("project", self.project_md, loader=pload)
-        cc.cached_memory_layer("global", self.global_md, loader=gload)
-        cc.cached_memory_layer("project", self.project_md, loader=pload)
-        # Each loader still called exactly once (first call); the second
-        # was served from cache.
-        self.assertEqual(gcalls[0], 1)
-        self.assertEqual(pcalls[0], 1)
-
-    def test_mtime_change_invalidates(self):
-        calls = [0]
-
-        def loader():
-            calls[0] += 1
-            return f"v{calls[0]}"
-
-        cc.cached_memory_layer("global", self.global_md, loader=loader)
-        new_t = time.time() + 5.0
-        os.utime(self.global_md, (new_t, new_t))
-        cc.cached_memory_layer("global", self.global_md, loader=loader)
-        self.assertEqual(calls[0], 2)
-
-    def test_file_path_none_bypasses(self):
-        calls = [0]
-
-        def loader():
-            calls[0] += 1
-            return None
-
-        cc.cached_memory_layer("global", None, loader=loader)
-        cc.cached_memory_layer("global", None, loader=loader)
-        self.assertEqual(calls[0], 2,
-                         "file_path=None must bypass cache and always call loader")
-
-    def test_disabled_flag_falls_through(self):
-        calls = [0]
-
-        def loader():
-            calls[0] += 1
-            return "x"
-
-        with patch.object(_cfg, "MEMORY_LEGACY_CACHE_ENABLED", False):
-            cc.cached_memory_layer("global", self.global_md, loader=loader)
-            cc.cached_memory_layer("global", self.global_md, loader=loader)
-        self.assertEqual(calls[0], 2)
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -560,7 +466,6 @@ class MetricsBridgeTests(unittest.TestCase):
         from larkhelm import metrics as _metrics
         try:
             _metrics.inc_recent_turns_cache("hit")
-            _metrics.inc_memory_layer_cache("global", "miss")
             _metrics.inc_doc_inject_cache("hit")
         except Exception as e:
             self.fail(f"metrics bridge raised: {e}")
@@ -601,7 +506,7 @@ class ConcurrencyTests(unittest.TestCase):
         def worker(chat_id: str):
             try:
                 for _ in range(100):
-                    cc.cached_recent_turns(chat_id, 6, 2000, None, loader=loader)
+                    cc.cached_recent_turns(chat_id, 6, 2000, loader=loader)
             except Exception as e:
                 errors.append(repr(e))
 
@@ -644,7 +549,7 @@ class ConcurrencyTests(unittest.TestCase):
             try:
                 for _ in range(100):
                     val = cc.cached_recent_turns(
-                        SHARED_CHAT, 6, 2000, None, loader=loader,
+                        SHARED_CHAT, 6, 2000, loader=loader,
                     )
                     if val != "shared-value":
                         errors.append(f"unexpected value: {val!r}")

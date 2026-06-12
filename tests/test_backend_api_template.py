@@ -696,10 +696,14 @@ def test_anthropic_adapter_layered_two_blocks(monkeypatch):
 
 
 def test_anthropic_adapter_default_single_block(monkeypatch):
-    """AC-08: When ANTHROPIC_LAYERED_CACHE_CONTROL=False (default) prepare_request
+    """AC-08: When ANTHROPIC_LAYERED_CACHE_CONTROL=False (legacy opt-out;
+    default flipped to True at the 2026-06-12 graduation) prepare_request
     emits a single system block (byte-identical to pre-Week-4 behaviour)."""
     import larkhelm.config as _cfg
     monkeypatch.setattr(_cfg, "ANTHROPIC_LAYERED_CACHE_CONTROL", False, raising=False)
+    # Pin traffic too: since the 2026-06-12 graduation the default is 1.0,
+    # so the opt-out shape needs both knobs at their rollback values.
+    monkeypatch.setattr(_cfg, "ANTHROPIC_LAYERED_CACHE_TRAFFIC", 0.0, raising=False)
     monkeypatch.setattr(_cfg, "ANTHROPIC_EXTENDED_CACHE_ENABLED", False, raising=False)
 
     mod = types.SimpleNamespace(Anthropic=lambda **kw: None)
@@ -769,7 +773,12 @@ def test_anthropic_adapter_layered_only_stable_no_volatile(monkeypatch):
 
 
 def test_anthropic_adapter_traffic_zero_no_layered(monkeypatch):
-    """AC-05: ANTHROPIC_LAYERED_CACHE_CONTROL=False + traffic=0.0 → single block (not layered)."""
+    """AC-05: ANTHROPIC_LAYERED_CACHE_CONTROL=False + traffic=0.0 → single block.
+
+    Since the 2026-06-12 graduation these are the *opt-out* values (defaults
+    are True / 1.0 — see test_layered_cache_config_defaults_graduated); the
+    rollback path must keep producing the legacy single-block shape.
+    """
     import larkhelm.config as _cfg
     monkeypatch.setattr(_cfg, "ANTHROPIC_LAYERED_CACHE_CONTROL", False, raising=False)
     monkeypatch.setattr(_cfg, "ANTHROPIC_LAYERED_CACHE_TRAFFIC", 0.0, raising=False)

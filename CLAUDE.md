@@ -67,18 +67,19 @@ CLI --data-dir > LARKHELM_DATA_DIR env > /var/lib/larkhelm > ~/.local/share/lark
 | `claude_session_reset_turns` | 累计 `record_token_usage(model="claude")` 次数阈值，默认 `50`；`reason="turns"` |
 | `claude_workflow_enabled` | 默认 `false`。Claude Code Workflow（多 Agent 编排，CLI ≥ 2.1.154）总开关：`true` 时 `/ultra <task>` 重写 prompt 注入 `ultracode:` 关键字、`Workflow(*)` 进 permission allow 列表；`false` 时 `build_env` 注入 `CLAUDE_CODE_DISABLE_WORKFLOWS=1` 在 CLI 侧硬禁用（覆盖 `skip_permissions` 放行一切的情况）。版本探测 `runner_claude.workflow_supported`（进程内缓存） |
 | `chat_agent_cheap_routing_enabled` | 默认 `true`。`ChatAgent.execute` 调 `resolve_backend_for_task(profile=chat, cost_ceiling=0.10)` 走 DeepSeek/Kimi 等 cheap backend；无健康候选时回落 `_get_chat_model` |
-| `backend_aware_budget_enabled` | 默认 `false`。按 backend context window tier 动态缩放记忆注入预算：Gemini/Kimi（≥256K）+20%，mid-tier（≥64K）不变，小窗口（<64K）−30%；联动字段：`context_window_<id>`（9 个，值 0 = 用内置默认，见 `token_budget.DEFAULT_CONTEXT_WINDOWS`）|
+| `anthropic_layered_cache_control_enabled` / `anthropic_layered_cache_traffic` | 默认 `true` / `1.0`（2026-06-12 灰度转正）。system prompt 拆 stable（global+project memory）/ volatile（session memory）双 `cache_control` 块，提升 Anthropic prompt-cache 前缀命中率；设 `false` / `0.0` 回滚单块 |
+| `context_window_<id>` | 9 个 backend 窗口覆写字段，值 `0` = 用内置默认（`token_budget.DEFAULT_CONTEXT_WINDOWS`）；供 API `max_tokens` 计算与 `/stats` `/context` 显示 |
 | `cli_skip_recent_turns_when_sid` | 默认 `true`。`sid` 非空时跳过 recent_turns 注入（多省 ~500 input tokens / call）；flip `false` 强制每次注入 |
+| `api_strip_session_memory_when_history` | 默认 `true`。API backend history 非空时从 extra_system 剥离 `[SESSION MEMORY]` 块（与 history 冗余且每 ~10 轮重写会击穿 prompt-cache 前缀）；设 `false` 恢复全量注入（混合 backend 场景的跨 backend 连续性优先时用） |
 | `recent_turns_cache_enabled` | 默认 `true`，`_get_recent_turns` 走 LRU；flip `false` 直走 tail-read（bisect 用） |
-| `memory_legacy_cache_enabled` | 默认 `true`，三层 memory 走 LRU（key = layer + path + mtime_ns），单层容量 128 |
 | `doc_inject_cache_enabled` / `doc_inject_cache_ttl_sec` | 默认 `true` / `600`s。命中时 `_inject_doc_context` 加 age hint，metric outcome = `hit_with_age_hint`；`DocPermissionError` 与 `DocError` 不入缓存 |
-| `workspace_hint_keyword_gate` | 默认 `false`。`true` 时 `.crew_workspace/` 文件清单仅匹配 `(workspace|计划|任务|设计|prd|design|tasks|review|qa|crew)` 时注入 |
+| `file_inject_max_chars_per_file` / `file_inject_max_chars_total` | 默认 `4000` / `8000`（`<=0` 关闭）。上传文件内容注入预算：单文件超限截断并标注原大小与落盘路径；总预算超限的文件降级为一行「未注入」标记 |
+| `workspace_hint_keyword_gate` | 默认 `true`。`.crew_workspace/` 文件清单仅当消息匹配关键词（英文 `\b(workspace|prd|design|tasks|review|qa|crew)\b` 或中文 `计划|任务|设计|写代码|改代码|修复|重构`）时注入；清单按 mtime 取最新 8 个、>30 天文件不列 |
 
 **灰度总开关 / 失败上报**
 
 | Field | Purpose |
 |---|---|
-| `query_session_v2_traffic` | `_do_query` v2 灰度比 0.0–1.0；默认 `0.0`。`query_session_v2_enabled=true` 时强制 v2 |
 | `metrics_text_legacy` | 默认 `false`；`true` 强制 `/metrics` 走 P1 手写文本（bisect 指标回归用） |
 | `cascade_backoff_max_attempts` | memory cascade / extract buffer 的 ExponentialBackoff 最大尝试次数，默认 `3`（即 sleep `[1.0s, 2.0s]`，单次 cap 30s） |
 | `failure_report_card_enabled` / `plugin_report_card_enabled` | 默认 `false`。失败 / 插件加载诊断卡片总开关，目标 chat 由 `admin_chat_id`（默认 `""`） 决定，为空时退回 `default_owner_open_id` 私聊 |
@@ -97,15 +98,14 @@ Project is structured as the `larkhelm/` package. 核心模块按角色分组：
 
 ### 入口与配置
 - `__main__.py` — CLI 入口（`larkhelm start` / `larkhelm voice probe` / `larkhelm memory ...` / `larkhelm doc ...`）
-- `bridge.py` — `main()` 主程序、`_start_memory_boot_warmup()` 启动 daemon、`.register_p2_*` 注册飞书事件
+- `bridge.py` — `main()` 主程序、`.register_p2_*` 注册飞书事件
 - `config.py` — 运行时配置加载、~88 个 `setdefault`、自动发现 backend（`_auto_discover_cli` / `_auto_discover_http`）
 - `command_registry.py` — `CommandSpec` + `COMMAND_REGISTRY` 集中式 slash 命令注册表（替代旧的 600 行 if/elif 链）
 
 ### 飞书事件层 (`handlers/`)
 - `_message.py` — `handle_message()` 主消息路由（ACL / dedup / 工作区注入 / intent router / `/cancel` `/rename` `/btw` 直接处理）；其余命令交给 `COMMAND_REGISTRY.dispatch`
 - `_query.py` — `_do_query()` AI 查询主流程；`_inject_doc_context()` doc URL 注入、流式卡片更新、超时、取消
-- `_query_session.py` — `QuerySession` 类化重构（v2 灰度由 `query_session_v2_traffic` 控制）
-- `_query_card_state.py` / `_query_pure.py` — query 子组件（卡片状态机 / 纯函数）
+- `_query_card_state.py` — query 卡片状态机子组件
 - `_card_action.py` — 卡片按钮回调分发，调用 `commands._dispatch_button_cmd`
 
 ### 命令实现
@@ -392,8 +392,9 @@ session memory，再级联抽取 project / global memory。它有**两条触发�
 | 普通节奏 | 普通 `/chat` 查询完成后 | `handlers/_query.py` 内 `maybe_auto_update(chat_id)` 调用点 | 每 `AUTO_UPDATE_EVERY=10` 轮一次 |
 | 里程碑节奏 | 长后台任务完成时 | `record_milestone(chat_id, kind, summary)`（`memory.py`）| 每次完成 + 60s 防抖 |
 
-里程碑节奏的机制（**当前没有内置调用方**——原 `/dev` / `/crew` / `/plan`
-调用点已随自建编排一起删除，函数保留供未来后台任务使用）：
+里程碑节奏的机制（**当前唯一内置调用方为 `session_guard._perform_reset`**——
+原 `/dev` / `/crew` / `/plan` 调用点已随自建编排删除，函数同时保留供未来
+后台任务使用）：
 
 - `record_milestone` 写一条 `role="milestone"`、`model="milestone"` 的日志条目
 - `maybe_auto_update` 的过滤器接受 `role in {user, assistant, milestone}`、

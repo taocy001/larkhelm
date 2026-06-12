@@ -1,22 +1,13 @@
-"""Tests for ``larkhelm.token_budget`` (Week-2 Backend-aware Context Budget)."""
+"""Tests for ``larkhelm.token_budget`` (context-window resolution + max_tokens)."""
 from __future__ import annotations
 
 import dataclasses
 
-import pytest
-
 import larkhelm.config as _cfg
-@dataclasses.dataclass
-class InjectionPolicy:
-    agent_type: str
-    token_budget: int
-    layer_weights: dict = dataclasses.field(default_factory=dict)
-    kind_priority: tuple = ()
 from larkhelm.token_budget import (
     DEFAULT_CONTEXT_WINDOWS,
     _MIN_CONTEXT_WINDOW,
     compute_api_max_tokens,
-    compute_memory_char_budget,
     resolve_context_window,
 )
 
@@ -75,58 +66,6 @@ def test_resolve_positive_config_overrides_builtin(monkeypatch):
     assert resolve_context_window(spec) == 300_000
 
 
-# ── compute_memory_char_budget ───────────────────────────────────────────────
-
-def test_budget_disabled_flag_returns_base():
-    """When backend_aware_budget_enabled is False, base budget is returned."""
-    spec = _StubSpec(id="deepseek", provider="deepseek_api")
-    # flag off → unchanged
-    assert compute_memory_char_budget(spec, "chat", base_budget=1200) == 1200
-
-
-def _set_budget_enabled(enabled: bool) -> None:
-    """Helper: flip the runtime feature flag."""
-    _cfg.config["backend_aware_budget_enabled"] = enabled
-
-
-def test_budget_large_context_scales_up():
-    """Gemini 1M window → +20 % over base."""
-    _set_budget_enabled(True)
-    try:
-        spec = _StubSpec(id="gemini", provider="gemini_cli")
-        budget = compute_memory_char_budget(spec, "chat", base_budget=1200)
-        assert budget == int(1200 * 1.20)
-    finally:
-        _set_budget_enabled(False)
-
-
-def test_budget_small_context_scales_down():
-    """Tiny window (<64K) → -30 % under base."""
-    _set_budget_enabled(True)
-    try:
-        spec = _StubSpec(id="tiny", provider="tiny")
-        spec.context_window = 32_000
-        budget = compute_memory_char_budget(spec, "chat", base_budget=1200)
-        assert budget == int(1200 * 0.70)
-    finally:
-        _set_budget_enabled(False)
-
-
-def test_budget_never_below_floor():
-    """Even with tiny window and tiny base, floor is respected."""
-    _set_budget_enabled(True)
-    try:
-        spec = _StubSpec(id="tiny", provider="tiny")
-        budget = compute_memory_char_budget(spec, "chat", base_budget=100)
-        assert budget >= 400
-    finally:
-        _set_budget_enabled(False)
-
-
-def test_budget_none_spec():
-    assert compute_memory_char_budget(None, "dev", base_budget=3000) == 3000
-
-
 # ── compute_api_max_tokens ───────────────────────────────────────────────────
 
 def test_api_max_tokens_large_window():
@@ -164,57 +103,49 @@ def _make_stats_row(**kwargs):
     return defaults
 
 
-def test_fmt_token_block_shows_ctx_when_enabled(monkeypatch):
-    """When backend_aware_budget_enabled=true, model label shows Xk ctx."""
-    import larkhelm.config as _cfg
+def test_fmt_token_block_shows_ctx_annotation():
+    """Registered model → label always shows the Xk ctx annotation (no flag)."""
     from larkhelm.commands import _fmt_token_block
     from larkhelm.backend_registry import BACKEND_REGISTRY
 
-    monkeypatch.setitem(_cfg.config, "backend_aware_budget_enabled", True)
-    try:
-        spec = BACKEND_REGISTRY.get("gemini")
-        if spec is None:
-            # Registry may not be initialised in test env; verify fail-open only.
-            body = _fmt_token_block("label", {"gemini": _make_stats_row()})
-            # Should render without crash; model name present even if no ctx annotation
-            assert "gemini" in body
-        else:
-            body = _fmt_token_block("label", {"gemini": _make_stats_row()})
-            assert "ctx）" in body or "K ctx" in body
-    finally:
-        monkeypatch.setitem(_cfg.config, "backend_aware_budget_enabled", False)
+    spec = BACKEND_REGISTRY.get("gemini")
+    body = _fmt_token_block("label", {"gemini": _make_stats_row()})
+    if spec is None:
+        # Registry may not be initialised in test env; verify fail-open only.
+        assert "gemini" in body
+    else:
+        assert "ctx）" in body or "K ctx" in body
 
 
-def test_fmt_token_block_no_ctx_when_disabled(monkeypatch):
-    """When backend_aware_budget_enabled=false (default), no ctx annotation."""
-    import larkhelm.config as _cfg
+def test_fmt_token_block_unknown_model_bare_label(monkeypatch):
+    """Model absent from the registry → bare name, no bogus 32K annotation."""
+    import larkhelm.backend_registry as _breg
     from larkhelm.commands import _fmt_token_block
 
-    monkeypatch.setitem(_cfg.config, "backend_aware_budget_enabled", False)
-    body = _fmt_token_block("label", {"claude": _make_stats_row()})
+    class _EmptyRegistry:
+        def get(self, _id):
+            return None
+
+    monkeypatch.setattr(_breg, "BACKEND_REGISTRY", _EmptyRegistry())
+    body = _fmt_token_block("label", {"milestone": _make_stats_row()})
+    assert "milestone" in body
     assert "ctx）" not in body
 
 
 def test_fmt_token_block_failopen_on_registry_error(monkeypatch):
     """If BACKEND_REGISTRY.get() raises, label falls back to bare model name."""
-    import larkhelm.config as _cfg
     import larkhelm.backend_registry as _breg
     from larkhelm.commands import _fmt_token_block
-
-    monkeypatch.setitem(_cfg.config, "backend_aware_budget_enabled", True)
 
     class _BrokenRegistry:
         def get(self, _id):
             raise RuntimeError("registry broken")
 
     monkeypatch.setattr(_breg, "BACKEND_REGISTRY", _BrokenRegistry())
-    try:
-        body = _fmt_token_block("label", {"claude": _make_stats_row()})
-        # fail-open: no crash, bare model name present
-        assert "claude" in body
-        assert "ctx）" not in body
-    finally:
-        monkeypatch.setitem(_cfg.config, "backend_aware_budget_enabled", False)
+    body = _fmt_token_block("label", {"claude": _make_stats_row()})
+    # fail-open: no crash, bare model name present
+    assert "claude" in body
+    assert "ctx）" not in body
 
 
 # ── BackendSpec.context_window auto-population (R2 coverage) ─────────────────

@@ -1,18 +1,21 @@
 """larkhelm · context-injection cache primitives
 
-Three call sites in ``_do_query`` reload the same data on every turn:
+Two call sites in ``_do_query`` reload the same data on every turn:
 
   * ``log._get_recent_turns`` re-reads the tail 100 KB of ``all.jsonl``.
-  * ``memory_context._layer_global / _layer_project / _layer_session``
-    re-open up to four ``.md`` files.
   * ``handlers._query._inject_doc_context`` re-issues a Feishu RPC for
     each URL in the user message.
 
-The first two are **idempotent for a given file mtime**; the third is
+The first is **idempotent for a given file mtime**; the second is
 idempotent for ~60 seconds (Feishu has no mtime channel we can read).
-This module owns the three caches that make those calls effectively free
+This module owns the two caches that make those calls effectively free
 on repeat invocations, plus a small set of helpers callers use to wrap
 their loaders.
+
+(The former third cache — ``cached_memory_layer`` — was removed: the
+memory hot path ``memory._load_md_body`` keeps its own mtime-keyed dict
+and never consulted the LRU here, so the layer cache only ever saw
+warmup writes and zero production hits.)
 
 Module boundaries (PRD §6 + design.md §2): this file MUST NOT import any
 business module (``memory_context``, ``lark_client``, ``log``, etc.).
@@ -37,12 +40,10 @@ Known backlog items (round-1 reviewer kimi 2026-05-20, **non-blocking**):
 """
 from __future__ import annotations
 
-import hashlib
 import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Callable, Generic, Hashable, Optional, TypeVar
 
 K = TypeVar("K", bound=Hashable)
@@ -70,19 +71,6 @@ class RecentTurnsKey:
     # ``log.log_entry`` / ``log._get_conv_seqno``). Tool / shell / error /
     # debug writes do NOT bump the counter, so retries within the same
     # request see the same key and produce a cache hit.
-    #
-    # NOTE: dedup_prefix intentionally excluded from the key.
-    # The dedup filter is cheap (in-memory substring scan) and is applied
-    # INSIDE the loader; removing it from the key lets callers with different
-    # dedup_prefix values share the same cache entry — avoiding a second
-    # 100 KB read.
-
-
-@dataclass(frozen=True)
-class MemoryLayerKey:
-    layer: str
-    file_path: str
-    mtime_ns: int
 
 
 @dataclass(frozen=True)
@@ -326,14 +314,10 @@ class TTLCache(Generic[K, V]):
 # ``doc_inject_cache_ttl_sec`` doesn't need a bridge restart.
 
 _RECENT_TURNS_MAX = 64
-_MEMORY_LAYER_MAX = 128
 _DOC_DEFAULT_TTL = 600.0
 
 _recent_turns_cache: LRUCache[RecentTurnsKey, str] = LRUCache(
     "recent_turns", _RECENT_TURNS_MAX
-)
-_memory_layer_cache: LRUCache[MemoryLayerKey, Optional[str]] = LRUCache(
-    "memory_layer", _MEMORY_LAYER_MAX
 )
 _doc_cache: TTLCache[DocKey, DocCachedEntry] = TTLCache(
     "doc_inject", _DOC_DEFAULT_TTL
@@ -341,33 +325,6 @@ _doc_cache: TTLCache[DocKey, DocCachedEntry] = TTLCache(
 
 
 # ── Internal utilities ─────────────────────────────────────────────────────
-
-
-def _stat_file(path: Optional[Path]) -> tuple[int, int]:
-    """Return ``(mtime_ns, size)`` for ``path`` or ``(0, 0)`` on miss / error.
-
-    Never raises — a stat failure must collapse to "file missing" so the
-    cache lookup still has a stable key (and an unrelated miss doesn't
-    crash a hot path).
-    """
-    if path is None:
-        return 0, 0
-    try:
-        st = path.stat()
-        return int(st.st_mtime_ns), int(st.st_size)
-    except (FileNotFoundError, OSError):
-        return 0, 0
-
-
-def _dedup_hash(prefix: Optional[str]) -> str:
-    """Stable 16-hex digest of ``prefix`` for embedding in a cache key.
-
-    Empty / None → empty hash so the key still compares cleanly. blake2b
-    with ``digest_size=8`` gives 16 hex chars — enough collision space
-    for a 64-entry cache without bloating each key.
-    """
-    raw = (prefix or "").encode("utf-8", errors="ignore")
-    return hashlib.blake2b(raw, digest_size=8).hexdigest()
 
 
 def _doc_ttl_sec() -> float:
@@ -412,15 +369,13 @@ def _config_flag(name: str, default: bool = True) -> bool:
         return default
 
 
-def _inc_outcome(cache_name: str, outcome: str, layer: str | None = None) -> None:
+def _inc_outcome(cache_name: str, outcome: str) -> None:
     """Best-effort Prometheus counter bridge. Never raises — a metrics
     failure must not break the cache hot path."""
     try:
         from larkhelm import metrics as _metrics
         if cache_name == "recent_turns":
             _metrics.inc_recent_turns_cache(outcome)
-        elif cache_name == "memory_layer":
-            _metrics.inc_memory_layer_cache(layer or "unknown", outcome)
         elif cache_name == "doc_inject":
             _metrics.inc_doc_inject_cache(outcome)
     except Exception:
@@ -444,7 +399,6 @@ def cached_recent_turns(
     chat_id: str,
     max_turns: int,
     max_chars: int,
-    dedup_prefix: Optional[str],
     *,
     conv_seqno: int = 0,
     loader: Callable[[], str],
@@ -465,12 +419,6 @@ def cached_recent_turns(
     ``log_entry`` write, causing the LRU to produce Hit=0 in all observed
     production runs. ``conv_seqno`` fixes this: only real conversation
     turns (user/assistant) bust the cache.
-
-    ``dedup_prefix`` is intentionally NOT part of the key: it is applied
-    inside the loader and its effect is cheap (substring scan on in-memory
-    strings).  Excluding it from the key means the exception-retry path in
-    ``_query.py`` (``dedup_prefix=P`` → retry with ``dedup_prefix=None``)
-    can share the same cache slot as the primary call.
 
     Cache disabled (config flag off) → directly returns ``loader()``;
     no metric, no debug log.
@@ -498,48 +446,6 @@ def cached_recent_turns(
     if evicted is not None:
         _inc_outcome("recent_turns", "evict")
         _log_event("recent_turns", "evict", f"chat={evicted.chat_id[:8]}")
-    return value
-
-
-def cached_memory_layer(
-    layer: str,
-    file_path: Optional[Path],
-    *,
-    loader: Callable[[], Optional[str]],
-) -> Optional[str]:
-    """LRU-cached wrapper for a single memory layer load.
-
-    ``layer`` ∈ {"global", "project", "session", "global_slots",
-    "project_sections"}. ``file_path=None`` (e.g. global memory when the
-    sender open_id isn't known yet) bypasses the cache and falls through
-    to the loader — there's no stable key in that case and the loader
-    will itself return ``None``.
-    """
-    if not _config_flag("MEMORY_LEGACY_CACHE_ENABLED", True):
-        return loader()
-
-    if file_path is None:
-        # No stable key — call the loader directly. We still record the
-        # miss so /metrics shows the bypass volume.
-        _inc_outcome("memory_layer", "bypass", layer=layer)
-        return loader()
-
-    mtime_ns, _size = _stat_file(file_path)
-    key = MemoryLayerKey(layer=layer, file_path=str(file_path), mtime_ns=mtime_ns)
-
-    hit, value = _memory_layer_cache.get(key)
-    if hit:
-        _inc_outcome("memory_layer", "hit", layer=layer)
-        _log_event("memory_layer", "hit", f"layer={layer}")
-        return value
-
-    value = loader()
-    evicted = _memory_layer_cache.put(key, value)
-    _inc_outcome("memory_layer", "miss", layer=layer)
-    _log_event("memory_layer", "miss", f"layer={layer}")
-    if evicted is not None:
-        _inc_outcome("memory_layer", "evict", layer=evicted.layer)
-        _log_event("memory_layer", "evict", f"layer={evicted.layer}")
     return value
 
 
@@ -613,8 +519,7 @@ def cached_doc_read_with_meta(
     Same caching semantics as :func:`cached_doc_read` (key = chat_id +
     doc_type + token + max_chars; TTL hot-read from
     ``_cfg.DOC_INJECT_CACHE_TTL_SEC``; ``DOC_INJECT_CACHE_ENABLED=False``
-    bypasses with a ``bypass`` metric — aligned with
-    :func:`cached_memory_layer`'s disabled branch).
+    bypasses with a ``bypass`` metric).
 
     On hit emits ``inc_doc_inject_cache("hit_with_age_hint")`` instead of
     plain ``hit`` so dashboards can distinguish the two call paths (REQ-06).
@@ -622,8 +527,7 @@ def cached_doc_read_with_meta(
     ``DocPermissionError`` / ``DocError`` handlers must keep firing.
     """
     if not _config_flag("DOC_INJECT_CACHE_ENABLED", True):
-        # Align metric label with log label and with cached_memory_layer's
-        # disabled-flag branch (which uses 'bypass'). CLAUDE.md monitoring
+        # Align metric label with log label. CLAUDE.md monitoring
         # table lists `bypass` as a first-class outcome alongside hit/miss.
         _inc_outcome("doc_inject", "bypass")
         _log_event("doc_inject", "bypass", f"chat={chat_id[:8]}")
@@ -662,6 +566,58 @@ def cached_doc_read_with_meta(
     return DocReadResult(payload=payload, from_cache=False, age_sec=None)
 
 
+# ── Doc-injection session records ─────────────────────────────────────────
+#
+# Process-local record of which doc bodies were already injected during the
+# *current* backend session of a chat. Sessions are per-(chat, backend) —
+# sid files are keyed by model, API history by provider — so the record key
+# carries the backend id too: ``(chat_id, backend, doc_token) → content_hash``.
+# ``_inject_doc_context`` consults it to downgrade a repeat injection of an
+# unchanged doc to a one-line marker (resumed CLI sessions already carry the
+# full body from the first turn). The query path commits records only *after*
+# the backend returned successfully — a cancelled / failed query must not
+# leave a record claiming the session saw the body. Cleared alongside the
+# session id — ``chat_state._clear_sid(chat_id, model)`` calls
+# :func:`clear_doc_injections` with the same model so the record lifetime
+# exactly mirrors the per-(chat, model) sid lifetime.
+
+_doc_injection_seen: dict[tuple[str, str, str], str] = {}
+_doc_injection_lock = threading.Lock()
+
+
+def doc_injection_seen(chat_id: str, backend: str, doc_token: str,
+                       content_hash: str) -> bool:
+    """True iff this exact doc body was already injected in the current
+    session of ``backend`` for this chat."""
+    with _doc_injection_lock:
+        return _doc_injection_seen.get((chat_id, backend, doc_token)) == content_hash
+
+
+def record_doc_injection(chat_id: str, backend: str, doc_token: str,
+                         content_hash: str) -> None:
+    """Remember that ``doc_token``'s body (``content_hash``) was injected
+    into the current session of ``backend``."""
+    with _doc_injection_lock:
+        _doc_injection_seen[(chat_id, backend, doc_token)] = content_hash
+
+
+def clear_doc_injections(chat_id: str, backend: str | None = None) -> None:
+    """Drop injection records for ``chat_id`` (session was reset).
+
+    ``backend=None`` drops every backend's records for the chat (safe
+    over-clearing direction, kept for full-reset paths); a non-empty
+    ``backend`` drops only that backend's records, mirroring the
+    per-(chat, model) sid lifetime.
+    """
+    with _doc_injection_lock:
+        doomed = [
+            k for k in _doc_injection_seen
+            if k[0] == chat_id and (backend is None or k[1] == backend)
+        ]
+        for k in doomed:
+            _doc_injection_seen.pop(k, None)
+
+
 def reset_for_tests() -> None:
     """Test-only: clear every cache + counter. Production must not call.
 
@@ -671,8 +627,9 @@ def reset_for_tests() -> None:
     ``larkhelm.metrics._reset_for_tests`` themselves.
     """
     _recent_turns_cache.clear()
-    _memory_layer_cache.clear()
     _doc_cache.clear()
+    with _doc_injection_lock:
+        _doc_injection_seen.clear()
     # Pin TTL back to the design default in case a test mutated it.
     # Reviewer round-1 nit #3: use ``set_ttl`` instead of poking ``_ttl``.
     _doc_cache.set_ttl(_DOC_DEFAULT_TTL)
@@ -680,10 +637,11 @@ def reset_for_tests() -> None:
 
 __all__ = [
     "LRUCache", "TTLCache",
-    "RecentTurnsKey", "MemoryLayerKey", "DocKey", "DocCachedEntry",
+    "RecentTurnsKey", "DocKey", "DocCachedEntry",
     "DocReadResult",
-    "cached_recent_turns", "cached_memory_layer", "cached_doc_read",
+    "cached_recent_turns", "cached_doc_read",
     "cached_doc_read_with_meta",
     "_doc_ttl_sec_for_backend",
+    "doc_injection_seen", "record_doc_injection", "clear_doc_injections",
     "reset_for_tests",
 ]

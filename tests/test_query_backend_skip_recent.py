@@ -208,5 +208,123 @@ class APIBackendSkipRecentTurnsTests(unittest.TestCase):
         self.assertTrue(bool(getattr(_cfg, "API_SKIP_RECENT_TURNS_WHEN_HISTORY", True)))
 
 
+# ════════════════════════════════════════════════════════════════════════
+#  API backends strip [SESSION MEMORY] from extra_system when history
+#  is non-empty (the structured history already carries those turns
+#  verbatim) — _maybe_strip_session_memory_for_api.
+# ════════════════════════════════════════════════════════════════════════
+
+_EXTRA_SYSTEM = (
+    "[GLOBAL MEMORY]\nglobal facts\n[/GLOBAL MEMORY]\n\n"
+    "[PROJECT MEMORY]\nproject facts\n[/PROJECT MEMORY]\n\n"
+    "[SESSION MEMORY]\nrecent summary\n[/SESSION MEMORY]"
+)
+_HISTORY = [
+    {"role": "user", "content": "hi"},
+    {"role": "assistant", "content": "hello"},
+]
+
+
+class APISessionMemoryStripTests(unittest.TestCase):
+
+    def test_history_nonempty_strips_session_block(self):
+        out = q._maybe_strip_session_memory_for_api(
+            _EXTRA_SYSTEM, _HISTORY, provider="anthropic_api", chat_id="chatA",
+        )
+        self.assertNotIn("[SESSION MEMORY]", out)
+        self.assertNotIn("recent summary", out)
+        # global / project layers survive (stable prefix)
+        self.assertIn("global facts", out)
+        self.assertIn("project facts", out)
+
+    def test_history_empty_keeps_full_injection(self):
+        out = q._maybe_strip_session_memory_for_api(
+            _EXTRA_SYSTEM, [], provider="anthropic_api", chat_id="chatA",
+        )
+        self.assertEqual(out, _EXTRA_SYSTEM)
+        self.assertIn("[SESSION MEMORY]", out)
+
+    def test_no_session_block_passthrough(self):
+        plain = "[GLOBAL MEMORY]\ng\n[/GLOBAL MEMORY]"
+        out = q._maybe_strip_session_memory_for_api(
+            plain, _HISTORY, provider="google_api", chat_id="chatA",
+        )
+        self.assertEqual(out, plain)
+
+    def test_empty_extra_system_passthrough(self):
+        out = q._maybe_strip_session_memory_for_api(
+            "", _HISTORY, provider="openai_compat_api", chat_id="chatA",
+        )
+        self.assertEqual(out, "")
+
+    def test_flag_off_keeps_full_injection(self):
+        """api_strip_session_memory_when_history=false is the rollback
+        switch: history non-empty must NOT strip the session block."""
+        with patch.object(
+            q._cfg, "API_STRIP_SESSION_MEMORY_WHEN_HISTORY", False, create=True
+        ):
+            out = q._maybe_strip_session_memory_for_api(
+                _EXTRA_SYSTEM, _HISTORY, provider="anthropic_api", chat_id="chatA",
+            )
+        self.assertEqual(out, _EXTRA_SYSTEM)
+
+    def test_strip_flag_default_is_true(self):
+        self.assertTrue(
+            bool(getattr(_cfg, "API_STRIP_SESSION_MEMORY_WHEN_HISTORY", True)))
+
+    def test_boundary_tags_shared_with_layered_cache_split(self):
+        """The strip must use the exact stable/volatile boundary that
+        backend_api_streaming._split_stable_volatile defines, so the gate
+        and the layered cache_control split can never disagree."""
+        from larkhelm.backend_api_streaming import _split_stable_volatile
+        stable, _volatile = _split_stable_volatile(_EXTRA_SYSTEM)
+        out = q._maybe_strip_session_memory_for_api(
+            _EXTRA_SYSTEM, _HISTORY, provider="anthropic_api", chat_id="chatA",
+        )
+        self.assertEqual(out, stable)
+
+
+class APISessionMemoryStripIntegrationTests(unittest.TestCase):
+    """_run_backend_single wires the strip into all three API branches."""
+
+    def _run(self, provider: str, runner_name: str, history: list):
+        captured: dict = {}
+
+        def fake_runner(spec, chat_id, message, history, cancel_ev, on_text,
+                        extra_system=""):
+            captured["extra_system"] = extra_system
+            return "ok", list(history)
+
+        with patch(f"larkhelm.backend_api.{runner_name}", fake_runner), \
+             patch("larkhelm.api_session.load_history", return_value=history), \
+             patch("larkhelm.api_session.save_history", lambda *a, **k: None):
+            q._run_backend_single(
+                _FakeSpec(provider), "chatX", "msg", _TMP, None,
+                None, None, None, None,
+                extra_system=_EXTRA_SYSTEM,
+            )
+        return captured["extra_system"]
+
+    def test_anthropic_history_nonempty_system_has_no_session_memory(self):
+        out = self._run("anthropic_api", "run_anthropic", _HISTORY)
+        self.assertNotIn("[SESSION MEMORY]", out)
+        self.assertIn("global facts", out)
+
+    def test_anthropic_history_empty_system_keeps_session_memory(self):
+        out = self._run("anthropic_api", "run_anthropic", [])
+        self.assertIn("[SESSION MEMORY]", out)
+
+    def test_google_and_openai_compat_also_strip(self):
+        for provider, runner in (
+            ("google_api", "run_google"),
+            ("openai_compat_api", "run_openai_compat"),
+        ):
+            out = self._run(provider, runner, _HISTORY)
+            self.assertNotIn(
+                "[SESSION MEMORY]", out,
+                f"{provider} must strip session memory when history non-empty",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

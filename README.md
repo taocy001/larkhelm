@@ -288,7 +288,7 @@ sudo systemctl restart larkhelm
 | `/lang [zh\|en]` | 切换机器人界面语言；不带参数显示当前设置 |
 | `/rename <名称>` | 给当前会话命名 |
 | `/pickup` | 获取在终端接力会话的命令 |
-| `/compact` | 将对话历史压缩到记忆并重置会话，适用于长对话续跑 |
+| `/compact` | 将对话历史压缩到记忆后重置会话（压缩成功才重置，失败时保留会话并提示），适用于长对话续跑 |
 
 **目录 & Shell**
 
@@ -742,7 +742,7 @@ All commands start with `/`. Sending an image message automatically forwards it 
 | `/lang [zh\|en]` | Switch bot UI language; omit arg to see current setting |
 | `/rename <name>` | Name the current session |
 | `/pickup` | Get terminal resume commands |
-| `/compact` | Compress conversation history into memory and reset session |
+| `/compact` | Compress conversation history into memory, then reset session (resets only on success; keeps session and warns on failure) |
 
 **Directory & Shell**
 

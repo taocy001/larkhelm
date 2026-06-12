@@ -21,6 +21,7 @@ Auto-learning flow:
 from __future__ import annotations
 
 import contextvars
+import functools
 import hashlib
 import os
 import re
@@ -40,9 +41,15 @@ from larkhelm.log import _read_logs, _read_logs_tail, _debug_log, warn
 # In group chats the _chat_state_store["sender_open_id"] is overwritten by
 # every message, so reading it inside _global_memory_file() can return the
 # WRONG user's open_id if another message arrived while the current query was
-# still running. Python threads inherit the parent's contextvars context, so
-# setting this ContextVar in handle_message() BEFORE starting the _do_query
-# thread ensures each query sees the open_id of the message that triggered it.
+# still running.
+#
+# CAUTION: ``threading.Thread`` does NOT inherit the parent's contextvars
+# context (verified on CPython 3.14, ``sys.flags.thread_inherit_context=0``;
+# on ≤3.13 there is no inheritance mechanism at all), so this ContextVar is
+# only visible to SAME-THREAD readers. Cross-thread paths (the _do_query
+# worker, the maybe_auto_update → _cascade_extract → _try_extract_global
+# cascade) must carry ``sender_open_id`` as an explicit parameter — the
+# ContextVar fallback in _global_memory_file() reads the default ("") there.
 
 _query_sender_open_id: contextvars.ContextVar[str] = contextvars.ContextVar(
     "_query_sender_open_id", default=""
@@ -57,7 +64,6 @@ MEMORY_HOME_DIR = Path.home() / ".larkhelm" / "memory"
 GLOBAL_MAX_CHARS  = 800
 PROJECT_MAX_CHARS = 1500
 SESSION_MAX_CHARS = 2000
-TOTAL_MEMORY_BUDGET = 4500  # combined cap; tag overhead counted separately
 
 # ── Schema version (S47) ──────────────────────────────────────────────────────
 #
@@ -74,14 +80,6 @@ MEMORY_SCHEMA_VERSION = "1"
 # Anchored at line start to avoid matching keys that merely *contain* the
 # substring "schema_version" (e.g. last_schema_version_check, my_schema_version_note).
 _SCHEMA_KEY_RE = re.compile(r'(?m)^schema_version\s*:')
-
-# Tag overhead (open + close + separator) reserved per layer when computing
-# the trim budget. Was bumped to 90 to also cover the per-layer meter line
-# that used to be injected on the second line of every layer; P5-OPT1 stripped
-# the meter from the injection path (cache-prefix stability) but the 90-char
-# slack stays — shrinking it now would chase ~30 char savings per layer at
-# real risk of mis-budgeting unicode tag bytes.
-_TAG_OVERHEAD_PER_LAYER = 90
 
 # ── /memory observe tuning ───────────────────────────────────────────────────
 
@@ -768,12 +766,8 @@ def get_memory_context_v2(
     chat_id: str,
     cwd: str | None = None,
     *,
-    query: str = "",
     recent_turns: list[str] | None = None,
-    has_doc_urls: bool = False,
-    intent=None,
     sender_open_id: str | None = None,
-    backend_spec=None,
 ) -> tuple[str, list[str]]:
     """Build memory context from the three persistent layers.
 
@@ -999,65 +993,6 @@ def _is_useful_summary(text: str | None) -> bool:
     return True
 
 
-_CHECKPOINT_PROMPT = (
-    "Summarize the following conversation in ≤300 characters. "
-    "Focus on the most important current task, key decisions, and next actions. "
-    "Be concise — this will be used as a session anchor when the session resets.\n\n"
-    "{logs}"
-)
-
-
-def generate_session_checkpoint(chat_id: str, turns: int = 5) -> str:
-    """Generate a ≤300 char session summary via cheap LLM for anchor sidecar.
-
-    Reads the last `turns*2` user/assistant log entries and calls
-    _run_one_shot(prefer_cheap=True). Returns "" on empty history,
-    LLM error, or any other exception. Never raises.
-    """
-    try:
-        records = _read_logs_tail(chat_id)
-        conv = [
-            r for r in records
-            if r.get("role") in ("user", "assistant")
-        ]
-        recent = conv[-(turns * 2):]
-        if not recent:
-            return ""
-        lines = []
-        for r in recent:
-            role = r.get("role", "")
-            content = r.get("content") or r.get("text") or ""
-            if content:
-                lines.append(f"{role}: {content[:400]}")
-        logs = "\n".join(lines)
-        if not logs.strip():
-            return ""
-        prompt = _CHECKPOINT_PROMPT.format(logs=logs)
-        result = _run_one_shot(prompt, f"{chat_id}__checkpoint", prefer_cheap=True)
-        return (result or "").strip()[:300]
-    except Exception as e:
-        _debug_log(f"[Memory] generate_session_checkpoint failed for {chat_id[:8]}: {e}")
-        return ""
-
-
-def load_session_anchor(chat_id: str) -> str:
-    """Read the anchor sidecar summary for chat_id.
-
-    Returns the "summary" field from {SESSION_DIR}/{chat_id}.anchor.json,
-    or "" if the file does not exist or is malformed. Never raises.
-    """
-    try:
-        import json as _json
-        anchor_path = _cfg.SESSION_DIR / f"{chat_id}.anchor.json"
-        if not anchor_path.exists():
-            return ""
-        data = _json.loads(anchor_path.read_text(encoding="utf-8"))
-        return str(data.get("summary") or "")
-    except Exception as e:
-        _debug_log(f"[Memory] load_session_anchor failed for {chat_id[:8]}: {e}")
-        return ""
-
-
 def generate_memory(chat_id: str, recent_logs: str,
                     existing_memory: str | None = None,
                     cancel_ev: "threading.Event | None" = None) -> str:
@@ -1144,6 +1079,32 @@ def _should_skip_extract_by_hash(prev_fm: dict, session_content: str,
     if prev_len < 0:
         return False
     return abs(prev_len - len(session_content)) < len_tolerance
+
+
+def _persist_unchanged_hash(path: Path | None, session_content: str,
+                            save_fn: "Callable[[str, dict[str, str]], bool]") -> None:
+    """Re-stamp an existing memory file's frontmatter after an UNCHANGED verdict.
+
+    An UNCHANGED extract means this session payload HAS been evaluated, so
+    recording its hash lets the next cascade with an identical payload
+    short-circuit before the LLM call (_should_skip_extract_by_hash).
+
+    No-op when the target file is missing or has no body — never create a
+    memory file just to hold a hash.
+    """
+    try:
+        if path is None or not path.exists():
+            return
+        body = _load_md_body(path)
+        if not body:
+            return
+        save_fn(body, {
+            "last_extracted_session_hash": _session_hash(session_content),
+            "last_extracted_session_len":  str(len(session_content)),
+        })
+    except Exception as e:
+        # 中危—辅助操作失败：hash 缓存写失败只影响下次短路命中率，不打断级联。
+        _debug_log(f"[Memory] persist UNCHANGED hash failed for {path}: {e}")
 
 
 def _config_flag(key: str, default: bool = True) -> bool:
@@ -1361,6 +1322,11 @@ def _try_extract_project(session_content: str, cwd: str, chat_id: str = "",
         result = (result or "").strip()
         if not result or result.upper() == "UNCHANGED":
             record_extract_outcome("project", "unchanged")
+            _persist_unchanged_hash(
+                proj_path, session_content,
+                lambda body, pairs: save_project_memory(
+                    cwd, body, extra_fm_pairs=pairs),
+            )
             return
         if not _is_useful_summary(result):
             _debug_log(f"[Memory] project extract rejected non-useful output for {cwd!r}")
@@ -1423,6 +1389,12 @@ def _try_extract_global(session_content: str, chat_id: str,
         result = (result or "").strip()
         if not result or result.upper() == "UNCHANGED":
             record_extract_outcome("global", "unchanged")
+            _persist_unchanged_hash(
+                g_path, session_content,
+                lambda body, pairs: save_global_memory(
+                    body, chat_id=chat_id, extra_fm_pairs=pairs,
+                    sender_open_id=sender_open_id),
+            )
             return
         if not _is_useful_summary(result):
             _debug_log(f"[Memory] global extract rejected non-useful output for {chat_id[:8]}")
@@ -1445,7 +1417,8 @@ def _try_extract_global(session_content: str, chat_id: str,
         record_extract_outcome("global", "error")
 
 
-def _cascade_extract(session_content: str, chat_id: str) -> None:
+def _cascade_extract(session_content: str, chat_id: str,
+                     *, sender_open_id: str | None = None) -> None:
     """Launch background threads to extract project and global facts from a fresh session summary.
 
     Coordinator semantics (S43):
@@ -1525,9 +1498,14 @@ def _cascade_extract(session_content: str, chat_id: str) -> None:
                 daemon=True,
                 name=f"memext-proj-{chat_id[:8]}",
             ))
+        # MEM-C1: sender_open_id MUST travel as an explicit parameter — this
+        # runs in a daemon thread, where the ContextVar fallback reads "" and
+        # the chat_state fallback is last-writer-wins in group chats.
         threads.append(threading.Thread(
             target=_coordinated,
-            args=(_try_extract_global, (session_content, chat_id), "global"),
+            args=(functools.partial(_try_extract_global,
+                                    sender_open_id=sender_open_id),
+                  (session_content, chat_id), "global"),
             daemon=True,
             name=f"memext-glob-{chat_id[:8]}",
         ))
@@ -1541,6 +1519,7 @@ def _cascade_extract(session_content: str, chat_id: str) -> None:
 
 def maybe_auto_update(chat_id: str, force: bool = False,
                       on_done: Callable[[bool, str | None, str | None], None] | None = None,
+                      *, sender_open_id: str | None = None,
                       ) -> None:
     """Check if session memory needs updating and run in a background thread if so.
 
@@ -1551,6 +1530,11 @@ def maybe_auto_update(chat_id: str, force: bool = False,
     (background, non-blocking).
 
     on_done: optional callback(success, content, error_code)
+    sender_open_id: open_id of the user whose query triggered this update.
+        MUST be passed explicitly by query-path callers (group-chat safety:
+        the cascade runs in daemon threads where the ContextVar fallback is
+        empty and the chat_state fallback is last-writer-wins). ``None``
+        keeps the legacy fallback chain for cron / legacy callers.
     """
     turn_count = _get_turn_count(chat_id)
     if not force and not _should_auto_update(turn_count):
@@ -1578,7 +1562,8 @@ def maybe_auto_update(chat_id: str, force: bool = False,
             # Whitelist roles that semantically describe "what happened in
             # this session". The "milestone" role is added by
             # ``record_milestone`` and represents the completion of a
-            # /dev /crew /plan task — without including it the LLM
+            # long-running background task (e.g. session_guard's
+            # session_auto_reset) — without including it the LLM
             # summarizer never sees those events even when the user
             # invokes ``maybe_auto_update`` right after.
             #
@@ -1623,7 +1608,8 @@ def maybe_auto_update(chat_id: str, force: bool = False,
             save_memory(chat_id, result[0])
             _notify(True, result[0], None)
 
-            _cascade_extract(result[0], chat_id)
+            _cascade_extract(result[0], chat_id,
+                             sender_open_id=sender_open_id)
 
         except Exception as e:
             _debug_log(f"[Memory] maybe_auto_update error {chat_id}: {e}")
@@ -1634,7 +1620,7 @@ def maybe_auto_update(chat_id: str, force: bool = False,
     threading.Thread(target=_run, daemon=True, name=f"memory-{chat_id[:8]}").start()
 
 
-# ── Milestone hook (post-/dev /crew /plan completion) ────────────────────────
+# ── Milestone hook (post background-task completion) ─────────────────────────
 
 # Debounce: don't refresh memory more than once per chat per N seconds, even
 # if multiple milestones fire close together. Cheap-LLM cost is bounded and
@@ -1648,8 +1634,10 @@ _milestone_meta = threading.Lock()
 def record_milestone(chat_id: str, kind: str, summary: str = "") -> None:
     """Record a task milestone and (debounced) trigger a session memory refresh.
 
-    Called from the finally blocks of /dev (`_run_dev_crew_inner`),
-    /crew (`_run_generic_crew_inner`) and /plan (`_run_plan`).
+    Current caller: ``session_guard._perform_reset`` (the
+    ``session_auto_reset`` milestone). The former /dev /crew /plan callers
+    were removed with the Route A refactor (2026-06-12); the hook is kept
+    for any long-running background task that should land in memory.
 
     Two responsibilities:
 
@@ -1666,7 +1654,7 @@ def record_milestone(chat_id: str, kind: str, summary: str = "") -> None:
     Debounce: if another milestone fired within ``_MILESTONE_DEBOUNCE_SEC``
     seconds, the memory regeneration is skipped (the log entry is still
     written so the next regenerate sees both events). Prevents pile-up
-    when /plan runs many /dev steps back-to-back.
+    when a background task fires several milestones back-to-back.
     """
     import time as _time
     msg = f"[Milestone] {kind}"

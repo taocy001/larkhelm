@@ -1,7 +1,6 @@
-"""Tests for larkhelm.session_guard — AC-05 and AC-08."""
+"""Tests for larkhelm.session_guard — AC-05 and settle-before-reset."""
 from __future__ import annotations
 
-import json
 import os
 import threading
 
@@ -28,7 +27,6 @@ def test_maybe_auto_reset_turns_threshold(monkeypatch):
 
     # Ensure guard is enabled
     monkeypatch.setattr(_cfg, "SESSION_GUARD_ENABLED", True)
-    monkeypatch.setattr(_cfg, "SESSION_GUARD_CHECKPOINT_BEFORE_RESET", False)
     monkeypatch.setattr(
         _cfg,
         "SESSION_GUARD_POLICIES",
@@ -61,16 +59,6 @@ def test_maybe_auto_reset_turns_threshold(monkeypatch):
         lambda *a: None,
         raising=False,
     )
-    monkeypatch.setattr(
-        "larkhelm.session_guard.inc_session_checkpoint",
-        lambda *a: None,
-        raising=False,
-    )
-
-    # Patch _perform_reset's lazy imports to avoid heavy deps at test collection
-    monkeypatch.setattr(
-        "larkhelm.session_guard._checkpoint_enabled", lambda: False,
-    )
 
     # Also clear any existing counters in chat_state
     from larkhelm.chat_state import _clear_backend_session_counters as _cs_clear
@@ -93,7 +81,6 @@ def test_maybe_auto_reset_min_turns_guard(monkeypatch):
     chat_id = "test_chat_ac03_minturns"
 
     monkeypatch.setattr(_cfg, "SESSION_GUARD_ENABLED", True)
-    monkeypatch.setattr(_cfg, "SESSION_GUARD_CHECKPOINT_BEFORE_RESET", False)
     monkeypatch.setattr(
         _cfg,
         "SESSION_GUARD_POLICIES",
@@ -106,16 +93,10 @@ def test_maybe_auto_reset_min_turns_guard(monkeypatch):
         "larkhelm.session_guard._clear_backend_session_counters", lambda *a, **kw: None,
     )
     monkeypatch.setattr(
-        "larkhelm.session_guard._checkpoint_enabled", lambda: False,
-    )
-    monkeypatch.setattr(
         "larkhelm.session_guard.record_milestone", lambda *a, **kw: None, raising=False,
     )
     monkeypatch.setattr(
         "larkhelm.session_guard.inc_session_auto_reset", lambda *a: None, raising=False,
-    )
-    monkeypatch.setattr(
-        "larkhelm.session_guard.inc_session_checkpoint", lambda *a: None, raising=False,
     )
 
     from larkhelm.chat_state import _clear_backend_session_counters as _cs_clear
@@ -147,28 +128,17 @@ def test_maybe_auto_reset_unknown_backend(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# AC-08: anchor JSON written to tmp_path with 'summary' key
+# Checkpoint/anchor chain removed (write-only dead path): _perform_reset must
+# not write {chat_id}.anchor.json and the chain's symbols must stay deleted.
 # ---------------------------------------------------------------------------
 
-def test_perform_reset_writes_anchor(monkeypatch, tmp_path):
-    """_perform_reset should write an anchor JSON file when checkpoint is enabled
-    and generate_session_checkpoint returns a non-empty summary."""
-    chat_id = "anchor_test_chat"
-    fixed_summary = "User is implementing Week-3 session guard feature."
+def test_perform_reset_writes_no_anchor_file(monkeypatch, tmp_path):
+    """The checkpoint/anchor sidecar chain was deleted: a reset must not
+    create any *.anchor.json file under SESSION_DIR."""
+    chat_id = "no_anchor_chain_chat"
 
-    # Point SESSION_DIR at tmp_path so _write_anchor lands there
     monkeypatch.setattr(_cfg, "SESSION_DIR", tmp_path, raising=False)
-    monkeypatch.setattr(_cfg, "SESSION_GUARD_CHECKPOINT_BEFORE_RESET", True)
     monkeypatch.setattr(_cfg, "SESSION_GUARD_ENABLED", True)
-
-    # Patch generate_session_checkpoint to return fixed summary
-    monkeypatch.setattr(
-        "larkhelm.memory.generate_session_checkpoint",
-        lambda chat_id, turns=5: fixed_summary,
-        raising=False,
-    )
-
-    # Stub side-effects
     monkeypatch.setattr(
         "larkhelm.session_guard._clear_sid", lambda *a, **kw: None,
     )
@@ -177,111 +147,145 @@ def test_perform_reset_writes_anchor(monkeypatch, tmp_path):
         lambda *a, **kw: None,
     )
     monkeypatch.setattr(
-        "larkhelm.session_guard.record_milestone",
-        lambda *a, **kw: None,
-        raising=False,
+        "larkhelm.memory.record_milestone", lambda *a, **kw: None, raising=False,
     )
     monkeypatch.setattr(
-        "larkhelm.session_guard.inc_session_auto_reset",
-        lambda *a: None,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        "larkhelm.session_guard.inc_session_checkpoint",
-        lambda *a: None,
+        "larkhelm.memory.maybe_auto_update",
+        lambda cid, force=False, on_done=None, *, sender_open_id=None: (
+            on_done(True, "memory content", None) if on_done else None
+        ),
         raising=False,
     )
 
     _perform_reset(chat_id, "claude", "turns", 0, 50)
 
-    anchor_path = tmp_path / f"{chat_id}.anchor.json"
-    assert anchor_path.exists(), f"Anchor file not created at {anchor_path}"
-
-    data = json.loads(anchor_path.read_text("utf-8"))
-    assert "summary" in data, f"'summary' key missing from anchor JSON: {data}"
-    assert data["summary"] == fixed_summary
-    assert data["backend"] == "claude"
-    assert data["reason"] == "turns"
-
-
-def test_perform_reset_checkpoint_turns_parameterized(monkeypatch, tmp_path):
-    """AC-07: _perform_reset passes SESSION_GUARD_CHECKPOINT_TURNS to generate_session_checkpoint."""
-    chat_id = "anchor_test_chat_ac07"
-    fixed_summary = "Checkpoint with custom turns."
-    captured_turns = []
-
-    def _fake_checkpoint(cid, turns=5):
-        captured_turns.append(turns)
-        return fixed_summary
-
-    monkeypatch.setattr(_cfg, "SESSION_DIR", tmp_path, raising=False)
-    monkeypatch.setattr(_cfg, "SESSION_GUARD_CHECKPOINT_BEFORE_RESET", True)
-    monkeypatch.setattr(_cfg, "SESSION_GUARD_ENABLED", True)
-    monkeypatch.setattr(_cfg, "SESSION_GUARD_CHECKPOINT_TURNS", 10, raising=False)
-
-    monkeypatch.setattr(
-        "larkhelm.memory.generate_session_checkpoint", _fake_checkpoint, raising=False,
-    )
-    monkeypatch.setattr("larkhelm.session_guard._clear_sid", lambda *a, **kw: None)
-    monkeypatch.setattr(
-        "larkhelm.session_guard._clear_backend_session_counters", lambda *a, **kw: None,
-    )
-    monkeypatch.setattr(
-        "larkhelm.session_guard.record_milestone", lambda *a, **kw: None, raising=False,
-    )
-    monkeypatch.setattr(
-        "larkhelm.session_guard.inc_session_auto_reset", lambda *a: None, raising=False,
-    )
-    monkeypatch.setattr(
-        "larkhelm.session_guard.inc_session_checkpoint", lambda *a: None, raising=False,
-    )
-
-    _perform_reset(chat_id, "claude", "turns", 0, 50)
-
-    assert captured_turns, "generate_session_checkpoint was not called"
-    assert captured_turns[0] == 10, (
-        f"Expected turns=10 (from SESSION_GUARD_CHECKPOINT_TURNS) but got {captured_turns[0]}"
+    assert not list(tmp_path.glob("*.anchor.json")), (
+        "checkpoint/anchor chain was deleted — no anchor file may be written"
     )
 
 
-def test_perform_reset_no_anchor_when_empty_summary(monkeypatch, tmp_path):
-    """When checkpoint returns empty string, no anchor file should be written."""
-    chat_id = "no_anchor_chat"
+def test_checkpoint_anchor_symbols_deleted():
+    """Pin the deletion: neither session_guard nor memory re-grow the
+    write-only checkpoint/anchor helpers."""
+    import larkhelm.memory as memory
+    import larkhelm.session_guard as session_guard
 
-    monkeypatch.setattr(_cfg, "SESSION_DIR", tmp_path, raising=False)
-    monkeypatch.setattr(_cfg, "SESSION_GUARD_CHECKPOINT_BEFORE_RESET", True)
+    for mod, name in (
+        (session_guard, "_write_anchor"),
+        (session_guard, "_checkpoint_enabled"),
+        (memory, "generate_session_checkpoint"),
+        (memory, "load_session_anchor"),
+    ):
+        assert not hasattr(mod, name), f"{mod.__name__}.{name} should be deleted"
+    assert not hasattr(_cfg, "SESSION_GUARD_CHECKPOINT_BEFORE_RESET")
+    assert not hasattr(_cfg, "SESSION_GUARD_CHECKPOINT_TURNS")
+
+
+# ---------------------------------------------------------------------------
+# Settle-before-reset: memory summary must complete before _clear_sid
+# ---------------------------------------------------------------------------
+
+def _stub_reset_side_effects(monkeypatch, events=None):
+    """Stub everything in _perform_reset except the settle step."""
     monkeypatch.setattr(
-        "larkhelm.memory.generate_session_checkpoint",
-        lambda chat_id, turns=5: "",
-        raising=False,
-    )
-    monkeypatch.setattr(
-        "larkhelm.session_guard._clear_sid", lambda *a, **kw: None,
+        "larkhelm.session_guard._clear_sid",
+        lambda *a, **kw: events.append("clear_sid") if events is not None else None,
     )
     monkeypatch.setattr(
         "larkhelm.session_guard._clear_backend_session_counters",
         lambda *a, **kw: None,
     )
     monkeypatch.setattr(
-        "larkhelm.session_guard.record_milestone",
-        lambda *a, **kw: None,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        "larkhelm.session_guard.inc_session_auto_reset",
-        lambda *a: None,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        "larkhelm.session_guard.inc_session_checkpoint",
-        lambda *a: None,
-        raising=False,
+        "larkhelm.memory.record_milestone", lambda *a, **kw: None, raising=False,
     )
 
-    _perform_reset(chat_id, "gemini", "cache_tokens", 4_000_001, 10)
 
-    anchor_path = tmp_path / f"{chat_id}.anchor.json"
-    assert not anchor_path.exists(), "Anchor file should NOT be created for empty summary"
+def test_perform_reset_waits_for_settle_before_clear_sid(monkeypatch):
+    """The forced pre-reset maybe_auto_update must complete (on_done fired)
+    before _clear_sid runs — not fire-and-forget."""
+    chat_id = "settle_order_chat"
+    events = []
+    _stub_reset_side_effects(monkeypatch, events)
+
+    def _fake_maybe_auto_update(cid, force=False, on_done=None, *,
+                                sender_open_id=None):
+        def _bg():
+            import time
+            time.sleep(0.2)  # simulate slow LLM summarization
+            events.append("settle_done")
+            if on_done:
+                on_done(True, "memory content", None)
+        threading.Thread(target=_bg, daemon=True).start()
+
+    monkeypatch.setattr(
+        "larkhelm.memory.maybe_auto_update", _fake_maybe_auto_update, raising=False,
+    )
+
+    _perform_reset(chat_id, "claude", "turns", 0, 50)
+
+    assert events[:2] == ["settle_done", "clear_sid"], (
+        f"settle must complete before sid is cleared, got order: {events}"
+    )
+
+
+def test_perform_reset_settle_retries_once_on_already_in_progress(monkeypatch):
+    """If the forced update is crowded out by a regular update
+    (already_in_progress), settle waits for the update lock and retries once."""
+    chat_id = "settle_retry_chat"
+    events = []
+    _stub_reset_side_effects(monkeypatch, events)
+
+    calls = []
+
+    def _fake_maybe_auto_update(cid, force=False, on_done=None, *,
+                                sender_open_id=None):
+        calls.append(force)
+        if len(calls) == 1:
+            on_done(False, None, "already_in_progress")
+        else:
+            events.append("settle_done")
+            on_done(True, "memory content", None)
+
+    monkeypatch.setattr(
+        "larkhelm.memory.maybe_auto_update", _fake_maybe_auto_update, raising=False,
+    )
+
+    _perform_reset(chat_id, "claude", "turns", 0, 50)
+
+    assert len(calls) == 2, f"expected exactly one retry (2 calls), got {len(calls)}"
+    assert events[:2] == ["settle_done", "clear_sid"]
+
+
+def test_perform_reset_settle_skipped_after_retry_still_resets(monkeypatch):
+    """If both settle attempts are crowded out, log 'settle skipped' and
+    proceed with the reset anyway (best-effort)."""
+    chat_id = "settle_skip_chat"
+    events = []
+    _stub_reset_side_effects(monkeypatch, events)
+
+    calls = []
+
+    def _fake_maybe_auto_update(cid, force=False, on_done=None, *,
+                                sender_open_id=None):
+        calls.append(force)
+        on_done(False, None, "already_in_progress")
+
+    monkeypatch.setattr(
+        "larkhelm.memory.maybe_auto_update", _fake_maybe_auto_update, raising=False,
+    )
+
+    logs = []
+    monkeypatch.setattr(
+        "larkhelm.session_guard._debug_log", lambda msg: logs.append(msg),
+    )
+
+    _perform_reset(chat_id, "claude", "turns", 0, 50)
+
+    assert len(calls) == 2, f"expected exactly 2 attempts, got {len(calls)}"
+    assert "clear_sid" in events, "reset must still proceed when settle is skipped"
+    assert any("settle skipped" in m for m in logs), (
+        f"expected '[SessionGuard] settle skipped' log, got: {logs}"
+    )
 
 
 def test_get_session_counters_returns_dict(monkeypatch):

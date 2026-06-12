@@ -92,17 +92,14 @@ class _RuntimeConfig:
     ANTHROPIC_EXTENDED_CACHE_ENABLED:   bool = True
     # Context-injection cache toggles (REQ-01..04)
     RECENT_TURNS_CACHE_ENABLED:        bool = True
-    MEMORY_LEGACY_CACHE_ENABLED:       bool = True
     DOC_INJECT_CACHE_ENABLED:          bool = True
     DOC_INJECT_CACHE_TTL_SEC:          int = 600
-    DOC_INJECT_RELEVANCE_GATE_ENABLED: bool = False
-    DOC_INJECT_RELEVANCE_THRESHOLD:    float = 0.3
     CLI_SKIP_RECENT_TURNS_WHEN_SID:    bool = True
     API_SKIP_RECENT_TURNS_WHEN_HISTORY: bool = True
+    API_STRIP_SESSION_MEMORY_WHEN_HISTORY: bool = True
     # Injection gate flags (P1)
     SESSION_GUARD_MIN_TURNS_BEFORE_RESET:   int = 5
-    SESSION_GUARD_CHECKPOINT_TURNS:         int = 5
-    ANTHROPIC_LAYERED_CACHE_TRAFFIC:        float = 0.0
+    ANTHROPIC_LAYERED_CACHE_TRAFFIC:        float = 1.0
     CACHE_HIT_RATE_ALERT_THRESHOLD:         float = 0.5
     PROJECT_GUIDE_ENABLED:                  bool = False
     PROJECT_GUIDE_PATH:                     str = ""
@@ -123,6 +120,8 @@ class _RuntimeConfig:
     FILE_TEXT_EXTENSIONS:  "frozenset[str]" = frozenset()
     FILE_PDF_ENABLED:      bool = True
     FILE_PDF_LIB:          str = "PyPDF2"
+    FILE_INJECT_MAX_CHARS_PER_FILE: int = 4000
+    FILE_INJECT_MAX_CHARS_TOTAL:    int = 8000
     # search skill (web_search injector)
     SEARCH_API_PROVIDER:   str = "ddg"    # "ddg" (no key) | "brave"
     SEARCH_API_KEY:        str = ""
@@ -267,14 +266,12 @@ MEMORY_LIMIT_MB:         int   # RSS hard limit in MB; auto-detected on first ru
 HEALTH_ENDPOINT_PORT: int = 0
 HEALTH_BIND_ADDR: str = "127.0.0.1"
 MEMORY_CASCADE_MIDFLIGHT_CANCEL: bool = True
-QUERY_SESSION_V2_ENABLED: bool = False
 
 # ── P2 globals (REQ-01 / 05 / 06 / 07) ─────────────────────────────────────
 METRICS_TEXT_LEGACY: bool = False
 ANTHROPIC_EXTENDED_CACHE_ENABLED: bool = True
 
 # ── P3 globals (REQ-02 / 03 / 04 / 05 / 06 / 07 / 08 / 09 / 10) ────────────
-QUERY_SESSION_V2_TRAFFIC: float = 0.0
 CASCADE_BACKOFF_MAX_ATTEMPTS: int = 3
 PLUGIN_REPORT_CARD_ENABLED: bool = False
 FAILURE_REPORT_CARD_ENABLED: bool = False
@@ -297,17 +294,14 @@ FEISHU_DOC_COLLABORATORS: "list[str]" = []
 # load_history. Operators flip any of these off in config.json to bisect a
 # regression without redeploying.
 RECENT_TURNS_CACHE_ENABLED: bool = True
-MEMORY_LEGACY_CACHE_ENABLED: bool = True
 DOC_INJECT_CACHE_ENABLED: bool = True
 DOC_INJECT_CACHE_TTL_SEC: int = 600
-DOC_INJECT_RELEVANCE_GATE_ENABLED: bool = False
-DOC_INJECT_RELEVANCE_THRESHOLD: float = 0.3
 CLI_SKIP_RECENT_TURNS_WHEN_SID: bool = True
 API_SKIP_RECENT_TURNS_WHEN_HISTORY: bool = True
+API_STRIP_SESSION_MEMORY_WHEN_HISTORY: bool = True
 # Injection gate flags (P1)
 SESSION_GUARD_MIN_TURNS_BEFORE_RESET: int = 5
-SESSION_GUARD_CHECKPOINT_TURNS: int = 5
-ANTHROPIC_LAYERED_CACHE_TRAFFIC: float = 0.0
+ANTHROPIC_LAYERED_CACHE_TRAFFIC: float = 1.0
 CACHE_HIT_RATE_ALERT_THRESHOLD: float = 0.5
 PROJECT_GUIDE_ENABLED: bool = False
 PROJECT_GUIDE_PATH: str = ""
@@ -327,9 +321,8 @@ WORKSPACE_HINT_KEYWORD_GATE: bool = True
 # ── P0/P1/P2 cache-bleed knobs (.crew_workspace/design.md §3.3) ───────────
 # P0: Claude session auto-reset
 CLAUDE_SESSION_AUTO_RESET_ENABLED: bool = True
-# Week-3: universal session guard + anchor sidecar
+# Week-3: universal session guard
 SESSION_GUARD_ENABLED: bool = True
-SESSION_GUARD_CHECKPOINT_BEFORE_RESET: bool = True
 SESSION_GUARD_POLICIES: dict = {
     "claude":   {"max_cache_read_tokens": 5_000_000, "max_turns": 50},
     "gemini":   {"max_cache_read_tokens": 4_000_000, "max_turns": 40},
@@ -337,7 +330,7 @@ SESSION_GUARD_POLICIES: dict = {
     "kimi":     {"max_cache_read_tokens": 0,          "max_turns": 60},
 }
 ANTHROPIC_EXTENDED_CACHE_RETRY_SEC: int = 1800
-ANTHROPIC_LAYERED_CACHE_CONTROL: bool = False
+ANTHROPIC_LAYERED_CACHE_CONTROL: bool = True
 CLAUDE_SESSION_RESET_CACHE_TOKENS: int = 5_000_000
 CLAUDE_SESSION_RESET_TURNS: int = 50
 # P1: ChatAgent cheap routing
@@ -353,6 +346,8 @@ FILE_TEXT_EXTENSIONS: "frozenset[str]" = frozenset({
 })
 FILE_PDF_ENABLED: bool = True
 FILE_PDF_LIB: str = "PyPDF2"
+FILE_INJECT_MAX_CHARS_PER_FILE: int = 4000   # per-file inject budget; <= 0 disables
+FILE_INJECT_MAX_CHARS_TOTAL: int = 8000      # total inject budget per message; <= 0 disables
 # search skill
 SEARCH_API_PROVIDER: str = "ddg"
 SEARCH_API_KEY: str = ""
@@ -638,20 +633,19 @@ def _init_app_config() -> None:
     global MEMORY_LIMIT_MB
     global HEALTH_ENDPOINT_PORT, HEALTH_BIND_ADDR
     global MEMORY_CASCADE_MIDFLIGHT_CANCEL
-    global QUERY_SESSION_V2_ENABLED
     global METRICS_TEXT_LEGACY, ANTHROPIC_EXTENDED_CACHE_ENABLED
-    global QUERY_SESSION_V2_TRAFFIC
     global CASCADE_BACKOFF_MAX_ATTEMPTS
     global PLUGIN_REPORT_CARD_ENABLED, FAILURE_REPORT_CARD_ENABLED, ADMIN_CHAT_ID
-    global RECENT_TURNS_CACHE_ENABLED, MEMORY_LEGACY_CACHE_ENABLED
+    global RECENT_TURNS_CACHE_ENABLED
     global DOC_INJECT_CACHE_ENABLED, DOC_INJECT_CACHE_TTL_SEC
-    global DOC_INJECT_RELEVANCE_GATE_ENABLED, DOC_INJECT_RELEVANCE_THRESHOLD
     global CLI_SKIP_RECENT_TURNS_WHEN_SID, API_SKIP_RECENT_TURNS_WHEN_HISTORY
+    global API_STRIP_SESSION_MEMORY_WHEN_HISTORY
     global PROJECT_GUIDE_ENABLED, PROJECT_GUIDE_PATH, PROJECT_GUIDE_AUTO_DISCOVER, PARENT_INJECT_SKIP_WHEN_API_HISTORY
     global DOC_INJECT_CACHE_TTL_SEC_CLAUDE, DOC_INJECT_CACHE_TTL_SEC_GEMINI
     global DOC_INJECT_CACHE_TTL_SEC_KIMI, DOC_INJECT_CACHE_TTL_SEC_DEEPSEEK
     global FILE_ENABLED, MAX_FILE_SIZE_BYTES, FILE_TEXT_EXTENSIONS
     global FILE_PDF_ENABLED, FILE_PDF_LIB
+    global FILE_INJECT_MAX_CHARS_PER_FILE, FILE_INJECT_MAX_CHARS_TOTAL
     global FEISHU_DOC_DEFAULT_VIS, FEISHU_DOC_COLLABORATORS
 
     try:
@@ -906,7 +900,6 @@ def _init_app_config() -> None:
     config.setdefault("intent_audit_path", "")
 
     # Memory execution flags (still read by memory.py / log.py)
-    config.setdefault("memory_recent_turns_dedup", True)
     config.setdefault("memory_cascade_shortcircuit", True)
     config.setdefault("memory_cascade_max_concurrent", 4)
 
@@ -939,7 +932,6 @@ def _init_app_config() -> None:
     # untouched; reads later use _cfg.HEALTH_* etc. as well as config[...].
     config.setdefault("health_endpoint_port", 0)
     config.setdefault("health_bind_addr", "127.0.0.1")
-    config.setdefault("query_session_v2_enabled", False)
     config.setdefault("memory_session_layer_smart", True)
     config.setdefault("memory_session_layer_budgets", {
         "work_context": 1200, "decisions": 800, "history": 600,
@@ -951,7 +943,6 @@ def _init_app_config() -> None:
     except (TypeError, ValueError):
         HEALTH_ENDPOINT_PORT = 0
     HEALTH_BIND_ADDR = str(config.get("health_bind_addr", "127.0.0.1") or "127.0.0.1")
-    QUERY_SESSION_V2_ENABLED = bool(config.get("query_session_v2_enabled", False))
     MEMORY_CASCADE_MIDFLIGHT_CANCEL = bool(config.get("memory_cascade_midflight_cancel", True))
 
     # ── P2 new keys (REQ-01) ────────────────────────────────────────────────
@@ -964,7 +955,6 @@ def _init_app_config() -> None:
     )
 
     # ── P3 new keys ──────────────────────────────────────────────────────────
-    config.setdefault("query_session_v2_traffic", 0.0)
     config.setdefault("cascade_backoff_max_attempts", 3)
     config.setdefault("plugin_report_card_enabled", False)
     config.setdefault("failure_report_card_enabled", False)
@@ -973,13 +963,6 @@ def _init_app_config() -> None:
     config.setdefault("feishu_doc_default_vis", "")
     # M-DOC-PERM: list of open_ids to add as collaborators after doc creation.
     config.setdefault("feishu_doc_collaborators", [])
-
-    try:
-        QUERY_SESSION_V2_TRAFFIC = max(
-            0.0, min(1.0, float(config.get("query_session_v2_traffic", 0.0) or 0.0)),
-        )
-    except (TypeError, ValueError):
-        QUERY_SESSION_V2_TRAFFIC = 0.0
 
     try:
         CASCADE_BACKOFF_MAX_ATTEMPTS = max(
@@ -996,11 +979,13 @@ def _init_app_config() -> None:
     # behaviour: caches on (loaders byte-identical, just memoized) and the
     # CLI sid skip on (mirrors what API backends already do).
     config.setdefault("recent_turns_cache_enabled", True)
-    config.setdefault("memory_legacy_cache_enabled", True)
     config.setdefault("doc_inject_cache_enabled", True)
     config.setdefault("doc_inject_cache_ttl_sec", 600)
     config.setdefault("cli_skip_recent_turns_when_sid", True)
     config.setdefault("api_skip_recent_turns_when_history", True)
+    # MCR P1-5 回滚开关：API history 非空时剥离 [SESSION MEMORY] 注入。
+    # 设 false 恢复全量注入（跨 backend 连续性优先于 token 节省时用）。
+    config.setdefault("api_strip_session_memory_when_history", True)
     # P3 REQ-02. REQ-18: default is now True (keyword gate on by
     # default); operators flip to false to restore unconditional injection.
     config.setdefault("workspace_hint_keyword_gate", True)
@@ -1015,14 +1000,9 @@ def _init_app_config() -> None:
     config.setdefault("doc_inject_cache_ttl_sec_kimi", 120)
     config.setdefault("doc_inject_cache_ttl_sec_deepseek", 180)
     config.setdefault("parent_inject_skip_when_api_history", False)
-    config.setdefault("doc_inject_relevance_gate_enabled", False)
-    config.setdefault("doc_inject_relevance_threshold", 0.3)
 
     RECENT_TURNS_CACHE_ENABLED = bool(
         config.get("recent_turns_cache_enabled", True)
-    )
-    MEMORY_LEGACY_CACHE_ENABLED = bool(
-        config.get("memory_legacy_cache_enabled", True)
     )
     DOC_INJECT_CACHE_ENABLED = bool(
         config.get("doc_inject_cache_enabled", True)
@@ -1033,20 +1013,14 @@ def _init_app_config() -> None:
         )
     except (TypeError, ValueError):
         DOC_INJECT_CACHE_TTL_SEC = 600
-    DOC_INJECT_RELEVANCE_GATE_ENABLED = bool(
-        config.get("doc_inject_relevance_gate_enabled", False)
-    )
-    try:
-        DOC_INJECT_RELEVANCE_THRESHOLD = max(
-            0.0, min(1.0, float(config.get("doc_inject_relevance_threshold", 0.3) or 0.3)),
-        )
-    except (TypeError, ValueError):
-        DOC_INJECT_RELEVANCE_THRESHOLD = 0.3
     CLI_SKIP_RECENT_TURNS_WHEN_SID = bool(
         config.get("cli_skip_recent_turns_when_sid", True)
     )
     API_SKIP_RECENT_TURNS_WHEN_HISTORY = bool(
         config.get("api_skip_recent_turns_when_history", True)
+    )
+    API_STRIP_SESSION_MEMORY_WHEN_HISTORY = bool(
+        config.get("api_strip_session_memory_when_history", True)
     )
     PROJECT_GUIDE_ENABLED = bool(config.get("project_guide_enabled", False))
     PROJECT_GUIDE_PATH = str(config.get("project_guide_path", "") or "")
@@ -1068,9 +1042,7 @@ def _init_app_config() -> None:
     # config.json to bisect a regression without redeploying.
     config.setdefault("claude_session_auto_reset_enabled", True)
     config.setdefault("session_guard_enabled", True)
-    config.setdefault("session_guard_checkpoint_before_reset", True)
     config.setdefault("session_guard_min_turns_before_reset", 5)
-    config.setdefault("session_guard_checkpoint_turns", 5)
     config.setdefault("claude_session_reset_cache_tokens", 5_000_000)
     config.setdefault("session_guard_policies", {
         "claude":   {"max_cache_read_tokens": 5_000_000, "max_turns": 50},
@@ -1079,8 +1051,13 @@ def _init_app_config() -> None:
         "kimi":     {"max_cache_read_tokens": 0,          "max_turns": 60},
     })
     config.setdefault("anthropic_extended_cache_retry_sec", 1800)
-    config.setdefault("anthropic_layered_cache_control_enabled", False)
-    config.setdefault("anthropic_layered_cache_traffic", 0.0)
+    # Layered cache_control graduated to default-on (2026-06-12): the stable
+    # global/project prefix keeps its 1h cache while the volatile
+    # [SESSION MEMORY] block (rewritten every ~10 turns) no longer pins into
+    # — and periodically breaks — the cached prefix. DEF-01 empty-stable
+    # fallback is test-protected. Set false / 0.0 to restore single-block.
+    config.setdefault("anthropic_layered_cache_control_enabled", True)
+    config.setdefault("anthropic_layered_cache_traffic", 1.0)
     config.setdefault("claude_session_reset_turns", 50)
     config.setdefault("chat_agent_cheap_routing_enabled", True)
     config.setdefault("memory_prefer_cheap_enabled", True)
@@ -1093,10 +1070,10 @@ def _init_app_config() -> None:
 
     global CLAUDE_SESSION_AUTO_RESET_ENABLED, CLAUDE_SESSION_RESET_CACHE_TOKENS
     global CLAUDE_SESSION_RESET_TURNS, CHAT_AGENT_CHEAP_ROUTING_ENABLED
-    global SESSION_GUARD_ENABLED, SESSION_GUARD_CHECKPOINT_BEFORE_RESET
+    global SESSION_GUARD_ENABLED
     global SESSION_GUARD_POLICIES, ANTHROPIC_EXTENDED_CACHE_RETRY_SEC
     global ANTHROPIC_LAYERED_CACHE_CONTROL, ANTHROPIC_LAYERED_CACHE_TRAFFIC
-    global SESSION_GUARD_MIN_TURNS_BEFORE_RESET, SESSION_GUARD_CHECKPOINT_TURNS
+    global SESSION_GUARD_MIN_TURNS_BEFORE_RESET
 
     CLAUDE_SESSION_AUTO_RESET_ENABLED = bool(
         config.get("claude_session_auto_reset_enabled", True)
@@ -1116,29 +1093,21 @@ def _init_app_config() -> None:
         CLAUDE_SESSION_RESET_TURNS = 50
     SESSION_GUARD_ENABLED = bool(config.get("session_guard_enabled", True))
     ANTHROPIC_LAYERED_CACHE_CONTROL = bool(
-        config.get("anthropic_layered_cache_control_enabled", False)
+        config.get("anthropic_layered_cache_control_enabled", True)
     )
     try:
+        _layered_traffic_raw = config.get("anthropic_layered_cache_traffic", 1.0)
         ANTHROPIC_LAYERED_CACHE_TRAFFIC = max(
-            0.0, min(1.0, float(config.get("anthropic_layered_cache_traffic", 0.0) or 0.0))
+            0.0, min(1.0, float(1.0 if _layered_traffic_raw is None else _layered_traffic_raw))
         )
     except (TypeError, ValueError):
-        ANTHROPIC_LAYERED_CACHE_TRAFFIC = 0.0
+        ANTHROPIC_LAYERED_CACHE_TRAFFIC = 1.0
     try:
         SESSION_GUARD_MIN_TURNS_BEFORE_RESET = max(
             1, int(config.get("session_guard_min_turns_before_reset", 5) or 5)
         )
     except (TypeError, ValueError):
         SESSION_GUARD_MIN_TURNS_BEFORE_RESET = 5
-    try:
-        SESSION_GUARD_CHECKPOINT_TURNS = max(
-            1, int(config.get("session_guard_checkpoint_turns", 5) or 5)
-        )
-    except (TypeError, ValueError):
-        SESSION_GUARD_CHECKPOINT_TURNS = 5
-    SESSION_GUARD_CHECKPOINT_BEFORE_RESET = bool(
-        config.get("session_guard_checkpoint_before_reset", True)
-    )
     _raw_policies = config.get("session_guard_policies") or {}
     if isinstance(_raw_policies, dict) and _raw_policies:
         SESSION_GUARD_POLICIES = _raw_policies
@@ -1160,9 +1129,9 @@ def _init_app_config() -> None:
         config.get("chat_agent_cheap_routing_enabled", True)
     )
 
-    # ── Week-2: Backend-aware Context Budget ───────────────────────────────
-    config.setdefault("backend_aware_budget_enabled", False)
-    # 9 per-model context-window overrides (tokens). 0 = "use default".
+    # ── Per-backend context-window overrides ───────────────────────────────
+    # Read by token_budget.resolve_context_window → API max_tokens computation
+    # and the /stats / /context window labels. 0 = "use built-in default".
     config.setdefault("context_window_claude", 0)
     config.setdefault("context_window_gemini", 0)
     config.setdefault("context_window_kimi", 0)
@@ -1188,6 +1157,8 @@ def _init_app_config() -> None:
     config.setdefault("max_file_size_bytes", 10 * 1024 * 1024)
     config.setdefault("file_pdf_enabled", True)
     config.setdefault("file_pdf_lib", "PyPDF2")
+    config.setdefault("file_inject_max_chars_per_file", 4000)
+    config.setdefault("file_inject_max_chars_total", 8000)
 
     FILE_ENABLED = bool(config.get("file_enabled", True))
     try:
@@ -1207,6 +1178,14 @@ def _init_app_config() -> None:
         })
     FILE_PDF_ENABLED = bool(config.get("file_pdf_enabled", True))
     FILE_PDF_LIB = str(config.get("file_pdf_lib", "PyPDF2") or "PyPDF2")
+    try:
+        FILE_INJECT_MAX_CHARS_PER_FILE = int(config.get("file_inject_max_chars_per_file", 4000))
+    except (TypeError, ValueError):
+        FILE_INJECT_MAX_CHARS_PER_FILE = 4000
+    try:
+        FILE_INJECT_MAX_CHARS_TOTAL = int(config.get("file_inject_max_chars_total", 8000))
+    except (TypeError, ValueError):
+        FILE_INJECT_MAX_CHARS_TOTAL = 8000
     global SEARCH_API_PROVIDER, SEARCH_API_KEY
     SEARCH_API_PROVIDER = str(config.get("search_api_provider", "ddg") or "ddg").lower()
     SEARCH_API_KEY = str(config.get("search_api_key", "") or "")
@@ -1367,12 +1346,6 @@ def validate_config(config: dict) -> list[str]:
             errors.append(f"[ConfigError] shell_timeout_sec: must be >= 1 (got {st})")
     except (TypeError, ValueError):
         errors.append("[ConfigError] shell_timeout_sec: must be an integer")
-    try:
-        qst = float(config.get("query_session_v2_traffic", 0.0))
-        if not (0.0 <= qst <= 1.0):
-            errors.append(f"[ConfigError] query_session_v2_traffic: must be in [0.0, 1.0] (got {qst})")
-    except (TypeError, ValueError):
-        errors.append("[ConfigError] query_session_v2_traffic: must be a float")
     return errors
 
 
@@ -1434,15 +1407,12 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         ANTHROPIC_EXTENDED_CACHE_ENABLED=ANTHROPIC_EXTENDED_CACHE_ENABLED,
 
         RECENT_TURNS_CACHE_ENABLED=RECENT_TURNS_CACHE_ENABLED,
-        MEMORY_LEGACY_CACHE_ENABLED=MEMORY_LEGACY_CACHE_ENABLED,
         DOC_INJECT_CACHE_ENABLED=DOC_INJECT_CACHE_ENABLED,
         DOC_INJECT_CACHE_TTL_SEC=DOC_INJECT_CACHE_TTL_SEC,
-        DOC_INJECT_RELEVANCE_GATE_ENABLED=DOC_INJECT_RELEVANCE_GATE_ENABLED,
-        DOC_INJECT_RELEVANCE_THRESHOLD=DOC_INJECT_RELEVANCE_THRESHOLD,
         CLI_SKIP_RECENT_TURNS_WHEN_SID=CLI_SKIP_RECENT_TURNS_WHEN_SID,
         API_SKIP_RECENT_TURNS_WHEN_HISTORY=API_SKIP_RECENT_TURNS_WHEN_HISTORY,
+        API_STRIP_SESSION_MEMORY_WHEN_HISTORY=API_STRIP_SESSION_MEMORY_WHEN_HISTORY,
         SESSION_GUARD_MIN_TURNS_BEFORE_RESET=SESSION_GUARD_MIN_TURNS_BEFORE_RESET,
-        SESSION_GUARD_CHECKPOINT_TURNS=SESSION_GUARD_CHECKPOINT_TURNS,
         ANTHROPIC_LAYERED_CACHE_TRAFFIC=ANTHROPIC_LAYERED_CACHE_TRAFFIC,
         CACHE_HIT_RATE_ALERT_THRESHOLD=CACHE_HIT_RATE_ALERT_THRESHOLD,
         PROJECT_GUIDE_ENABLED=PROJECT_GUIDE_ENABLED,
@@ -1459,6 +1429,8 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         FILE_TEXT_EXTENSIONS=FILE_TEXT_EXTENSIONS,
         FILE_PDF_ENABLED=FILE_PDF_ENABLED,
         FILE_PDF_LIB=FILE_PDF_LIB,
+        FILE_INJECT_MAX_CHARS_PER_FILE=FILE_INJECT_MAX_CHARS_PER_FILE,
+        FILE_INJECT_MAX_CHARS_TOTAL=FILE_INJECT_MAX_CHARS_TOTAL,
         SEARCH_API_PROVIDER=SEARCH_API_PROVIDER,
         SEARCH_API_KEY=SEARCH_API_KEY,
         GITHUB_TOKEN=GITHUB_TOKEN,

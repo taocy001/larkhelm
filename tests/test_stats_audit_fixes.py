@@ -1093,9 +1093,13 @@ class TestDurationHardCapMatchesHardTimeout(unittest.TestCase):
 
     def test_long_query_below_hard_timeout_is_kept(self):
         """A 2-hour /dev pipeline (well under the default 6h
-        hard_timeout) must NOT be filtered."""
-        import larkhelm.config as _cfg
+        hard_timeout) must NOT be filtered.
 
+        The premise is the *default* hard_timeout (21600s) — pin it
+        explicitly instead of reading the live module global, which other
+        test modules (e.g. test_runner_deepseek's import-time bootstrap)
+        mutate, making this test order-dependent under ``-k`` filtering.
+        """
         records = [
             {"role": "user",      "ts": "2026-05-19T10:00:00"},
             # assistant arrives 2 hours later (7200s) — under the
@@ -1103,7 +1107,7 @@ class TestDurationHardCapMatchesHardTimeout(unittest.TestCase):
             {"role": "assistant", "ts": "2026-05-19T12:00:00"},
         ]
         from datetime import datetime as _dt
-        hard_cap = float(getattr(_cfg, "HARD_TIMEOUT", 21600) or 21600) * 1.1
+        hard_cap = 21600 * 1.1
         durations: list[float] = []
         pending = None
         for r in records:

@@ -1,10 +1,9 @@
 """Tests: failover loop uses record_call_failure instead of mark_unhealthy (LOGIC-C2).
 
-Four test classes:
+Three test classes:
   1. TestQueryPyUsesRecordCallFailure      — source inspection of _query.py
-  2. TestQuerySessionPyUsesRecordCallFailure — source inspection of _query_session.py
-  3. TestTransientSlidingWindow            — BackendRegistry TRANSIENT window logic
-  4. TestUserCancelAndTimeoutSkipFailoverNotice — set_current_text not called on NO_HEALTH_UPDATE
+  2. TestTransientSlidingWindow            — BackendRegistry TRANSIENT window logic
+  3. TestUserCancelAndTimeoutSkipFailoverNotice — set_current_text not called on NO_HEALTH_UPDATE
 """
 import atexit
 import json
@@ -80,34 +79,7 @@ class TestQueryPyUsesRecordCallFailure(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  2. Source inspection — _query_session.py
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class TestQuerySessionPyUsesRecordCallFailure(unittest.TestCase):
-
-    def setUp(self):
-        self._src = Path("larkhelm/handlers/_query_session.py").read_text()
-
-    def test_record_call_failure_present(self):
-        self.assertIn("record_call_failure", self._src)
-
-    def test_no_health_update_imported_and_used(self):
-        self.assertIn("NO_HEALTH_UPDATE", self._src)
-
-    def test_mark_unhealthy_not_called(self):
-        non_comment = [
-            ln for ln in self._src.splitlines()
-            if "mark_unhealthy" in ln and not ln.strip().startswith("#")
-        ]
-        self.assertEqual(non_comment, [],
-                         f"mark_unhealthy still referenced in _query_session.py: {non_comment}")
-
-    def test_category_guards_set_current_text(self):
-        self.assertIn("category not in NO_HEALTH_UPDATE", self._src)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  3. BackendRegistry TRANSIENT sliding window
+#  2. BackendRegistry TRANSIENT sliding window
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestTransientSlidingWindow(unittest.TestCase):
@@ -159,7 +131,7 @@ class TestTransientSlidingWindow(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  4. set_current_text not called on USER_CANCEL / TIMEOUT
+#  3. set_current_text not called on USER_CANCEL / TIMEOUT
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestUserCancelAndTimeoutSkipFailoverNotice(unittest.TestCase):

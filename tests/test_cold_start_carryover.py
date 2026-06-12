@@ -87,7 +87,7 @@ class TestColdStartCarryOver(unittest.TestCase):
     always-True in production — ``maybe_auto_update`` itself short-circuits
     on empty ``_read_logs_tail`` results, so force=True is safe."""
 
-    def _run_hook(self, *, old_turn: int):
+    def _run_hook(self, *, old_turn: int, sender_open_id=None):
         """Drive ``_post_query_memory_hook`` under controlled conditions.
 
         Patches:
@@ -100,7 +100,8 @@ class TestColdStartCarryOver(unittest.TestCase):
         with patch.object(_query_mod, "_get_turn_count", return_value=old_turn), \
              patch.object(_query_mod, "_increment_turn_count", inc_mock), \
              patch.object(_memory, "maybe_auto_update", mau_mock):
-            _query_mod._post_query_memory_hook("chat_xyz", "trace_abc")
+            _query_mod._post_query_memory_hook("chat_xyz", "trace_abc",
+                                               sender_open_id)
         return mau_mock, inc_mock
 
     def test_first_turn_triggers_force(self):
@@ -112,13 +113,14 @@ class TestColdStartCarryOver(unittest.TestCase):
         """
         mau, inc = self._run_hook(old_turn=0)
         inc.assert_called_once_with("chat_xyz")
-        mau.assert_called_once_with("chat_xyz", force=True)
+        mau.assert_called_once_with("chat_xyz", force=True,
+                                    sender_open_id=None)
 
     def test_second_turn_uses_regular_path(self):
         """old=1 → routes through regular (non-force) maybe_auto_update."""
         mau, inc = self._run_hook(old_turn=1)
         inc.assert_called_once_with("chat_xyz")
-        mau.assert_called_once_with("chat_xyz")
+        mau.assert_called_once_with("chat_xyz", sender_open_id=None)
         # Must NOT have force=True kwarg
         _, kwargs = mau.call_args
         self.assertNotIn("force", kwargs)
@@ -127,9 +129,18 @@ class TestColdStartCarryOver(unittest.TestCase):
         """old=12 → regular path (gate decides inside maybe_auto_update)."""
         mau, inc = self._run_hook(old_turn=12)
         inc.assert_called_once_with("chat_xyz")
-        mau.assert_called_once_with("chat_xyz")
+        mau.assert_called_once_with("chat_xyz", sender_open_id=None)
         _, kwargs = mau.call_args
         self.assertNotIn("force", kwargs)
+
+    def test_sender_open_id_forwarded_on_both_paths(self):
+        """MEM-C1: the hook must forward sender_open_id to maybe_auto_update
+        on both the cold-start (force) and regular paths."""
+        mau, _ = self._run_hook(old_turn=0, sender_open_id="ou_alice")
+        mau.assert_called_once_with("chat_xyz", force=True,
+                                    sender_open_id="ou_alice")
+        mau, _ = self._run_hook(old_turn=1, sender_open_id="ou_alice")
+        mau.assert_called_once_with("chat_xyz", sender_open_id="ou_alice")
 
     def test_force_bypasses_gate(self):
         """Calling maybe_auto_update(force=True) at a non-trigger turn must

@@ -412,43 +412,6 @@ def _start_cron_scheduler() -> None:
     threading.Thread(target=_loop, daemon=True, name="cron-scheduler").start()
 
 
-def _start_memory_boot_warmup() -> None:
-    """Boot-time memory LRU warmup daemon.
-
-    Pre-fills the memory layer LRU cache with recently-modified .md files
-    so the first few queries don't pay cold-cache disk I/O. Daemon thread
-    so traffic serving is never blocked. Failures are caught and logged.
-    """
-    def _loop():
-
-        # Pre-fill memory layer LRU with recently-modified .md files
-        try:
-            import time as _time
-            from larkhelm.memory import MEMORY_HOME_DIR
-            from larkhelm._context_cache import cached_memory_layer
-            cutoff = _time.time() - 86400
-            for path in MEMORY_HOME_DIR.glob("*.md"):
-                try:
-                    if path.stat().st_mtime < cutoff:
-                        continue
-                    name = path.name
-                    if name.startswith("global_"):
-                        layer = "global"
-                    elif name.startswith("project_"):
-                        layer = "project"
-                    elif name.startswith("session_"):
-                        layer = "session"
-                    else:
-                        continue
-                    cached_memory_layer(layer, path, loader=lambda p=path: p.read_text("utf-8"))
-                except Exception as inner:
-                    _debug_log(f"[BootWarmup] LRU fill failed for {path.name}: {inner}")
-        except Exception as e:
-            _debug_log(f"[BootWarmup] LRU warmup failed: {e}")
-
-    threading.Thread(target=_loop, daemon=True, name="boot-warmup").start()
-
-
 def _maybe_send_alert(metric_name: str, message: str, cfg) -> None:
     """Send an orange alert card if not throttled within _ALERT_THROTTLE_SEC."""
     now = time.time()
@@ -552,7 +515,6 @@ def _start_background_threads(cfg) -> None:
 
     _start_cron_scheduler()
     _start_gc_thread()
-    _start_memory_boot_warmup()
 
     from larkhelm.memory_watchdog import start_memory_watchdog
     start_memory_watchdog(cfg.MEMORY_LIMIT_MB)

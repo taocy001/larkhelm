@@ -65,7 +65,6 @@
     "memory_lazy_global":            { "type": "boolean" },
     "memory_project_conditional":    { "type": "boolean" },
     "memory_session_layered":        { "type": "boolean" },
-    "memory_recent_turns_dedup":     { "type": "boolean" },
     "memory_cascade_shortcircuit":   { "type": "boolean" },
     "memory_cascade_max_concurrent": { "type": "integer", "minimum": 1 },
     "memory_session_gc_enabled":     { "type": "boolean" },
@@ -113,7 +112,6 @@
     "health_endpoint_port": { "type": "integer", "minimum": 0, "maximum": 65535 },
     "health_bind_addr":     { "type": "string" },
 
-    "query_session_v2_enabled":       { "type": "boolean" },
     "memory_session_layer_smart":     { "type": "boolean" },
     "memory_session_layer_budgets": {
       "type": "object",
@@ -126,7 +124,6 @@
     },
     "memory_cascade_midflight_cancel": { "type": "boolean" },
 
-    "query_session_v2_traffic":          { "type": "number",  "minimum": 0.0, "maximum": 1.0 },
     "intent_embedding_top_k_threshold":  { "type": "number",  "minimum": 0.0, "maximum": 1.0 },
     "llm_router_circuit_failures":       { "type": "integer", "minimum": 1 },
     "llm_router_circuit_cooldown_sec":   { "type": "number",  "minimum": 1.0 },
@@ -145,7 +142,6 @@
       "items": { "type": "object" }
     },
 
-    "backend_aware_budget_enabled": { "type": "boolean" },
     "context_window_claude":          { "type": "integer", "minimum": 0 },
     "context_window_gemini":          { "type": "integer", "minimum": 0 },
     "context_window_kimi":            { "type": "integer", "minimum": 0 },

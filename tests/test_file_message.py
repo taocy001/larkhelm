@@ -1,7 +1,7 @@
 """Tests for file message handling (AC-01 through AC-09).
 
 Covers: FileProcessor, file message routing in _message.py,
-cleanup_temp_paths in _query_pure.py, and _do_query files parameter.
+cleanup_temp_paths in _query.py, and _do_query files parameter.
 """
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ from larkhelm.file_handler import (  # noqa: E402
     ExtractedFile, FileProcessResult, FileProcessor,
     process_file, build_file_prompt_blocks, files_to_prompt_fragment,
 )
-from larkhelm.handlers import _query_pure  # noqa: E402
+from larkhelm.handlers import _query  # noqa: E402
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -174,7 +174,7 @@ class TestFileCleanup(unittest.TestCase):
         pathlib.Path(tmp_file).write_text("code")
         self.assertTrue(pathlib.Path(tmp_file).exists())
 
-        _query_pure.cleanup_temp_paths([tmp_file])
+        _query.cleanup_temp_paths([tmp_file])
 
         self.assertFalse(pathlib.Path(tmp_file).exists(), "Temp file should be cleaned")
 
@@ -191,7 +191,7 @@ class TestFileCleanup(unittest.TestCase):
         # Use the actual session_dir parent as SESSION_DIR
         _cfg.SESSION_DIR = str(pathlib.Path(_TMP))
 
-        _query_pure.cleanup_temp_paths([fake_file])
+        _query.cleanup_temp_paths([fake_file])
 
         # File in SESSION_DIR/../files/ should be removed
         self.assertFalse(pathlib.Path(fake_file).exists(), "Session files/ file should be cleaned")
@@ -199,11 +199,11 @@ class TestFileCleanup(unittest.TestCase):
             _cfg.SESSION_DIR = orig
 
     def test_file_cleanup_nonexistent_is_noop(self):
-        _query_pure.cleanup_temp_paths(["/tmp/nonexistent_lhtest_xyz.py"])
+        _query.cleanup_temp_paths(["/tmp/nonexistent_lhtest_xyz.py"])
         # No exception
 
     def test_file_cleanup_none_is_noop(self):
-        _query_pure.cleanup_temp_paths(None)
+        _query.cleanup_temp_paths(None)
         # No exception
 
     def test_file_cleanup_skips_image_cache(self):
@@ -213,7 +213,7 @@ class TestFileCleanup(unittest.TestCase):
         # Ensure session_dir is set to something that doesn't match
         orig = getattr(_cfg, "SESSION_DIR", None)
         _cfg.SESSION_DIR = "/some/other/dir"
-        _query_pure.cleanup_temp_paths([safe_file])
+        _query.cleanup_temp_paths([safe_file])
         # File should still exist (not deleted — not in /tmp/ or session /files/)
         exists = pathlib.Path(safe_file).exists()
         # restore
@@ -647,6 +647,96 @@ class TestExtractFallback(unittest.TestCase):
         content = proc._extract(path, "txt")
         self.assertIsNotNone(content)
         self.assertIn("hello", content)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# File inject char budgets (file_inject_max_chars_per_file / _total)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TestFileInjectCharBudgets(unittest.TestCase):
+    """Per-file truncation in _build_block + total budget in files_to_prompt_fragment."""
+
+    def setUp(self):
+        self._orig_per_file = getattr(_cfg, "FILE_INJECT_MAX_CHARS_PER_FILE", 4000)
+        self._orig_total = getattr(_cfg, "FILE_INJECT_MAX_CHARS_TOTAL", 8000)
+
+    def tearDown(self):
+        _cfg.FILE_INJECT_MAX_CHARS_PER_FILE = self._orig_per_file
+        _cfg.FILE_INJECT_MAX_CHARS_TOTAL = self._orig_total
+
+    def test_defaults_loaded(self):
+        self.assertEqual(self._orig_per_file, 4000)
+        self.assertEqual(self._orig_total, 8000)
+
+    def test_build_block_truncates_over_per_file_limit(self):
+        _cfg.FILE_INJECT_MAX_CHARS_PER_FILE = 10
+        proc = FileProcessor()
+        block = proc._build_block("big.log", "log", "x" * 50,
+                                  size=200 * 1024, path="/tmp/big.log")
+        self.assertIn("x" * 10, block)
+        self.assertNotIn("x" * 11, block)
+        self.assertIn("已截断", block)
+        self.assertIn("200 KB", block)
+        self.assertIn("/tmp/big.log", block)
+
+    def test_build_block_under_limit_unchanged(self):
+        _cfg.FILE_INJECT_MAX_CHARS_PER_FILE = 100
+        proc = FileProcessor()
+        content = "print('hi')"
+        block = proc._build_block("hi.py", "py", content, size=11, path="/tmp/hi.py")
+        self.assertEqual(block, f"### hi.py\n```python\n{content}\n```")
+        self.assertNotIn("已截断", block)
+
+    def test_build_block_limit_disabled_with_zero(self):
+        _cfg.FILE_INJECT_MAX_CHARS_PER_FILE = 0
+        proc = FileProcessor()
+        block = proc._build_block("big.log", "log", "x" * 50)
+        self.assertIn("x" * 50, block)
+        self.assertNotIn("已截断", block)
+
+    def test_build_block_marker_falls_back_to_file_name_without_path(self):
+        _cfg.FILE_INJECT_MAX_CHARS_PER_FILE = 10
+        proc = FileProcessor()
+        block = proc._build_block("big.log", "log", "x" * 50)
+        self.assertIn("完整文件见 big.log", block)
+
+    def test_fragment_total_budget_degrades_subsequent_files(self):
+        _cfg.FILE_INJECT_MAX_CHARS_PER_FILE = 1000
+        _cfg.FILE_INJECT_MAX_CHARS_TOTAL = 500
+        f1 = ExtractedFile(path="/tmp/a.py", file_name="a.py", ext="py",
+                           size=400, content="a" * 400)
+        f2 = ExtractedFile(path="/tmp/b.py", file_name="b.py", ext="py",
+                           size=2048, content="b" * 400)
+        frag = files_to_prompt_fragment([f1, f2])
+        # First file fully injected; second degraded to one-line placeholder.
+        self.assertIn("a" * 400, frag)
+        self.assertNotIn("b" * 400, frag)
+        self.assertIn("[文件 b.py (2 KB) 未注入，超出总预算]", frag)
+        # Fragment structure preserved.
+        self.assertTrue(frag.startswith("[用户上传了以下文件]\n\n"))
+        self.assertTrue(frag.endswith("\n\n---\n\n"))
+
+    def test_fragment_under_budgets_unchanged(self):
+        _cfg.FILE_INJECT_MAX_CHARS_PER_FILE = 4000
+        _cfg.FILE_INJECT_MAX_CHARS_TOTAL = 8000
+        f1 = ExtractedFile(path="/tmp/a.py", file_name="a.py", ext="py",
+                           size=3, content="a=1")
+        f2 = ExtractedFile(path="/tmp/b.md", file_name="b.md", ext="md",
+                           size=7, content="# Hello")
+        frag = files_to_prompt_fragment([f1, f2])
+        self.assertIn("a=1", frag)
+        self.assertIn("# Hello", frag)
+        self.assertNotIn("已截断", frag)
+        self.assertNotIn("未注入", frag)
+
+    def test_fragment_total_budget_disabled_with_zero(self):
+        _cfg.FILE_INJECT_MAX_CHARS_PER_FILE = 0
+        _cfg.FILE_INJECT_MAX_CHARS_TOTAL = 0
+        f1 = ExtractedFile(path="/tmp/a.py", file_name="a.py", ext="py",
+                           size=9000, content="a" * 9000)
+        frag = files_to_prompt_fragment([f1])
+        self.assertIn("a" * 9000, frag)
+        self.assertNotIn("未注入", frag)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

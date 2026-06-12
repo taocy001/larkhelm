@@ -79,3 +79,34 @@ def test_cmd_memory_set_global_passes_sender_open_id(tmp_path, monkeypatch):
 
     assert captured.get("sender_open_id") == "user_Y"
     assert captured.get("file_open_id") == "user_Y"
+
+
+def test_memory_set_usage_cards_quote_real_char_limits(tmp_path):
+    """MCR doc-sync pin: /memory set usage cards quote memory.py's real limits.
+
+    GLOBAL_MAX_CHARS=800 / PROJECT_MAX_CHARS=1500 — the cards used to claim
+    500/1000, misleading users into under-using the layers.
+    """
+    import larkhelm.memory as mem
+    assert mem.GLOBAL_MAX_CHARS == 800
+    assert mem.PROJECT_MAX_CHARS == 1500
+
+    sent = []
+
+    def fake_send(chat_id, msg_id, title, body, **kw):
+        sent.append(body)
+
+    from larkhelm.commands import _cmd_memory
+
+    with patch("larkhelm.commands.send_card_reply", side_effect=fake_send), \
+         patch("larkhelm.commands._get_cwd", return_value=str(tmp_path)):
+        # empty text → usage card for each subcommand
+        _cmd_memory("chat1", "set global", msg_id="m1", sender_open_id="u1")
+        _cmd_memory("chat1", "set project", msg_id="m2", sender_open_id="u1")
+
+    assert len(sent) == 2
+    global_card, project_card = sent
+    assert str(mem.GLOBAL_MAX_CHARS) in global_card    # "800"
+    assert "500" not in global_card
+    assert str(mem.PROJECT_MAX_CHARS) in project_card  # "1500"
+    assert "1000" not in project_card

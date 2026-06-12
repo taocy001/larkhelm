@@ -809,10 +809,10 @@ def _fmt_token_block(label: str, data: dict, lang: str = "zh") -> str:
     for model, m in sorted(data.items()):
         model_label = model
         try:
-            if _cfg.config.get("backend_aware_budget_enabled"):
-                from larkhelm.backend_registry import BACKEND_REGISTRY
-                from larkhelm.token_budget import resolve_context_window
-                spec = BACKEND_REGISTRY.get(model)
+            from larkhelm.backend_registry import BACKEND_REGISTRY
+            from larkhelm.token_budget import resolve_context_window
+            spec = BACKEND_REGISTRY.get(model)
+            if spec is not None:
                 cw = resolve_context_window(spec)
                 model_label = f"{model}（{cw // 1000}K ctx）"
         except Exception:
@@ -1991,8 +1991,13 @@ def _cmd_btw(chat_id: str, question: str, user_msg_id: str, *, sender_open_id: s
             if _spec is None:
                 raise RuntimeError("No backend available for /btw")
 
-            # SID: reuse main session when free, else dedicated btw session
+            # SID: reuse main session when free, else dedicated btw session.
+            # sid_key is also passed to run_* as session_key so the runner
+            # saves any NEW sid back under the same key — otherwise a btw_*
+            # session's sid would overwrite the main-session sid (runner
+            # default session_key is spec.id).
             sid = None
+            sid_key = None
             if _spec.provider.endswith("_cli"):
                 sid_key = _spec.id if main_free else f"btw_{_spec.id}"
                 sid = _load_sid(chat_id, sid_key)
@@ -2012,48 +2017,47 @@ def _cmd_btw(chat_id: str, question: str, user_msg_id: str, *, sender_open_id: s
                     if mid:
                         _patch_card_raw(mid, _make_card("💬", text.strip() or _thinking_text, color="grey"))
 
-                # Inject memory context (L2)
-                # N-1 follow-up: migrate to v2 with ``query=question`` so
-                # the S50 lazy global / S51 project conditional gating
-                # actually fires on /btw side-questions (which are often
-                # casual or domain-unrelated to the current project).
-                # Closes the last v1 user-facing entry point — chat / btw
-                # now share the same memory contract.
+                # Inject memory context (L2): same three-layer
+                # global+project+session concatenation as the main /chat
+                # path — there is no btw-specific gating or budget.
                 _btw_mem_ctx = ""
                 try:
                     from larkhelm.memory import get_memory_context_v2
-                    # Phase D: synthesise a btw-flavoured IntentResult so the
-                    # retriever (when enabled) picks the smaller btw policy
-                    # (token_budget=800, prefer preference/context_summary)
-                    # rather than the default chat policy.
                     _btw_mem_ctx, _ = get_memory_context_v2(
-                        chat_id, cwd=cwd, query=question,
+                        chat_id, cwd=cwd,
                         sender_open_id=sender_open_id,
                     )
                 except Exception as e:
                     _debug_log(f"[btw] memory load failed: {e}")
 
+                # CTX-C1 (btw entry): only inject the memory block when the
+                # CLI session is brand-new (sid is None). A --resume'd session
+                # already carries the first-turn memory in its transcript, and
+                # re-injecting on every /btw accumulates duplicate copies.
                 _API_PROVIDERS = ("anthropic_api", "google_api", "openai_compat_api")
                 if _spec.provider == "claude_cli":
                     _btw_msg = (f"[System]\n{_btw_mem_ctx}\n\n[User Query]\n{question}"
-                                if _btw_mem_ctx else question)
+                                if (_btw_mem_ctx and not sid) else question)
                     output = _bc_run_claude(
                         spec=_spec, chat_id=chat_id, message=_btw_msg, sid=sid, cwd=cwd,
                         cancel_ev=None, on_text=_on_text, allow_retry=True,
+                        session_key=sid_key,
                     )
                 elif _spec.provider == "gemini_cli":
                     _btw_msg = (f"[System]\n{_btw_mem_ctx}\n\n[User Query]\n{question}"
-                                if _btw_mem_ctx else question)
+                                if (_btw_mem_ctx and not sid) else question)
                     output = _bc_run_gemini(
                         spec=_spec, chat_id=chat_id, message=_btw_msg, sid=sid, cwd=cwd,
                         cancel_ev=None, on_text=_on_text,
+                        session_key=sid_key,
                     )
                 elif _spec.provider == "kimi_cli":
                     _btw_msg = (f"[System]\n{_btw_mem_ctx}\n\n[User Query]\n{question}"
-                                if _btw_mem_ctx else question)
+                                if (_btw_mem_ctx and not sid) else question)
                     output = _bc_run_kimi(
                         spec=_spec, chat_id=chat_id, message=_btw_msg, sid=sid, cwd=cwd,
                         cancel_ev=None, on_text=_on_text, allow_retry=True,
+                        session_key=sid_key,
                     )
                 elif _spec.provider == "deepseek_api":
                     from larkhelm.backend_cli import run_deepseek as _bc_run_deepseek
@@ -2248,8 +2252,8 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open
     """/memory — show/set/clear/update/gc/export/import/status the three-tier memory system.
 
     /memory                        show all active layers
-    /memory set global <text>      overwrite global layer (≤500 chars)
-    /memory set project <text>     overwrite project layer for current cwd (≤1000 chars)
+    /memory set global <text>      overwrite global layer (≤800 chars)
+    /memory set project <text>     overwrite project layer for current cwd (≤1500 chars)
     /memory clear [global|project|session]   clear one or all layers
     /memory update                 force-regenerate session layer from logs
     /memory list                   list every project_*.md file
@@ -2494,8 +2498,8 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open
             send_card_reply(chat_id, msg_id,
                             _t(lang, "⚠️ 用法", "⚠️ Usage"),
                             _t(lang,
-                               "`/memory set global <内容>` — 设置全局记忆（最多 500 字符）",
-                               "`/memory set global <text>` — set global memory (max 500 chars)"),
+                               "`/memory set global <内容>` — 设置全局记忆（最多 800 字符）",
+                               "`/memory set global <text>` — set global memory (max 800 chars)"),
                             color="orange")
             return
         if _global_memory_file(chat_id, sender_open_id=sender_open_id) is None:
@@ -2525,8 +2529,8 @@ def _cmd_memory(chat_id: str, args: str = "", msg_id: str = None, *, sender_open
             send_card_reply(chat_id, msg_id,
                             _t(lang, "⚠️ 用法", "⚠️ Usage"),
                             _t(lang,
-                               f"`/memory set project <内容>` — 设置当前项目记忆（cwd: `{cwd}`，最多 1000 字符）",
-                               f"`/memory set project <text>` — set project memory for current cwd: `{cwd}` (max 1000 chars)"),
+                               f"`/memory set project <内容>` — 设置当前项目记忆（cwd: `{cwd}`，最多 1500 字符）",
+                               f"`/memory set project <text>` — set project memory for current cwd: `{cwd}` (max 1500 chars)"),
                             color="orange")
             return
         save_project_memory(cwd, text)
@@ -2921,6 +2925,11 @@ def _dispatch_button_cmd(chat_id: str, cmd: str):
 #  /compact — compress conversation history to memory
 # ═══════════════════════════════════════════════════
 
+# maybe_auto_update's internal LLM call is capped at
+# memory.MEMORY_GENERATION_TIMEOUT (120s); wait with margin so a slow but
+# successful generation still counts. Module-level so tests can shrink it.
+_COMPACT_WAIT_SEC = 150
+
 
 def _cmd_compact(chat_id: str, msg_id: str = None):
     """/compact: summarize recent conversation into memory and reset session."""
@@ -2947,13 +2956,44 @@ def _do_compact(chat_id: str, msg_id: str, lang: str):
     except Exception:
         pass
 
+    # maybe_auto_update spawns a daemon thread and returns immediately —
+    # wait for its on_done callback so we only clear the sid (and report
+    # success) after the summary actually landed. _do_compact itself runs
+    # in a daemon thread, so blocking here is safe.
+    done_ev = threading.Event()
+    result: dict = {"success": False, "error": None}
+
+    def _on_compact_done(success: bool, content, error) -> None:
+        result["success"] = bool(success)
+        result["error"] = error
+        done_ev.set()
+
     try:
-        maybe_auto_update(chat_id, force=True)
+        maybe_auto_update(chat_id, force=True, on_done=_on_compact_done)
     except Exception as e:
         send_card_reply(chat_id, msg_id,
                         _t(lang, "❌ 压缩失败", "❌ Compact Failed"),
                         _t(lang, f"记忆更新失败：{e}", f"Memory update failed: {e}"),
                         color="red")
+        return
+
+    if not done_ev.wait(timeout=_COMPACT_WAIT_SEC):
+        result["error"] = f"timed_out_{_COMPACT_WAIT_SEC}s"
+    if not result["success"]:
+        err = str(result["error"] or "unknown")
+        if err == "already_in_progress":
+            detail_zh = "已有一次记忆更新正在进行，请稍后重试。会话未重置。"
+            detail_en = "A memory update is already in progress — please retry later. Session NOT reset."
+        elif err.startswith("timed_out_"):
+            detail_zh = "记忆生成超时，会话未重置，请稍后重试。"
+            detail_en = "Memory generation timed out — session NOT reset, please retry."
+        else:
+            detail_zh = f"记忆生成失败（{err[:120]}），会话未重置，请稍后重试。"
+            detail_en = f"Memory generation failed ({err[:120]}) — session NOT reset, please retry."
+        send_card_reply(chat_id, msg_id,
+                        _t(lang, "⚠️ 压缩未完成", "⚠️ Compact Incomplete"),
+                        _t(lang, detail_zh, detail_en),
+                        color="orange")
         return
 
     model = _get_chat_model(chat_id)

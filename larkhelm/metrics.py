@@ -120,7 +120,6 @@ class LarkhelmMetricsRegistry:
             self.cascade_midflight_cancelled_total = None
             self.query_duration_seconds = None
             self.recent_turns_cache_total = None
-            self.memory_layer_cache_total = None
             self.doc_inject_cache_total = None
             self.file_downloads_total = None
             self.file_extract_errors_total = None
@@ -132,7 +131,6 @@ class LarkhelmMetricsRegistry:
             self.cache_read_tokens_total = None
             self.cache_hit_ratio = None
             self.cache_savings_total = None
-            self.session_checkpoint_total = None
             self.prefix_stability_low_total = None
             self.lark_api_retry_total = None
             self.prompt_cache_hit_rate = None
@@ -191,20 +189,11 @@ class LarkhelmMetricsRegistry:
             registry=self._registry,
         )
         # P1 context-cache counters (REQ-01..03). Each cache reports
-        # ``outcome`` ∈ {hit, miss, evict, invalidate, bypass}; the layer
-        # cache adds the layer name as a second label so global / project /
-        # session / global_slots / project_sections can be tuned
-        # independently.
+        # ``outcome`` ∈ {hit, miss, evict, invalidate, bypass}.
         self.recent_turns_cache_total = pc.Counter(
             "larkhelm_recent_turns_cache_total",
             "Recent-turns cache outcomes",
             ["outcome"],
-            registry=self._registry,
-        )
-        self.memory_layer_cache_total = pc.Counter(
-            "larkhelm_memory_layer_cache_total",
-            "Memory layer cache outcomes",
-            ["layer", "outcome"],
             registry=self._registry,
         )
         self.doc_inject_cache_total = pc.Counter(
@@ -248,11 +237,10 @@ class LarkhelmMetricsRegistry:
         )
         # P0 injection-gate telemetry: emitted on every gate decision so
         # operators can observe skip rates before enabling gates.
-        # point ∈ {recent_turns_api, memory_intent_global, memory_intent_project,
-        #          memory_intent_session, doc_inject, project_guide}
+        # point ∈ {recent_turns_api, doc_inject, project_guide,
+        #          memory_session_api}
         # outcome ∈ {injected, skipped_by_gate, skipped_by_state,
-        #             skipped_by_relevance, truncated_by_relevance, large_doc,
-        #             skipped_cli, error}
+        #             skipped_session_dup, large_doc, skipped_cli, error}
         self.injection_gate_total = pc.Counter(
             "larkhelm_injection_gate_total",
             "Context injection gate skip decisions",
@@ -286,12 +274,6 @@ class LarkhelmMetricsRegistry:
             "larkhelm_cache_savings_total",
             "Estimated USD saved by prompt cache hits, bucketed by backend",
             ["backend"],
-            registry=self._registry,
-        )
-        self.session_checkpoint_total = pc.Counter(
-            "larkhelm_session_checkpoint_total",
-            "Session auto-reset checkpoints by backend and reason",
-            ["backend", "reason"],
             registry=self._registry,
         )
         self.prefix_stability_low_total = pc.Counter(
@@ -523,24 +505,6 @@ def inc_recent_turns_cache(outcome: str) -> None:
         safe_log(f"[Metrics] inc_recent_turns_cache failed (outcome={outcome}): {e}")
 
 
-def inc_memory_layer_cache(layer: str, outcome: str) -> None:
-    """Bump ``larkhelm_memory_layer_cache_total{layer, outcome}``.
-
-    ``layer`` ∈ {global, project, session, global_slots, project_sections};
-    ``outcome`` ∈ {hit, miss, evict, invalidate, bypass}. Never raises.
-    """
-    reg = get_registry()
-    if not reg.available or reg.memory_layer_cache_total is None:
-        return
-    try:
-        reg.memory_layer_cache_total.labels(layer=layer, outcome=outcome).inc()
-    except Exception as e:
-        safe_log(
-            f"[Metrics] inc_memory_layer_cache failed "
-            f"(layer={layer}, outcome={outcome}): {e}"
-        )
-
-
 def inc_doc_inject_cache(outcome: str) -> None:
     """Bump ``larkhelm_doc_inject_cache_total{outcome}``.
 
@@ -668,11 +632,10 @@ def inc_injection_gate(point: str, outcome: str) -> None:
     Always emitted regardless of feature flag state so operators can observe
     skip rates in flag=False mode before enabling gates.
 
-    ``point`` ∈ {recent_turns_api, memory_intent_global, memory_intent_project,
-    memory_intent_session, doc_inject, project_guide}.
+    ``point`` ∈ {recent_turns_api, doc_inject, project_guide,
+    memory_session_api}.
     ``outcome`` ∈ {injected, skipped_by_gate, skipped_by_state,
-    skipped_by_relevance, truncated_by_relevance, large_doc, skipped_cli,
-    error}. Never raises.
+    skipped_session_dup, large_doc, skipped_cli, error}. Never raises.
     """
     reg = get_registry()
     if not reg.available or reg.injection_gate_total is None:
@@ -743,21 +706,6 @@ def inc_cache_savings(backend: str, amount_usd: float) -> None:
         reg.cache_savings_total.labels(backend=str(backend)).inc(float(amount_usd))
     except Exception as e:
         safe_log(f"[Metrics] inc_cache_savings failed (backend={backend}, amount_usd={amount_usd}): {e}")
-
-
-def inc_session_checkpoint(backend: str, reason: str) -> None:
-    """Bump larkhelm_session_checkpoint_total{backend, reason}.
-
-    reason ∈ {"cache_tokens", "turns"}.
-    Never raises; no-op when prometheus-client is absent.
-    """
-    reg = get_registry()
-    if not reg.available or getattr(reg, "session_checkpoint_total", None) is None:
-        return
-    try:
-        reg.session_checkpoint_total.labels(backend=str(backend), reason=str(reason)).inc()
-    except Exception as e:
-        safe_log(f"[Metrics] inc_session_checkpoint failed (backend={backend}, reason={reason}): {e}")
 
 
 def inc_prefix_stability_low(backend: str) -> None:
@@ -871,7 +819,6 @@ _REGISTRY_ALIASES = {
     "TOKENS_TOTAL":                  "tokens_total",
     "DOC_INJECT_CACHE_TOTAL":        "doc_inject_cache_total",
     "CACHE_SAVINGS_TOTAL":           "cache_savings_total",
-    "SESSION_CHECKPOINT_TOTAL":      "session_checkpoint_total",
     "WEBHOOK_RECEIVED_TOTAL":        "webhook_received_total",
     "LARK_API_DURATION_SECONDS":     "lark_api_duration_seconds",
     "MESSAGE_ERRORS_TOTAL":          "message_errors_total",
@@ -899,7 +846,6 @@ __all__ = [
     "observe_query_duration",
     "update_health_gauges",
     "inc_recent_turns_cache",
-    "inc_memory_layer_cache",
     "inc_doc_inject_cache",
     "inc_file_download",
     "inc_file_extract_error",
@@ -911,7 +857,6 @@ __all__ = [
     "inc_cache_read_tokens",
     "set_cache_hit_ratio",
     "inc_cache_savings",
-    "inc_session_checkpoint",
     "inc_prefix_stability_low",
     "inc_lark_api_retry",
     "observe_cache_hit_rate",

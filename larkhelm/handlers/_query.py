@@ -37,32 +37,11 @@ from larkhelm.chat_state import _get_cwd, _load_sid, _get_turn_count, _increment
 from larkhelm.handlers._query_card_state import QueryCardState
 
 # ── Card UX parameters ──────────────────────────────────────────────
-# Constants imported from _query_constants to break the circular
-# dependency with _query_session.py (REQ-23).
+# Constants live in _query_constants (dependency-free leaf module).
 from larkhelm.handlers._query_constants import (
     CARD_PUSH_INTERVAL, CURSOR_INTERVAL,
     STALL_THRESHOLD, CURSOR_FRAMES, TOOL_HISTORY_CAP,
 )
-
-
-def _should_use_query_session_v2(chat_id: str) -> bool:
-    """P3 REQ-02: decide if this chat sees the v2 query path.
-
-    Legacy boolean ``query_session_v2_enabled`` is preserved as a hard
-    override: ``true`` forces v2 for every chat (traffic implicitly 1.0),
-    ``false`` leaves the new ``query_session_v2_traffic`` knob in control.
-    A traffic of 0.0 (default) keeps every chat on the legacy path → P2
-    byte-compatibility.
-    """
-    if bool(_cfg.config.get("query_session_v2_enabled")):
-        return True
-    try:
-        from larkhelm._gating import hash_bucket_allows
-        traffic = float(getattr(_cfg, "QUERY_SESSION_V2_TRAFFIC", 0.0) or 0.0)
-        return hash_bucket_allows(chat_id, traffic)
-    except Exception as e:
-        _debug_log(f"[DoQuery] v2 gating lookup failed, defaulting to legacy: {e}")
-        return False
 
 
 # ═══════════════════════════════════════════════════
@@ -72,6 +51,44 @@ def _should_use_query_session_v2(chat_id: str) -> bool:
 def _extract_feishu_urls(text: str) -> list:
     """Extract a list of Feishu document/Drive URLs from the given text."""
     return re.findall(r'https://[a-zA-Z0-9-]+\.feishu\.cn/[^\s\]>）]+', text)
+
+
+def cleanup_temp_paths(paths: "list[str] | None") -> None:
+    """Unlink temporary file paths produced during a query.
+
+    Cleans paths under ``/tmp/`` (backward-compat with the inline temp-image
+    cleanup) and paths under ``SESSION_DIR/{chat_id}/files/`` (file-download
+    cache). Paths outside those two roots (e.g. ``SESSION_DIR/{chat_id}/imgs/``)
+    are skipped safely so the image cache is never deleted between queries.
+    """
+    if not paths:
+        return
+    import os as _os
+    # Resolve both roots so the prefix check is symlink-safe.
+    # On macOS /tmp → /private/tmp; resolving the root means the comparison
+    # works after realpath() expands the target path too.
+    _tmp_root = _os.path.realpath("/tmp")
+    try:
+        session_dir_str = _os.path.realpath(str(_cfg.SESSION_DIR))
+    except Exception:
+        session_dir_str = ""
+    for path in paths:
+        try:
+            if not path:
+                continue
+            p = _os.path.realpath(str(path))
+            is_tmp = p.startswith(_tmp_root + "/") or p == _tmp_root
+            is_session_files = bool(
+                session_dir_str
+                and p.startswith(session_dir_str)
+                and "/files/" in p
+            )
+            if is_tmp or is_session_files:
+                _os.unlink(p)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            _debug_log(f"[Query] temp path cleanup failed: {e}")
 
 
 def _format_age_hint(age_sec: int) -> str:
@@ -101,11 +118,9 @@ def _format_age_hint(age_sec: int) -> str:
     return f"（缓存版本，{phrase}读取，如内容已变请提示刷新）"
 
 
-def _compute_doc_query_relevance(query: str, doc_title: str, doc_snippet: str) -> float:
-    return 1.0
-
-
-def _inject_doc_context(text: str, chat_id: str, backend: str = "") -> str:
+def _inject_doc_context(text: str, chat_id: str, backend: str = "",
+                        pending_doc_records: list[tuple[str, str]] | None = None,
+                        ) -> str:
     """
     Detect Feishu document URLs in text, read their content, and prepend it to
     the prompt. At most DOC_INJECT_MAX_DOCS documents are injected, each capped
@@ -118,6 +133,19 @@ def _inject_doc_context(text: str, chat_id: str, backend: str = "") -> str:
     age hint so the model can warn the user the body may be stale.
     Permission / API errors propagate from the loader and are caught here
     (so the user still sees the "no permission" hint on each retry).
+
+    Session-level dedup is keyed per (chat_id, ``backend``, doc_token) —
+    sessions are per-(chat, backend), so a body injected into one backend's
+    session must NOT suppress injection for another backend. ``backend``
+    should be the routing target's backend id (same namespace as sid files).
+
+    ``pending_doc_records`` (when given) collects ``(doc_token, content_hash)``
+    tuples for every full body injected instead of recording them right away;
+    the caller commits them via ``_context_cache.record_doc_injection`` only
+    after the backend returns successfully, so a cancelled / failed query
+    leaves no record. When ``None`` (direct callers / tests) no record is
+    written — dedup then only ever downgrades based on previously committed
+    records.
     """
     from larkhelm.lark_client import (
         FeishuDocClient, parse_doc_url,
@@ -156,37 +184,45 @@ def _inject_doc_context(text: str, chat_id: str, backend: str = "") -> str:
             if age_hint:
                 header = f"{header}\n{age_hint}"
 
-            # P2b: doc relevance gate
-            _gate_enabled = bool(getattr(_cfg, "DOC_INJECT_RELEVANCE_GATE_ENABLED", False))
-            _threshold = float(getattr(_cfg, "DOC_INJECT_RELEVANCE_THRESHOLD", 0.3))
             _injected_content = result.content
-            _gate_outcome = "injected"
-            if _gate_enabled:
-                _snippet = result.content[:512]
-                _sim = _compute_doc_query_relevance(text, label, _snippet)
-                if _sim < _threshold:
-                    # Very low relevance: inject title-only hint, skip body
-                    injections.append(
-                        f"{header}\n（相关度过低（{_sim:.2f}），已跳过全文注入）\n[/文档内容]"
-                    )
+
+            # Session-level dedup: the same doc body was already injected
+            # during the current (chat, backend) session (resumed CLI
+            # sessions carry it from the first turn via --resume), so
+            # re-injecting the full body is pure duplicate tokens. Downgrade
+            # to a one-line marker. Records are committed by the caller after
+            # backend success and cleared with the sid
+            # (chat_state._clear_sid(chat_id, model)).
+            # fail-open: any error here → full injection as before.
+            _doc_token: str | None = None
+            _content_hash = ""
+            try:
+                import hashlib
+                from larkhelm._context_cache import doc_injection_seen
+                _doc_token = str(getattr(ref, "token", "") or url)
+                _content_hash = hashlib.sha256(
+                    _injected_content.encode("utf-8", "replace")
+                ).hexdigest()
+                if doc_injection_seen(chat_id, backend, _doc_token, _content_hash):
+                    injections.append(f"[文档《{label}》本会话已注入且未变更]")
                     try:
-                        from larkhelm.metrics import inc_injection_gate as _inc_doc_ig2
-                        _inc_doc_ig2("doc_inject", "skipped_by_relevance")
+                        from larkhelm.metrics import inc_injection_gate as _inc_doc_ig3
+                        _inc_doc_ig3("doc_inject", "skipped_session_dup")
                     except Exception:
                         pass
                     continue
-                elif _sim < 0.6:
-                    # Medium relevance: truncate to half budget
-                    _half = _cfg.DOC_INJECT_MAX_CHARS // 2
-                    _injected_content = result.content[:_half]
-                    _gate_outcome = "truncated_by_relevance"
+            except Exception as _dd_err:
+                _debug_log(f"[DoQuery] doc inject session dedup error (fail-open): {_dd_err}")
+                _doc_token = None
 
             injections.append(
                 f"{header}\n{_injected_content}\n[/文档内容]"
             )
+            if _doc_token is not None and pending_doc_records is not None:
+                pending_doc_records.append((_doc_token, _content_hash))
             try:
                 from larkhelm.metrics import inc_injection_gate as _inc_doc_ig
-                _inc_doc_ig("doc_inject", _gate_outcome)
+                _inc_doc_ig("doc_inject", "injected")
                 if len(_injected_content) > 10000:
                     _inc_doc_ig("doc_inject", "large_doc")
             except Exception:
@@ -284,18 +320,24 @@ def _run_backend_single(spec, chat_id: str, message: str, cwd: str, cancel_ev,
     if provider == "anthropic_api":
         history = load_history(provider, chat_id)
         # NOTE: recent_turns intentionally omitted — history already carries it.
+        api_extra = _maybe_strip_session_memory_for_api(
+            extra_system, history, provider=provider, chat_id=chat_id)
         output, new_history = run_anthropic(spec, chat_id, message, history, cancel_ev, on_text,
-                                            extra_system=extra_system)
+                                            extra_system=api_extra)
         save_history(provider, chat_id, new_history)
     elif provider == "google_api":
         history = load_history(provider, chat_id)
+        api_extra = _maybe_strip_session_memory_for_api(
+            extra_system, history, provider=provider, chat_id=chat_id)
         output, new_history = run_google(spec, chat_id, message, history, cancel_ev, on_text,
-                                         extra_system=extra_system)
+                                         extra_system=api_extra)
         save_history(provider, chat_id, new_history)
     elif provider == "openai_compat_api":
         history = load_history(provider, chat_id)
+        api_extra = _maybe_strip_session_memory_for_api(
+            extra_system, history, provider=provider, chat_id=chat_id)
         output, new_history = run_openai_compat(spec, chat_id, message, history, cancel_ev, on_text,
-                                                extra_system=extra_system)
+                                                extra_system=api_extra)
         save_history(provider, chat_id, new_history)
     elif provider == "gemini_cli":
         sid = _load_sid(chat_id, spec.id)
@@ -346,6 +388,65 @@ def _run_backend_single(spec, chat_id: str, message: str, cwd: str, cancel_ev,
                             on_soft_timeout=on_soft_timeout, images=images, allow_retry=True,
                             system_prompt=cli_extra if (cli_extra and not sid) else None)
     return output
+
+
+def _maybe_strip_session_memory_for_api(
+    extra_system: str, history: list, *, provider: str, chat_id: str,
+) -> str:
+    """Strip the ``[SESSION MEMORY]`` block from ``extra_system`` when the
+    API session already carries structured history.
+
+    The session-memory summary is distilled from the same recent chat-log
+    turns that ``load_history()`` feeds back verbatim (up to 80K tokens —
+    ``api_session._MAX_HISTORY_TOKENS``), so re-injecting the summary on
+    every call is mostly duplicate input tokens AND rewrites the system
+    block every ~10 turns, breaking the Anthropic prompt-cache prefix.
+    Global / project layers stay — they are the stable prefix and have no
+    verbatim counterpart in the history.
+
+    A fresh API session (empty history) keeps the full injection: there
+    the summary is the only continuity source (e.g. right after /reset,
+    or for turns that happened on another backend).
+
+    The boundary tags are owned by ``backend_api_streaming`` —
+    ``_split_stable_volatile`` is the single parser so this gate and the
+    layered cache_control split can never disagree on the block edges.
+    fail-open: any error → return ``extra_system`` unchanged.
+
+    Rollback switch: ``api_strip_session_memory_when_history=false``
+    restores unconditional full injection (the summary is the only
+    cross-backend continuity source — mixed-backend chats trade ~1K
+    duplicate tokens/call for it).
+    """
+    if not extra_system:
+        return extra_system
+    if not bool(getattr(_cfg, "API_STRIP_SESSION_MEMORY_WHEN_HISTORY", True)):
+        return extra_system
+    try:
+        from larkhelm.backend_api_streaming import _split_stable_volatile
+        stable, volatile = _split_stable_volatile(extra_system)
+    except Exception as e:
+        _debug_log(f"[DoQuery] session memory split error (fail-open): {e}")
+        return extra_system
+    if not volatile:
+        return extra_system
+    if not history:
+        try:
+            from larkhelm.metrics import inc_injection_gate as _inc_sm
+            _inc_sm("memory_session_api", "injected")
+        except Exception:
+            pass
+        return extra_system
+    try:
+        from larkhelm.metrics import inc_injection_gate as _inc_sm2
+        _inc_sm2("memory_session_api", "skipped_by_state")
+    except Exception:
+        pass
+    _debug_log(
+        f"[DoQuery] {provider} strip SESSION MEMORY chat={chat_id[:8]} "
+        f"(history={len(history)} msgs)"
+    )
+    return stable
 
 
 def _maybe_drop_recent_turns_for_cli(
@@ -503,7 +604,8 @@ def _do_query_with_delegation(
     return specialist_output
 
 
-def _post_query_memory_hook(chat_id: str, trace_id: str) -> None:
+def _post_query_memory_hook(chat_id: str, trace_id: str,
+                            sender_open_id: str | None = None) -> None:
     """Run after a successful query: increment turn_count, dispatch to
     ``maybe_auto_update`` with the appropriate ``force`` flag for cold-start
     carry-over.
@@ -515,15 +617,21 @@ def _post_query_memory_hook(chat_id: str, trace_id: str) -> None:
     when the chat has no readable history (``_read_logs_tail`` returns []),
     and ``_is_useful_summary`` rejects any thin output, so the force call is
     safe for brand-new chats too.
+
+    ``sender_open_id`` is forwarded to ``maybe_auto_update`` so the global
+    memory cascade writes to the TRIGGERING user's file (MEM-C1: ContextVar
+    does not cross threads and the chat_state fallback is last-writer-wins
+    in group chats).
     """
     try:
         from larkhelm.memory import maybe_auto_update
         old_count = _get_turn_count(chat_id)
         _increment_turn_count(chat_id)
         if old_count == 0:
-            maybe_auto_update(chat_id, force=True)
+            maybe_auto_update(chat_id, force=True,
+                              sender_open_id=sender_open_id)
             return
-        maybe_auto_update(chat_id)
+        maybe_auto_update(chat_id, sender_open_id=sender_open_id)
     except Exception as _mc_err:
         _debug_log(f"[{trace_id}][DoQuery] post-query memory error: {_mc_err}")
 
@@ -582,43 +690,6 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
               trace_id: str | None = None,
               sender_open_id: str | None = None,
               queue_card_mid: str | None = None):
-    # P1-1 PR2: opt-in dispatch to the QuerySession rewrite. Default OFF so
-    # existing behaviour is byte-identical until the flag flips.
-    #
-    # Fallback semantics (P1 round-2 review): the only SAFE fall-back to
-    # legacy is when v2 hasn't committed any side effect yet — i.e. import
-    # or construction failed. Once ``QuerySession.run()`` is entered, IT
-    # owns the request: its internal try/except catches QueryCancelled /
-    # Timeout / Exception and surfaces them via on_cancel / on_timeout /
-    # on_error. Anything that *still* escapes is a v2 bug in unknown state
-    # — falling back to legacy at that point would acquire the chat lock
-    # a second time, emit a second init card, and run the LLM again. So we
-    # log the escape and return: fail loud, never double-process.
-    if _should_use_query_session_v2(chat_id):
-        try:
-            from larkhelm.handlers._query_session import QuerySession
-            _session = QuerySession(
-                chat_id=chat_id, message=message, model=model,
-                user_msg_id=user_msg_id, images=images, files=files,
-                parent_id=parent_id, force_backend_id=force_backend_id,
-                sender_open_id=sender_open_id,
-                queue_card_mid=queue_card_mid,
-            )
-        except Exception as _v2_setup_err:
-            # Pre-side-effect failure (import / __init__) → legacy fallback is safe.
-            _debug_log(
-                f"[DoQuery] QuerySession setup failed, using legacy: {_v2_setup_err}"
-            )
-        else:
-            try:
-                _session.run()
-            except Exception as _v2_run_err:
-                _debug_log(
-                    f"[DoQuery] QuerySession v2 raised post-setup; "
-                    f"NOT falling back to avoid double-processing: {_v2_run_err}"
-                )
-            return   # v2 owned this request — success or failure.
-
     # Use caller-supplied trace_id (_message.py generates one BEFORE
     # logging the user entry so user/assistant pair share an id —
     # /stats duration pairing depends on it). Fall back to a fresh uuid
@@ -669,8 +740,6 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
     # lived inside the try (`_get_cwd` could raise), so an exception there
     # would crash the finally's elapsed-time math even though
     # ``record_query_start`` (which IS try/except-wrapped) had already run.
-    # Hoisting the assignment also keeps semantics with the new
-    # ``QuerySession.run`` parity fix (see _query_session.py:97).
     start = time.time()
 
     # P1-3: bump the diagnostic active counter so /metrics surfaces it.
@@ -888,19 +957,24 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             # blocking the event dispatch loop. Applied to the original message so memory
             # content cannot trigger redundant Feishu API reads.
             has_doc_urls = bool(_extract_feishu_urls(message))
+            # Pending session-dedup records for full doc bodies injected this
+            # query; committed only after the backend returns successfully
+            # (under the backend that actually served the query) so /cancel,
+            # backend failure or failover never leaves a record for a session
+            # that never saw the body.
+            _doc_pending: list[tuple[str, str]] = []
             if _cfg.DOC_AUTO_INJECT:
                 try:
-                    message = _inject_doc_context(message, chat_id, backend=model)
+                    message = _inject_doc_context(
+                        message, chat_id,
+                        backend=(_early_spec.id if _early_spec is not None else model),
+                        pending_doc_records=_doc_pending,
+                    )
                 except Exception as _doc_err:
                     _debug_log(f"[{trace_id}][DoQuery] doc inject error: {_doc_err}")
 
             # Memory is passed as extra_system (proper system channel) rather than prepended
             # to the user message, so the model receives clean user turn content.
-            #
-            # Phase B: ``get_memory_context_v2`` lets the builder see the live
-            # query + recent turns so it can apply lazy-global / project-conditional
-            # / session-layered / recent-turns dedup. Default flags keep the
-            # builder fail-open (everything injected) when in doubt.
             memory_ctx = ""
             recent_turns_list: list[str] = []
             try:
@@ -947,17 +1021,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                             pass
 
                 if not _skip_recent_turns:
-                    # Compute a dedup_prefix from the session memory's Work
-                    # Context slot so summarised content doesn't double-inject
-                    # into the orchestrator. Any failure (memory not loaded,
-                    # parse miss) cleanly degrades to ``dedup_prefix=None`` →
-                    # byte-compatible with the PR-prior behaviour.
-                    _dedup_prefix: str | None = None
-                    try:
-                        _raw_recent = _get_recent_turns(chat_id, dedup_prefix=_dedup_prefix) or ""
-                    except Exception as _rt_err:
-                        _debug_log(f"[{trace_id}][DoQuery] dedup recent_turns error: {_rt_err}, retrying without prefix")
-                        _raw_recent = _get_recent_turns(chat_id) or ""
+                    _raw_recent = _get_recent_turns(chat_id) or ""
                     if _raw_recent:
                         recent_turns_list = [
                             ln for ln in _raw_recent.splitlines() if ln.strip()
@@ -968,11 +1032,9 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             try:
                 from larkhelm.memory import get_memory_context_v2, maybe_auto_update
                 memory_ctx, deduped_recent = get_memory_context_v2(
-                    chat_id, cwd=cwd, query=message,
+                    chat_id, cwd=cwd,
                     recent_turns=recent_turns_list,
-                    has_doc_urls=has_doc_urls,
                     sender_open_id=sender_open_id,
-                    backend_spec=_early_spec,
                 )
             except Exception as _mem_err:
                 _debug_log(f"[{trace_id}][DoQuery] memory context error: {_mem_err}")
@@ -1048,13 +1110,17 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 chain = [primary_spec]
 
             successful_spec = None
+            # Backend id the doc-injection dedup records get committed under
+            # (overwritten below once the actually-used backend is known).
+            _doc_commit_backend = model
             if not chain:
                 # Last resort: fall back to legacy routing.
                 # Same new-session-only rule: only prepend memory when no existing sid.
-                _legacy_sid = _load_sid(chat_id,
+                _doc_commit_backend = (
                     "gemini" if model == "gemini" else
                     "kimi" if model == "kimi" else
                     "deepseek" if model == "deepseek" else "claude")
+                _legacy_sid = _load_sid(chat_id, _doc_commit_backend)
                 _legacy_msg = (f"[System]\n{memory_ctx}\n\n[User Query]\n{message}"
                                if memory_ctx and not _legacy_sid else message)
                 if model == "gemini":
@@ -1135,6 +1201,23 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             if not output:
                 output = "✅ 完成（无文本输出）"
 
+            # Commit doc-injection dedup records: the backend returned
+            # successfully, so its session now carries the injected bodies.
+            # Committed under the backend that actually served the query
+            # (failover may differ from the routing target used at injection
+            # time) so /model switches and failover re-inject correctly.
+            # Mid-risk aux op: failure only costs duplicate tokens later.
+            if _doc_pending:
+                try:
+                    from larkhelm._context_cache import record_doc_injection
+                    if successful_spec is not None:
+                        _doc_commit_backend = successful_spec.id
+                    for _doc_tok, _doc_hash in _doc_pending:
+                        record_doc_injection(
+                            chat_id, _doc_commit_backend, _doc_tok, _doc_hash)
+                except Exception as _dc_err:
+                    _debug_log(f"[{trace_id}][DoQuery] doc inject commit failed: {_dc_err}")
+
             # Strip <!--FILE:name-->...<!--/FILE--> markers before logging so
             # the log and card both show clean text. Files are sent after final card.
             _auto_files: list[tuple[str, str]] = []
@@ -1150,7 +1233,7 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             # Increment turn count and trigger memory auto-update in background
             # (with cold-start carry-over for first-turn chats whose all.jsonl
             # already has imported / pre-existing history).
-            _post_query_memory_hook(chat_id, trace_id)
+            _post_query_memory_hook(chat_id, trace_id, sender_open_id)
 
             # Stop the heartbeat and wait for any in-flight patch to complete
             # before writing the final card.  join(timeout) alone is insufficient
@@ -1337,7 +1420,6 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
         # Clean up file downloads for this query.
         if files:
             try:
-                from larkhelm.handlers._query_pure import cleanup_temp_paths
                 cleanup_temp_paths([f.path for f in files])
             except Exception as _cte:
                 _debug_log(f"[query] file temp cleanup failed: {_cte}")

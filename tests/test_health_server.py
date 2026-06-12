@@ -113,8 +113,8 @@ def test_active_query_counter_tracks_record_start_end():
     ``decrement_active_query`` were never called from production code,
     so the ``/metrics`` ``larkhelm_active_queries`` gauge was permanently
     flat-zero. The fix routes ``_get_active_queries`` through
-    ``_query_card_state.get_diagnostics`` — the SAME counter that both
-    legacy ``_do_query`` and ``QuerySession.run`` already write via
+    ``_query_card_state.get_diagnostics`` — the SAME counter that
+    ``_do_query`` already writes via
     ``record_query_start`` / ``record_query_end``.
 
     This test exercises that wiring end-to-end: drive the production

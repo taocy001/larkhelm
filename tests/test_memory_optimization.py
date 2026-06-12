@@ -513,6 +513,82 @@ class CascadeShortCircuitTests(unittest.TestCase):
             }, session))
 
 
+class UnchangedHashCachingTests(unittest.TestCase):
+    """S53 follow-up: an UNCHANGED verdict must ALSO persist the session
+    hash into the target layer's frontmatter (the payload has been
+    evaluated), so an identical re-trigger short-circuits the LLM call.
+    Missing target file → no hash write, and NO empty file is created."""
+
+    def setUp(self):
+        from larkhelm import memory as mem
+        self.mem = mem
+        self._tmp = tempfile.mkdtemp(prefix="larkhelm_unchg_")
+        self.addCleanup(shutil.rmtree, self._tmp, ignore_errors=True)
+        self._orig_home = mem.MEMORY_HOME_DIR
+        mem.MEMORY_HOME_DIR = Path(self._tmp)
+        self.addCleanup(lambda: setattr(mem, "MEMORY_HOME_DIR", self._orig_home))
+
+    def test_project_unchanged_persists_hash_and_short_circuits(self):
+        mem = self.mem
+        cwd = self._tmp  # existing dir so cwd-canonical check passes
+        session = "## Work Context\n" + ("line\n" * 30)
+        # Seed an existing project file WITHOUT a stored hash.
+        mem.save_project_memory(cwd, "existing project facts")
+        proj_path = mem._project_memory_file(cwd)
+        self.assertTrue(proj_path.exists())
+
+        with patch.object(mem, "_run_one_shot_with_backoff",
+                          return_value="UNCHANGED") as llm:
+            mem._try_extract_project(session, cwd)
+            self.assertEqual(llm.call_count, 1)
+            fm = mem._load_md_frontmatter(proj_path)
+            self.assertEqual(fm.get("last_extracted_session_hash"),
+                             mem._session_hash(session))
+            self.assertEqual(fm.get("last_extracted_session_len"),
+                             str(len(session)))
+            # Body must be preserved untouched.
+            self.assertEqual(mem._load_md_body(proj_path),
+                             "existing project facts")
+            # Second cascade with the SAME payload → hash short-circuit,
+            # no second LLM call.
+            mem._try_extract_project(session, cwd)
+            self.assertEqual(llm.call_count, 1)
+
+    def test_global_unchanged_persists_hash_and_short_circuits(self):
+        mem = self.mem
+        session = "## Work Context\n" + ("line\n" * 30)
+        g_path = Path(self._tmp) / "global_ou_alice.md"
+        mem.save_global_memory("user prefers zh", "chat1",
+                               sender_open_id="ou_alice")
+        self.assertTrue(g_path.exists())
+
+        with patch.object(mem, "_run_one_shot_with_backoff",
+                          return_value="UNCHANGED") as llm:
+            mem._try_extract_global(session, "chat1",
+                                    sender_open_id="ou_alice")
+            self.assertEqual(llm.call_count, 1)
+            fm = mem._load_md_frontmatter(g_path)
+            self.assertEqual(fm.get("last_extracted_session_hash"),
+                             mem._session_hash(session))
+            self.assertEqual(mem._load_md_body(g_path), "user prefers zh")
+            mem._try_extract_global(session, "chat1",
+                                    sender_open_id="ou_alice")
+            self.assertEqual(llm.call_count, 1)
+
+    def test_unchanged_with_missing_file_creates_nothing(self):
+        """UNCHANGED + nonexistent target → never create an empty memory
+        file just to hold a hash."""
+        mem = self.mem
+        session = "## Work Context\nbody"
+        g_path = Path(self._tmp) / "global_ou_ghost.md"
+        self.assertFalse(g_path.exists())
+        with patch.object(mem, "_run_one_shot_with_backoff",
+                          return_value="UNCHANGED"):
+            mem._try_extract_global(session, "chat1",
+                                    sender_open_id="ou_ghost")
+        self.assertFalse(g_path.exists())
+
+
 class CascadeCoordinatorTests(unittest.TestCase):
     """``_cascade_extract`` cancel-event + BoundedSemaphore semantics."""
 

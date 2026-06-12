@@ -77,14 +77,22 @@ def _thread_error_card(chat_id: str, label: str, exc: Exception) -> None:
 # P3 REQ-02 / design.md §3.3: case-insensitive keyword set that gates the
 # workspace-hint segment when WORKSPACE_HINT_KEYWORD_GATE=True. Compiled at
 # import time (regex is fixed; satisfies NFR §4.1 "< 0.5 ms / message").
-# P2a: expanded with code-task keywords so the gate also fires for code
-# editing / fixing / refactoring prompts (avoids injecting workspace context
-# into casual chat while still covering all actionable work requests).
+# MCR fix: English keywords carry \b word boundaries (so "fixture" /
+# "unicode" / "qatar" no longer leak through) and the P2a high-frequency
+# code-task substrings (code/edit/fix/implement/refactor/debug) were
+# dropped — only explicit workspace vocabulary gates the hint. Chinese
+# keywords sit in a separate alternation because \b is meaningless
+# between CJK codepoints.
 _WORKSPACE_KEYWORD_RE = _re.compile(
-    r"(workspace|计划|任务|设计|prd|design|tasks|review|qa|crew"
-    r"|code|edit|implement|fix|refactor|debug|写代码|改代码|修复|重构)",
+    r"\b(?:workspace|prd|design|tasks|review|qa|crew)\b"
+    r"|计划|任务|设计|写代码|改代码|修复|重构",
     _re.IGNORECASE,
 )
+
+# MCR fix: cap the injected file listing — newest-first, max 8 names,
+# anything older than 30 days is dropped entirely (Route A leftovers).
+_WS_HINT_MAX_FILES = 8
+_WS_HINT_MAX_AGE_SEC = 30 * 86400
 def _build_workspace_hint(chat_id: str, user_text: str) -> tuple[str, str]:
     """Return ``(injection_prefix, outcome)`` for the workspace-hint segment.
 
@@ -106,23 +114,39 @@ def _build_workspace_hint(chat_id: str, user_text: str) -> tuple[str, str]:
         ws = _Path(_get_cwd(chat_id)) / ".crew_workspace"
         if not ws.is_dir():
             return "", "skipped_empty"
-        files = sorted(
-            f.name for f in ws.iterdir()
-            if f.is_file() and f.suffix in (".md", ".json")
-            and f.name != "crew_checkpoint.json"
-        )
+        now = time.time()
+        entries: list[tuple[float, str]] = []
+        for f in ws.iterdir():
+            if not f.is_file() or f.suffix not in (".md", ".json"):
+                continue
+            if f.name == "crew_checkpoint.json":
+                continue
+            try:
+                mtime = f.stat().st_mtime
+            except OSError:
+                continue  # racing unlink / permission flake → skip file
+            if now - mtime > _WS_HINT_MAX_AGE_SEC:
+                continue  # stale Route A leftover — don't advertise it
+            entries.append((mtime, f.name))
     except OSError:
         return "", "skipped_empty"
 
-    if not files:
+    if not entries:
         return "", "skipped_empty"
 
     gate_on = bool(getattr(_cfg, "WORKSPACE_HINT_KEYWORD_GATE", False))
     if gate_on and _WORKSPACE_KEYWORD_RE.search(user_text or "") is None:
         return "", "skipped_by_gate"
 
+    entries.sort(key=lambda e: (-e[0], e[1]))  # newest first, name tiebreak
+    names = [name for _, name in entries[:_WS_HINT_MAX_FILES]]
+    listing = ", ".join(names)
+    extra = len(entries) - len(names)
+    if extra > 0:
+        listing += f" 等 {extra} 个文件"
+
     prefix = (
-        f"[工作区] .crew_workspace/ 下存在以下文件：{', '.join(files)}。"
+        f"[工作区] .crew_workspace/ 下存在以下文件：{listing}。"
         f"如果与本次问题相关，再读取；否则忽略。\n\n"
     )
     return prefix, "injected_passive"
@@ -733,9 +757,11 @@ def handle_message(data: P2ImMessageReceiveV1):
         log_entry(chat_id, "user", prompt, model=target_model, trace_id=trace_id)
         _reset_cancel(chat_id)
         user_msg_id = message.message_id
-        # MEM-C1: propagate sender_open_id into the child thread via ContextVar so
-        # group-chat queries never read a neighbour's global memory file.
-        # Python threads inherit the parent's Context snapshot at start() time.
+        # MEM-C1: sender_open_id reaches _do_query as an explicit kwarg below —
+        # that is the real carrier. The ContextVar set here is only visible to
+        # SAME-THREAD readers: threading.Thread does NOT inherit the parent's
+        # Context (verified on CPython 3.14, sys.flags.thread_inherit_context=0;
+        # ≤3.13 has no inheritance at all), so the _do_query thread reads "".
         try:
             from larkhelm.memory import _query_sender_open_id
             _query_sender_open_id.set(sender_open_id or "")

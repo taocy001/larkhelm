@@ -98,3 +98,34 @@ def test_init_app_config_picks_up_new_p1_keys(tmp_path):
     _cfg._init_app_config()
     assert _cfg.HEALTH_ENDPOINT_PORT == 9300
     assert _cfg.MEMORY_CASCADE_MIDFLIGHT_CANCEL is False
+
+
+def test_layered_cache_config_defaults_graduated(fresh_cfg):
+    """2026-06-12 graduation: layered Anthropic cache_control is default-on.
+
+    Pins setdefault + module globals so a silent rollback of the defaults
+    (anthropic_layered_cache_control_enabled=true /
+    anthropic_layered_cache_traffic=1.0) fails loudly. Opt-out path
+    (false / 0.0) is covered by tests/test_backend_api_template.py AC-05.
+    """
+    cfg_path, tmp_path = fresh_cfg
+    import larkhelm.config as _cfg
+    _cfg._init_runtime(str(cfg_path), str(tmp_path))
+    assert _cfg.config.get("anthropic_layered_cache_control_enabled") is True
+    assert _cfg.config.get("anthropic_layered_cache_traffic") == 1.0
+    assert _cfg.ANTHROPIC_LAYERED_CACHE_CONTROL is True
+    assert _cfg.ANTHROPIC_LAYERED_CACHE_TRAFFIC == 1.0
+
+
+def test_layered_cache_config_opt_out_respected(tmp_path):
+    """Operator-set false / 0.0 must survive the new defaults (rollback knob)."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "APP_ID": "X", "APP_SECRET": "Y",
+        "anthropic_layered_cache_control_enabled": False,
+        "anthropic_layered_cache_traffic": 0.0,
+    }))
+    import larkhelm.config as _cfg
+    _cfg._init_runtime(str(cfg_path), str(tmp_path))
+    assert _cfg.ANTHROPIC_LAYERED_CACHE_CONTROL is False
+    assert _cfg.ANTHROPIC_LAYERED_CACHE_TRAFFIC == 0.0

@@ -1,6 +1,8 @@
 """Tests for P2 on-demand injection gates (P2a / P2b / P2c).
 
-P2a — workspace_hint_keyword_gate: regex expanded with code-task keywords.
+P2a — workspace_hint_keyword_gate: explicit workspace vocabulary, English
+keywords with \\b word boundaries (MCR fix: P2a code-task substrings
+code/edit/fix/implement/refactor/debug were dropped).
 P2b — parent_inject_skip_when_api_history: skip parent msg for API backends.
 P2c — doc_inject observe-only metrics: inc_injection_gate called on doc inject.
 """
@@ -27,7 +29,7 @@ _cfg._init_runtime(config_path=_cfg_file, data_dir=_TMP)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  P2a — _WORKSPACE_KEYWORD_RE expanded with code-task keywords
+#  P2a/MCR — _WORKSPACE_KEYWORD_RE: explicit vocabulary + \b word boundaries
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Import the compiled regex from the module so we test the live object.
@@ -35,27 +37,49 @@ from larkhelm.handlers._message import _WORKSPACE_KEYWORD_RE  # noqa: E402
 
 
 class WorkspaceKeywordRegexTests(unittest.TestCase):
-    """Pin the updated _WORKSPACE_KEYWORD_RE pattern for P2a."""
+    """Pin the tightened _WORKSPACE_KEYWORD_RE pattern (MCR fix)."""
 
-    # ── New code-task keywords must match ─────────────────────────────────
-    def test_matches_code(self):
-        self.assertIsNotNone(_WORKSPACE_KEYWORD_RE.search("write some code for me"))
+    # ── Dropped P2a code-task keywords must NOT match anymore ─────────────
+    def test_no_match_code(self):
+        self.assertIsNone(_WORKSPACE_KEYWORD_RE.search("write some code for me"))
 
-    def test_matches_fix(self):
-        self.assertIsNotNone(_WORKSPACE_KEYWORD_RE.search("fix this bug"))
+    def test_no_match_fix(self):
+        self.assertIsNone(_WORKSPACE_KEYWORD_RE.search("fix this bug"))
 
-    def test_matches_debug(self):
-        self.assertIsNotNone(_WORKSPACE_KEYWORD_RE.search("help me debug this"))
+    def test_no_match_debug(self):
+        self.assertIsNone(_WORKSPACE_KEYWORD_RE.search("help me debug this"))
 
-    def test_matches_refactor(self):
-        self.assertIsNotNone(_WORKSPACE_KEYWORD_RE.search("refactor the module"))
+    def test_no_match_refactor(self):
+        self.assertIsNone(_WORKSPACE_KEYWORD_RE.search("refactor the module"))
 
-    def test_matches_implement(self):
-        self.assertIsNotNone(_WORKSPACE_KEYWORD_RE.search("implement the feature"))
+    def test_no_match_implement(self):
+        self.assertIsNone(_WORKSPACE_KEYWORD_RE.search("implement the feature"))
 
-    def test_matches_edit(self):
-        self.assertIsNotNone(_WORKSPACE_KEYWORD_RE.search("edit the file"))
+    def test_no_match_edit(self):
+        self.assertIsNone(_WORKSPACE_KEYWORD_RE.search("edit the file"))
 
+    # ── \b word boundaries: substrings inside larger words must NOT match ──
+    def test_no_match_fixture(self):
+        self.assertIsNone(_WORKSPACE_KEYWORD_RE.search("the fixture is flaky"))
+
+    def test_no_match_unicode(self):
+        self.assertIsNone(_WORKSPACE_KEYWORD_RE.search("unicode handling question"))
+
+    def test_no_match_barcode(self):
+        self.assertIsNone(_WORKSPACE_KEYWORD_RE.search("scan the barcode"))
+
+    def test_no_match_qatar(self):
+        self.assertIsNone(_WORKSPACE_KEYWORD_RE.search("flights to qatar"))
+
+    def test_no_match_predesigned(self):
+        self.assertIsNone(_WORKSPACE_KEYWORD_RE.search("use the predesigned theme"))
+
+    def test_no_match_reviewer_suffix(self):
+        # "reviews" / "reviewing" still match via \breview...? No — \b sits
+        # after the full keyword, so "reviews" does NOT match "review\b".
+        self.assertIsNone(_WORKSPACE_KEYWORD_RE.search("he reviews movies"))
+
+    # ── Chinese code-task keywords retained (no false-positive risk) ──────
     def test_matches_chinese_write_code(self):
         self.assertIsNotNone(_WORKSPACE_KEYWORD_RE.search("帮我写代码"))
 
@@ -110,11 +134,11 @@ class WorkspaceKeywordRegexTests(unittest.TestCase):
         self.assertIsNone(_WORKSPACE_KEYWORD_RE.search(""))
 
     # ── Case insensitivity ────────────────────────────────────────────────
-    def test_case_insensitive_CODE(self):
-        self.assertIsNotNone(_WORKSPACE_KEYWORD_RE.search("Write some CODE"))
+    def test_case_insensitive_PRD(self):
+        self.assertIsNotNone(_WORKSPACE_KEYWORD_RE.search("send me the PRD"))
 
-    def test_case_insensitive_FIX(self):
-        self.assertIsNotNone(_WORKSPACE_KEYWORD_RE.search("FIX this"))
+    def test_case_insensitive_DESIGN(self):
+        self.assertIsNotNone(_WORKSPACE_KEYWORD_RE.search("DESIGN doc please"))
 
     def test_case_insensitive_CREW(self):
         self.assertIsNotNone(_WORKSPACE_KEYWORD_RE.search("CREW mission"))
@@ -346,9 +370,11 @@ class ParentInjectConfigIntegrationTests(unittest.TestCase):
         self.assertIn("parent_inject_skip_when_api_history", _cfg.config)
         self.assertFalse(_cfg.config["parent_inject_skip_when_api_history"])
 
-    def test_doc_inject_relevance_gate_default_is_false(self):
-        self.assertIn("doc_inject_relevance_gate_enabled", _cfg.config)
-        self.assertFalse(_cfg.config["doc_inject_relevance_gate_enabled"])
+    def test_doc_inject_relevance_gate_removed(self):
+        # The relevance gate was a stub (always sim=1.0) and has been deleted;
+        # its config keys must no longer be seeded by _init_runtime.
+        self.assertNotIn("doc_inject_relevance_gate_enabled", _cfg.config)
+        self.assertNotIn("doc_inject_relevance_threshold", _cfg.config)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
