@@ -44,11 +44,6 @@ from larkhelm.handlers._query_constants import (
     STALL_THRESHOLD, CURSOR_FRAMES, TOOL_HISTORY_CAP,
 )
 
-# Intent types for which global memory (user style/format preferences) is
-# irrelevant.  Hoisted to module level so the set literal is not recreated
-# on every call — same pattern as _CREW_STICKY_KW_RE in _message.py.
-_MEMORY_SKIP_GLOBAL_INTENTS: frozenset = frozenset({"dev", "crew", "shell"})
-
 
 def _should_use_query_session_v2(chat_id: str) -> bool:
     """P3 REQ-02: decide if this chat sees the v2 query path.
@@ -627,95 +622,12 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
     # Use caller-supplied trace_id (_message.py generates one BEFORE
     # logging the user entry so user/assistant pair share an id —
     # /stats duration pairing depends on it). Fall back to a fresh uuid
-    # when called from a context that doesn't propagate trace_id (e.g.
-    # crew sub-agent dispatch path).
+    # when called from a context that doesn't propagate trace_id.
     if not trace_id:
         trace_id = uuid.uuid4().hex[:12]
 
     chat_lock = _get_chat_lock(chat_id)
     cancel_ev = _get_cancel_event(chat_id)
-
-    # Queue behind crew if one is running for this chat
-    try:
-        from larkhelm.crew._state import (
-            current_owner, describe_active_owner, is_crew_running,
-            owner_kind, subscribe_crew_done,
-        )
-        if is_crew_running(chat_id):
-            existing_mid = _set_pending(chat_id, message, model, user_msg_id)
-            preview = message[:80].replace("\n", " ")
-            # C5 #14: ``is_crew_running`` is True for any ``_active_crew``
-            # owner — including ``/plan``. Pre-C5 the card hardcoded
-            # "⏳ Crew 运行中" + "当前 Crew 任务完成后自动执行" so when
-            # the user was actually queued behind a plan they got the
-            # wrong command name on every wait card (same family as
-            # C4 #11 / #12). Decode the owner token and pick the title
-            # and body to match. Falls back to the conservative "task"
-            # wording for any unknown future owner class.
-            owner_token = current_owner(chat_id)
-            kind = owner_kind(owner_token)
-            if kind == "plan":
-                _q_title = "⏳ Plan 运行中"
-                _q_body_lead = f"当前 {describe_active_owner(owner_token)} 完成后自动执行"
-            elif kind == "crew":
-                _q_title = "⏳ Crew 运行中"
-                _q_body_lead = "当前 Crew 任务完成后自动执行"
-            else:
-                _q_title = "⏳ 任务运行中"
-                _q_body_lead = "当前任务完成后自动执行"
-            crew_queue_card = _make_card(
-                _q_title,
-                f"{_q_body_lead}：\n\n> {preview}",
-                color="orange",
-                buttons=[("❌ 取消排队", f"cancel_queue:{chat_id}")]
-            )
-            # Pending state is already written; if card emission fails
-            # (Feishu 5xx / network), the user has no visible queue card
-            # AND no way to cancel — roll back so the next message can
-            # re-queue cleanly. Same fix lives in QuerySession (P1 round-3
-            # follow-up); kept in sync here.
-            try:
-                if existing_mid:
-                    _patch_card_raw(existing_mid, crew_queue_card)
-                else:
-                    if user_msg_id:
-                        _mid = _reply_card_raw(user_msg_id, crew_queue_card, in_thread=False)
-                    else:
-                        _mid = _send_card_raw(chat_id, crew_queue_card)
-                    _update_pending_card_mid(chat_id, _mid)
-            except Exception as _card_err:
-                _debug_log(
-                    f"[DoQuery] queue card emission failed, rolling back "
-                    f"pending state: {_card_err}"
-                )
-                _pop_pending(chat_id)
-                return
-
-            # subscribe_crew_done is race-safe: if crew ended between is_crew_running
-            # and here, it returns a pre-set event so the watcher fires immediately.
-            _done_ev = subscribe_crew_done(chat_id)
-
-            def _after_crew(_ev=_done_ev, _cid=chat_id, _msg=message, _model=model, _uid=user_msg_id):
-                _ev.wait(timeout=4 * 3600)
-                pending = _pop_pending(_cid)
-                if pending:
-                    p_msg, p_model, p_user_msg_id, p_queue_mid = (
-                        pending[0], pending[1], pending[2],
-                        pending[3] if len(pending) >= 4 else None,
-                    )
-                    _reset_cancel(_cid)
-                    threading.Thread(
-                        target=_do_query,
-                        args=(_cid, p_msg, p_model, p_user_msg_id),
-                        kwargs={"queue_card_mid": p_queue_mid},
-                        daemon=True, name=f"query-{_cid[:8]}",
-                    ).start()
-
-            threading.Thread(target=_after_crew, daemon=True,
-                             name=f"crew-wait-{chat_id[:8]}").start()
-            return
-    except Exception as _crew_check_err:
-        _debug_log(f"[{trace_id}][DoQuery] crew check error: {_crew_check_err}")
 
     if not chat_lock.acquire(blocking=False):
         existing_mid = _set_pending(chat_id, message, model, user_msg_id)
@@ -726,9 +638,9 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             color="orange",
             buttons=[("❌ 取消排队", f"cancel_queue:{chat_id}")]
         )
-        # Same pending-rollback pattern as the crew-queue branch above:
-        # if card emission fails, the user has no visible queue indicator
-        # and no cancel button → roll back so the next message can re-queue.
+        # Pending-rollback pattern: if card emission fails, the user has
+        # no visible queue indicator and no cancel button → roll back so
+        # the next message can re-queue.
         try:
             if existing_mid:
                 _patch_card_raw(existing_mid, queue_card)
@@ -943,7 +855,6 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                             f"(fail-open): {_gate_err}"
                         )
 
-                    _parent_injected = False
                     if not _skip_parent:
                         from larkhelm.lark_client import _fetch_parent_message_text
                         parent_text = _fetch_parent_message_text(parent_id)
@@ -957,17 +868,6 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                                 f"[用户回复了以下消息]\n\n{parent_text}\n\n---\n\n{message}"
                             )
                             _debug_log(f"[{trace_id}][DoQuery] injected parent context ({len(parent_text)} chars)")
-                            _parent_injected = True
-
-                    if not _parent_injected:
-                        from larkhelm.crew import get_recent_crew_context
-                        crew_ctx = get_recent_crew_context(chat_id)
-                        if crew_ctx:
-                            message = (
-                                f"[以下是刚完成的 Crew 任务「{crew_ctx['title']}」的交付结论，"
-                                f"请结合它来回答我的问题]\n\n"
-                                f"{crew_ctx['summary']}\n\n---\n\n{message}"
-                            )
                 except Exception as _pe:
                     _debug_log(f"[{trace_id}][DoQuery] parent fetch error: {_pe}")
 
@@ -1065,9 +965,6 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             except Exception as _hist_err:
                 _debug_log(f"[{trace_id}][DoQuery] rolling history error: {_hist_err}")
 
-            # Phase D: lift any IntentResult that _message.py staged before
-            # falling through to _do_query so memory injection can use the
-            # per-agent policy. Wrapped in try/except + None fallback so the
             try:
                 from larkhelm.memory import get_memory_context_v2, maybe_auto_update
                 memory_ctx, deduped_recent = get_memory_context_v2(
@@ -1081,25 +978,6 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
                 _debug_log(f"[{trace_id}][DoQuery] memory context error: {_mem_err}")
                 memory_ctx = ""
                 deduped_recent = recent_turns_list
-
-            try:
-                from larkhelm.metrics import inc_injection_gate as _inc_ig
-                _intent_type = getattr(_pending_intent, "agent_type", "") or ""
-                if (bool(_cfg.config.get("memory_intent_policy_enabled"))
-                        and _intent_type in _MEMORY_SKIP_GLOBAL_INTENTS
-                        and "[GLOBAL MEMORY]" in memory_ctx):
-                    import re as _re_ig
-                    memory_ctx = _re_ig.sub(
-                        r"\[GLOBAL MEMORY\].*?\[/GLOBAL MEMORY\]\n*",
-                        "",
-                        memory_ctx,
-                        flags=_re_ig.DOTALL,
-                    ).lstrip()
-                    _inc_ig("memory_global", "skipped")
-                else:
-                    _inc_ig("memory_global", "injected")
-            except Exception as _ig_err:
-                _debug_log(f"[{trace_id}][DoQuery] memory_intent_policy gate error: {_ig_err}")
 
             try:
                 from larkhelm.metrics import inc_injection_gate as _inc_ig2
@@ -1388,8 +1266,8 @@ def _do_query(chat_id: str, message: str, model: str, user_msg_id: str = None,
             # Show the actual exception message rather than a hard-coded
             # ``HARD_TIMEOUT // 60`` blurb. Multiple paths funnel through
             # this except: BaseProcessRunner._on_kill_signal (idle window
-            # exceeded), runner_gemini's response-timeout override, the
-            # crew watcher's wall-clock kill, etc. Hard-coding "360 分钟"
+            # exceeded), runner_gemini's response-timeout override, etc.
+            # Hard-coding "360 分钟"
             # was the bug users hit when none of those reasons actually
             # applied — the card just always lied "360 分钟".
             err_msg = str(e).strip() or "未知超时"

@@ -132,7 +132,7 @@ ignore_missing_imports = true
 strict = false
 
 [[tool.mypy.overrides]]
-module = ["larkhelm.crew_types", "larkhelm.dedup", "larkhelm.concurrency", "larkhelm.log", "larkhelm.token_stats", "larkhelm.chat_state"]
+module = ["larkhelm.dedup", "larkhelm.concurrency", "larkhelm.log", "larkhelm.token_stats", "larkhelm.chat_state"]
 disallow_untyped_defs = true
 check_untyped_defs = true
 

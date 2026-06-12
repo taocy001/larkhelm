@@ -14,7 +14,7 @@ class AgentExecutor(abc.ABC):
 
     Subclasses must override ``agent_type`` and implement :meth:`execute`.
     Default :meth:`abort` triggers the chat-level cancel event so existing
-    cancellation paths (``_do_query``, crew runners, plan runners) wake up.
+    cancellation paths (``_do_query``) wake up.
     """
 
     agent_type: str = ""

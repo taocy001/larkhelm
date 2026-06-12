@@ -47,7 +47,6 @@ case "$cmd" in
         # transitively checks every import target with the same strictness
         # and explodes to 200+ errors.
         exec "$PY" -m mypy --follow-imports=silent \
-            larkhelm/crew_types.py \
             larkhelm/dedup.py \
             larkhelm/concurrency.py \
             larkhelm/log.py \

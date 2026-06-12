@@ -126,7 +126,6 @@ class LarkhelmMetricsRegistry:
             self.file_extract_errors_total = None
             self.tokens_total = None
             self.session_auto_reset_total = None
-            self.sticky_context_evicted_total = None
             self.workspace_hint_total = None
             self.injection_gate_total = None
             self.cache_write_tokens_total = None
@@ -135,9 +134,7 @@ class LarkhelmMetricsRegistry:
             self.cache_savings_total = None
             self.session_checkpoint_total = None
             self.prefix_stability_low_total = None
-            self.crew_preflight_total = None
             self.lark_api_retry_total = None
-            self.plan_ac_total = None
             self.prompt_cache_hit_rate = None
             self.webhook_received_total = None
             self.lark_api_duration_seconds = None
@@ -241,12 +238,6 @@ class LarkhelmMetricsRegistry:
             ["reason"],
             registry=self._registry,
         )
-        self.sticky_context_evicted_total = pc.Counter(
-            "larkhelm_sticky_context_evicted_total",
-            "Sticky crew context evictions by reason",
-            ["reason"],
-            registry=self._registry,
-        )
         # P3 REQ-03: workspace-hint segment telemetry. One outcome emitted
         # per handle_message that reaches the workspace injection block.
         self.workspace_hint_total = pc.Counter(
@@ -258,7 +249,7 @@ class LarkhelmMetricsRegistry:
         # P0 injection-gate telemetry: emitted on every gate decision so
         # operators can observe skip rates before enabling gates.
         # point ∈ {recent_turns_api, memory_intent_global, memory_intent_project,
-        #          memory_intent_session, crew_sticky, doc_inject, project_guide}
+        #          memory_intent_session, doc_inject, project_guide}
         # outcome ∈ {injected, skipped_by_gate, skipped_by_state,
         #             skipped_by_relevance, truncated_by_relevance, large_doc,
         #             skipped_cli, error}
@@ -271,48 +262,6 @@ class LarkhelmMetricsRegistry:
         self.cascade_backoff_exhausted_total = pc.Counter(
             "larkhelm_cascade_backoff_exhausted_total",
             "Memory cascade ExponentialBackoff retries exhausted (gave up)",
-            registry=self._registry,
-        )
-        # SEC-CRIT-4 layer-2 sentinel heuristic outcomes. Bumped exactly
-        # once per artifact validation that has ≥1 raw sentinel match
-        # (layer-1 already missed at this point). ``outcome`` ∈
-        # {hit_drop_ratio, hit_paranoid, abstain}. ``mode`` ∈
-        # {enforced, observe} — observe means traffic bucket missed or
-        # crew_sentinel_layer2_enabled=false, so the artifact was NOT
-        # rejected; track it anyway so operators can calibrate thresholds
-        # against real crew runs before enforcing.
-        self.crew_validate_layer2_total = pc.Counter(
-            "larkhelm_crew_validate_layer2_total",
-            "Layer-2 sentinel heuristic outcomes",
-            ["outcome", "mode"],
-            registry=self._registry,
-        )
-        # SEC-v2-MED-1 (review_security_v2): structural Anthropic XML
-        # leak check. ``outcome`` ∈ {hit_enforced, hit_observed} —
-        # ``hit_enforced`` rejects the artifact, ``hit_observed`` only
-        # fires when the gate is OFF so operators can spot real-world
-        # match rates before flipping enforcement. Abstain is intentionally
-        # not bumped (the regex misses on 99%+ of artifacts; emitting
-        # ``abstain`` per validate call would flood the series).
-        self.crew_validate_anthropic_loose_total = pc.Counter(
-            "larkhelm_crew_validate_anthropic_loose_total",
-            "SEC-v2-MED-1 structural Anthropic XML check outcomes",
-            ["outcome"],
-            registry=self._registry,
-        )
-        # SEC-v2-MED-2 (review_security_v2): backend "swing" detector.
-        # Bumped each time ``_run_agent_wrapper`` writes a backend id
-        # into the agent's ``excluded_backends_until`` map that
-        # ALREADY had a (possibly expired) entry — i.e. the same
-        # backend has been excluded twice during this crew run.
-        # Healthy crews emit zero of these; a steady rate signals
-        # an attacker repeatedly poisoning the preferred backend to
-        # burn tokens on retries. Label cardinality is bounded by
-        # the agent-id set defined in the crew plan (~5-10 per crew).
-        self.crew_backend_swing_total = pc.Counter(
-            "larkhelm_crew_backend_swing_total",
-            "Same backend re-excluded within a crew (swing/DoS signal)",
-            ["agent_id"],
             registry=self._registry,
         )
         self.cache_write_tokens_total = pc.Counter(
@@ -358,22 +307,10 @@ class LarkhelmMetricsRegistry:
             buckets=[0, 0.25, 0.5, 0.75, 0.9, 0.95, 1.0],
             registry=self._registry,
         )
-        self.crew_preflight_total = pc.Counter(
-            "larkhelm_crew_preflight_total",
-            "Crew agent preflight env check outcomes",
-            ["outcome", "check_type"],
-            registry=self._registry,
-        )
         self.lark_api_retry_total = pc.Counter(
             "larkhelm_lark_api_retry_total",
             "Feishu API call retry outcomes",
             ["method", "outcome"],
-            registry=self._registry,
-        )
-        self.plan_ac_total = pc.Counter(
-            "larkhelm_plan_ac_total",
-            "Plan acceptance criteria outcomes by gate_type",
-            ["gate_type", "outcome"],
             registry=self._registry,
         )
         self.lark_api_ok = pc.Gauge(
@@ -711,19 +648,6 @@ def inc_session_auto_reset(reason: str) -> None:
         safe_log(f"[Metrics] inc_session_auto_reset failed (reason={reason}): {e}")
 
 
-def inc_sticky_context_evicted(reason: str) -> None:
-    """Bump ``larkhelm_sticky_context_evicted_total{reason}``.
-
-    ``reason`` ∈ {'max_injections', 'ttl'}. Never raises.
-    """
-    reg = get_registry()
-    if not reg.available or reg.sticky_context_evicted_total is None:
-        return
-    try:
-        reg.sticky_context_evicted_total.labels(reason=str(reason)).inc()
-    except Exception as e:
-        safe_log(f"[Metrics] inc_sticky_context_evicted failed (reason={reason}): {e}")
-
 
 def inc_cascade_backoff_exhausted() -> None:
     """Bump ``larkhelm_cascade_backoff_exhausted_total`` when ``ExponentialBackoff``
@@ -738,81 +662,6 @@ def inc_cascade_backoff_exhausted() -> None:
         safe_log(f"[Metrics] inc_cascade_backoff_exhausted failed: {e}")
 
 
-def inc_crew_validate_layer2(outcome: str, mode: str) -> None:
-    """Bump ``larkhelm_crew_validate_layer2_total{outcome, mode}``.
-
-    Called from ``crew/_runner.py:_validate_output_artifact`` exactly once
-    per artifact whose pre-scrub content contains ≥ 1 raw sentinel match
-    (layer-1 missed). Never raises. Safe when prometheus-client is absent.
-
-    Args:
-        outcome: ``"hit_drop_ratio"`` / ``"hit_paranoid"`` / ``"abstain"``
-        mode: ``"enforced"`` (artifact rejected) / ``"observe"``
-              (gray rollout missed; metric only, no rejection)
-    """
-    reg = get_registry()
-    if not reg.available or reg.crew_validate_layer2_total is None:
-        return
-    try:
-        reg.crew_validate_layer2_total.labels(
-            outcome=str(outcome), mode=str(mode),
-        ).inc()
-    except Exception as e:
-        safe_log(
-            f"[Metrics] inc_crew_validate_layer2 failed "
-            f"(outcome={outcome}, mode={mode}): {e}"
-        )
-
-
-def inc_crew_backend_swing(agent_id: str, backend_id: str) -> None:
-    """Bump ``larkhelm_crew_backend_swing_total{agent_id}``.
-
-    SEC-v2-MED-2: called from ``crew/_runner._run_agent_wrapper`` each
-    time we re-exclude the same backend on a retry round. The
-    ``backend_id`` flows into the log breadcrumb only (not exported
-    as a label) to keep series cardinality bounded. Never raises;
-    safe when prometheus-client is absent.
-    """
-    reg = get_registry()
-    if (not reg.available
-            or getattr(reg, "crew_backend_swing_total", None) is None):
-        return
-    try:
-        reg.crew_backend_swing_total.labels(agent_id=str(agent_id)).inc()
-    except Exception as e:
-        safe_log(
-            f"[Metrics] inc_crew_backend_swing failed "
-            f"(agent_id={agent_id}, backend_id={backend_id}): {e}"
-        )
-
-
-def inc_crew_validate_anthropic_loose(outcome: str) -> None:
-    """Bump ``larkhelm_crew_validate_anthropic_loose_total{outcome}``.
-
-    SEC-v2-MED-1: called from ``crew/_runner.py:_anthropic_loose_check``
-    each time the structural Anthropic-XML regex matches in
-    scrubbed prose. Outcomes: ``"hit_enforced"`` (gate on → artifact
-    rejected) / ``"hit_observed"`` (gate off → metric-only). Never
-    raises; safe when prometheus-client is absent.
-
-    Abstain is intentionally NOT bumped — the regex misses on 99%+ of
-    artifacts so per-call emission would flood the series.
-    """
-    reg = get_registry()
-    if (not reg.available
-            or getattr(reg, "crew_validate_anthropic_loose_total", None) is None):
-        return
-    try:
-        reg.crew_validate_anthropic_loose_total.labels(
-            outcome=str(outcome),
-        ).inc()
-    except Exception as e:
-        safe_log(
-            f"[Metrics] inc_crew_validate_anthropic_loose failed "
-            f"(outcome={outcome}): {e}"
-        )
-
-
 def inc_injection_gate(point: str, outcome: str) -> None:
     """Bump ``larkhelm_injection_gate_total{point, outcome}``.
 
@@ -820,7 +669,7 @@ def inc_injection_gate(point: str, outcome: str) -> None:
     skip rates in flag=False mode before enabling gates.
 
     ``point`` ∈ {recent_turns_api, memory_intent_global, memory_intent_project,
-    memory_intent_session, crew_sticky, doc_inject, project_guide}.
+    memory_intent_session, doc_inject, project_guide}.
     ``outcome`` ∈ {injected, skipped_by_gate, skipped_by_state,
     skipped_by_relevance, truncated_by_relevance, large_doc, skipped_cli,
     error}. Never raises.
@@ -941,20 +790,6 @@ def observe_cache_hit_rate(backend: str, ratio: float) -> None:
         safe_log(f"[Metrics] observe_cache_hit_rate failed (backend={backend}, ratio={ratio}): {e}")
 
 
-def inc_crew_preflight(outcome: str, check_type: str) -> None:
-    """Bump larkhelm_crew_preflight_total{outcome, check_type}. 永不抛出。
-    outcome: pass / fail_arch / fail_docker
-    check_type: arch / docker
-    """
-    reg = get_registry()
-    if not reg.available or getattr(reg, "crew_preflight_total", None) is None:
-        return
-    try:
-        reg.crew_preflight_total.labels(outcome=str(outcome), check_type=str(check_type)).inc()
-    except Exception as e:
-        safe_log(f"[Metrics] inc_crew_preflight failed (outcome={outcome}, check_type={check_type}): {e}")
-
-
 def inc_lark_api_retry(method: str, outcome: str) -> None:
     """Bump larkhelm_lark_api_retry_total{method, outcome}. 永不抛出。
     outcome: success_after_retry / exhausted
@@ -967,19 +802,6 @@ def inc_lark_api_retry(method: str, outcome: str) -> None:
     except Exception as e:
         safe_log(f"[Metrics] inc_lark_api_retry failed (method={method}, outcome={outcome}): {e}")
 
-
-def inc_plan_ac(gate_type: str, outcome: str) -> None:
-    """Bump larkhelm_plan_ac_total{gate_type, outcome}. 永不抛出。
-    gate_type: code / runtime / release
-    outcome: passed / skipped / env_blocked / failed
-    """
-    reg = get_registry()
-    if not reg.available or getattr(reg, "plan_ac_total", None) is None:
-        return
-    try:
-        reg.plan_ac_total.labels(gate_type=str(gate_type), outcome=str(outcome)).inc()
-    except Exception as e:
-        safe_log(f"[Metrics] inc_plan_ac failed (gate_type={gate_type}, outcome={outcome}): {e}")
 
 
 def inc_workspace_hint(outcome: str) -> None:
@@ -1046,7 +868,6 @@ def inc_message_errors(error_type: str) -> None:
 _REGISTRY_ALIASES = {
     "WORKSPACE_HINT_TOTAL":          "workspace_hint_total",
     "SESSION_AUTO_RESET_TOTAL":      "session_auto_reset_total",
-    "STICKY_CONTEXT_EVICTED_TOTAL":  "sticky_context_evicted_total",
     "TOKENS_TOTAL":                  "tokens_total",
     "DOC_INJECT_CACHE_TOTAL":        "doc_inject_cache_total",
     "CACHE_SAVINGS_TOTAL":           "cache_savings_total",
@@ -1084,19 +905,15 @@ __all__ = [
     "inc_file_extract_error",
     "inc_tokens",
     "inc_session_auto_reset",
-    "inc_sticky_context_evicted",
     "inc_workspace_hint",
     "inc_injection_gate",
-    "inc_crew_backend_swing",
     "inc_cache_write_tokens",
     "inc_cache_read_tokens",
     "set_cache_hit_ratio",
     "inc_cache_savings",
     "inc_session_checkpoint",
     "inc_prefix_stability_low",
-    "inc_crew_preflight",
     "inc_lark_api_retry",
-    "inc_plan_ac",
     "observe_cache_hit_rate",
     "inc_webhook_received",
     "observe_lark_api_duration",

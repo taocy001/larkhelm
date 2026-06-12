@@ -81,7 +81,6 @@ class _RuntimeConfig:
     VOICE_MAX_MERGE:         int
     VOICE_KEEP_AUDIO:        bool
     MEMORY_LIMIT_MB:         int
-    CREW_BREAKPOINT_TIMEOUT_SEC: int
     # ``/upgrade`` install-mode flag: True when ``SOURCE_DIR`` resolved to a
     # git repo via editable install (``pip install -e``), False when resolved
     # via ``direct_url.json`` (``pipx install <local-path>``) or fell back to
@@ -101,12 +100,10 @@ class _RuntimeConfig:
     CLI_SKIP_RECENT_TURNS_WHEN_SID:    bool = True
     API_SKIP_RECENT_TURNS_WHEN_HISTORY: bool = True
     # Injection gate flags (P1)
-    MEMORY_INTENT_POLICY_ENABLED:           bool = True
     SESSION_GUARD_MIN_TURNS_BEFORE_RESET:   int = 5
     SESSION_GUARD_CHECKPOINT_TURNS:         int = 5
     ANTHROPIC_LAYERED_CACHE_TRAFFIC:        float = 0.0
     CACHE_HIT_RATE_ALERT_THRESHOLD:         float = 0.5
-    CREW_STICKY_KEYWORD_GATE_ENABLED:       bool = False
     PROJECT_GUIDE_ENABLED:                  bool = False
     PROJECT_GUIDE_PATH:                     str = ""
     PROJECT_GUIDE_AUTO_DISCOVER:            bool = False
@@ -115,9 +112,8 @@ class _RuntimeConfig:
     DOC_INJECT_CACHE_TTL_SEC_KIMI:          int = 120
     DOC_INJECT_CACHE_TTL_SEC_DEEPSEEK:      int = 180
     PARENT_INJECT_SKIP_WHEN_API_HISTORY:    bool = False
-    # Workspace-hint / stats-breakdown toggles (P3/P5)
+    # Workspace-hint toggle (P3)
     WORKSPACE_HINT_KEYWORD_GATE:        bool = False
-    STATS_AGENT_TYPE_BREAKDOWN_ENABLED: bool = True
     # Feishu doc permission defaults (M-DOC-PERM)
     FEISHU_DOC_DEFAULT_VIS:             str = ""
     FEISHU_DOC_COLLABORATORS:           "list[str]" = dataclasses.field(default_factory=list)
@@ -262,7 +258,6 @@ VOICE_MERGE_WINDOW_SEC:  int   # 0 = disable merge
 VOICE_MAX_MERGE:         int
 VOICE_KEEP_AUDIO:        bool
 MEMORY_LIMIT_MB:         int   # RSS hard limit in MB; auto-detected on first run
-CREW_BREAKPOINT_TIMEOUT_SEC: int   # Phase C: max wait for human confirmation in /dev (default 1800s)
 
 # ── P1-3 / P1-5 / P1-6 globals ──────────────────────────────────────────────
 # All default to "feature off" so byte-compat with master holds when the
@@ -281,7 +276,6 @@ ANTHROPIC_EXTENDED_CACHE_ENABLED: bool = True
 # ── P3 globals (REQ-02 / 03 / 04 / 05 / 06 / 07 / 08 / 09 / 10) ────────────
 QUERY_SESSION_V2_TRAFFIC: float = 0.0
 CASCADE_BACKOFF_MAX_ATTEMPTS: int = 3
-PLAN_RETRY_STRATEGY: str = "off"             # "now" | "manual" | "off"
 PLUGIN_REPORT_CARD_ENABLED: bool = False
 FAILURE_REPORT_CARD_ENABLED: bool = False
 ADMIN_CHAT_ID: str = ""
@@ -290,12 +284,6 @@ METRICS_ALERT_INTERVAL_SEC: int = 60
 METRICS_ALERT_ACTIVE_QUERIES_THRESHOLD: int = 20
 METRICS_ALERT_ERROR_RATE_THRESHOLD: float = 0.1
 METRICS_ALERT_RSS_BYTES_THRESHOLD: int = 2 * 1024 * 1024 * 1024
-CREW_CHECKPOINT_TTL_DAYS: float = 7.0
-DEV_STAGE_TIMEOUTS: "dict[str, int]" = {}
-# B3: window during which a different-task workspace_meta under the same
-# chat surfaces a "stale workspace was discarded" notice card. Set to 0 to
-# silence the notice entirely (still clears the workspace). Floor 0.
-WORKSPACE_FINALIZE_PROMPT_AGE_SEC: float = 3600.0
 
 # ── Feishu doc permission defaults (M-DOC-PERM) ───────────────────────────
 FEISHU_DOC_DEFAULT_VIS:   str       = ""
@@ -317,12 +305,10 @@ DOC_INJECT_RELEVANCE_THRESHOLD: float = 0.3
 CLI_SKIP_RECENT_TURNS_WHEN_SID: bool = True
 API_SKIP_RECENT_TURNS_WHEN_HISTORY: bool = True
 # Injection gate flags (P1)
-MEMORY_INTENT_POLICY_ENABLED: bool = True
 SESSION_GUARD_MIN_TURNS_BEFORE_RESET: int = 5
 SESSION_GUARD_CHECKPOINT_TURNS: int = 5
 ANTHROPIC_LAYERED_CACHE_TRAFFIC: float = 0.0
 CACHE_HIT_RATE_ALERT_THRESHOLD: float = 0.5
-CREW_STICKY_KEYWORD_GATE_ENABLED: bool = False
 PROJECT_GUIDE_ENABLED: bool = False
 PROJECT_GUIDE_PATH: str = ""
 PROJECT_GUIDE_AUTO_DISCOVER: bool = False
@@ -332,15 +318,11 @@ DOC_INJECT_CACHE_TTL_SEC_KIMI: int = 120
 DOC_INJECT_CACHE_TTL_SEC_DEEPSEEK: int = 180
 PARENT_INJECT_SKIP_WHEN_API_HISTORY: bool = False
 
-# ── P3 workspace-hint / P5 stats-breakdown knobs ──────────────────────────
+# ── P3 workspace-hint knob ────────────────────────────────────────────────
 # WORKSPACE_HINT_KEYWORD_GATE (default False): when True, the workspace
 # hint segment is suppressed unless the user message matches the keyword
 # regex (see _message._WORKSPACE_KEYWORD_RE). REQ-02.
-# STATS_AGENT_TYPE_BREAKDOWN_ENABLED (default True): when True, /stats
-# renders crew agents bucketed by agent_type; when False, falls back to
-# the P2 single-line summary for cards approaching MAX_CARD_LEN. REQ-09.
 WORKSPACE_HINT_KEYWORD_GATE: bool = True
-STATS_AGENT_TYPE_BREAKDOWN_ENABLED: bool = True
 
 # ── P0/P1/P2 cache-bleed knobs (.crew_workspace/design.md §3.3) ───────────
 # P0: Claude session auto-reset
@@ -360,9 +342,6 @@ CLAUDE_SESSION_RESET_CACHE_TOKENS: int = 5_000_000
 CLAUDE_SESSION_RESET_TURNS: int = 50
 # P1: ChatAgent cheap routing
 CHAT_AGENT_CHEAP_ROUTING_ENABLED: bool = True
-# P2: Sticky crew context tuning
-RECENT_CREW_STICKY_TTL_SEC: int = 1800
-RECENT_CREW_STICKY_MAX_INJECTIONS: int = 5
 
 # ── File handling configuration ───────────────────────────────────────────
 FILE_ENABLED: bool = True
@@ -398,8 +377,8 @@ def _auto_discover_cli() -> list[dict]:
     Returns list of BackendSpec dicts (without 'role' — inferred by BackendRegistry.load()).
     Only includes CLIs found via shutil.which().
 
-    ``capability_scores`` keys MUST match the keys used by
-    ``TASK_PROFILES`` in ``crew/_backend_resolver.py``
+    ``capability_scores`` keys MUST match the capability keys consumed by
+    ``backend_registry.rank_for_task``
     (``reasoning`` / ``coding`` / ``tools`` / ``long_context`` / ``chat``).
     Without these, ``rank_for_task`` falls back to a tag-intersection
     score that ties every backend at 0 or 1, then breaks the tie on
@@ -662,15 +641,12 @@ def _init_app_config() -> None:
     global QUERY_SESSION_V2_ENABLED
     global METRICS_TEXT_LEGACY, ANTHROPIC_EXTENDED_CACHE_ENABLED
     global QUERY_SESSION_V2_TRAFFIC
-    global CASCADE_BACKOFF_MAX_ATTEMPTS, PLAN_RETRY_STRATEGY
+    global CASCADE_BACKOFF_MAX_ATTEMPTS
     global PLUGIN_REPORT_CARD_ENABLED, FAILURE_REPORT_CARD_ENABLED, ADMIN_CHAT_ID
-    global CREW_CHECKPOINT_TTL_DAYS, DEV_STAGE_TIMEOUTS
-    global WORKSPACE_FINALIZE_PROMPT_AGE_SEC
     global RECENT_TURNS_CACHE_ENABLED, MEMORY_LEGACY_CACHE_ENABLED
     global DOC_INJECT_CACHE_ENABLED, DOC_INJECT_CACHE_TTL_SEC
     global DOC_INJECT_RELEVANCE_GATE_ENABLED, DOC_INJECT_RELEVANCE_THRESHOLD
     global CLI_SKIP_RECENT_TURNS_WHEN_SID, API_SKIP_RECENT_TURNS_WHEN_HISTORY
-    global MEMORY_INTENT_POLICY_ENABLED, CREW_STICKY_KEYWORD_GATE_ENABLED
     global PROJECT_GUIDE_ENABLED, PROJECT_GUIDE_PATH, PROJECT_GUIDE_AUTO_DISCOVER, PARENT_INJECT_SKIP_WHEN_API_HISTORY
     global DOC_INJECT_CACHE_TTL_SEC_CLAUDE, DOC_INJECT_CACHE_TTL_SEC_GEMINI
     global DOC_INJECT_CACHE_TTL_SEC_KIMI, DOC_INJECT_CACHE_TTL_SEC_DEEPSEEK
@@ -934,15 +910,6 @@ def _init_app_config() -> None:
     config.setdefault("memory_cascade_shortcircuit", True)
     config.setdefault("memory_cascade_max_concurrent", 4)
 
-    # Phase C: max seconds to wait for the user to click 继续/取消 at a
-    # crew breakpoint. Default 1800s (30 min); see crew/_runner.py
-    # _wait_for_breakpoint and _failure_card.emit_breakpoint_timeout.
-    global CREW_BREAKPOINT_TIMEOUT_SEC
-    try:
-        CREW_BREAKPOINT_TIMEOUT_SEC = max(60, int(config.get("crew_breakpoint_timeout_sec", 1800)))
-    except (TypeError, ValueError):
-        CREW_BREAKPOINT_TIMEOUT_SEC = 1800
-
     # ── OAuth user_access_token (see oauth_user.py) ──────────────────────
     # The token file is loaded lazily by oauth_user.get_user_token(); this
     # block only reads the cached ``open_id`` to populate LOGGED_IN_OPEN_ID
@@ -999,63 +966,13 @@ def _init_app_config() -> None:
     # ── P3 new keys ──────────────────────────────────────────────────────────
     config.setdefault("query_session_v2_traffic", 0.0)
     config.setdefault("cascade_backoff_max_attempts", 3)
-    config.setdefault("plan_retry_strategy", "off")
-    config.setdefault("plan_pre_check_cmd", "")
     config.setdefault("plugin_report_card_enabled", False)
     config.setdefault("failure_report_card_enabled", False)
     config.setdefault("admin_chat_id", "")
-    config.setdefault("crew_checkpoint_ttl_days", 7.0)
-    config.setdefault("dev_stage_timeouts", {})
-    # SEC-CRIT-4 layer-2 sentinel heuristic (review_security.md). The
-    # layer-1 ``_strip_code_evidence`` + sentinel scan in
-    # ``crew/_runner.py:_validate_output_artifact`` is bypassable by an
-    # attacker who wraps tool-call tokens in fenced / inline-backtick /
-    # blockquote citations. Layer-2 runs AFTER layer-1 misses and counts
-    # raw sentinel occurrences (pre-scrub) — if there are too many
-    # citations hiding sentinels (drop_ratio heuristic) or just a
-    # paranoid raw count, layer-2 rejects regardless of citation form.
-    # Default OFF (traffic=0.0); enable gradually via traffic dial.
-    # Salted hash bucket by chat_id (uses _gating.hash_traffic_active) so
-    # the same chat is consistently enrolled/excluded.
-    config.setdefault("crew_sentinel_layer2_enabled", False)
-    config.setdefault("crew_sentinel_layer2_traffic", 0.0)
-    # Layer-2 thresholds (tunable; defaults are intuition-based, will be
-    # calibrated against real crew run data once gray rollout collects
-    # ≥ 1 week of `larkhelm_crew_validate_layer2_total` metric).
-    config.setdefault("crew_sentinel_layer2_raw_threshold", 3)
-    config.setdefault("crew_sentinel_layer2_drop_ratio", 0.30)
-    config.setdefault("crew_sentinel_layer2_paranoid_threshold", 5)
-    # SEC-v2-MED-1 (review_security_v2): structural-only check for
-    # Anthropic XML-style tool-call leaks. Replaces the LOW3 bare-
-    # substring scan for ``<function_calls>`` / ``<invoke name=`` —
-    # those tokens legitimately appear in narrative prose (Claude API
-    # docs, agent prompt examples, larkhelm CLAUDE.md). The structural
-    # regex requires the full opening + invoke + closing trio within a
-    # 4 KiB window. Default ON because we want enforcement immediately
-    # — the structural shape only arises from real leakage. Flip false
-    # to disable enforcement and fall back to metric-only observation.
-    config.setdefault("crew_sentinel_anthropic_loose_enabled", True)
-    # SEC-v2-MED-2 (review_security_v2): TTL (seconds) for per-agent
-    # backend exclusion entries. ``_run_agent_wrapper`` stamps a
-    # failing backend with ``time.time() + this`` after a validate
-    # failure; cross-round retry-target reset prunes only entries
-    # whose expiry has lapsed (was unconditional ``.clear()`` before
-    # the fix). 60s default is long enough to span one wave-level
-    # retry — breaking the backend-swing DoS where an attacker
-    # repeatedly poisons one backend each round — yet short enough
-    # that a backend recovered after a true transient hiccup re-enters
-    # the candidate pool within the same crew. Set to 0 to restore
-    # pre-fix byte-compatible behaviour (every cross-round retry
-    # clears every exclusion).
-    config.setdefault("crew_backend_exclusion_cooldown_sec", 60.0)
     # M-DOC-PERM: default visibility for newly created docs; "" means use API default.
     config.setdefault("feishu_doc_default_vis", "")
     # M-DOC-PERM: list of open_ids to add as collaborators after doc creation.
     config.setdefault("feishu_doc_collaborators", [])
-    # B3: stale-workspace notice window. Discarding a different-task
-    # workspace_meta within this many seconds (same chat) surfaces an
-    # orange notice card. Set 0 to silence.
-    config.setdefault("workspace_finalize_prompt_age_sec", 3600.0)
 
     try:
         QUERY_SESSION_V2_TRAFFIC = max(
@@ -1071,29 +988,9 @@ def _init_app_config() -> None:
     except (TypeError, ValueError):
         CASCADE_BACKOFF_MAX_ATTEMPTS = 3
 
-    _strategy = str(config.get("plan_retry_strategy", "off") or "off").lower()
-    if _strategy not in ("now", "manual", "off"):
-        _strategy = "off"
-    PLAN_RETRY_STRATEGY = _strategy
-
     PLUGIN_REPORT_CARD_ENABLED = bool(config.get("plugin_report_card_enabled", False))
     FAILURE_REPORT_CARD_ENABLED = bool(config.get("failure_report_card_enabled", False))
     ADMIN_CHAT_ID = str(config.get("admin_chat_id", "") or "")
-
-    try:
-        CREW_CHECKPOINT_TTL_DAYS = max(
-            0.0, float(config.get("crew_checkpoint_ttl_days", 7.0) or 7.0),
-        )
-    except (TypeError, ValueError):
-        CREW_CHECKPOINT_TTL_DAYS = 7.0
-
-    # B3: stale-workspace notice window (floor 0 disables the notice).
-    try:
-        WORKSPACE_FINALIZE_PROMPT_AGE_SEC = max(
-            0.0, float(config.get("workspace_finalize_prompt_age_sec", 3600.0) or 3600.0),
-        )
-    except (TypeError, ValueError):
-        WORKSPACE_FINALIZE_PROMPT_AGE_SEC = 3600.0
 
     # Context-injection cache flags (REQ-01..04). Defaults preserve PR-prior
     # behaviour: caches on (loaders byte-identical, just memoized) and the
@@ -1104,17 +1001,12 @@ def _init_app_config() -> None:
     config.setdefault("doc_inject_cache_ttl_sec", 600)
     config.setdefault("cli_skip_recent_turns_when_sid", True)
     config.setdefault("api_skip_recent_turns_when_history", True)
-    # P3 REQ-02 / P5 REQ-09. REQ-18: default is now True (keyword gate on by
+    # P3 REQ-02. REQ-18: default is now True (keyword gate on by
     # default); operators flip to false to restore unconditional injection.
     config.setdefault("workspace_hint_keyword_gate", True)
-    config.setdefault("stats_agent_type_breakdown_enabled", True)
 
     # P1 on-demand injection gates (all default false = inject as before).
-    # memory_intent_policy_enabled: skip global memory for dev/crew/shell intents.
-    # crew_sticky_keyword_gate_enabled: skip sticky crew context when no crew keywords.
     # project_guide_enabled: inject a static project guide file for non-claude-cli backends.
-    config.setdefault("memory_intent_policy_enabled", True)
-    config.setdefault("crew_sticky_keyword_gate_enabled", False)
     config.setdefault("project_guide_enabled", False)
     config.setdefault("project_guide_path", "")
     config.setdefault("project_guide_auto_discover", False)
@@ -1156,8 +1048,6 @@ def _init_app_config() -> None:
     API_SKIP_RECENT_TURNS_WHEN_HISTORY = bool(
         config.get("api_skip_recent_turns_when_history", True)
     )
-    MEMORY_INTENT_POLICY_ENABLED = bool(config.get("memory_intent_policy_enabled", True))
-    CREW_STICKY_KEYWORD_GATE_ENABLED = bool(config.get("crew_sticky_keyword_gate_enabled", False))
     PROJECT_GUIDE_ENABLED = bool(config.get("project_guide_enabled", False))
     PROJECT_GUIDE_PATH = str(config.get("project_guide_path", "") or "")
     PROJECT_GUIDE_AUTO_DISCOVER = bool(config.get("project_guide_auto_discover", False))
@@ -1167,12 +1057,9 @@ def _init_app_config() -> None:
     DOC_INJECT_CACHE_TTL_SEC_DEEPSEEK = max(1, int(config.get("doc_inject_cache_ttl_sec_deepseek", 180) or 180))
     PARENT_INJECT_SKIP_WHEN_API_HISTORY = bool(config.get("parent_inject_skip_when_api_history", False))
 
-    global WORKSPACE_HINT_KEYWORD_GATE, STATS_AGENT_TYPE_BREAKDOWN_ENABLED
+    global WORKSPACE_HINT_KEYWORD_GATE
     WORKSPACE_HINT_KEYWORD_GATE = bool(
         config.get("workspace_hint_keyword_gate", True)
-    )
-    STATS_AGENT_TYPE_BREAKDOWN_ENABLED = bool(
-        config.get("stats_agent_type_breakdown_enabled", True)
     )
 
     # ── P0/P1/P2 cache-bleed knobs (design.md §3.3) ───────────────────────
@@ -1197,8 +1084,6 @@ def _init_app_config() -> None:
     config.setdefault("claude_session_reset_turns", 50)
     config.setdefault("chat_agent_cheap_routing_enabled", True)
     config.setdefault("memory_prefer_cheap_enabled", True)
-    config.setdefault("recent_crew_sticky_ttl_sec", 1800)
-    config.setdefault("recent_crew_sticky_max_injections", 5)
 
     # Claude Code Workflow（多 Agent 编排，CLI ≥ 2.1.154）。默认关：workflow
     # 单次可烧数十万 token，必须由用户通过 /ultra 显式 opt-in。关闭时通过
@@ -1208,7 +1093,6 @@ def _init_app_config() -> None:
 
     global CLAUDE_SESSION_AUTO_RESET_ENABLED, CLAUDE_SESSION_RESET_CACHE_TOKENS
     global CLAUDE_SESSION_RESET_TURNS, CHAT_AGENT_CHEAP_ROUTING_ENABLED
-    global RECENT_CREW_STICKY_TTL_SEC, RECENT_CREW_STICKY_MAX_INJECTIONS
     global SESSION_GUARD_ENABLED, SESSION_GUARD_CHECKPOINT_BEFORE_RESET
     global SESSION_GUARD_POLICIES, ANTHROPIC_EXTENDED_CACHE_RETRY_SEC
     global ANTHROPIC_LAYERED_CACHE_CONTROL, ANTHROPIC_LAYERED_CACHE_TRAFFIC
@@ -1275,20 +1159,6 @@ def _init_app_config() -> None:
     CHAT_AGENT_CHEAP_ROUTING_ENABLED = bool(
         config.get("chat_agent_cheap_routing_enabled", True)
     )
-    try:
-        # Floor 60s: anything shorter would drop a freshly-completed crew
-        # context before the user could send a reply.
-        RECENT_CREW_STICKY_TTL_SEC = max(
-            60, int(config.get("recent_crew_sticky_ttl_sec", 1800) or 1800),
-        )
-    except (TypeError, ValueError):
-        RECENT_CREW_STICKY_TTL_SEC = 1800
-    try:
-        RECENT_CREW_STICKY_MAX_INJECTIONS = max(
-            0, int(config.get("recent_crew_sticky_max_injections", 5) or 5),
-        )
-    except (TypeError, ValueError):
-        RECENT_CREW_STICKY_MAX_INJECTIONS = 5
 
     # ── Week-2: Backend-aware Context Budget ───────────────────────────────
     config.setdefault("backend_aware_budget_enabled", False)
@@ -1343,18 +1213,6 @@ def _init_app_config() -> None:
     global GITHUB_TOKEN, GITHUB_REPO
     GITHUB_TOKEN = str(config.get("github_token", "") or "")
     GITHUB_REPO = str(config.get("github_repo", "") or "")
-
-    _raw_timeouts = config.get("dev_stage_timeouts") or {}
-    _clean_timeouts: "dict[str, int]" = {}
-    if isinstance(_raw_timeouts, dict):
-        for _k, _v in _raw_timeouts.items():
-            try:
-                _iv = int(_v)
-            except (TypeError, ValueError):
-                continue
-            if _iv > 0 and isinstance(_k, str) and _k.strip():
-                _clean_timeouts[_k.strip()] = _iv
-    DEV_STAGE_TIMEOUTS = _clean_timeouts
 
     # ── Metrics alert daemon knobs (M-METRICS) ─────────────────────────────
     config.setdefault("metrics_alert_enabled", True)
@@ -1572,7 +1430,6 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         VOICE_DEFAULT_LANG=VOICE_DEFAULT_LANG, VOICE_MERGE_WINDOW_SEC=VOICE_MERGE_WINDOW_SEC,
         VOICE_MAX_MERGE=VOICE_MAX_MERGE, VOICE_KEEP_AUDIO=VOICE_KEEP_AUDIO,
         MEMORY_LIMIT_MB=MEMORY_LIMIT_MB,
-        CREW_BREAKPOINT_TIMEOUT_SEC=CREW_BREAKPOINT_TIMEOUT_SEC,
         METRICS_TEXT_LEGACY=METRICS_TEXT_LEGACY,
         ANTHROPIC_EXTENDED_CACHE_ENABLED=ANTHROPIC_EXTENDED_CACHE_ENABLED,
 
@@ -1584,12 +1441,10 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         DOC_INJECT_RELEVANCE_THRESHOLD=DOC_INJECT_RELEVANCE_THRESHOLD,
         CLI_SKIP_RECENT_TURNS_WHEN_SID=CLI_SKIP_RECENT_TURNS_WHEN_SID,
         API_SKIP_RECENT_TURNS_WHEN_HISTORY=API_SKIP_RECENT_TURNS_WHEN_HISTORY,
-        MEMORY_INTENT_POLICY_ENABLED=MEMORY_INTENT_POLICY_ENABLED,
         SESSION_GUARD_MIN_TURNS_BEFORE_RESET=SESSION_GUARD_MIN_TURNS_BEFORE_RESET,
         SESSION_GUARD_CHECKPOINT_TURNS=SESSION_GUARD_CHECKPOINT_TURNS,
         ANTHROPIC_LAYERED_CACHE_TRAFFIC=ANTHROPIC_LAYERED_CACHE_TRAFFIC,
         CACHE_HIT_RATE_ALERT_THRESHOLD=CACHE_HIT_RATE_ALERT_THRESHOLD,
-        CREW_STICKY_KEYWORD_GATE_ENABLED=CREW_STICKY_KEYWORD_GATE_ENABLED,
         PROJECT_GUIDE_ENABLED=PROJECT_GUIDE_ENABLED,
         PROJECT_GUIDE_PATH=PROJECT_GUIDE_PATH,
         PROJECT_GUIDE_AUTO_DISCOVER=PROJECT_GUIDE_AUTO_DISCOVER,
@@ -1599,7 +1454,6 @@ def _init_runtime(config_path: str = None, data_dir: str = None) -> None:
         DOC_INJECT_CACHE_TTL_SEC_DEEPSEEK=DOC_INJECT_CACHE_TTL_SEC_DEEPSEEK,
         PARENT_INJECT_SKIP_WHEN_API_HISTORY=PARENT_INJECT_SKIP_WHEN_API_HISTORY,
         WORKSPACE_HINT_KEYWORD_GATE=WORKSPACE_HINT_KEYWORD_GATE,
-        STATS_AGENT_TYPE_BREAKDOWN_ENABLED=STATS_AGENT_TYPE_BREAKDOWN_ENABLED,
         FILE_ENABLED=FILE_ENABLED,
         MAX_FILE_SIZE_BYTES=MAX_FILE_SIZE_BYTES,
         FILE_TEXT_EXTENSIONS=FILE_TEXT_EXTENSIONS,

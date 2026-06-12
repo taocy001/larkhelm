@@ -89,9 +89,6 @@ _CASES = [
 # Async commands are dispatched on a daemon thread; they need a small grace
 # period before the call_count assertion fires.
 _ASYNC_CASES = [
-    ("/crew plan refactor",       "larkhelm.crew.cmd_crew",                "refactor"),
-    ("/dev fix login",            "larkhelm.crew.cmd_dev",                 "fix login"),
-    ("/plan ship release",        "larkhelm.cmd_plan.cmd_plan",            "ship release"),
     ("/run echo hi",              "larkhelm.commands._cmd_run",            "echo hi"),
 ]
 

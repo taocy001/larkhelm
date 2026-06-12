@@ -262,19 +262,6 @@ class CrossModuleStaleness_P0Tests(unittest.TestCase):
                          "runner_deepseek must not freeze the _ai_proc_sem binding — "
                          "use get_ai_sem() at acquire site instead")
 
-    def test_crew_commands_uses_getter_at_call_site(self):
-        """``crew/_commands.py`` likewise uses get_ai_sem() — verify the
-        symbol is at least imported by the module under test."""
-        import larkhelm.crew._commands as cc
-        src = Path(cc.__file__).read_text()
-        # The frozen-binding pattern must be gone.
-        self.assertNotIn("from larkhelm.ai_runner import _ai_proc_sem", src,
-                         "crew/_commands.py must use get_ai_sem() instead of "
-                         "frozen ai_runner._ai_proc_sem binding")
-        self.assertIn("get_ai_sem", src,
-                      "crew/_commands.py must call get_ai_sem() at acquire site")
-
-
 def _make_fake_open(file_map: dict[str, str | Exception]):
     """Build a ``builtins.open`` replacement that serves a fixed virtual FS.
 

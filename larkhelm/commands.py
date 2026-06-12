@@ -28,8 +28,6 @@ from larkhelm.concurrency import (
 )
 from larkhelm.token_stats import (
     get_token_stats, get_token_stats_persistent,
-    summarize_crew_agent_tokens_for_chat,
-    summarize_crew_agent_tokens_by_type,
     estimate_cache_savings,
     get_cache_savings_summary,
 )
@@ -66,17 +64,13 @@ _HELP_STATIC_SECTIONS: dict[str, tuple[str, str]] = {
         (
             "**🧭 任务怎么选**\n"
             "💬 直接发消息 — 单轮问答 / 闲聊 / 代码片段解释\n"
-            "🛠 **/dev** <需求> — 软件工程流水线（PM→架构→工程→QA→审查），产物通常一次 commit\n"
-            "🤖 **/crew** <需求> — 动态规划，Manager 自动分解任务多 Agent 并行\n"
-            "📋 **/plan** — 多阶段串行：`[dev]` `[review]` `[fix]` `[test]`，每步确认；支持飞书文档 URL\n"
+            "🚀 **/ultra** <任务> — 复杂任务走 Claude Code Workflow 多 Agent 编排\n"
             "💡 不确定时 → 直接发消息让 AI 判断"
         ),
         (
             "**🧭 Which command to use**\n"
             "💬 Just message — Q&A / chat / code snippets\n"
-            "🛠 **/dev** <task> — software pipeline (PM→Arch→Eng→QA→Review), usually one commit\n"
-            "🤖 **/crew** <task> — dynamic planning, Manager decomposes and runs agents in parallel\n"
-            "📋 **/plan** — staged pipeline: `[dev]` `[review]` `[fix]` `[test]`, confirm each step; supports Feishu doc URLs\n"
+            "🚀 **/ultra** <task> — complex tasks via Claude Code Workflow multi-agent orchestration\n"
             "💡 Unsure? → just message and let AI decide"
         ),
     ),
@@ -500,38 +494,6 @@ def _cmd_status(chat_id: str, msg_id: str = None):
     else:
         perm_status = _t(lang, "🔐 正常审批", "🔐 Normal approval")
 
-    # Active crew info
-    crew_info = ""
-    try:
-        from larkhelm.crew import _active_crew, _active_crew_states, _active_crew_lock
-        from larkhelm.crew._state import describe_active_owner
-        with _active_crew_lock:
-            crew_id    = _active_crew.get(chat_id)
-            crew_state = _active_crew_states.get(chat_id)
-        if crew_id and crew_state:
-            _phase_label = {
-                "planning": "规划中", "planned": "已规划", "running": "执行中",
-                "synthesizing": "综合中", "breakpoint": "等待确认",
-                "done": "已完成", "cancelled": "已取消",
-            }.get(crew_state.phase, crew_state.phase)
-            from larkhelm.crew_types import AgentStatus as _AgentStatus
-            n_done  = sum(1 for a in crew_state.agents.values() if a.status == _AgentStatus.DONE)
-            n_total = len(crew_state.agents)
-            crew_info = f"**Crew 进行中** {crew_id[:8]}…　{_phase_label}　{n_done}/{n_total} 完成"
-        elif crew_id:
-            # C4 #12 (sister of C4 #11 / C3 #9): when ``/plan`` owns the
-            # slot, ``_active_crew_states`` is empty (plan never writes
-            # it) but ``_active_crew`` carries the ``plan:<id>`` token.
-            # Pre-C4 this branch labelled the row "Crew 进行中 plan:abc…"
-            # — both the wrong command type AND a truncated token that
-            # bleeds the ``plan:`` prefix into the displayed hex. Route
-            # through ``describe_active_owner`` so the user sees the
-            # real owner (``/plan 任务 (id=...)`` vs ``/crew 或 /dev
-            # 任务 (id=...)``), matching the /crew-status fix in C4 #11.
-            crew_info = f"**任务进行中** {describe_active_owner(crew_id)}"
-    except Exception as e:
-        _debug_log(f"[status] crew info failed: {e}")
-
     # Token summary (current process lifetime, current chat)
     token_summary = ""
     stats = get_token_stats(chat_id)
@@ -629,20 +591,6 @@ def _cmd_status(chat_id: str, msg_id: str = None):
     except Exception as e:
         _debug_log(f"[status] backend summary failed: {e}")
 
-    # Phase C: Crew Backend 调度预览 — show which backend each task_profile
-    # currently resolves to so operators can see at a glance whether a
-    # planner / engineer / qa task would route to the expected provider
-    # (or to ``<none>`` if no backend matches).
-    crew_backend_preview = ""
-    try:
-        from larkhelm.crew._backend_resolver import resolve_backend_preview
-        preview = resolve_backend_preview()
-        if preview:
-            orch_id = preview.get("orchestrator", "<none>")
-            crew_backend_preview = f"**{_t(lang, 'Crew/Dev 主调度', 'Crew/Dev Orchestrator')}** {orch_id}"
-    except Exception as e:
-        _debug_log(f"[status] crew backend preview failed: {e}")
-
     # Effort level
     effort_line = ""
     try:
@@ -679,11 +627,9 @@ def _cmd_status(chat_id: str, msg_id: str = None):
         "",
         f"**{_t(lang, '权限模式', 'Permissions')}** {perm_status}",
         *([ effort_line ] if effort_line else []),
-        *([ crew_info ] if crew_info else []),
         *([ f"**{_t(lang, 'Token（本次启动）', 'Tokens (session)')}** {token_summary}" ] if token_summary else []),
         *([ backend_summary ] if backend_summary else []),
         *([ workflow_line ] if workflow_line else []),
-        *([ crew_backend_preview ] if crew_backend_preview else []),
         "",
     ]
 
@@ -921,70 +867,6 @@ def _fmt_token_block(label: str, data: dict, lang: str = "zh") -> str:
     return "\n".join(lines)
 
 
-def _render_crew_agent_breakdown(chat_id: str, lang: str = "zh") -> list[str]:
-    """Build the markdown lines for the /stats "Crew Agents" block.
-
-    Returns ``[]`` when there are no crew-agent tokens (caller suppresses
-    the section). Honours :pydata:`config.STATS_AGENT_TYPE_BREAKDOWN_ENABLED`:
-
-      * ``True``  → header line + one line per bucket, sorted by total
-        tokens descending (P5 REQ-07).
-      * ``False`` → single-line P2-byte-compat fallback
-        (REQ-09; for the rare card-overflow escape hatch).
-    """
-    from larkhelm.locale import _t
-    breakdown_on = bool(
-        getattr(_cfg, "STATS_AGENT_TYPE_BREAKDOWN_ENABLED", True)
-    )
-
-    if not breakdown_on:
-        summary = summarize_crew_agent_tokens_for_chat(chat_id)
-        if not summary:
-            return []
-        crew_total = (
-            summary["input_tokens"] + summary["output_tokens"]
-            + summary["cache_read"] + summary["cache_create"]
-        )
-        cost_val = summary.get("cost_usd", 0.0)
-        cost_str = "—" if cost_val is None else f"${cost_val:.4f}"
-        header = _t(lang, "**🤖 Crew Agents（本进程）**", "**🤖 Crew Agents (this process)**")
-        return [
-            "---",
-            (
-                f"{header}\n"
-                f"› {summary['agents']} agents  "
-                f"{_t(lang, '合计', 'total')} **{crew_total:,}** tokens  "
-                f"{_t(lang, '费用', 'cost')} **{cost_str}**"
-            ),
-        ]
-
-    buckets = summarize_crew_agent_tokens_by_type(chat_id)
-    if not buckets:
-        return []
-
-    def _bucket_total(item: tuple[str, dict]) -> int:
-        _name, agg = item
-        return (
-            agg.get("input_tokens", 0) + agg.get("output_tokens", 0)
-            + agg.get("cache_read", 0) + agg.get("cache_create", 0)
-        )
-
-    ordered = sorted(buckets.items(), key=_bucket_total, reverse=True)
-    header = _t(lang, "**🤖 Crew Agents（本进程·按类型）**",
-                "**🤖 Crew Agents (this process · by type)**")
-    lines = ["---", header]
-    for type_name, agg in ordered:
-        total = _bucket_total((type_name, agg))
-        cost_val = agg.get("cost_usd", 0.0)
-        cost_str = "—" if cost_val is None else f"${cost_val:.4f}"
-        lines.append(
-            f"› **{type_name}** {agg['agents']} agents  "
-            f"{_t(lang, '合计', 'total')} **{total:,}** tokens  "
-            f"{_t(lang, '费用', 'cost')} **{cost_str}**"
-        )
-    return lines
-
-
 def _cmd_stats_intent(chat_id: str, msg_id: str = None, date: str | None = None,
                       lang: str = "zh"):
     """Render today's intent dispatcher aggregate (hit rate / latency / cost)."""
@@ -1013,7 +895,7 @@ def _cmd_stats_intent(chat_id: str, msg_id: str = None, date: str | None = None,
                         color="grey")
         return
     # ``agg['total_cost']`` was always rendered as "$0.0000" because none
-    # of the 5 builtin agents (chat / dev / crew / plan / doc) populate
+    # of the builtin agents populate
     # ``AgentResult.cost_usd`` — it just emits the default 0.0. Showing
     # a hardcoded "$0.0000" pretended the dispatcher was free; the
     # accurate per-chat cost lives in ``/stats`` (token block). Suppress
@@ -1161,15 +1043,15 @@ def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
     records = _read_logs(chat_id)
     today_records = [r for r in records if r["ts"].startswith(today)]
 
-    # Round-4 audit P1 (R4-1c): /crew / /plan write ``role="user", model in
-    # {crew,plan}`` as a command marker, not a real conversation turn.
+    # Round-4 audit P1 (R4-1c): command markers (``role="user"`` with a
+    # non-conversation ``model``) are not real conversation turns.
     # Counting them as "对话" inflated the dialogue count by every command
     # invocation. ``model=""`` (legacy records missing the field entirely)
     # still counts — only filter on KNOWN non-conversation markers so old
     # JSONL stays accurate. ``shell`` would never appear with role="user"
     # in practice (commands.py:975 emits ``role="shell"``) but pin it
     # here defensively.
-    _NON_CONVERSATION_MODELS = {"crew", "plan", "shell"}
+    _NON_CONVERSATION_MODELS = {"shell"}
     user_count  = sum(
         1 for r in today_records
         if r["role"] == "user"
@@ -1186,7 +1068,7 @@ def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
     # (pre-trace_id-propagation) still contribute.
     #
     # (Fix #3) The previous ``if 0 < secs < 3600`` cap silently dropped
-    # every long-running /dev / /crew query — those are normal at >1h
+    # every long-running query — those are normal at >1h
     # under the default ``hard_timeout=21600``. Raised to
     # ``HARD_TIMEOUT * 1.1`` so the cap kicks in only for clearly-bad
     # records (e.g. a missing pair-end making the gap span days).
@@ -1348,21 +1230,6 @@ def _cmd_stats(chat_id: str, msg_id: str = None, args: str = ""):
         parts.append(_fmt_token_block(
             _lt(lang, "⚡ 本次启动（内存）", "⚡ This session (memory)"),
             stats_mem, lang))
-
-    # Round-4 audit P1 (R4-1e) + P5 REQ-07/09: expose the in-memory
-    # per-crew-agent counter. Counters reset on bridge restart so the
-    # block labels "本进程" — totals are also rolled up into the parent
-    # chat's persistent stats above, so this is a per-agent split, not a
-    # separate accounting source. STATS_AGENT_TYPE_BREAKDOWN_ENABLED=false
-    # restores the P2 single-line summary.
-    # _render_crew_agent_breakdown returns ["---", header, row1, row2, ...].
-    # Keep the "---" as its own top-level part (blank-line-separated divider),
-    # but join the header + rows into ONE block so the "\n\n".join(parts) below
-    # doesn't insert a blank line between every crew-agent row.
-    _crew_lines = _render_crew_agent_breakdown(chat_id, lang)
-    if _crew_lines:
-        parts.append(_crew_lines[0])              # "---" divider
-        parts.append("\n".join(_crew_lines[1:]))  # header + agent rows, tight
 
     send_card_reply(chat_id, msg_id,
                     _lt(lang, "📊 Token 统计", "📊 Token Stats"),
@@ -2150,8 +2017,8 @@ def _cmd_btw(chat_id: str, question: str, user_msg_id: str, *, sender_open_id: s
                 # the S50 lazy global / S51 project conditional gating
                 # actually fires on /btw side-questions (which are often
                 # casual or domain-unrelated to the current project).
-                # Closes the last v1 user-facing entry point — chat / dev /
-                # crew / plan / btw now all share the same memory contract.
+                # Closes the last v1 user-facing entry point — chat / btw
+                # now share the same memory contract.
                 _btw_mem_ctx = ""
                 try:
                     from larkhelm.memory import get_memory_context_v2
@@ -3658,11 +3525,6 @@ def _do_upgrade(chat_id: str, msg_id: str = None):
                     color="blue")
 
     set_shutting_down()
-    from larkhelm.crew import cancel_all_crews, wait_crews_done
-    cancel_all_crews(reason=_t(lang,
-                               "服务升级中，Crew 任务重启后将自动恢复",
-                               "Service upgrading — Crew tasks will resume automatically after restart"))
-    wait_crews_done(timeout=30.0)
     idle_ok = wait_for_idle(timeout=60.0)
     if not idle_ok:
         warn("[Upgrade] wait_for_idle timed out — proceeding with execv while queries still in flight")

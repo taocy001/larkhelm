@@ -98,7 +98,6 @@
     "memory_llm_router_max_per_chat_per_min": { "type": "integer", "minimum": 1 },
     "memory_llm_router_cache_ttl_sec":        { "type": "integer", "minimum": 1 },
 
-    "crew_breakpoint_timeout_sec": { "type": "integer", "minimum": 60 },
 
     "memory_limit_mb": { "type": "integer", "minimum": 128 },
 
@@ -132,17 +131,10 @@
     "llm_router_circuit_failures":       { "type": "integer", "minimum": 1 },
     "llm_router_circuit_cooldown_sec":   { "type": "number",  "minimum": 1.0 },
     "cascade_backoff_max_attempts":      { "type": "integer", "minimum": 1 },
-    "plan_retry_strategy":               { "enum": ["now", "manual", "off"] },
     "plugin_report_card_enabled":        { "type": "boolean" },
     "failure_report_card_enabled":       { "type": "boolean" },
     "admin_chat_id":                     { "type": "string" },
     "memory_gc_interval_hours":          { "type": "number",  "minimum": 0.0 },
-    "crew_checkpoint_ttl_days":          { "type": "number",  "minimum": 0.0 },
-    "dev_stage_timeouts": {
-      "type": "object",
-      "additionalProperties": { "type": "integer", "minimum": 1 }
-    },
-    "workspace_finalize_prompt_age_sec":  { "type": "number",  "minimum": 0.0 },
 
     "probe_models": {
       "type": "array",

@@ -240,7 +240,7 @@ def main() -> int:
     print(f"| `_is_useful_summary` rejections | {rejected} | LLM emitted refusal/empty |")
     print(f"| `generate_memory` timeouts | {timeout} | exceeded MEMORY_GENERATION_TIMEOUT |")
     print(f"| Cascade extracts (project+global updates) | {cascade} | |")
-    print(f"| Milestone log entries (in JSONL) | {milestone_total} | from /dev /crew /plan finally hooks |")
+    print(f"| Milestone log entries (in JSONL) | {milestone_total} | from session_guard record_milestone |")
     print(f"| Milestone debounce skips | {debounced} | within 60s of previous |")
     print(f"| `/memory gc` invocations | {jsonl['memory_gc_invocations']} | user-explicit cleanup |\n")
 

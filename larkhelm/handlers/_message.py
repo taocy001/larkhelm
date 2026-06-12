@@ -48,7 +48,7 @@ from larkhelm.voice.merge import add_voice
 def _thread_error_card(chat_id: str, label: str, exc: Exception) -> None:
     """Log full traceback and notify the user with a red error card.
 
-    Used by ``/plan`` / ``/crew`` / ``/dev`` daemon thread wrappers — those
+    Used by ``run_async`` command daemon thread wrappers — those
     threads previously only wrote to ``_debug_log`` on uncaught exceptions, so
     the user saw the task silently disappear. The user-visible body truncates
     ``str(exc)`` to 200 chars; the full ``traceback.format_exc()`` still lands
@@ -85,50 +85,6 @@ _WORKSPACE_KEYWORD_RE = _re.compile(
     r"|code|edit|implement|fix|refactor|debug|写代码|改代码|修复|重构)",
     _re.IGNORECASE,
 )
-_CREW_STICKY_KW_RE = _re.compile(
-    r"(crew|/dev|/plan|agent|任务|流水线|pipeline|checkpoint)",
-    _re.IGNORECASE,
-)
-
-
-def _apply_crew_sticky_context(chat_id: str, text: str, prompt: str) -> str:
-    """Consume and optionally inject the most recent sticky crew summary.
-
-    ``consume_recent_crew_context`` is **always** called so the injection
-    counter advances and the TTL / max-injections eviction logic in
-    ``crew/_state.py`` fires correctly — regardless of whether the keyword
-    gate decides to skip the actual text injection.
-    """
-    gate_on = bool(_cfg.config.get("crew_sticky_keyword_gate_enabled"))
-    kw_match = (not gate_on) or bool(_CREW_STICKY_KW_RE.search(text or ""))
-    from larkhelm.crew import consume_recent_crew_context
-    crew_ctx = consume_recent_crew_context(chat_id)
-    if not crew_ctx:
-        return prompt
-    if gate_on and not kw_match:
-        try:
-            from larkhelm.metrics import inc_injection_gate as _inc
-            _inc("crew_sticky", "skipped")
-        except Exception:
-            pass
-        return prompt
-    try:
-        from larkhelm.metrics import inc_injection_gate as _inc
-        _inc("crew_sticky", "injected")
-    except Exception:
-        pass
-    _debug_log(f"[MSG] injecting sticky crew context '{crew_ctx['title'][:20]}' → {chat_id[:12]}")
-    _title = crew_ctx['title'][:100]
-    _summary = crew_ctx['summary'][:3000]
-    return (
-        f"[以下是刚完成的 Crew 任务「{_title}」的交付结论，"
-        f"请结合它来回答我的问题]\n\n"
-        f"{_summary}\n\n"
-        f"---\n\n"
-        f"{prompt}"
-    )
-
-
 def _build_workspace_hint(chat_id: str, user_text: str) -> tuple[str, str]:
     """Return ``(injection_prefix, outcome)`` for the workspace-hint segment.
 
@@ -658,7 +614,7 @@ def handle_message(data: P2ImMessageReceiveV1):
 
         # ── Registry-driven dispatch (S1+S7) ──
         # Covers /reset, /status, /help, /pickup, /upgrade, /history, /stats,
-        # /memory, /cron, /crew, /dev, /plan, /pwd, /cd, /ls, /run,
+        # /memory, /cron, /pwd, /cd, /ls, /run,
         # /model (+ /lock alias), /voice. See command_registry._default_registrations.
         from larkhelm.command_registry import COMMAND_REGISTRY, DispatchContext
         _dctx = DispatchContext(chat_id=chat_id, msg_id=_mid, text=text, tl=tl,
@@ -749,29 +705,7 @@ def handle_message(data: P2ImMessageReceiveV1):
         # (SDK event thread) to avoid blocking all event dispatch.  Instead,
         # parent_id is passed to _do_query which runs in a background thread.
         parent_id = getattr(message, "parent_id", None)
-
-        # Priority 1: user replied to a crew task card → inject crew summary (local, no I/O)
-        crew_ctx = None
-        if parent_id:
-            from larkhelm.crew import get_crew_card_context
-            crew_ctx = get_crew_card_context(parent_id)
-
-        if crew_ctx:
-            _debug_log(f"[MSG] injecting crew context '{crew_ctx['title'][:20]}' → {chat_id[:12]}")
-            prompt = (
-                f"[以下是刚完成的 Crew 任务「{crew_ctx['title']}」的交付结论，"
-                f"请结合它来回答我的问题]\n\n"
-                f"{crew_ctx['summary']}\n\n"
-                f"---\n\n"
-                f"{prompt}"
-            )
-            parent_id = None  # already handled; no need to fetch parent in _do_query
-        elif not parent_id:
-            # No parent at all → try sticky crew context (local, no I/O).
-            # Delegated to _apply_crew_sticky_context which always calls
-            # consume_recent_crew_context so the injection counter advances.
-            prompt = _apply_crew_sticky_context(chat_id, text, prompt)
-        # else: parent_id set and no crew card found → _do_query will fetch parent text in background
+        # parent_id set → _do_query will fetch parent text in background
 
         # Workspace context: P3 REQ-01 passive phrasing + REQ-02 optional
         # keyword gate. _build_workspace_hint encodes the scanning + gate

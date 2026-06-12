@@ -150,17 +150,13 @@ def _run_shutdown_sequence() -> dict:
     Steps (each wrapped in try/except so a single failure doesn't abort the rest):
       1. stop_health_server()
       2. flush_all_for_shutdown(timeout_sec=10.0)
-      3. cancel_all_crews(reason="服务即将重启")
-      4. wait_crews_done(timeout=30.0)
-      5. wait_for_idle(timeout=60.0)
-      6. time.sleep(2)
+      3. wait_for_idle(timeout=60.0)
+      4. time.sleep(2)
 
     Returns a dict with per-step outcomes for structured logging and test assertions:
         {
             "health_server_stopped": bool,
             "buffer_flushed": bool,
-            "crews_cancelled": bool,
-            "crews_done": bool,
             "idle_reached": bool,
             "final_status": "clean" | "timeout",
         }
@@ -173,8 +169,6 @@ def _run_shutdown_sequence() -> dict:
     result: dict = {
         "health_server_stopped": False,
         "buffer_flushed": False,
-        "crews_cancelled": False,
-        "crews_done": False,
         "idle_reached": False,
         "final_status": "clean",
     }
@@ -190,21 +184,6 @@ def _run_shutdown_sequence() -> dict:
         _dedup_flush()
     except Exception as e:
         _debug_log(f"[Dedup] shutdown flush failed (continuing): {e}")
-
-    try:
-        from larkhelm.crew import cancel_all_crews
-        cancel_all_crews(reason="服务即将重启")
-        result["crews_cancelled"] = True
-    except Exception as e:
-        _debug_log(f"[Shutdown] cancel_all_crews failed (continuing): {e}")
-
-    try:
-        from larkhelm.crew import wait_crews_done
-        done = wait_crews_done(timeout=30.0)
-        result["crews_done"] = done
-        _debug_log(f"[Shutdown] Crew 线程{'已全部退出' if done else '等待超时，强制继续'}")
-    except Exception as e:
-        _debug_log(f"[Shutdown] wait_crews_done failed (continuing): {e}")
 
     try:
         idle = wait_for_idle(timeout=60.0)
@@ -554,9 +533,9 @@ def _start_background_threads(cfg) -> None:
     """Start every background daemon the bridge depends on.
 
     Order: perm-server (so AI subprocess permission checks have a target)
-    → health endpoint → cron / GC / memory warmup → watchdog → crew /
-    plan resume. Each block is best-effort and never re-raises so a
-    failure in one thread doesn't abort startup.
+    → health endpoint → cron / GC / memory warmup → watchdog. Each block
+    is best-effort and never re-raises so a failure in one thread doesn't
+    abort startup.
     """
     if not cfg.SKIP_PERMISSIONS:
         _start_perm_server()
@@ -581,17 +560,6 @@ def _start_background_threads(cfg) -> None:
         f"[MemWatchdog] 内存限制: {cfg.MEMORY_LIMIT_MB} MB "
         f"(soft={int(cfg.MEMORY_LIMIT_MB*0.8)} MB)"
     )
-
-    # On startup, resume any crew tasks that were interrupted last time.
-    from larkhelm.crew import resume_interrupted_crews
-    resume_interrupted_crews()
-
-    # U17: surface any /plan whose bridge died mid-flight.
-    try:
-        from larkhelm.plan_persistence import resume_interrupted_plans
-        resume_interrupted_plans()
-    except Exception as _e:
-        _debug_log(f"[Startup] resume_interrupted_plans failed: {_e}")
 
     _start_metrics_alert_daemon(cfg)
 

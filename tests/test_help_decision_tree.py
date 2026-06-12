@@ -2,7 +2,7 @@
 Lightweight string-assertion tests for the `/help` task-complexity decision tree.
 
 Guards against regression of the U1 docs change in `_cmd_help`:
-- the "任务复杂度决策树" section exists and lists all four entries
+- the "任务复杂度决策树" section exists and lists its entries
 - body fits within `max_card_len` so a single Feishu card still suffices
 - the full-width `｜` separator (U+FF5C) is used instead of the GFM table pipe `|`
 """
@@ -46,13 +46,9 @@ class TestHelpDecisionTree(unittest.TestCase):
         body = self._capture_help_body()
         self.assertIn("任务怎么选", body)
 
-    def test_all_four_entries_present(self):
+    def test_direct_chat_entry_present(self):
         body = self._capture_help_body()
-        # 直接对话 + /plan + /dev + /crew
         self.assertIn("直接发消息", body)
-        self.assertIn("/plan", body)
-        self.assertIn("/dev", body)
-        self.assertIn("/crew", body)
 
     def test_fallback_hint_present(self):
         body = self._capture_help_body()

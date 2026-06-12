@@ -1344,80 +1344,20 @@ class TestEvictCrewAgentTokensStrictPrefix(unittest.TestCase):
         self.assertEqual(len(token_stats._crew_agent_tokens), 0)
 
 
-class TestSummarizeCrewAgentTokensForChat(unittest.TestCase):
-    """R4-1e helper: aggregate the in-memory `_crew_agent_tokens` dict
-    for one chat. Powers the `/stats` card bottom "Crew Agents" line."""
+class TestCmdStatsUserCountExcludesShell(unittest.TestCase):
+    """R4-1c: `/run` writes `role="user", model="shell"` as a command
+    marker, not a real conversation turn. It must NOT count toward
+    `今日对话` in `/stats`."""
 
-    def setUp(self):
-        self._snap = dict(token_stats._crew_agent_tokens)
-        token_stats._crew_agent_tokens.clear()
-
-    def tearDown(self):
-        token_stats._crew_agent_tokens.clear()
-        token_stats._crew_agent_tokens.update(self._snap)
-
-    def test_aggregates_matching_chat_entries(self):
-        # Two agents under one chat + one entry under a different chat
-        # which must NOT be included in the sum.
-        token_stats.record_crew_agent_tokens(
-            "chatA__crew_run1_agent_pm", "claude",
-            {"input_tokens": 100, "output_tokens": 50, "cost_usd": 0.01},
-        )
-        token_stats.record_crew_agent_tokens(
-            "chatA__crew_run1_agent_eng", "claude",
-            {"input_tokens": 200, "output_tokens": 75, "cost_usd": 0.02},
-        )
-        token_stats.record_crew_agent_tokens(
-            "chatB__crew_run9_agent_pm", "claude",
-            {"input_tokens": 999, "output_tokens": 999, "cost_usd": 9.99},
-        )
-        summary = token_stats.summarize_crew_agent_tokens_for_chat("chatA")
-        self.assertEqual(summary["agents"], 2)
-        self.assertEqual(summary["input_tokens"], 300)
-        self.assertEqual(summary["output_tokens"], 125)
-        # Cost rounds via float arithmetic; compare to 4 decimals.
-        self.assertAlmostEqual(summary["cost_usd"], 0.03, places=4)
-
-    def test_empty_when_no_match(self):
-        token_stats.record_crew_agent_tokens(
-            "other__crew_x_agent_1", "claude", {"input_tokens": 5},
-        )
-        self.assertEqual(
-            token_stats.summarize_crew_agent_tokens_for_chat("nobody"), {},
-            "no matching prefix must return {} so /stats can suppress the line"
-        )
-
-    def test_prefix_is_anchored_to_chat_id_double_underscore(self):
-        """Ensure `chatA` doesn't accidentally swallow `chatAB__crew_*`
-        (the prefix is `chatA__crew_`, NOT `chatA`)."""
-        token_stats.record_crew_agent_tokens(
-            "chatA__crew_x_agent_1", "claude", {"input_tokens": 10},
-        )
-        token_stats.record_crew_agent_tokens(
-            "chatAB__crew_x_agent_1", "claude", {"input_tokens": 99},
-        )
-        summary = token_stats.summarize_crew_agent_tokens_for_chat("chatA")
-        self.assertEqual(summary["input_tokens"], 10,
-            "chatAB__crew_* must NOT be summed into chatA's totals"
-        )
-
-
-class TestCmdStatsUserCountExcludesCrewPlan(unittest.TestCase):
-    """R4-1c: `/crew` and `/plan` commands write `role="user", model in
-    {crew,plan}` as command markers, not real conversation turns. They
-    must NOT count toward `今日对话` in `/stats`."""
-
-    def test_user_count_excludes_crew_plan_shell_markers(self):
+    def test_user_count_excludes_shell_markers(self):
         from datetime import datetime as _dt
         today = _dt.now().strftime("%Y-%m-%d")
         fake_records = [
             # 2 genuine user turns (model="" — legacy or claude/gemini).
             {"ts": today + "T10:00:00", "role": "user", "model": ""},
             {"ts": today + "T10:01:00", "role": "user", "model": "claude"},
-            # 3 command markers that must NOT count:
-            {"ts": today + "T10:02:00", "role": "user", "model": "crew"},
-            {"ts": today + "T10:03:00", "role": "user", "model": "plan"},
-            {"ts": today + "T10:04:00", "role": "user", "model": "shell"},
+            # Command marker that must NOT count:
+            {"ts": today + "T10:02:00", "role": "user", "model": "shell"},
         ]
 
         captured: list = []
@@ -1437,7 +1377,7 @@ class TestCmdStatsUserCountExcludesCrewPlan(unittest.TestCase):
         body = captured[0]["body"]
         # Card formats the user count as "今日对话：**N** 次".
         self.assertIn("今日对话：**2** 次", body,
-            "crew/plan/shell command markers must NOT inflate user_count; "
+            "shell command markers must NOT inflate user_count; "
             f"got body:\n{body}"
         )
 
@@ -1532,75 +1472,6 @@ class TestCmdStatsIntentForwardsChatId(unittest.TestCase):
         )
 
 
-class TestCmdStatsCrewAgentsLine(unittest.TestCase):
-    """R4-1e render test: when in-memory `_crew_agent_tokens` has entries
-    for the chat, `/stats` must append a `Crew Agents（本进程）` block
-    so users can see the drill-down CLAUDE.md promised."""
-
-    def setUp(self):
-        self._snap = dict(token_stats._crew_agent_tokens)
-        token_stats._crew_agent_tokens.clear()
-
-    def tearDown(self):
-        token_stats._crew_agent_tokens.clear()
-        token_stats._crew_agent_tokens.update(self._snap)
-
-    def test_crew_agents_line_appears_when_present(self):
-        # Seed two crew agent entries under chat "oc_x".
-        token_stats.record_crew_agent_tokens(
-            "oc_x__crew_run1_agent_pm", "claude",
-            {"input_tokens": 1000, "output_tokens": 500, "cost_usd": 0.05},
-        )
-        token_stats.record_crew_agent_tokens(
-            "oc_x__crew_run1_agent_eng", "claude",
-            {"input_tokens": 2000, "output_tokens": 800, "cost_usd": 0.10},
-        )
-
-        sent: list = []
-        def _capture(chat_id, msg_id, title, body, color="blue", **kw):
-            sent.append({"body": body})
-
-        with patch("larkhelm.commands.send_card_reply", side_effect=_capture):
-            with patch("larkhelm.commands._read_logs", return_value=[]):
-                with patch("larkhelm.commands.get_token_stats_persistent",
-                           return_value={}):
-                    with patch("larkhelm.commands.get_token_stats",
-                               return_value={}):
-                        from larkhelm.commands import _cmd_stats
-                        _cmd_stats("oc_x", "msg_1")
-
-        self.assertEqual(len(sent), 1)
-        body = sent[0]["body"]
-        self.assertIn("Crew Agents", body,
-            "Crew Agents block must appear when in-memory entries exist"
-        )
-        self.assertIn("2 agents", body, "agent count must surface")
-        # 1000+500+2000+800 = 4300 total tokens
-        self.assertIn("4,300", body, "summed token total must surface")
-        # 0.05+0.10 = 0.15 cost
-        self.assertIn("$0.1500", body, "summed cost must surface")
-
-    def test_crew_agents_line_suppressed_when_empty(self):
-        """No crew entries → no card block (don't add empty noise)."""
-        sent: list = []
-        def _capture(chat_id, msg_id, title, body, color="blue", **kw):
-            sent.append({"body": body})
-
-        with patch("larkhelm.commands.send_card_reply", side_effect=_capture):
-            with patch("larkhelm.commands._read_logs", return_value=[]):
-                with patch("larkhelm.commands.get_token_stats_persistent",
-                           return_value={}):
-                    with patch("larkhelm.commands.get_token_stats",
-                               return_value={}):
-                        from larkhelm.commands import _cmd_stats
-                        _cmd_stats("oc_empty", "msg_1")
-
-        self.assertEqual(len(sent), 1)
-        self.assertNotIn("Crew Agents", sent[0]["body"],
-            "empty in-memory store must NOT render a 'Crew Agents' block"
-        )
-
-
 class TestFmtTokenBlockHitRateHeader(unittest.TestCase):
     """P0+P1 caching audit (2026-05-22):  /stats output must surface a
     "缓存命中率 X% 写入比 Y%" line per model so operators can grep and so
@@ -1639,186 +1510,6 @@ class TestFmtTokenBlockHitRateHeader(unittest.TestCase):
         body = _fmt_token_block("空", {})
         self.assertEqual(body, "**空** — 暂无数据")
         self.assertNotIn("缓存命中率", body)
-
-
-# ════════════════════════════════════════════════════════════════════════
-#  P5 — agent_type bucket aggregation + /stats rendering (AC-07..09)
-# ════════════════════════════════════════════════════════════════════════
-
-
-class TestSummarizeByType(unittest.TestCase):
-    """AC-08 — summarize_crew_agent_tokens_by_type returns one dict per
-    bucketed agent_type with the 6 documented inner fields."""
-
-    def setUp(self):
-        self._snap = dict(token_stats._crew_agent_tokens)
-        token_stats._crew_agent_tokens.clear()
-
-    def tearDown(self):
-        token_stats._crew_agent_tokens.clear()
-        token_stats._crew_agent_tokens.update(self._snap)
-
-    def test_returns_empty_dict_when_no_entries(self):
-        self.assertEqual(
-            token_stats.summarize_crew_agent_tokens_by_type("nobody"), {}
-        )
-
-    def test_buckets_by_agent_id_via_static_map(self):
-        """implementer + fixer must collapse to 'engineer'; qa / reviewer
-        keep their own buckets."""
-        token_stats.record_crew_agent_tokens(
-            "chatA__crew_run1_implementer", "claude",
-            {"input_tokens": 100, "output_tokens": 50,
-             "cache_read": 0, "cache_create": 0, "cost_usd": 0.01},
-        )
-        token_stats.record_crew_agent_tokens(
-            "chatA__crew_run1_fixer", "claude",
-            {"input_tokens": 30, "output_tokens": 20,
-             "cache_read": 0, "cache_create": 0, "cost_usd": 0.005},
-        )
-        token_stats.record_crew_agent_tokens(
-            "chatA__crew_run1_qa", "kimi",
-            {"input_tokens": 10, "output_tokens": 5,
-             "cache_read": 0, "cache_create": 0, "cost_usd": 0.001},
-        )
-        token_stats.record_crew_agent_tokens(
-            "chatA__crew_run1_reviewer", "kimi",
-            {"input_tokens": 20, "output_tokens": 10,
-             "cache_read": 0, "cache_create": 0, "cost_usd": 0.002},
-        )
-
-        buckets = token_stats.summarize_crew_agent_tokens_by_type("chatA")
-        self.assertIn("engineer", buckets)
-        self.assertIn("qa", buckets)
-        self.assertIn("reviewer", buckets)
-        self.assertEqual(buckets["engineer"]["agents"], 2)
-        self.assertEqual(buckets["engineer"]["input_tokens"], 130)
-        self.assertEqual(buckets["engineer"]["output_tokens"], 70)
-        self.assertAlmostEqual(buckets["engineer"]["cost_usd"], 0.015, places=4)
-        self.assertEqual(buckets["qa"]["agents"], 1)
-        self.assertEqual(buckets["reviewer"]["agents"], 1)
-
-    def test_unknown_agent_id_falls_back_to_其它(self):
-        token_stats.record_crew_agent_tokens(
-            "chatA__crew_run1_my_custom_agent", "claude",
-            {"input_tokens": 5, "output_tokens": 5,
-             "cache_read": 0, "cache_create": 0, "cost_usd": 0.001},
-        )
-        buckets = token_stats.summarize_crew_agent_tokens_by_type("chatA")
-        self.assertIn("其它", buckets)
-        self.assertEqual(buckets["其它"]["agents"], 1)
-
-    def test_prefix_anchor_isolates_chats(self):
-        """chatA must not absorb chatAB's entries (same anchor invariant
-        as the legacy helper)."""
-        token_stats.record_crew_agent_tokens(
-            "chatA__crew_x_implementer", "claude", {"input_tokens": 10},
-        )
-        token_stats.record_crew_agent_tokens(
-            "chatAB__crew_x_implementer", "claude", {"input_tokens": 99},
-        )
-        buckets = token_stats.summarize_crew_agent_tokens_by_type("chatA")
-        self.assertEqual(buckets["engineer"]["input_tokens"], 10)
-
-
-class TestStatsByTypeRendering(unittest.TestCase):
-    """AC-07 — _render_crew_agent_breakdown orders buckets by total
-    tokens descending and uses the PRD line format."""
-
-    def setUp(self):
-        self._snap = dict(token_stats._crew_agent_tokens)
-        token_stats._crew_agent_tokens.clear()
-        self._flag_snap = bool(
-            getattr(_cfg, "STATS_AGENT_TYPE_BREAKDOWN_ENABLED", True)
-        )
-
-    def tearDown(self):
-        token_stats._crew_agent_tokens.clear()
-        token_stats._crew_agent_tokens.update(self._snap)
-        _cfg.STATS_AGENT_TYPE_BREAKDOWN_ENABLED = self._flag_snap
-
-    def _seed_three_buckets(self) -> None:
-        # engineer biggest (1500), reviewer middle (250), qa smallest (150)
-        token_stats.record_crew_agent_tokens(
-            "ccc__crew_run1_implementer", "claude",
-            {"input_tokens": 1000, "output_tokens": 500,
-             "cache_read": 0, "cache_create": 0, "cost_usd": 0.01},
-        )
-        token_stats.record_crew_agent_tokens(
-            "ccc__crew_run1_reviewer", "kimi",
-            {"input_tokens": 200, "output_tokens": 50,
-             "cache_read": 0, "cache_create": 0, "cost_usd": 0.002},
-        )
-        token_stats.record_crew_agent_tokens(
-            "ccc__crew_run1_qa", "kimi",
-            {"input_tokens": 100, "output_tokens": 50,
-             "cache_read": 0, "cache_create": 0, "cost_usd": 0.001},
-        )
-
-    def test_descending_by_total_tokens(self):
-        from larkhelm.commands import _render_crew_agent_breakdown
-
-        _cfg.STATS_AGENT_TYPE_BREAKDOWN_ENABLED = True
-        self._seed_three_buckets()
-        lines = _render_crew_agent_breakdown("ccc")
-        # First entry is the separator + header; bucket lines follow.
-        bucket_lines = [
-            ln for ln in lines if ln.startswith("›")
-        ]
-        self.assertEqual(len(bucket_lines), 3)
-        # Order: engineer (1500) > reviewer (250) > qa (150)
-        self.assertIn("engineer", bucket_lines[0])
-        self.assertIn("reviewer", bucket_lines[1])
-        self.assertIn("qa",       bucket_lines[2])
-
-    def test_line_format_matches_prd_spec(self):
-        from larkhelm.commands import _render_crew_agent_breakdown
-
-        _cfg.STATS_AGENT_TYPE_BREAKDOWN_ENABLED = True
-        self._seed_three_buckets()
-        lines = _render_crew_agent_breakdown("ccc")
-        header = lines[1]
-        self.assertIn("按类型", header)
-        engineer_line = next(ln for ln in lines if "engineer" in ln)
-        self.assertIn("**engineer**", engineer_line)
-        self.assertIn("1 agents", engineer_line)
-        self.assertIn("合计 **1,500** tokens", engineer_line)
-        self.assertIn("费用 **$0.0100**", engineer_line)
-
-
-class TestBreakdownDisabled(unittest.TestCase):
-    """AC-09 — STATS_AGENT_TYPE_BREAKDOWN_ENABLED=False restores the
-    P2 single-line summary."""
-
-    def setUp(self):
-        self._snap = dict(token_stats._crew_agent_tokens)
-        token_stats._crew_agent_tokens.clear()
-        self._flag_snap = bool(
-            getattr(_cfg, "STATS_AGENT_TYPE_BREAKDOWN_ENABLED", True)
-        )
-
-    def tearDown(self):
-        token_stats._crew_agent_tokens.clear()
-        token_stats._crew_agent_tokens.update(self._snap)
-        _cfg.STATS_AGENT_TYPE_BREAKDOWN_ENABLED = self._flag_snap
-
-    def test_breakdown_disabled_falls_back_to_p2_single_line(self):
-        from larkhelm.commands import _render_crew_agent_breakdown
-
-        token_stats.record_crew_agent_tokens(
-            "ddd__crew_run1_implementer", "claude",
-            {"input_tokens": 1000, "output_tokens": 500,
-             "cache_read": 0, "cache_create": 0, "cost_usd": 0.01},
-        )
-        _cfg.STATS_AGENT_TYPE_BREAKDOWN_ENABLED = False
-        lines = _render_crew_agent_breakdown("ddd")
-        body = "\n".join(lines)
-        self.assertIn("**🤖 Crew Agents（本进程）**", body)
-        self.assertNotIn("按类型", body,
-            "flag=false must keep the P2 single-line summary",
-        )
-        # Single bucket aggregated as one line.
-        self.assertIn("1 agents", body)
 
 
 if __name__ == "__main__":

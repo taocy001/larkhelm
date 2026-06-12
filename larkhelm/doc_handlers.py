@@ -24,7 +24,7 @@ _DOC_HELP = (
     "`/doc create <标题> [url]` — 新建文档（可指定云盘文件夹或 wiki 父节点 URL）\n"
     "`/doc wiki list [space_id]` — 列出知识库节点\n"
     "`/doc wiki create <space_id> <标题> [parent_token]` — 在知识库创建新页面\n"
-    "`/doc setfolder <url>` — 设置 crew/dev 文档默认存储位置（云盘文件夹链接）\n\n"
+    "`/doc setfolder <url>` — 设置文档默认存储位置（云盘文件夹链接）\n\n"
     "支持 docx / docs / wiki / sheets / drive/folder 链接。"
 )
 
@@ -57,7 +57,7 @@ def _cmd_doc(chat_id: str, args: str):
 
 
 def _cmd_doc_setfolder(chat_id: str, url: str):
-    """/doc setfolder <url> — Set the default storage folder for crew/dev documents."""
+    """/doc setfolder <url> — Set the default storage folder for created documents."""
     from larkhelm.lark_client import parse_doc_url, explain_doc_url_failure
     if not url:
         send_card(chat_id, "❌ 缺少参数",
@@ -83,7 +83,7 @@ def _cmd_doc_setfolder(chat_id: str, url: str):
 
     _cfg.save_config_field("default_drive_folder", ref.token)
     send_card(chat_id, "✅ 默认文件夹已设置",
-              f"后续 crew/dev 任务的中间文档将自动上传到该文件夹。\n\n"
+              f"后续创建的文档将自动上传到该文件夹。\n\n"
               f"文件夹 token：`{ref.token}`\n\n"
               f"如需清空设置，发送：`/doc setfolder clear`",
               color="green")

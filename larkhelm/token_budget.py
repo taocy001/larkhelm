@@ -70,9 +70,6 @@ _MEMORY_BUDGET_FLOOR = 400
 _DEFAULT_AGENT_BUDGETS: dict[str, int] = {
     "chat": 1200,
     "btw":   800,
-    "dev":  3000,
-    "crew": 2400,
-    "plan": 2000,
     "doc":   800,
 }
 

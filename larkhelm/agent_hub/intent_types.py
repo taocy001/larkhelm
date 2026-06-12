@@ -11,7 +11,7 @@ import threading
 from typing import Any, Literal
 
 
-AgentType = Literal["dev", "crew", "plan", "chat", "doc", "file", "search", "reviewer", "shell", "translate", "github", "calendar", "history_search"]
+AgentType = Literal["chat", "doc", "file", "search", "reviewer", "shell", "translate", "github", "calendar", "history_search"]
 Complexity = Literal["simple", "medium", "complex"]
 LatencyTier = Literal["instant", "fast", "medium", "slow"]
 SessionPolicy = Literal["inherit", "isolated", "ephemeral"]

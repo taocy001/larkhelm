@@ -13,14 +13,14 @@
 
 ### 简介
 
-LarkHelm 是一个运行在飞书（Lark）中的 AI 助手平台，可以使用 Claude CLI、Gemini CLI 或 Kimi Code CLI 作为 AI 后端。你可以直接在飞书会话中与 AI 对话、执行 Shell 命令、读写飞书文档；内置多 Agent 编排引擎支持复杂任务分解与并行执行，以及完整的软件工程自动化流水线。所有交互均以实时更新的飞书交互卡片呈现，支持进度追踪、中途取消与人工审批节点。
+LarkHelm 是一个运行在飞书（Lark）中的 AI 助手平台，可以使用 Claude CLI、Gemini CLI 或 Kimi Code CLI 作为 AI 后端。你可以直接在飞书会话中与 AI 对话、执行 Shell 命令、读写飞书文档；复杂多 Agent 任务通过 `/ultra`（Claude Code Workflow）执行。所有交互均以实时更新的飞书交互卡片呈现，支持进度追踪、中途取消与人工审批节点。
 
 **核心特性：**
 
 - **实时流式卡片**：工具调用过程可视化，支持进度显示、耗时统计，可一键取消
-- **多 Agent 协作**：`/crew` 动态规划多 Agent 并行执行；`/dev` 完整软件工程流水线（PM → 架构师 → 工程师 → QA → 审查员）
-- **飞书文档集成**：crew/dev 产出自动写入飞书云盘/Wiki；消息中的文档链接自动注入上下文；文档写入走 `larkhelm doc` CLI
-- **上下文感知**：回复任意历史消息时自动注入被回复消息内容；回复 crew 结果卡片可直接追问
+- **多 Agent 协作**：`/ultra` 走 Claude Code Workflow 多 Agent 编排（需开启 `claude_workflow_enabled`）
+- **飞书文档集成**：消息中的文档链接自动注入上下文；文档写入走 `larkhelm doc` CLI
+- **上下文感知**：回复任意历史消息时自动注入被回复消息内容
 - **多模态输入**：支持图片消息，Claude 原生识图
 - **多模型支持**：每个会话独立切换 Claude / Gemini / Kimi
 - **会话持久化**：重启不丢失上下文，支持多聊天独立会话，支持终端接力
@@ -131,18 +131,17 @@ cd larkhelm
 | `allowed_chat_ids` | 白名单 chat ID 列表，空表示不限制 | `[]` |
 | `require_at_in_group` | 群聊中是否需要 @ 机器人才响应；设为 `false` 则对所有群消息均响应 | `true` |
 | `gemini_idle_ttl` | Gemini 进程空闲回收时间（秒） | `1800` |
-| `default_drive_folder` | crew/dev 文档默认写入的云盘文件夹 token | — |
-| `default_wiki_space_id` | crew/dev 文档默认写入的 Wiki 空间 ID | — |
+| `default_drive_folder` | `larkhelm doc` 文档默认写入的云盘文件夹 token | — |
+| `default_wiki_space_id` | `larkhelm doc` 文档默认写入的 Wiki 空间 ID | — |
 | `doc_write_backend` | 文档写入后端：`auto`/`feishu`/`local` | `auto` |
 | `doc_auto_inject` | 消息中的文档链接自动注入上下文 | `true` |
 | `doc_write_confirm` | DocAgent / CLI 覆写文档前要求确认 | `true` |
 | `mcp_config_file` | MCP 配置文件路径（可选） | — |
 | `timezone` | 定时任务时区 | `Asia/Shanghai` |
-| `crew_breakpoint_timeout_sec` | `/crew` 断点等待用户点「继续 / 取消」的最长秒数；超时自动取消并推橙色卡 | `1800` |
 | `shell_timeout_sec` | `/run` 命令的硬超时（秒），floor 1s，不受 `response_timeout`/`hard_timeout` 约束 | `30` |
 | `max_ai_procs` | 并发 AI 子进程上限：正整数 / `"auto"` / 缺省（`"auto"` 按可用内存自动探测） | `"auto"` |
 | `default_owner_open_id` | 文档所有权转移目标用户 open_id；也是 `admin_chat_id` 为空时失败卡片的兜底发送目标 | — |
-| `failure_report_card_enabled` | crew agent 失败 / 插件加载诊断卡片推送到 admin chat 的总开关 | `false` |
+| `failure_report_card_enabled` | 失败 / 插件加载诊断卡片推送到 admin chat 的总开关 | `false` |
 | `admin_chat_id` | 失败 / 插件加载报告卡片的目标 chat_id；为空时退回 `default_owner_open_id` 私聊 | — |
 
 > 更细的旋钮（cache TTL、cascade 并发等）见
@@ -329,11 +328,7 @@ sudo systemctl restart larkhelm
 
 **多 Agent 协作**
 
-| 命令 | 功能 |
-|---|---|
-| `/crew <需求>` | 动态规划：Manager 自动分解任务，多 Agent 并行执行 |
-| `/dev <需求>` | 软件工程流水线：PM → 架构师 → 工程师 → QA → 审查员 |
-| `/plan <需求>` | 多阶段串行：`[dev]` `[review]` `[fix]` `[test]`，每步确认后继续 |
+多 Agent 任务统一走 `/ultra <任务>`（Claude Code Workflow，见上方命令表；需开启 `claude_workflow_enabled`）。
 
 **飞书文档**
 
@@ -462,7 +457,7 @@ systemctl --user restart larkhelm
 ```
 
 未安装 prometheus-client 时自动 fallback 到纯文本 `/metrics`。
-完整指标清单见 `.crew_workspace/metrics_reference.md`。
+完整指标清单以 `larkhelm/metrics.py` 注册中心为准。
 
 ### 本地开发
 
@@ -486,14 +481,14 @@ make test ARGS="-k pure -x"          # 转发额外参数
 
 ### Overview
 
-LarkHelm is an AI assistant platform that runs inside Feishu (Lark), supporting Claude CLI, Gemini CLI, or Kimi Code CLI as the AI backend. Chat with AI, run shell commands, and read/write Feishu documents directly in your Feishu workspace. A built-in multi-agent orchestration engine powers parallel task planning (`/crew`) and a full software engineering pipeline (`/dev`: requirements → architecture → implementation → QA → review). All interactions are rendered as live-updating Feishu interactive cards with progress tracking, in-progress cancellation, and human-in-the-loop approval nodes.
+LarkHelm is an AI assistant platform that runs inside Feishu (Lark), supporting Claude CLI, Gemini CLI, or Kimi Code CLI as the AI backend. Chat with AI, run shell commands, and read/write Feishu documents directly in your Feishu workspace. Complex multi-agent tasks run through `/ultra` (Claude Code Workflow). All interactions are rendered as live-updating Feishu interactive cards with progress tracking, in-progress cancellation, and human-in-the-loop approval nodes.
 
 **Key features:**
 
 - **Streaming cards**: tool call visualization with progress, timing, and one-click cancel
-- **Multi-agent orchestration**: `/crew` for dynamic parallel agent planning; `/dev` for a full software engineering pipeline (PM → Architect → Engineer → QA → Reviewer)
-- **Feishu document integration**: crew/dev outputs auto-written to Drive/Wiki; document URLs in messages auto-injected as context; document writes go through the `larkhelm doc` CLI or the DocAgent (when intent router is on)
-- **Context awareness**: replying to any message auto-injects the quoted content; replying to a crew result card continues the conversation in context
+- **Multi-agent orchestration**: `/ultra` runs tasks via Claude Code Workflow (requires `claude_workflow_enabled`)
+- **Feishu document integration**: document URLs in messages auto-injected as context; document writes go through the `larkhelm doc` CLI
+- **Context awareness**: replying to any message auto-injects the quoted content
 - **Multimodal input**: send images directly, Claude reads them natively
 - **Multi-model**: switch Claude / Gemini / Kimi independently per conversation
 - **Session persistence**: context survives restarts, independent per chat, with terminal handoff support
@@ -607,15 +602,14 @@ Config file location:
 | `allowed_chat_ids` | Chat ID whitelist, empty = no restriction | `[]` |
 | `require_at_in_group` | Require @mention in group chats to respond; set `false` to respond to all group messages | `true` |
 | `gemini_idle_ttl` | Seconds before idle Gemini process is reaped | `1800` |
-| `default_drive_folder` | Drive folder token for crew/dev document output | — |
-| `default_wiki_space_id` | Wiki space ID for crew/dev document output | — |
+| `default_drive_folder` | Default Drive folder token for `larkhelm doc` document output | — |
+| `default_wiki_space_id` | Default Wiki space ID for `larkhelm doc` document output | — |
 | `doc_write_backend` | Document backend: `auto` / `feishu` / `local` | `auto` |
 | `doc_auto_inject` | Auto-inject linked document content as context | `true` |
 | `doc_write_confirm` | Require confirmation before DocAgent / CLI overwrites a document | `true` |
 | `mcp_config_file` | Path to MCP config file (optional) | — |
 | `timezone` | Timezone for cron tasks | `Asia/Shanghai` |
-| `crew_breakpoint_timeout_sec` | Seconds `/crew` waits for a 继续/取消 click before auto-cancelling and emitting an orange card | `1800` |
-| `failure_report_card_enabled` | Master switch for crew agent failure / plugin-load diagnostic cards pushed to admin chat | `false` |
+| `failure_report_card_enabled` | Master switch for failure / plugin-load diagnostic cards pushed to admin chat | `false` |
 | `admin_chat_id` | Target chat_id for failure / plugin-load report cards; falls back to `default_owner_open_id` DM when empty | — |
 
 > Finer knobs (cache TTLs, cascade concurrency, etc.) live in the annotation
@@ -788,11 +782,7 @@ Memory is extracted from conversation automatically every 10 turns — no manual
 
 **Multi-Agent**
 
-| Command | Action |
-|---|---|
-| `/crew <task>` | Dynamic planning: Manager decomposes task, agents run in parallel |
-| `/dev <task>` | Software pipeline: PM → Architect → Engineer → QA → Reviewer |
-| `/plan <task>` | Serial multi-stage: `[dev]` `[review]` `[fix]` `[test]`, confirm between stages |
+Multi-agent tasks run through `/ultra <task>` (Claude Code Workflow — see the command table above; requires `claude_workflow_enabled`).
 
 **Feishu Documents**
 

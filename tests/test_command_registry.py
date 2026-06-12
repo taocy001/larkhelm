@@ -323,7 +323,7 @@ class DefaultRegistrationsTests(unittest.TestCase):
         # A representative subset — full coverage is in test_handlers_message_routing.
         # /doc was retired in commit 7c9845c (方案B) — no longer in the registry.
         for expected in ("/status", "/help", "/reset", "/run", "/cd", "/ls",
-                         "/dev", "/crew", "/plan", "/memory", "/cron",
+                         "/memory", "/cron",
                          "/model", "/lock", "/voice"):
             self.assertIn(expected, names, f"{expected} missing from default registry")
 
@@ -352,7 +352,7 @@ class CommandSpecMetadataTests(unittest.TestCase):
 
     def test_three_commands_have_examples_metadata(self):
         from larkhelm.command_registry import COMMAND_REGISTRY
-        for name in ("/dev", "/cron", "/memory"):
+        for name in ("/run", "/cron", "/memory"):
             spec = COMMAND_REGISTRY.lookup(name)
             self.assertIsNotNone(spec, f"{name} must be registered")
             self.assertGreaterEqual(

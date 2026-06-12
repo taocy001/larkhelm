@@ -93,10 +93,6 @@ class QuerySession:
         self.chat_lock = _get_chat_lock(self.chat_id)
         self.cancel_ev = _get_cancel_event(self.chat_id)
 
-        # Pre-flight: queue behind crew if one is running
-        if self._maybe_queue_behind_crew():
-            return
-
         if not self.chat_lock.acquire(blocking=False):
             self._queue_behind_running_query()
             return
@@ -635,91 +631,6 @@ class QuerySession:
     # Internals
     # ─────────────────────────────────────────────────────────────────
 
-    def _maybe_queue_behind_crew(self) -> bool:
-        try:
-            from larkhelm.crew._state import (
-                current_owner, describe_active_owner, is_crew_running,
-                owner_kind, subscribe_crew_done,
-            )
-            if not is_crew_running(self.chat_id):
-                return False
-        except Exception as e:
-            _debug_log(f"[QuerySession] crew check error: {e}")
-            return False
-
-        existing_mid = _set_pending(self.chat_id, self.message, self.model, self.user_msg_id)
-        preview = self.message[:80].replace("\n", " ")
-        # C5 #14: mirror the legacy ``_query.py`` queue card — pick the
-        # title and body to match the actual slot owner instead of always
-        # saying "Crew" (``is_crew_running`` is True for ``/plan`` owners
-        # too). Same family as C4 #11 / #12. Kept in sync with the
-        # legacy path; see the matching block in ``_query.py``.
-        owner_token = current_owner(self.chat_id)
-        kind = owner_kind(owner_token)
-        if kind == "plan":
-            _q_title = "⏳ Plan 运行中"
-            _q_body_lead = f"当前 {describe_active_owner(owner_token)} 完成后自动执行"
-        elif kind == "crew":
-            _q_title = "⏳ Crew 运行中"
-            _q_body_lead = "当前 Crew 任务完成后自动执行"
-        else:
-            _q_title = "⏳ 任务运行中"
-            _q_body_lead = "当前任务完成后自动执行"
-        card = _make_card(
-            _q_title,
-            f"{_q_body_lead}：\n\n> {preview}",
-            color="orange",
-            buttons=[("❌ 取消排队", f"cancel_queue:{self.chat_id}")],
-        )
-        # Pending state is already written; if card emission fails (Feishu
-        # 5xx, network), the user has no visible queue indicator AND no way
-        # to cancel — but the watcher above is waiting on the pending slot.
-        # Roll back so the next message can re-queue cleanly. Round-3
-        # review flagged this pre-existing leak.
-        try:
-            if existing_mid:
-                _patch_card_raw(existing_mid, card)
-            else:
-                if self.user_msg_id:
-                    mid = _reply_card_raw(self.user_msg_id, card, in_thread=False)
-                else:
-                    mid = _send_card_raw(self.chat_id, card)
-                _update_pending_card_mid(self.chat_id, mid)
-        except Exception as _card_err:
-            _debug_log(
-                f"[QuerySession] queue card emission failed, rolling back "
-                f"pending state: {_card_err}"
-            )
-            _pop_pending(self.chat_id)
-            return False
-
-        try:
-            from larkhelm.crew._state import subscribe_crew_done as _sub
-            done_ev = _sub(self.chat_id)
-        except Exception as e:
-            _debug_log(f"[QuerySession] subscribe_crew_done error: {e}")
-            return True
-
-        def _after(_ev=done_ev, cid=self.chat_id):
-            _ev.wait(timeout=4 * 3600)
-            pending = _pop_pending(cid)
-            if pending:
-                p_msg, p_model, p_user_msg_id, p_queue_mid = (
-                    pending[0], pending[1], pending[2],
-                    pending[3] if len(pending) >= 4 else None,
-                )
-                _reset_cancel(cid)
-                threading.Thread(
-                    target=_re_dispatch_query,
-                    args=(cid, p_msg, p_model, p_user_msg_id),
-                    kwargs={"queue_card_mid": p_queue_mid},
-                    daemon=True, name=f"query-{cid[:8]}",
-                ).start()
-
-        threading.Thread(target=_after, daemon=True,
-                         name=f"crew-wait-{self.chat_id[:8]}").start()
-        return True
-
     def _queue_behind_running_query(self) -> None:
         existing_mid = _set_pending(self.chat_id, self.message, self.model, self.user_msg_id)
         preview = self.message[:80].replace("\n", " ")
@@ -729,9 +640,8 @@ class QuerySession:
             color="orange",
             buttons=[("❌ 取消排队", f"cancel_queue:{self.chat_id}")],
         )
-        # Same rollback pattern as ``_maybe_queue_behind_crew`` — pending
-        # state is already written, so if card emission fails we leak a
-        # ghost queue entry with no consumer. Roll back on failure.
+        # Pending state is already written, so if card emission fails we
+        # leak a ghost queue entry with no consumer. Roll back on failure.
         try:
             if existing_mid:
                 _patch_card_raw(existing_mid, card)
@@ -761,15 +671,6 @@ class QuerySession:
                 _debug_log(
                     f"[{self.trace_id}][QuerySession] injected parent context ({len(parent_text)} chars)"
                 )
-            else:
-                from larkhelm.crew import get_recent_crew_context
-                crew_ctx = get_recent_crew_context(self.chat_id)
-                if crew_ctx:
-                    self.message = (
-                        f"[以下是刚完成的 Crew 任务「{crew_ctx['title']}」的交付结论，"
-                        f"请结合它来回答我的问题]\n\n{crew_ctx['summary']}\n\n"
-                        f"---\n\n{self.message}"
-                    )
         except Exception as e:
             _debug_log(f"[{self.trace_id}][QuerySession] parent fetch error: {e}")
 

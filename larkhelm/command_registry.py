@@ -11,7 +11,7 @@ chat_state, parent_id detection, or cancel-event plumbing in ways that
 don't generalise. Everything else lives here.
 
 Imports are deliberately lazy (inside handlers / inside ``_default_registrations``)
-so importing this module never drags in commands.py / doc_handlers.py / crew —
+so importing this module never drags in commands.py / doc_handlers.py —
 keeping ``handlers/_message.py`` import time minimal.
 
 ``CommandSpec.description`` / ``examples`` field semantics and the
@@ -32,11 +32,10 @@ def _is_arg_sep(ch: str) -> bool:
     """True iff ``ch`` separates a slash-command token from its arguments.
 
     Historically the dispatcher required a single ASCII space — which silently
-    broke ``/plan`` (and every other ``match_kind="prefix"`` command) whenever
-    a Feishu mobile user pasted a newline, tab, or full-width space (U+3000)
-    after the token. The user-facing symptom: ``/plan\\n<task>`` falls through
-    to the model dispatch path and gets answered by Claude's built-in /plan
-    instead of larkhelm's pipeline.
+    broke every ``match_kind="prefix"`` command whenever a Feishu mobile user
+    pasted a newline, tab, or full-width space (U+3000) after the token. The
+    user-facing symptom: ``/cd\\n<path>`` falls through to the model dispatch
+    path and gets answered by the model instead of larkhelm's handler.
 
     We accept any Unicode whitespace character. ``str.isspace`` is True for
     ``' '``, ``'\\t'``, ``'\\n'``, ``'\\r'``, ``'\\v'``, ``'\\f'`` and
@@ -462,49 +461,6 @@ def _default_registrations() -> None:
         description="切换机器人界面语言 zh / en — Switch bot UI language",
         description_en="Switch bot UI language: zh (Chinese) / en (English)",
         examples=("/lang", "/lang zh", "/lang en"),
-    ))
-
-    # ── /crew / /dev / /plan (async, error-carded) ─────────────────
-    def _h_crew(ctx: DispatchContext) -> None:
-        from larkhelm.crew import cmd_crew
-        cmd_crew(ctx.chat_id, ctx.raw_args, ctx.msg_id, sender_open_id=ctx.sender_open_id)
-    register(CommandSpec(
-        name="/crew",
-        handler=_h_crew,
-        match_kind="prefix",
-        run_async=True,
-        thread_label="Crew",
-        description="动态规划：Manager 自动分解任务，多 Agent 并行执行",
-        description_en="Dynamic planning: Manager decomposes task, agents run in parallel",
-        examples=("/crew 调研竞品 X 与 Y 的差异",),
-    ))
-
-    def _h_dev(ctx: DispatchContext) -> None:
-        from larkhelm.crew import cmd_dev
-        cmd_dev(ctx.chat_id, ctx.raw_args, ctx.msg_id, sender_open_id=ctx.sender_open_id)
-    register(CommandSpec(
-        name="/dev",
-        handler=_h_dev,
-        match_kind="prefix",
-        run_async=True,
-        thread_label="Dev",
-        description="软件工程流水线：PM → 架构 → 工程 → QA → 审查",
-        description_en="Software pipeline: PM → Arch → Eng → QA → Review",
-        examples=("/dev 给登录页加 SSO 支持", "/dev 修复登录超时 bug --no-confirm"),
-    ))
-
-    def _h_plan(ctx: DispatchContext) -> None:
-        from larkhelm.cmd_plan import cmd_plan
-        cmd_plan(ctx.chat_id, ctx.raw_args, ctx.msg_id, sender_open_id=ctx.sender_open_id)
-    register(CommandSpec(
-        name="/plan",
-        handler=_h_plan,
-        match_kind="prefix",
-        run_async=True,
-        thread_label="Plan",
-        description="多阶段串行流水线：dev → review → fix → test，每步可确认",
-        description_en="Staged pipeline: dev → review → fix → test, confirm each step",
-        examples=("/plan 给设置页加深色模式",),
     ))
 
     # ── /cd / /pwd / /ls / /run ────────────────────────────────────

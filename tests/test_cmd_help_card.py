@@ -114,9 +114,6 @@ class TestHelpCardLayout(unittest.TestCase):
 
         # Top-level user commands — each must appear at least once.
         for required in (
-            "/dev",       # software engineering pipeline
-            "/crew",      # dynamic multi-agent
-            "/plan",      # multi-stage orchestration
             "/reset",     # session reset
             "/cancel",    # cancel current query
             "/lock",      # backend select / switch

@@ -61,42 +61,10 @@ def handle_card_action(event: P2CardActionTrigger) -> P2CardActionTriggerRespons
                 resp.toast = toast
             return resp
 
-        # Crew human-confirmation breakpoint
-        if cmd.startswith("crew_bp:"):
-            parts = cmd.split(":", 2)
-            if len(parts) == 3:
-                bp_action, crew_id = parts[1], parts[2]
-                from larkhelm.crew._state import _active_crew, _active_crew_lock
-                with _active_crew_lock:
-                    owned = _active_crew.get(chat_id) == crew_id
-                if not owned:
-                    _debug_log(f"[Security] crew_bp rejected: chat={chat_id} does not own crew={crew_id}")
-                    return resp
-                confirmed = (bp_action == "confirm")
-                from larkhelm.crew import signal_breakpoint
-                signal_breakpoint(crew_id, confirmed)
-                from lark_oapi.event.callback.model.p2_card_action_trigger import CallBackCard
-                cb_card = CallBackCard()
-                cb_card.type = "raw"
-                cb_card.data = _make_card_dict(
-                    "✅ 继续执行" if confirmed else "🛑 已取消",
-                    "决策已记录，继续执行后续阶段…" if confirmed else "Crew 任务已取消。",
-                    color="green" if confirmed else "red",
-                )
-                resp.card = cb_card
-                toast = CallBackToast()
-                toast.type = "success"
-                toast.content = "✅ 继续执行" if confirmed else "🛑 已取消"
-                resp.toast = toast
-            return resp
-
         # Streaming query cancel button
         if cmd.startswith("cancel:"):
             target_chat = cmd.split(":", 1)[1]
             if target_chat == chat_id:
-                # First update the crew/dev card immediately (remove buttons), then send the cancel signal
-                from larkhelm.crew import immediate_cancel_crew
-                immediate_cancel_crew(chat_id)
                 _trigger_cancel(chat_id)
                 # Synchronously update the card via callback response to remove the cancel button
                 # immediately so the user does not see it linger after clicking
@@ -126,63 +94,6 @@ def handle_card_action(event: P2CardActionTrigger) -> P2CardActionTriggerRespons
                 toast.type = "success"
                 toast.content = "❌ 排队已取消"
                 resp.toast = toast
-            return resp
-
-        # Plan step confirmation buttons
-        # U17: "🗑️ 清除提示" button on the bridge-restart interrupted-plan
-        # notification card. Just deletes the persisted state file — no
-        # execution restart involved (that's not what U17 promises; we
-        # only notify, the user decides whether to re-run by hand).
-        if cmd.startswith("plan_persist_clear:"):
-            plan_id = cmd.split(":", 1)[1]
-            try:
-                from larkhelm.plan_persistence import clear_plan_state_button
-                existed = clear_plan_state_button(plan_id)
-            except Exception as e:
-                _debug_log(f"[CardAction] plan_persist_clear failed: {e}")
-                existed = False
-            from lark_oapi.event.callback.model.p2_card_action_trigger import CallBackCard
-            cb_card = CallBackCard()
-            cb_card.type = "raw"
-            label = "🗑️ 已清除中断提示" if existed else "🗑️ 提示已不存在"
-            cb_card.data = _make_card_dict(label, "", color="grey")
-            resp.card = cb_card
-            toast = CallBackToast()
-            toast.type = "success"
-            toast.content = label
-            resp.toast = toast
-            return resp
-
-        if cmd.startswith("plan_continue:") or cmd.startswith("plan_skip:") or cmd.startswith("plan_cancel:") or cmd.startswith("plan_retry:"):
-            parts  = cmd.split(":", 1)
-            action = parts[0].replace("plan_", "")   # "continue" | "skip" | "cancel" | "retry"
-            plan_id = parts[1]
-            from larkhelm.cmd_plan import signal_plan
-            signal_plan(plan_id, action)
-            labels = {"continue": "▶ 继续执行", "skip": "⏭ 已跳过", "cancel": "🛑 已取消", "retry": "🔄 重试中"}
-            colors = {"continue": "green", "skip": "grey", "cancel": "red", "retry": "blue"}
-            from lark_oapi.event.callback.model.p2_card_action_trigger import CallBackCard
-            cb_card = CallBackCard()
-            cb_card.type = "raw"
-            cb_card.data = _make_card_dict(labels.get(action, action), "", color=colors.get(action, "grey"))
-            resp.card = cb_card
-            toast = CallBackToast()
-            toast.type = "success"
-            toast.content = labels.get(action, action)
-            resp.toast = toast
-            return resp
-
-
-        # Crew pause button
-        if cmd.startswith("crew_pause:"):
-            crew_id = cmd.split(":", 1)[1]
-            from larkhelm.crew import pause_crew
-            threading.Thread(target=pause_crew, args=(crew_id,), daemon=True,
-                             name=f"pause-{crew_id[:8]}").start()
-            toast = CallBackToast()
-            toast.type = "success"
-            toast.content = "⏸ 暂停信号已发送"
-            resp.toast = toast
             return resp
 
         from larkhelm.commands import _dispatch_button_cmd
