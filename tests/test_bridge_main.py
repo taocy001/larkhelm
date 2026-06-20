@@ -101,6 +101,10 @@ def test_initialise_clients_builds_lark_client(monkeypatch, fake_cfg):
             built_specs["app_secret"] = v
             return self
 
+        def timeout(self, v):
+            built_specs["timeout"] = v
+            return self
+
         def build(self):
             return types.SimpleNamespace(_fake=True)
 

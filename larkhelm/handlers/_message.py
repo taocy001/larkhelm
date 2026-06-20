@@ -38,6 +38,7 @@ from larkhelm.lark_client import (
     send_card, send_card_reply, _download_image, _download_message_file, update_card,
     REACTION_ACTIONS, _reply_index, _reply_index_lock,
     _make_card, _patch_card_raw, download_file_by_key,
+    react_to_message, EMOJI_SEEN, mark_message_as_read,
 )
 from larkhelm.concurrency import is_shutting_down
 from larkhelm.handlers._query import _do_query
@@ -232,6 +233,16 @@ def handle_message(data: P2ImMessageReceiveV1):
             _debug_log(f"[ACL] rejected chat_id={chat_id} reason={_allow.reason}")
             return
 
+        # Mark the message as read by the bot so Feishu shows a read receipt.
+        _msg_id_for_read = getattr(message, "message_id", None)
+        if _msg_id_for_read:
+            threading.Thread(
+                target=mark_message_as_read,
+                args=(_msg_id_for_read,),
+                daemon=True,
+                name="mark-read",
+            ).start()
+
         # Group chat @mention filter: only respond when the bot itself is mentioned,
         # unless require_at_in_group=false in config (respond to all group messages).
         if message.chat_type != "p2p":  # covers "group" and any future non-DM chat types
@@ -243,12 +254,24 @@ def handle_message(data: P2ImMessageReceiveV1):
                     _debug_log("[Filter] BOT_OPEN_ID unknown, ignoring group message to avoid broadcast")
                     return
                 if not message.mentions:
+                    threading.Thread(
+                        target=react_to_message,
+                        args=(message.message_id, EMOJI_SEEN),
+                        daemon=True,
+                        name="react-seen",
+                    ).start()
                     return
                 mentioned_ids = {
                     m.id.open_id for m in message.mentions
                     if m.id and m.id.open_id
                 }
                 if bot_id not in mentioned_ids:
+                    threading.Thread(
+                        target=react_to_message,
+                        args=(message.message_id, EMOJI_SEEN),
+                        daemon=True,
+                        name="react-seen",
+                    ).start()
                     return
 
         _msg_images: list[str] = []

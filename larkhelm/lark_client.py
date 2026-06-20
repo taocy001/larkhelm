@@ -115,6 +115,7 @@ _reply_index_lock = threading.Lock()
 EMOJI_PROCESSING = "THINKING"
 EMOJI_DONE       = "DONE"
 EMOJI_ERROR      = "ERROR"
+EMOJI_SEEN       = "OK"        # react to group messages not directed at the bot
 
 REACTION_ACTIONS = {
     "THUMBSUP": "positive",
@@ -599,6 +600,21 @@ def react_to_message(message_id: str, emoji_type: str) -> str:
     except Exception as e:
         _debug_log(f"[React] 异常: {e}")
         return None
+
+
+def mark_message_as_read(message_id: str) -> None:
+    """Mark a message as read by the bot via the Feishu batch_read API."""
+    try:
+        req = BaseRequest()
+        req.http_method = HttpMethod.POST
+        req.uri = "/open-apis/im/v1/messages/batch_read"
+        req.token_types = {AccessTokenType.TENANT}
+        req.body = {"message_ids": [message_id]}
+        resp = client.request(req)
+        if not resp.success():
+            _debug_log(f"[MarkRead] 失败 code={resp.code}: {resp.msg}")
+    except Exception as e:
+        _debug_log(f"[MarkRead] 异常: {e}")
 
 
 def delete_reaction(message_id: str, reaction_id: str):

@@ -215,6 +215,7 @@ def _initialise_clients(cfg) -> Any:
         lark.Client.builder()
         .app_id(cfg.APP_ID)
         .app_secret(cfg.APP_SECRET)
+        .timeout(30.0)  # SDK default is None (never timeout); 30s caps per-call Feishu API hangs
         .build()
     )
     _lc._fetch_bot_open_id()
