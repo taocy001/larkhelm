@@ -1,4 +1,6 @@
 .claude/
+!.claude/commands/
+!.claude/commands/*.md
 .gemini/
 GEMINI.md
 CLAUDE.md

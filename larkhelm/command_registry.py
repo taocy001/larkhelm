@@ -511,6 +511,20 @@ def _default_registrations() -> None:
         examples=("/run uname -a", "/run df -h"),
     ))
 
+    def _h_commit(ctx: DispatchContext) -> None:
+        from larkhelm.commands import _cmd_commit
+        _cmd_commit(ctx.chat_id, ctx.msg_id)
+    register(CommandSpec(
+        name="/commit",
+        handler=_h_commit,
+        match_kind="exact",
+        run_async=True,
+        thread_label="Commit",
+        description="匿名提交并推送当前目录 git 变更（rebase + squash + 规范提交消息）",
+        description_en="Anonymously commit & push git changes (rebase + squash + conventional commit message)",
+        examples=("/commit",),
+    ))
+
     # ── /model + /lock (twin specs, shared handler) + /voice ───────
     # P1-2c: /lock used to be an alias of /model. Pulling it out as an
     # independent CommandSpec lets the help renderer (which iterates

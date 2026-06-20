@@ -413,6 +413,49 @@ def _start_cron_scheduler() -> None:
     threading.Thread(target=_loop, daemon=True, name="cron-scheduler").start()
 
 
+def _start_bg_watcher() -> None:
+    """Scan DATA_DIR/bg_tasks/ every 60 s and fire AI progress checks."""
+    def _loop():
+        while True:
+            try:
+                import larkhelm.config as _cfg
+                from larkhelm.bg_runner import (
+                    load_active_tasks, pid_alive,
+                    build_progress_query, update_last_check, remove_task,
+                )
+                from larkhelm.handlers import _do_query
+
+                now = time.time()
+                for task in load_active_tasks(_cfg.DATA_DIR):
+                    alive = pid_alive(task.pid)
+                    if not alive:
+                        # Fire final summary then clean up the task file.
+                        query = build_progress_query(task, alive=False)
+                        remove_task(task, _cfg.DATA_DIR)
+                        threading.Thread(
+                            target=_do_query,
+                            args=(task.chat_id, query, task.model, None),
+                            daemon=True,
+                            name=f"bg-final-{task.id}",
+                        ).start()
+                        _debug_log(f"[BgWatcher] 任务结束 id={task.id} pid={task.pid}")
+                    elif now - task.last_check_time >= task.check_interval_sec:
+                        query = build_progress_query(task, alive=True)
+                        update_last_check(task, _cfg.DATA_DIR)
+                        threading.Thread(
+                            target=_do_query,
+                            args=(task.chat_id, query, task.model, None),
+                            daemon=True,
+                            name=f"bg-check-{task.id}",
+                        ).start()
+                        _debug_log(f"[BgWatcher] 进度检查 id={task.id} pid={task.pid}")
+            except Exception as e:
+                _debug_log(f"[BgWatcher] 循环异常: {e}")
+            time.sleep(60)
+
+    threading.Thread(target=_loop, daemon=True, name="bg-watcher").start()
+
+
 def _maybe_send_alert(metric_name: str, message: str, cfg) -> None:
     """Send an orange alert card if not throttled within _ALERT_THROTTLE_SEC."""
     now = time.time()
@@ -515,6 +558,7 @@ def _start_background_threads(cfg) -> None:
         _debug_log(f"[HealthServer] start failed (continuing): {_hs_err}")
 
     _start_cron_scheduler()
+    _start_bg_watcher()
     _start_gc_thread()
 
     from larkhelm.memory_watchdog import start_memory_watchdog

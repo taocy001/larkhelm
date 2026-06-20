@@ -158,6 +158,69 @@ def run(config_path: str | None, data_dir: str | None) -> None:
         except Exception as e:
             return f"Error appending to {url}: {e}"
 
+    # ── Tool: start_bg_watcher ───────────────────────────────────────────────
+
+    @mcp.tool()
+    def start_bg_watcher(
+        cmd: str,
+        description: str = "",
+        interval_min: int = 30,
+    ) -> dict:
+        """
+        Start a long-running shell command in the background and schedule
+        periodic AI progress reports delivered as Feishu cards.
+
+        Call this when the user asks to run something that will take many
+        minutes or hours (make, pytest, build, training, etc.) and wants
+        to be notified of progress without waiting for it to finish.
+
+        Args:
+            cmd: The shell command to run (e.g. "make test", "pytest -x tests/")
+            description: Human-readable label for progress reports (e.g. "完整测试套件")
+            interval_min: How often to check progress in minutes (default: 30)
+
+        Returns a dict with task_id, pid, log_file, check_interval_min, and
+        a human-readable start_summary for Claude to relay to the user.
+        """
+        from larkhelm.bg_runner import start_bg_task
+        from larkhelm.chat_state import _get_chat_model
+
+        chat_id = os.environ.get("FEISHU_CHAT_ID", "")
+        cwd = _get_per_chat_cwd(chat_id, _cfg.DATA_DIR) or _cfg.DEFAULT_CWD
+
+        try:
+            model = _get_chat_model(chat_id)
+        except Exception:
+            model = _cfg.DEFAULT_MODEL
+
+        check_interval_sec = max(60, interval_min * 60)
+
+        try:
+            task = start_bg_task(
+                chat_id=chat_id,
+                cmd=cmd,
+                description=description or cmd,
+                model=model,
+                cwd=cwd,
+                data_dir=_cfg.DATA_DIR,
+                check_interval_sec=check_interval_sec,
+            )
+        except Exception as e:
+            return {"error": f"启动失败: {e}"}
+
+        return {
+            "task_id": task.id,
+            "pid": task.pid,
+            "log_file": task.log_file,
+            "cwd": cwd,
+            "check_interval_min": interval_min,
+            "start_summary": (
+                f"后台任务已启动（任务ID={task.id} PID={task.pid}）。"
+                f"日志写入 {task.log_file}。"
+                f"每 {interval_min} 分钟自动汇报一次进展，任务结束时发送最终结论。"
+            ),
+        }
+
     # ── Tool: workspace_snapshot ─────────────────────────────────────────────
 
     @mcp.tool()

@@ -11,6 +11,8 @@
   "_comment_require_at_in_group": "Group chats require @-mentioning the bot before a message is handled. Default true; set false to let the bot react to every group message.",
   "require_at_in_group": true,
   "gemini_idle_ttl": 1800,
+  "_comment_bg_check_interval_sec": "How often (seconds) the bg-watcher checks running background tasks and fires an AI progress report. Default 1800 (30 min).",
+  "bg_check_interval_sec": 1800,
   "timezone": "Asia/Shanghai",
   "doc_auto_inject": true,
   "doc_inject_max_chars": 2000,
